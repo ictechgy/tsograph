@@ -443,6 +443,7 @@ function resolveServerList(tree: SpecTree, listNode: ParsedNode): ServerPrefixes
  * @returns 접두사. url이 문자열이 아니면 미확정
  */
 function resolveServerObject(tree: SpecTree, node: ParsedNode | undefined): ServerPrefixes {
+  tree.requireUniqueKeys(node);
   const url = tree.string(tree.get(node, 'url'));
   if (url === undefined) return UNRESOLVED_SERVER_PREFIXES;
   return resolveServerUrl(url, readServerVariables(tree, tree.get(node, 'variables')));
@@ -459,6 +460,7 @@ function readServerVariables(tree: SpecTree, node: ParsedNode | undefined): Map<
   const variables = new Map<string, ServerVariable>();
   for (const entry of tree.entries(node) ?? []) {
     if (entry.key === undefined) continue;
+    tree.requireUniqueKeys(entry.value);
     variables.set(entry.key, {
       defaultValue: scalarText(tree, tree.get(entry.value, 'default')),
       values: enumValues(tree, tree.get(entry.value, 'enum')),

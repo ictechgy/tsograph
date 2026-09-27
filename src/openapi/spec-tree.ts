@@ -4,8 +4,11 @@
  * JSON은 YAML 1.2의 부분집합이라 하나의 파서(`yaml` 패키지)로 두 형식을 읽고,
  * 모든 노드의 원문 오프셋을 얻는다. 보안 경계:
  * - 여러 문서·구문 오류·깊이 초과는 파서 오류로 거부한다.
- * - 중복 키는 직접 선형 시간에 찾아 거부한다. `yaml`의 `uniqueKeys` 검사는 매핑
- *   크기에 대해 제곱 시간(4만 키에 5초 이상)이라, 상한 안의 파일로도 도구를 멈출 수 있다.
+ * - 중복 키는 파싱 때 선형 시간에 모두 기록하고, 사실을 만드는 조회가 그 키에 닿을 때만
+ *   거부한다(전체 순회하는 매핑에 중복이 있거나, 키로 조회한 키가 중복됐을 때). 스키마·예시
+ *   같은 route와 무관한 곳의 중복은 거부하지 않고 첫 번째 값을 쓰며, 호출자가 개수를
+ *   limitation으로 알린다. `yaml`의 `uniqueKeys` 검사는 매핑 크기에 대해 제곱 시간(4만
+ *   키에 5초 이상)이라 쓰지 않는다.
  * - JS 객체로 변환(toJS)하지 않는다. 그래서 alias 확장 폭탄과 `__proto__` 키가
  *   객체를 만들지 않고, 사용자 태그도 실행되지 않는다(`yaml`은 태그를 실행하지 않는다).
  * - alias는 한 번 만든 색인으로 O(1)에 따라가고, 따라간 횟수에 상한을 둔다.
@@ -86,6 +89,30 @@ export interface MapEntry {
   readonly value: ParsedNode | null;
 }
 
+/** 매핑 하나에서 발견한 중복 키 정보다. */
+interface MapDuplicates {
+  /** 두 번 이상 나온 키의 식별자(`타입:값`) → 그 키가 처음 다시 나온 줄이다. */
+  readonly lines: ReadonlyMap<string, number>;
+  /** 이 매핑에서 처음 다시 나온 중복 키의 줄이다. */
+  readonly firstLine: number;
+}
+
+/** 문서 전체의 중복 키 색인이다. */
+interface DuplicateIndex {
+  /** 매핑 노드 → 중복 정보다. */
+  readonly byMap: ReadonlyMap<object, MapDuplicates>;
+  /** 중복 발생 수(두 번째 이후 출현 수)다. */
+  readonly count: number;
+  /** 문서에서 가장 앞선 중복 키의 줄이다. 중복이 없으면 0이다. */
+  readonly firstLine: number;
+}
+
+/** 무시한 중복 키의 요약이다. */
+export interface IgnoredDuplicateKeys {
+  readonly count: number;
+  readonly firstLine: number;
+}
+
 /** 소스 위치(1부터 시작하는 줄, UTF-8 바이트 열)다. */
 export interface SourcePosition {
   readonly line: number;
@@ -107,11 +134,13 @@ export class SpecTree {
   private readonly byteColumns: ByteColumnIndex;
   /** 줄 시작 오프셋 색인이다. */
   private readonly lineCounter: LineCounter;
+  /** 문서 전체의 중복 키 색인이다. */
+  private readonly duplicates: DuplicateIndex;
   /** 지금까지 alias를 따라간 횟수다. */
   private dereferenceCount = 0;
   /**
    * 매핑 노드별 문자열 키 색인이다. 큰 매핑(`components.pathItems` 등)을 가리키는 `$ref`가
-   * 많을 때 조회마다 전체 항목을 훑는 제곱 시간을 피한다. 중복 키는 파싱 때 거부됐다.
+   * 많을 때 조회마다 전체 항목을 훑는 제곱 시간을 피한다. 중복 키는 첫 번째 값을 쓴다.
    */
   private readonly keyIndexes = new WeakMap<object, ReadonlyMap<string, ParsedNode | null>>();
 
@@ -120,17 +149,33 @@ export class SpecTree {
    * @param aliasTargets alias 대상 색인
    * @param text 파싱한 텍스트
    * @param lineCounter 줄 색인
+   * @param duplicates 중복 키 색인
    */
   constructor(
     root: ParsedNode | null,
     aliasTargets: ReadonlyMap<Alias, ParsedNode>,
     text: string,
     lineCounter: LineCounter,
+    duplicates: DuplicateIndex,
   ) {
     this.root = root;
     this.aliasTargets = aliasTargets;
     this.byteColumns = new ByteColumnIndex(text);
     this.lineCounter = lineCounter;
+    this.duplicates = duplicates;
+  }
+
+  /**
+   * 조회가 거부하지 않고 지나간 중복 키의 요약을 돌려준다.
+   *
+   * 사실에 쓰는 조회는 중복에 닿으면 이미 거부했으므로, 문서 생성까지 온 경우 남은
+   * 중복은 모두 사실과 무관한 곳에 있다.
+   *
+   * @returns 중복 수와 첫 줄. 중복이 없으면 undefined
+   */
+  ignoredDuplicateKeys(): IgnoredDuplicateKeys | undefined {
+    const { count, firstLine } = this.duplicates;
+    return count === 0 ? undefined : { count, firstLine };
   }
 
   /**
@@ -150,13 +195,29 @@ export class SpecTree {
   /**
    * 매핑 노드의 항목을 원문 순서로 돌려준다.
    *
+   * 전체 순회는 모든 키를 사실에 쓴다는 뜻이라, 매핑에 중복 키가 하나라도 있으면 거부한다.
+   *
    * @param node 매핑이어야 하는 노드
    * @returns 항목 목록. 매핑이 아니면 undefined
+   * @throws SpecParseError 매핑에 중복 키가 있으면 duplicate-key
    */
   entries(node: ParsedNode | null | undefined): readonly MapEntry[] | undefined {
     const resolved = this.resolve(node);
     if (!isMap(resolved)) return undefined;
-    return resolved.items.map((pair) => {
+    const duplicates = this.duplicates.byMap.get(resolved);
+    if (duplicates !== undefined) throw new SpecParseError('duplicate-key', duplicates.firstLine);
+    return this.rawEntries(resolved);
+  }
+
+  /**
+   * 중복 검사 없이 매핑 항목을 만든다. 키 색인 생성에만 쓴다.
+   *
+   * @param map 매핑 노드
+   * @returns 항목 목록
+   */
+  private rawEntries(map: ParsedNode): readonly MapEntry[] {
+    if (!isMap(map)) return [];
+    return map.items.map((pair) => {
       const keyNode = this.resolve(pair.key as ParsedNode) ?? (pair.key as ParsedNode);
       return { key: scalarString(keyNode), keyNode: pair.key as ParsedNode, value: pair.value };
     });
@@ -168,10 +229,13 @@ export class SpecTree {
    * @param node 매핑이어야 하는 노드
    * @param key 찾을 키
    * @returns 값 노드. 없거나 매핑이 아니면 undefined
+   * @throws SpecParseError 조회한 키가 이 매핑에서 중복됐으면 duplicate-key
    */
   get(node: ParsedNode | null | undefined, key: string): ParsedNode | undefined {
     const resolved = this.resolve(node);
     if (!isMap(resolved)) return undefined;
+    const duplicateLine = this.duplicates.byMap.get(resolved)?.lines.get(`string:${key}`);
+    if (duplicateLine !== undefined) throw new SpecParseError('duplicate-key', duplicateLine);
     let index = this.keyIndexes.get(resolved);
     if (index === undefined) {
       index = this.buildKeyIndex(resolved);
@@ -189,10 +253,22 @@ export class SpecTree {
    */
   private buildKeyIndex(map: ParsedNode): ReadonlyMap<string, ParsedNode | null> {
     const index = new Map<string, ParsedNode | null>();
-    for (const entry of this.entries(map) ?? []) {
+    for (const entry of this.rawEntries(map)) {
       if (entry.key !== undefined && !index.has(entry.key)) index.set(entry.key, entry.value);
     }
     return index;
+  }
+
+  /**
+   * 매핑 전체가 사실에 영향을 주는 구역이면, 어느 키든 중복이 있을 때 거부한다.
+   *
+   * 루트·서버 객체·서버 변수처럼 읽지 않는 키(예: `host`)까지 엄격하게 볼 구역에 쓴다.
+   *
+   * @param node 확인할 노드(매핑이 아니면 아무것도 하지 않는다)
+   * @throws SpecParseError 매핑에 중복 키가 있으면 duplicate-key
+   */
+  requireUniqueKeys(node: ParsedNode | null | undefined): void {
+    this.entries(node);
   }
 
   /**
@@ -277,7 +353,8 @@ export function parseSpecTree(source: string): SpecTree {
   });
   const firstError = document.errors[0];
   if (firstError !== undefined) throw toParseError(firstError, lineCounter);
-  return new SpecTree(document.contents, indexDocument(document, lineCounter), text, lineCounter);
+  const index = indexDocument(document, lineCounter);
+  return new SpecTree(document.contents, index.aliasTargets, text, lineCounter, index.duplicates);
 }
 
 /**
@@ -330,15 +407,26 @@ function toParseError(error: YAMLError, lineCounter: LineCounter): SpecParseErro
  * @returns alias → 대상 노드
  * @throws SpecParseError 중복 키, 또는 순회 중 스택이 넘치면 resource-exhaustion
  */
-function indexDocument(document: Document.Parsed, lineCounter: LineCounter): ReadonlyMap<Alias, ParsedNode> {
+function indexDocument(
+  document: Document.Parsed,
+  lineCounter: LineCounter,
+): { aliasTargets: ReadonlyMap<Alias, ParsedNode>; duplicates: DuplicateIndex } {
   const latestAnchors = new Map<string, ParsedNode>();
   const targets = new Map<Alias, ParsedNode>();
+  const byMap = new Map<object, MapDuplicates>();
+  let count = 0;
+  let firstLine = 0;
   try {
     // `yaml`의 visit은 가장 구체적인 방문자 하나만 부르므로 Map 방문자를 따로 두면
     // anchor가 달린 매핑이 Node 방문자를 건너뛴다. 한 방문자에서 모두 처리한다.
     visit(document, {
       Node(_key, node) {
-        if (isMap(node)) checkMapKeys(node.items.map((pair) => pair.key), lineCounter);
+        const duplicates = isMap(node) ? checkMapKeys(node.items.map((pair) => pair.key), lineCounter) : undefined;
+        if (duplicates !== undefined) {
+          byMap.set(node, duplicates.map);
+          count += duplicates.count;
+          firstLine = firstLine === 0 ? duplicates.map.firstLine : Math.min(firstLine, duplicates.map.firstLine);
+        }
         if (isAlias(node)) {
           const target = latestAnchors.get(node.source);
           if (target !== undefined) targets.set(node, target);
@@ -354,29 +442,55 @@ function indexDocument(document: Document.Parsed, lineCounter: LineCounter): Rea
     if (error instanceof RangeError) throw new SpecParseError('resource-exhaustion');
     throw error;
   }
-  return targets;
+  return { aliasTargets: targets, duplicates: { byMap, count, firstLine } };
 }
 
 /**
- * 매핑 키 목록을 확인한다: 스칼라 키만, merge key 없음, 중복 없음.
+ * 매핑 키 목록을 확인한다: 스칼라 키만, merge key 없음. 중복 키는 거부하지 않고 기록한다.
  *
  * 중복 판정은 `yaml`의 기본 비교(스칼라 값의 `===`)와 같다. `%YAML 1.1` 지시문이
  * 있으면 `yaml`이 merge key를 심볼 값으로 읽으므로 그 표기도 merge key로 본다.
  *
  * @param keys 매핑 키 노드 목록
  * @param lineCounter 줄 색인(위치 보고용)
- * @throws SpecParseError complex-key·merge-key·duplicate-key
+ * @returns 중복 정보와 중복 발생 수. 중복이 없으면 undefined
+ * @throws SpecParseError complex-key·merge-key
  */
-function checkMapKeys(keys: readonly unknown[], lineCounter: LineCounter): void {
+function checkMapKeys(
+  keys: readonly unknown[],
+  lineCounter: LineCounter,
+): { map: MapDuplicates; count: number } | undefined {
   const seen = new Set<string>();
+  const lines = new Map<string, number>();
+  let count = 0;
+  let firstLine = 0;
   for (const key of keys) {
     if (!isScalar(key)) throw keyError('complex-key', key, lineCounter);
     const isMergeKey = typeof key.value === 'symbol' || (key.value === '<<' && key.type === 'PLAIN');
     if (isMergeKey) throw keyError('merge-key', key, lineCounter);
     const identity = `${typeof key.value}:${String(key.value)}`;
-    if (seen.has(identity)) throw keyError('duplicate-key', key, lineCounter);
-    seen.add(identity);
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      continue;
+    }
+    const line = lineOf(key, lineCounter);
+    count += 1;
+    if (!lines.has(identity)) lines.set(identity, line);
+    firstLine = firstLine === 0 ? line : Math.min(firstLine, line);
   }
+  return count === 0 ? undefined : { map: { lines, firstLine }, count };
+}
+
+/**
+ * 노드 시작 위치의 1부터 시작하는 줄을 구한다.
+ *
+ * @param node 노드
+ * @param lineCounter 줄 색인
+ * @returns 줄 번호(구할 수 없으면 1)
+ */
+function lineOf(node: unknown, lineCounter: LineCounter): number {
+  const offset = (node as { range?: [number, number, number] } | null)?.range?.[0];
+  return Math.max(offset === undefined ? 1 : lineCounter.linePos(offset).line, 1);
 }
 
 /**
@@ -388,7 +502,5 @@ function checkMapKeys(keys: readonly unknown[], lineCounter: LineCounter): void 
  * @returns 실패
  */
 function keyError(reason: SpecParseFailureReason, key: unknown, lineCounter: LineCounter): SpecParseError {
-  const offset = (key as { range?: [number, number, number] } | null)?.range?.[0];
-  const line = offset === undefined ? 0 : lineCounter.linePos(offset).line;
-  return new SpecParseError(reason, line > 0 ? line : undefined);
+  return new SpecParseError(reason, lineOf(key, lineCounter));
 }

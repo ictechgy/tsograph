@@ -54,11 +54,13 @@ const openApiVersionPattern = /^3\.(0|1)(\.[0-9]+)?$/u;
  * @throws SpecContentError 최상위가 객체가 아니거나 버전·paths가 조건에 맞지 않을 때
  */
 export function readSpecShape(tree: SpecTree): SpecShape {
-  if (tree.entries(tree.root) === undefined) throw new SpecContentError('not-an-object');
+  if (!tree.isMapping(tree.root)) throw new SpecContentError('not-an-object');
+  // 루트 키(openapi·swagger·servers·basePath·host·paths 등)는 사실을 정하는 구역이라 엄격하다.
+  tree.requireUniqueKeys(tree.root);
   const version = detectVersion(tree);
   const paths = tree.get(tree.root, 'paths');
   if (paths === undefined && version !== '3.1') throw new SpecContentError('missing-paths');
-  if (paths !== undefined && tree.entries(paths) === undefined) throw new SpecContentError('invalid-paths');
+  if (paths !== undefined && !tree.isMapping(paths)) throw new SpecContentError('invalid-paths');
   return { version, paths };
 }
 

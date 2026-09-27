@@ -31,19 +31,42 @@ test('JSON과 YAML을 같은 트리로 읽고 문자열 키로 조회한다', ()
   }
 });
 
-test('중복 키는 JSON·YAML 모두 줄 번호와 함께 거부한다', () => {
-  expectParseFailure('{\n"a": 1,\n"a": 2\n}', 'duplicate-key', 3);
-  expectParseFailure('paths:\n  /x: {}\n  /x: {}\n', 'duplicate-key', 3);
+/** 트리 조회가 중복 키 실패(줄 포함)를 던지는지 확인한다. */
+function expectDuplicateOnRead(read: () => unknown, line: number): void {
+  assert.throws(read, (error: unknown) => error instanceof SpecParseError && error.reason === 'duplicate-key' && error.line === line);
+}
+
+test('중복 키는 파싱 때 거부하지 않고, 전체 순회하는 조회가 줄 번호와 함께 거부한다', () => {
+  const json = parseSpecTree('{\n"a": 1,\n"a": 2\n}');
+  expectDuplicateOnRead(() => json.entries(json.root), 3);
+  const yaml = parseSpecTree('paths:\n  /x: {}\n  /x: {}\n');
+  expectDuplicateOnRead(() => yaml.entries(yaml.get(yaml.root, 'paths')), 3);
+  expectDuplicateOnRead(() => yaml.requireUniqueKeys(yaml.get(yaml.root, 'paths')), 3);
 });
 
-test('중복 키 검사는 큰 매핑에서도 선형 시간이다(제곱 시간 DoS 회귀 방지)', { timeout: 30_000 }, () => {
+test('키로 조회하면 그 키가 중복일 때만 거부하고 다른 키의 중복은 첫 값을 쓴다', () => {
+  const tree = parseSpecTree('op:\n  operationId: a\n  description: x\n  description: y\n  servers: 1\n  servers: 2\n');
+  const operation = tree.get(tree.root, 'op');
+  assert.equal(tree.string(tree.get(operation, 'operationId')), 'a');
+  expectDuplicateOnRead(() => tree.get(operation, 'servers'), 6);
+  expectDuplicateOnRead(() => tree.get(operation, 'description'), 4);
+  assert.deepEqual(tree.ignoredDuplicateKeys(), { count: 2, firstLine: 4 });
+});
+
+test('중복이 없으면 무시한 중복 요약도 없다', () => {
+  assert.equal(parseSpecTree('a: 1\n').ignoredDuplicateKeys(), undefined);
+});
+
+test('중복 키 기록은 큰 매핑에서도 선형 시간이다(제곱 시간 DoS 회귀 방지)', { timeout: 30_000 }, () => {
   const lines = ['m:', ...Array.from({ length: 150_000 }, (_, index) => `  /p${index}: 1`), '  /p7: 2'];
-  expectParseFailure(lines.join('\n'), 'duplicate-key', 150_002);
+  const tree = parseSpecTree(lines.join('\n'));
+  assert.deepEqual(tree.ignoredDuplicateKeys(), { count: 1, firstLine: 150_002 });
+  expectDuplicateOnRead(() => tree.entries(tree.get(tree.root, 'm')), 150_002);
 });
 
-test('숫자 키와 문자열 키는 다른 키이고 깊은 곳의 중복도 찾는다', () => {
-  assert.doesNotThrow(() => parseSpecTree('m: {1: a, "1": b}\n'));
-  expectParseFailure('a:\n  b:\n    c: 1\n    c: 2\n', 'duplicate-key', 4);
+test('숫자 키와 문자열 키는 다른 키이고 깊은 곳의 중복도 기록한다', () => {
+  assert.equal(parseSpecTree('m: {1: a, "1": b}\n').ignoredDuplicateKeys(), undefined);
+  assert.deepEqual(parseSpecTree('a:\n  b:\n    c: 1\n    c: 2\n    d: 1\n    d: 2\n').ignoredDuplicateKeys(), { count: 2, firstLine: 4 });
 });
 
 test('여러 문서·구문 오류·과도한 중첩을 거부한다', () => {

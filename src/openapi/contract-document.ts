@@ -23,7 +23,7 @@ import {
   type PathTemplateResult,
   sanitizeDynamicChannel,
 } from './path-template.ts';
-import type { SpecTree } from './spec-tree.ts';
+import type { IgnoredDuplicateKeys, SpecTree } from './spec-tree.ts';
 import { readSpecShape } from './spec-version.ts';
 
 /** 문서 하나에 담는 최대 사실 수다. isthmus 입력 상한과 같다. */
@@ -92,7 +92,7 @@ export function createContractDocument(input: ContractDocumentInput): RouteContr
     service: input.service,
     project: input.project,
     facts: sortAndDeduplicate(facts),
-    limitations: buildLimitations(extraction.gaps, counters),
+    limitations: buildLimitations(extraction.gaps, counters, input.tree.ignoredDuplicateKeys()),
   };
 }
 
@@ -220,14 +220,20 @@ function compareFacts(left: RouteContractFact, right: RouteContractFact): number
  * 읽지 못한 부분과 미확정 값을 계약 접두사를 붙인 limitation 문장으로 만든다.
  *
  * 스펙 원문(경로·URL)은 싣지 않고 개수만 싣는다. `unresolved-contract-servers:`와
- * `contract-coverage:`는 초안의 계약 측 접두사다. `unsafe-operation-ids:`는 정보용이라
- * 소비자가 공백으로 읽지 않는다.
+ * `contract-coverage:`는 초안의 계약 측 접두사다. `unsafe-operation-ids:`와
+ * `duplicate-mapping-keys:`는 정보용이라 소비자가 공백으로 읽지 않는다. 사실에 쓰는 구역의
+ * 중복은 조회가 이미 거부했으므로, 여기까지 온 중복은 사실과 무관한 곳의 것이다.
  *
  * @param gaps operation 수집 개수
  * @param counters 사실 생성 개수
+ * @param duplicates 무시한 중복 키 요약
  * @returns 정렬한 limitation 목록
  */
-function buildLimitations(gaps: ExtractionGaps, counters: FactCounters): string[] {
+function buildLimitations(
+  gaps: ExtractionGaps,
+  counters: FactCounters,
+  duplicates: IgnoredDuplicateKeys | undefined,
+): string[] {
   const unreadableItems = gaps.nonLocalReferences + gaps.brokenReferences + gaps.cyclicReferences + gaps.nonObjectPathItems;
   const candidates: [number, string][] = [
     [counters.unresolvedServerOperations, `unresolved-contract-servers: ${counters.unresolvedServerOperations} operations use a server URL or basePath whose path prefix could not be resolved (open server variables, relative server URLs, or invalid values); their facts use pathAnchor base`],
@@ -236,6 +242,7 @@ function buildLimitations(gaps: ExtractionGaps, counters: FactCounters): string[
     [unreadableItems, `contract-coverage: ${unreadableItems} path items could not be read (${gaps.nonLocalReferences} non-local $ref, ${gaps.brokenReferences} broken $ref, ${gaps.cyclicReferences} cyclic $ref, ${gaps.nonObjectPathItems} non-object) and were skipped`],
     [gaps.nonObjectOperations, `contract-coverage: ${gaps.nonObjectOperations} operations are not objects and were skipped`],
     [gaps.unknownPathItemFields, `contract-coverage: ${gaps.unknownPathItemFields} path item fields are neither operations for this OpenAPI version nor known fields and were skipped`],
+    [duplicates?.count ?? 0, `duplicate-mapping-keys: ${duplicates?.count ?? 0} duplicate key(s) outside route-bearing sections were ignored (first at line ${duplicates?.firstLine ?? 0})`],
     [counters.unsafeOperationIds, `unsafe-operation-ids: ${counters.unsafeOperationIds} operationId values contain characters the exchange format forbids or exceed ${MAX_OPERATION_ID_LENGTH} characters and were omitted`],
   ];
   return candidates.filter(([count]) => count > 0).map(([, text]) => text).sort(compareStrings);

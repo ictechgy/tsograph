@@ -243,3 +243,39 @@ test('isthmus 입력 상한을 넘는 출력은 쓰지 않고 2로 끝난다', {
   assert.equal(result.exitCode, 2);
   assert.match(result.standardError, new RegExp(`exceed ${MAX_OUTPUT_LENGTH} characters`));
 });
+
+test('components.schemas의 중복 키는 코드 0과 duplicate-mapping-keys limitation이다', async () => {
+  const text = [
+    'openapi: 3.0.3',
+    'paths:',
+    '  /items: {get: {operationId: listItems}}',
+    'components:',
+    '  schemas:',
+    '    Item:',
+    '      type: object',
+    '      description: first',
+    '    Item:',
+    '      type: object',
+    '      description: second',
+  ].join('\n');
+  const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(text) });
+  const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+  assert.equal(result.exitCode, 0, result.standardError);
+  const document = JSON.parse(result.standardOutput) as { facts: { channel: string }[]; limitations: string[] };
+  assert.deepEqual(document.facts.map((fact) => fact.channel), ['/items']);
+  assert.deepEqual(document.limitations, ['duplicate-mapping-keys: 1 duplicate key(s) outside route-bearing sections were ignored (first at line 9)']);
+});
+
+test('경로 키·path item method·서버 변수의 중복 키는 코드 2다', async () => {
+  const cases: [string, string, number][] = [
+    ['path key', 'openapi: 3.0.3\npaths:\n  /items: {get: {}}\n  /items: {post: {}}\n', 4],
+    ['method', 'openapi: 3.0.3\npaths:\n  /items:\n    get: {operationId: a}\n    get: {operationId: b}\n', 5],
+    ['server variable', 'openapi: 3.0.3\nservers:\n  - url: "https://h.test/{v}"\n    variables:\n      v: {default: v1}\n      v: {default: v2}\npaths: {/items: {get: {}}}\n', 6],
+  ];
+  for (const [name, text, line] of cases) {
+    const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(text) });
+    const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+    assert.equal(result.exitCode, 2, name);
+    assert.match(result.standardError, new RegExp(`duplicate mapping key \\(line ${line}\\)`), name);
+  }
+});

@@ -5,7 +5,7 @@ import type { RouteContractDocument } from '../exchange/bridge-facts.ts';
 import { createContractDocument, FactLimitError, MAX_FACTS, MAX_OPERATION_ID_LENGTH } from './contract-document.ts';
 import { MAX_PATH_ITEM_REFERENCE_HOPS } from './operations.ts';
 import { MAX_DYNAMIC_CHANNEL_LENGTH, MAX_TEMPLATE_LENGTH } from './path-template.ts';
-import { parseSpecTree } from './spec-tree.ts';
+import { parseSpecTree, SpecParseError } from './spec-tree.ts';
 
 /** 합성 스펙 텍스트로 문서를 만든다. 시각·경로는 고정값이다. */
 function documentFor(source: string, sourceModifiedAt?: Date): RouteContractDocument {
@@ -290,6 +290,66 @@ test('큰 매핑을 여러 번 가리켜도 한 번만 훑고 모르는 필드�
   const document = documentFor(['openapi: 3.0.0', `x-big: {${keys}}`, `x-o: &o {operationId: shared, ${keys}}`, 'paths:', ...refs, ...aliases].join('\n'));
   assert.equal(document.facts.length, 4000);
   assert.deepEqual(document.limitations, ['contract-coverage: 40000 path item fields are neither operations for this OpenAPI version nor known fields and were skipped']);
+});
+
+/** 문서 생성이 중복 키 실패(줄 포함)로 끝나는지 확인한다. */
+function expectDuplicateKeyFailure(source: string, line: number): void {
+  assert.throws(() => documentFor(source), (error: unknown) =>
+    error instanceof SpecParseError && error.reason === 'duplicate-key' && error.line === line);
+}
+
+test('route와 무관한 곳(components.schemas·operation 설명)의 중복은 limitation으로만 알린다', () => {
+  const document = documentFor([
+    'openapi: 3.0.0',
+    'paths:',
+    '  /a:',
+    '    get:',
+    '      operationId: getA',
+    '      description: one',
+    '      description: two',
+    'components:',
+    '  schemas:',
+    '    Item: {type: object, description: first}',
+    '    Item: {type: object, description: second}',
+  ].join('\n'));
+  assert.deepEqual(routes(document), ['GET root /a']);
+  assert.deepEqual(document.limitations, ['duplicate-mapping-keys: 2 duplicate key(s) outside route-bearing sections were ignored (first at line 7)']);
+});
+
+test('사실을 정하는 구역의 중복 키는 줄 번호와 함께 거부한다', () => {
+  expectDuplicateKeyFailure('openapi: 3.0.0\npaths:\n  /a: {get: {}}\n  /a: {post: {}}\n', 4);
+  expectDuplicateKeyFailure('openapi: 3.0.0\npaths:\n  /a:\n    get: {}\n    get: {}\n', 5);
+  expectDuplicateKeyFailure('openapi: 3.0.0\nservers:\n  - url: "/{v}"\n    variables:\n      v: {default: a}\n      v: {default: b}\npaths: {}\n', 6);
+  expectDuplicateKeyFailure('openapi: 3.0.0\nservers:\n  - url: /a\n    url: /b\npaths: {}\n', 4);
+  expectDuplicateKeyFailure('openapi: 3.0.0\nservers: [{url: "/{v}", variables: {v: {default: a, default: b}}}]\npaths: {}\n', 2);
+  expectDuplicateKeyFailure('swagger: "2.0"\nhost: a\nhost: b\npaths: {}\n', 3);
+  expectDuplicateKeyFailure('openapi: 3.0.0\npaths:\n  /a:\n    get: {operationId: x, operationId: y}\n', 4);
+  expectDuplicateKeyFailure('openapi: 3.0.0\npaths:\n  /a:\n    get:\n      servers: []\n      servers: [{url: /v1}]\n', 6);
+});
+
+test('$ref로 따라간 path item의 중복은 거부하고, 포인터가 지나가지 않는 형제 키의 중복은 알리기만 한다', () => {
+  expectDuplicateKeyFailure([
+    'openapi: 3.1.0',
+    'paths:',
+    '  /a: {$ref: "#/components/pathItems/A"}',
+    'components:',
+    '  pathItems:',
+    '    A:',
+    '      get: {}',
+    '      get: {}',
+  ].join('\n'), 8);
+  const document = documentFor([
+    'openapi: 3.1.0',
+    'paths:',
+    '  /a: {$ref: "#/components/pathItems/A"}',
+    'components:',
+    '  pathItems:',
+    '    A: {get: {}}',
+    '  schemas: {}',
+    '  schemas: {}',
+  ].join('\n'));
+  assert.deepEqual(routes(document), ['GET root /a']);
+  assert.match(document.limitations[0]!, /^duplicate-mapping-keys: 1 duplicate key\(s\) .*\(first at line 8\)$/);
 });
 
 test('사실 수가 상한을 넘으면 부분 문서 대신 실패한다', () => {
