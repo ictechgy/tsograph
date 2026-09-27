@@ -279,3 +279,19 @@ test('경로 키·path item method·서버 변수의 중복 키는 코드 2다',
     assert.match(result.standardError, new RegExp(`duplicate mapping key \\(line ${line}\\)`), name);
   }
 });
+
+test('이스케이프 시퀀스가 앞에 있는 줄에서도 열은 파일 원문의 UTF-8 바이트 열이다', async () => {
+  // yaml 노드 오프셋은 디코드한 값이 아니라 원문 텍스트 위치라, 이스케이프는 원문 길이 그대로 센다.
+  const json = '{"openapi":"3.0.0","paths":{"/a":{"x-note":"\\u0041\\"\\\\\\n\\u00e9 é 😀","get":{}}}}';
+  const yaml = 'openapi: 3.0.0\npaths:\n  "/\\u00e9": {x-note: "\\t\\u00e9é", put: {}}\n';
+  for (const [text, key, line] of [[json, '"get"', 1], [yaml, 'put', 3]] as const) {
+    const bytes = new TextEncoder().encode(text);
+    const fileSystem = fakeFileSystem({ readBytes: async () => bytes });
+    const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as { facts: { location: { line: number; column: number } }[] };
+    const lineStart = Buffer.from(bytes).indexOf(text.split('\n')[line - 1]!);
+    const expectedColumn = Buffer.from(bytes).indexOf(key, lineStart) - lineStart + 1;
+    assert.deepEqual(document.facts[0]?.location, { path: 'swagger-2.0.json', line, column: expectedColumn }, key);
+  }
+});
