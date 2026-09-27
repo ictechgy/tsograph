@@ -11,7 +11,7 @@
  *   경로 부분에 있을 때 확정하지 않는다. scheme·host 부분에 있으면 버려지므로 무관하다.
  */
 
-import { canonicalizeLiteral } from './percent-encoding.ts';
+import { canonicalizeLiteralTemplate } from './path-template.ts';
 
 /** 서버 변수 조합을 펼치는 최대 개수다. 넘으면 해석하지 않고 base로 낸다. */
 export const MAX_SERVER_COMBINATIONS = 256;
@@ -312,7 +312,7 @@ function literalTail(
  * @returns 정규 접두사
  */
 export function canonicalizeLiteralPath(path: string): string {
-  const canonical = path.split('/').map(canonicalizeLiteral).join('/');
+  const canonical = canonicalizeLiteralTemplate(path);
   return canonical.endsWith('/') ? canonical.slice(0, -1) : canonical;
 }
 

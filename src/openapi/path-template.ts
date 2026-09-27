@@ -61,6 +61,20 @@ export function canonicalizePathTemplate(rawPath: string): PathTemplateResult {
 }
 
 /**
+ * 파라미터 문법 없이 경로 전체를 리터럴로 정규화한다.
+ *
+ * 세그먼트 구분(`/`)만 보존하고 나머지는 모두 리터럴 규칙을 따른다 — 중괄호도
+ * `%7B`·`%7D`로 인코딩한다. 서버 URL처럼 변수를 이미 치환한 경로와 공유 벡터의
+ * 리터럴 정규화 사례(`template.normalize`)에 쓴다. 중복·끝 슬래시를 보존한다.
+ *
+ * @param path `''` 또는 `/`로 시작하는 경로(짝 없는 서러게이트가 없어야 한다)
+ * @returns 정규 리터럴 경로
+ */
+export function canonicalizeLiteralTemplate(path: string): string {
+  return path.split('/').map(canonicalizeLiteral).join('/');
+}
+
+/**
  * 첫 `?` 또는 `#`부터 끝까지 뗀다. 초안은 query·fragment를 템플릿에서 제외한다.
  *
  * @param path 원문 경로
