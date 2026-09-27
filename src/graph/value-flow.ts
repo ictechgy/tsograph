@@ -680,46 +680,19 @@ export class ValueFlow {
   }
 
   /**
-   * 분석 범위의 파일을 문법적으로 다시 훑어, 심볼을 가리킬 수 있는 모든 토큰(심볼 이름·별칭 지역 이름과 같은 텍스트의
-   * 식별자·`#이름`·문자열 리터럴)이 선언 이름·별칭 선언·타입 자리이거나 색인된 참조임을 확인한다. 하나라도 색인에서
-   * 빠졌으면 완전하지 않다(그 심볼의 "호출 없음"을 믿지 않는다).
+   * 색인된 참조가 하나도 없는 심볼에 대해 "정말 참조가 없다"를 엄격히 증명한다: 분석 범위의 모든 파일에서 심볼 이름이나
+   * 별칭 지역 이름과 텍스트가 같은 토큰(식별자·`#이름`·문자열 리터럴)이 그 심볼 자신의 선언 이름뿐이어야 한다. 해석
+   * 결과를 믿지 않으므로 구조 분해 속성 이름·속성 접근 이름·`export default`·타입 자리·다른 심볼의 같은 이름까지 모두
+   * 증명 실패로 본다(닫힌 쪽으로 실패).
    *
    * @param symbol 함수·클래스 심볼
-   * @returns 완전하면 true
+   * @returns 증명되면 true
    */
   private hasCompleteReferences(symbol: ts.Symbol): boolean {
-    const indexed = new Set(this.index.references.get(symbol) ?? []);
+    if ((this.index.references.get(symbol) ?? []).length > 0) return false;
     const names = new Set([symbol.name, ...(this.index.aliasNames.get(symbol) ?? [])]);
-    for (const sourceFile of this.index.files) {
-      if (![...names].some((name) => sourceFile.text.includes(name))) continue;
-      if (this.hasStrayToken(sourceFile, symbol, names, indexed)) return false;
-    }
-    return true;
-  }
-
-  /**
-   * 파일에 색인에서 빠진, 심볼로 해석되는 토큰이 있는지 본다.
-   *
-   * @param sourceFile 파일
-   * @param symbol 심볼
-   * @param names 심볼을 가리킬 수 있는 이름
-   * @param indexed 색인된 참조 토큰
-   * @returns 빠진 토큰이 있으면 true
-   */
-  private hasStrayToken(sourceFile: ts.SourceFile, symbol: ts.Symbol, names: ReadonlySet<string>, indexed: ReadonlySet<ts.Node>): boolean {
-    let stray = false;
-    const visit = (node: ts.Node): void => {
-      if (stray || (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))) return;
-      const text = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
-      if (text !== undefined && names.has(text) && !indexed.has(node) && !isNameDeclaration(node)
-        && this.dealias(this.checker.getSymbolAtLocation(node)) === symbol) {
-        stray = true;
-        return;
-      }
-      ts.forEachChild(node, visit);
-    };
-    ts.forEachChild(sourceFile, visit);
-    return stray;
+    const own = new Set((symbol.declarations ?? []).map((declaration) => (declaration as { name?: ts.Node }).name).filter((name) => name !== undefined));
+    return this.index.files.every((sourceFile) => ![...names].some((name) => sourceFile.text.includes(name)) || !hasForeignToken(sourceFile, names, own));
   }
 
   /**
@@ -1215,20 +1188,26 @@ export function instanceTypeOf(checker: ts.TypeChecker, declaration: ts.ClassLik
 }
 
 /**
- * 토큰이 선언의 이름 자리인지 본다(선언 이름, import·export 별칭 이름, 구조 분해 속성 이름, 객체 리터럴 속성 이름).
+ * 파일에 이름이 같은 토큰 중 허용한 선언 이름이 아닌 것이 있는지 본다(해석하지 않는 문법 검사).
  *
- * @param token 식별자·문자열 토큰
- * @returns 이름 자리면 true
+ * @param sourceFile 파일
+ * @param names 찾는 이름
+ * @param own 허용하는 선언 이름 노드
+ * @returns 있으면 true
  */
-function isNameDeclaration(token: ts.Node): boolean {
-  const parent = token.parent;
-  if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)
-    || ts.isImportEqualsDeclaration(parent) || ts.isExternalModuleReference(parent) || ts.isImportDeclaration(parent)
-    || ts.isExportDeclaration(parent) || ts.isExportAssignment(parent) || ts.isLiteralTypeNode(parent)) {
-    return true;
-  }
-  if (ts.isBindingElement(parent) && parent.propertyName === token) return true;
-  return (parent as { name?: ts.Node }).name === token && !ts.isPropertyAccessExpression(parent);
+function hasForeignToken(sourceFile: ts.SourceFile, names: ReadonlySet<string>, own: ReadonlySet<ts.Node>): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    const text = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
+    if (text !== undefined && names.has(text) && !own.has(node)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return found;
 }
 
 /**

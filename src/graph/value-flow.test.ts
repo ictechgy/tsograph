@@ -451,3 +451,68 @@ test('GLM 지적 S1: 색인이 참조를 빠뜨려도 완전성 검사가 "호�
   // 참조가 정말 없는 함수는 완전성이 증명되어 기본값만 흐른다.
   assert.deepEqual(values(full, 5), ['A']);
 });
+
+test('GLM 2차 지적: 중첩 네임스페이스 계산된 읽기·구조 분해 별칭·기본 내보내기·축약 속성', async () => {
+  const main = [
+    'import { LocalStore, RemoteStore, type Store } from "./store";',
+    'import * as helpers from "./helpers";',
+    'import helperDefault from "./helpers-default";',
+    // 1: 중첩 네임스페이스를 계산된 키로 읽으면 멤버 호출을 다 볼 수 없다.
+    'namespace App1 { export namespace Repo { export function run1(s: Store = new LocalStore()) { return s.find("a"); } } }',
+    'declare const key1: "run1";',
+    'export const a1 = () => App1.Repo.run1(new LocalStore());',
+    'export const b1 = () => App1.Repo[key1](new RemoteStore());',
+    'declare const key1b: "run1b";',
+    'export const c1 = () => helpers.sub[key1b](new RemoteStore());',
+    'export const d1 = () => helpers.sub.run1b(new LocalStore());',
+    'export const e1 = () => helperDefault.sub[key1b](new RemoteStore());',
+    // 2: 구조 분해로 떼어 낸 네임스페이스 멤버를 부르면 호출 위치를 다 볼 수 없다.
+    'namespace App2 { export namespace Repo { export function run2(s: Store = new LocalStore()) { return s.find("b"); } } }',
+    'export const a2 = () => { const { run2 } = App2.Repo; return run2(new RemoteStore()); };',
+    'namespace App3 { export function run3(s: Store = new LocalStore()) { return s.find("c"); } }',
+    'export const a3 = () => { const { run3: r } = App3; return r(new RemoteStore()); };',
+    'export const b3 = () => App3.run3(new LocalStore());',
+    'namespace App4 { export function run4(s: Store = new LocalStore()) { return s.find("d"); } }',
+    'export const a4 = () => ({ ...App4 }).run4(new RemoteStore());',
+    'export const b4 = () => App4.run4(new LocalStore());',
+    // 3: 축약 속성으로 새어 나간 함수.
+    'function run5(s: Store = new LocalStore()) { return s.find("e"); }',
+    'export const bag5 = { run5 };',
+    'export const b5 = () => run5(new LocalStore());',
+    // 엄격한 완전성: 참조가 없는 함수라도 이름이 같은 토큰이 선언 밖에 하나라도 있으면(무관한 구조 분해라도) 증명 실패다.
+    'function spare6(s: Store = new LocalStore()) { return s.find("f"); }',
+    'const other6 = { spare6: 1 };',
+    'export const { spare6: picked6 } = other6;',
+    // 이름이 같은 토큰이 선언뿐이면 참조 없음이 증명되어 기본값만 흐른다.
+    'function spare7(s: Store = new LocalStore()) { return s.find("g"); }',
+  ].join('\n');
+  const graph = await graphOf({
+    'src/store.ts': cachingStore,
+    'src/helpers.ts': 'import { type Store } from "./store";\nexport namespace sub { export function run1b(s: Store) { return s.find("h"); } }\n',
+    'src/helpers-default.ts': 'import * as h from "./helpers";\nexport default h;\n',
+    'src/main.ts': main,
+  });
+  const bound = (from: string): string[] => graph.edges.filter((edge) => edge.from === from && edge.evidence === 'bound').map((edge) => edge.to);
+  const expectations: [string, string[]][] = [
+    ['src/main.ts#run1', []],
+    ['src/helpers.ts#run1b', []],
+    ['src/main.ts#run2', []],
+    ['src/main.ts#run3', []],
+    ['src/main.ts#run4', []],
+    ['src/main.ts#run5', []],
+    ['src/main.ts#spare6', []],
+    ['src/main.ts#spare7', [LOCAL]],
+  ];
+  assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
+});
+
+test('GLM 2차 지적 3: export default f로 내보낸 함수는 가져온 쪽 이름의 호출로 잇고, 공개 패키지면 열린 자리다', async () => {
+  const files = {
+    'src/store.ts': cachingStore,
+    'src/lib.ts': 'import { LocalStore, type Store } from "./store";\nfunction f6(s: Store = new LocalStore()) { return s.find("f"); }\nexport default f6;\n',
+    'src/main.ts': 'import g from "./lib";\nimport { RemoteStore } from "./store";\nexport const a6 = () => g(new RemoteStore());\n',
+  };
+  const bound = (graph: CallGraph): string[] => graph.edges.filter((edge) => edge.evidence === 'bound').map((edge) => `${edge.from} -> ${edge.to}`);
+  assert.deepEqual(bound(await graphOf(files)), ['src/lib.ts#f6 -> src/store.ts#LocalStore.find', 'src/lib.ts#f6 -> src/store.ts#RemoteStore.find']);
+  assert.deepEqual(bound(await graphOf({ ...files, 'package.json': '{ "name": "lib", "main": "src/lib.ts" }' })), []);
+});

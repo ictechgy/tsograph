@@ -259,7 +259,10 @@ class IndexCollector {
   private visitIdentifier(identifier: ts.Identifier): void {
     const parent = identifier.parent;
     if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) {
-      this.addReference(identifier, this.checker.getSymbolAtLocation(identifier));
+      const member = this.checker.getSymbolAtLocation(identifier);
+      this.addReference(identifier, member);
+      // `App.Repo`·`helpers.sub`처럼 속성 사슬 끝이 모듈·네임스페이스여도 값으로 쓰이면 연다.
+      this.noteNamespaceUse(parent, member);
       return;
     }
     if (!isReferencePosition(identifier)) return;
@@ -276,19 +279,23 @@ class IndexCollector {
    */
   private visitElementAccess(access: ts.ElementAccessExpression): void {
     const key = skipWrappers(access.argumentExpression);
-    if (ts.isStringLiteralLike(key)) this.addReference(key, this.checker.getSymbolAtLocation(key));
+    if (!ts.isStringLiteralLike(key)) return;
+    const member = this.checker.getSymbolAtLocation(key);
+    this.addReference(key, member);
+    this.noteNamespaceUse(access, member);
   }
 
   /**
-   * 모듈·값 네임스페이스 심볼(별칭이면 풀어서)이 `ns.x`·`ns["리터럴"]` 밖(인자·대입·전개·계산된 키 등)에서 쓰이면 연다.
+   * 모듈·값 네임스페이스로 풀리는 식(식별자, 속성 사슬 `App.Repo`, 문자열 키 원소 접근)이 `ns.x`·`ns["리터럴"]`의 왼쪽
+   * 밖(인자·대입·구조 분해 초기값·전개·계산된 키 등)에서 쓰이면 그 모듈·네임스페이스를 연다.
    *
-   * @param identifier 식별자
-   * @param symbol 식별자의 심볼
+   * @param expression 네임스페이스를 가리킬 수 있는 식
+   * @param symbol 그 식의 심볼
    */
-  private noteNamespaceUse(identifier: ts.Identifier, symbol: ts.Symbol | undefined): void {
+  private noteNamespaceUse(expression: ts.Expression, symbol: ts.Symbol | undefined): void {
     const target = this.dealias(symbol);
     if (target === undefined || (target.flags & ts.SymbolFlags.ValueModule) === 0) return;
-    const outer = climbWrappers(identifier);
+    const outer = climbWrappers(expression);
     const parent = outer.parent;
     if (ts.isPropertyAccessExpression(parent) && parent.expression === outer) return;
     if (ts.isElementAccessExpression(parent) && parent.expression === outer && ts.isStringLiteralLike(skipWrappers(parent.argumentExpression))) return;
