@@ -258,6 +258,28 @@ test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·
     'const h21 = new H21();',
     'let run21: () => string = () => "";',
     'export function detach21() { ({ run21: run21 } = h21); return run21.call({ s21: new RemoteStore() }); }',
+    'class A22 { #tag22 = 1; s22: Store = new LocalStore(); run22() { return this.s22.find("x"); } }',
+    'class B22 { #tag22 = 2; s22: Store = new LocalStore(); b22 = 1; }',
+    'const bs22: B22[] = [];',
+    'export function mix22() { const view: object[] = bs22; view.push(new A22()); bs22[0]!.s22 = new RemoteStore(); }',
+    'class A23 { #tag23 = 1; s23: Store = new LocalStore(); run23() { return this.s23.find("x"); } }',
+    'class B23 { #tag23 = 2; s23: Store = new LocalStore(); }',
+    'interface Sink23 { take(x: object): void }',
+    'const sink23: Sink23 = { take(x: B23) { x.s23 = new RemoteStore(); } };',
+    'export function mix23() { sink23.take(new A23()); }',
+    'class Root24 { #id24 = 0; }',
+    'class A24 extends Root24 { s24: Store = new LocalStore(); run24() { return this.s24.find("x"); } }',
+    'class B24 extends Root24 { s24: Store = new LocalStore(); b24 = 1; }',
+    'const bs24: B24[] = [];',
+    'export function mix24() { const roots: Root24[] = bs24; roots.push(new A24()); bs24[0]!.s24 = new RemoteStore(); }',
+    'class A25 { #tag25 = 1; s25: Store = new LocalStore(); run25() { return this.s25.find("x"); } }',
+    'class B25 { #tag25 = 2; s25: Store = new LocalStore(); run25() { return "b"; } }',
+    'const bs25: B25[] = [];',
+    'export function mix25() { const view: object[] = bs25; view.push(new A25()); return bs25[0]!.run25.call({ s25: new RemoteStore() }); }',
+    'class H26 { s26: Store = new LocalStore(); run26() { return this.s26.find("x"); } }',
+    'export const h26 = new H26();',
+    'const other26 = { s26: new LocalStore() as Store };',
+    'export function write26() { other26.s26 = new RemoteStore(); }',
   ].join('\n');
   const graph = await graphOf({
     'src/store.ts': cachingStore,
@@ -290,6 +312,13 @@ test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·
     ['src/main.ts#H19.run', [LOCAL, REMOTE]],
     ['src/main.ts#B20.run20', []],
     ['src/main.ts#H21.run21', []],
+    // 명목 클래스끼리도 공통 상위 타입을 거친 공변성·이변성으로 섞일 수 있다(수신자 흐름으로만 가른다).
+    ['src/main.ts#A22.run22', [LOCAL, REMOTE]],
+    ['src/main.ts#A23.run23', [LOCAL, REMOTE]],
+    ['src/main.ts#A24.run24', [LOCAL, REMOTE]],
+    ['src/main.ts#A25.run25', []],
+    // 수신자 흐름이 값을 담지 않음이 증명되면 같은 이름 쓰기는 닿지 않는다.
+    ['src/main.ts#H26.run26', [LOCAL]],
   ];
   assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
   assert.deepEqual(bound('src/main.ts#Holder2.upgrade'), ['src/store.ts#CachedStore.withCache', 'src/store.ts#LocalStore.withCache']);
