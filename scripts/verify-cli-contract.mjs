@@ -10,6 +10,7 @@ const binaryPath = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url)
 const fixtures = fileURLToPath(new URL('../fixtures/openapi/', import.meta.url));
 const nextFixtures = fileURLToPath(new URL('../fixtures/next/', import.meta.url));
 const schemaFixture = fileURLToPath(new URL('../fixtures/schema/prisma-app/', import.meta.url));
+const graphFixture = fileURLToPath(new URL('../fixtures/graph/next-prisma/', import.meta.url));
 const packageDocument = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 );
@@ -23,6 +24,7 @@ verifyOpenApiUsageErrors();
 verifyRoutesSuccess();
 verifyRoutesErrors();
 verifySchema();
+verifyGraph();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -121,6 +123,37 @@ function verifySchema() {
   const directory = mkdtempSync(join(tmpdir(), 'tsograph-cli-contract-'));
   try {
     verify(run(['schema', '--project', join(directory, 'missing')]).status === 2, 'schema missing directory');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** graph·reach·impact가 결정적인 문서를 내고 0/2/64 계약(모르는 id는 64)을 지키는지 확인한다. */
+function verifyGraph() {
+  const graphArgs = ['graph', '--project', graphFixture, '--format', 'json'];
+  const first = run(graphArgs);
+  verify(first.status === 0, 'graph exit code');
+  const snapshot = JSON.parse(first.stdout);
+  verify(snapshot.format === 'tsograph-graph' && snapshot.version === 1 && /^sha256:/u.test(snapshot.graphRevision), 'graph envelope');
+  verify(withoutGeneratedAt(first.stdout) === withoutGeneratedAt(run(graphArgs).stdout), 'graph determinism');
+  const root = 'src/app/api/jobs/route.ts#POST';
+  for (const [command, direction] of [['reach', 'dependencies'], ['impact', 'dependents']]) {
+    const args = [command, '--project', graphFixture, root];
+    const result = run(args);
+    verify(result.status === 0, `${command} exit code`);
+    const document = JSON.parse(result.stdout);
+    verify(document.format === 'language-traversal' && document.version === 1 && document.direction === direction, `${command} envelope`);
+    verify(document.graphRevision === snapshot.graphRevision, `${command} graphRevision`);
+    verify(withoutGeneratedAt(result.stdout) === withoutGeneratedAt(run(args).stdout), `${command} determinism`);
+    verify(run([command, '--project', graphFixture, 'src/nope.ts#missing']).status === 64, `${command} unknown id`);
+    verify(run([command, '--project', graphFixture]).status === 64, `${command} missing id`);
+    verify(run(['help', command]).stdout.startsWith(`Usage: tsograph ${command}`), `${command} help`);
+  }
+  verify(run(['graph']).status === 64, 'graph missing project');
+  const directory = mkdtempSync(join(tmpdir(), 'tsograph-cli-contract-'));
+  try {
+    verify(run(['graph', '--project', join(directory, 'missing')]).status === 2, 'graph missing directory');
+    verify(run(['reach', '--project', join(directory, 'missing'), root]).status === 2, 'reach missing directory');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

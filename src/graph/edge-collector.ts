@@ -1,0 +1,278 @@
+/**
+ * 파일 하나에서 간선을 모은다(2단계, 모든 노드가 등록된 뒤).
+ *
+ * 출발 노드는 코드 위치의 스코프 id(`scopeIdOf`)다. 호출·`new`·태그 템플릿·데코레이터·JSX 태그는
+ * `TargetResolver.resolveCallee`로, 함수 값 참조(콜백·일반 참조)는 `referenceTargets`로 잇는다.
+ * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다.
+ */
+
+import ts from 'typescript';
+
+import type { CallStatistics, EdgeKind, GraphStore, UnresolvedReason } from './graph-model.ts';
+import { isFunctionValued, isTypeOnly, skipWrappers } from './node-collector.ts';
+import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
+import type { Resolution, TargetResolver } from './target-resolver.ts';
+
+/** 간선 수집 중 센 공백이다. */
+export interface EdgeGaps {
+  /** 일부 대상만 이은 호출 수(이유별) */
+  readonly partial: Partial<Record<UnresolvedReason, number>>;
+  /** 하위 클래스가 재정의한 메서드를 기반 타입으로 부른 호출 수 */
+  overriddenCalls: number;
+}
+
+/** 간선 수집 문맥이다. */
+export interface EdgeContext {
+  readonly checker: ts.TypeChecker;
+  readonly store: GraphStore;
+  readonly resolver: TargetResolver;
+  /** 기반 메서드 id → 재정의한 메서드 id */
+  readonly overrides: ReadonlyMap<string, readonly string[]>;
+  readonly calls: CallStatistics;
+  readonly gaps: EdgeGaps;
+}
+
+/**
+ * 파일의 간선을 모은다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param sourceFile 파일
+ */
+export function collectFileEdges(context: EdgeContext, path: string, sourceFile: ts.SourceFile): void {
+  addModuleInitializerEdges(context.store, path, sourceFile);
+  const visit = (node: ts.Node): void => {
+    if (isTypeOnly(node) || ts.isExportDeclaration(node)) return;
+    visitNode(context, path, node);
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+}
+
+/**
+ * 모듈 스코프에서 모듈을 불러올 때 실행되는 최상위 초기값(함수 값이 아닌 변수, `export default` 식)으로
+ * `initializer` 간선을 잇는다.
+ *
+ * @param store 그래프 저장소
+ * @param path 프로젝트 기준 경로
+ * @param sourceFile 파일
+ */
+function addModuleInitializerEdges(store: GraphStore, path: string, sourceFile: ts.SourceFile): void {
+  const module = moduleScopeId(path);
+  for (const statement of sourceFile.statements) {
+    const initializers = ts.isVariableStatement(statement)
+      ? statement.declarationList.declarations.flatMap((declaration) => (declaration.initializer === undefined ? [] : [declaration.initializer]))
+      : ts.isExportAssignment(statement) && statement.isExportEquals !== true ? [statement.expression] : [];
+    for (const initializer of initializers.filter((expression) => !isFunctionValued(expression))) {
+      const id = scopeIdOf(initializer, path);
+      if (id !== module && store.hasNode(id)) store.addEdge(module, id, 'initializer');
+    }
+  }
+}
+
+/**
+ * 노드 하나에서 간선을 만든다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param node 노드
+ */
+function visitNode(context: EdgeContext, path: string, node: ts.Node): void {
+  if (ts.isCallExpression(node)) {
+    visitCall(context, path, node);
+  } else if (ts.isNewExpression(node)) {
+    recordCall(context, path, node, context.resolver.resolveCallee(node.expression), 'new');
+  } else if (ts.isTaggedTemplateExpression(node)) {
+    recordCall(context, path, node, context.resolver.resolveCallee(node.tag), 'call');
+  } else if (ts.isDecorator(node) && !ts.isCallExpression(node.expression)) {
+    recordCall(context, path, node, context.resolver.resolveCallee(node.expression), 'call');
+  } else if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+    visitJsxTag(context, path, node);
+  } else {
+    visitReference(context, path, node);
+  }
+}
+
+/**
+ * 호출식을 처리한다. `super(...)`는 기반 클래스 생성자, `import(...)` 자체는 호출이 아니다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param call 호출식
+ */
+function visitCall(context: EdgeContext, path: string, call: ts.CallExpression): void {
+  if (call.expression.kind === ts.SyntaxKind.ImportKeyword) return;
+  if (call.expression.kind === ts.SyntaxKind.SuperKeyword) {
+    const base = baseClassExpression(call);
+    if (base !== undefined) recordCall(context, path, call, context.resolver.resolveCallee(base), 'call');
+    return;
+  }
+  const resolution = context.resolver.resolveCallee(call.expression);
+  recordCall(context, path, call, resolution, 'call');
+  countOverriddenCall(context, call.expression, resolution);
+}
+
+/**
+ * JSX 태그가 컴포넌트(대문자 식별자·속성 접근)면 `jsx` 간선을 잇는다. 소문자 내장 태그는 건너뛴다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param element JSX 여는 태그·자기 닫힘 태그
+ */
+function visitJsxTag(context: EdgeContext, path: string, element: ts.JsxOpeningElement | ts.JsxSelfClosingElement): void {
+  const tag = element.tagName;
+  const isComponent = ts.isPropertyAccessExpression(tag) || (ts.isIdentifier(tag) && /^[A-Z_$]/u.test(tag.text));
+  if (isComponent) recordCall(context, path, element, context.resolver.resolveCallee(tag as ts.Expression), 'jsx');
+}
+
+/**
+ * 함수 값 참조(식별자·속성 접근·축약 속성)를 처리한다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param node 노드
+ */
+function visitReference(context: EdgeContext, path: string, node: ts.Node): void {
+  let symbol: ts.Symbol | undefined;
+  if (ts.isShorthandPropertyAssignment(node)) {
+    symbol = context.checker.getShorthandAssignmentValueSymbol(node);
+  } else if (ts.isIdentifier(node) && isValueIdentifier(node)) {
+    symbol = context.checker.getSymbolAtLocation(node);
+  } else if (ts.isPropertyAccessExpression(node) && isReferencePosition(node)) {
+    symbol = context.checker.getSymbolAtLocation(node.name);
+  } else {
+    return;
+  }
+  const targets = context.resolver.referenceTargets(symbol);
+  if (targets.length === 0) return;
+  const from = ensureScope(context.store, path, node);
+  const kind = isArgument(node) ? 'callback' : 'reference';
+  for (const target of targets) context.store.addEdge(from, target, kind);
+}
+
+/**
+ * 호출 해석 결과를 간선·통계로 옮긴다.
+ *
+ * @param context 수집 문맥
+ * @param path 프로젝트 기준 경로
+ * @param site 호출 위치
+ * @param resolution 해석 결과
+ * @param kind 간선 종류
+ */
+function recordCall(context: EdgeContext, path: string, site: ts.Node, resolution: Resolution, kind: EdgeKind): void {
+  if (resolution.kind === 'external') {
+    context.calls.external++;
+    if (resolution.missing === true) context.calls.missingDependencies++;
+  } else if (resolution.kind === 'unresolved') {
+    context.calls.unresolved[resolution.reason]++;
+  } else {
+    context.calls.resolved++;
+    if (resolution.partial !== undefined) context.gaps.partial[resolution.partial] = (context.gaps.partial[resolution.partial] ?? 0) + 1;
+    const from = ensureScope(context.store, path, site);
+    for (const id of resolution.ids) context.store.addEdge(from, id, kind);
+  }
+}
+
+/**
+ * 기반 타입으로 부른 메서드를 하위 클래스가 재정의했으면 센다(재정의는 증명하지 못해 잇지 않는다).
+ *
+ * @param context 수집 문맥
+ * @param callee 호출 대상 식
+ * @param resolution 해석 결과
+ */
+function countOverriddenCall(context: EdgeContext, callee: ts.Expression, resolution: Resolution): void {
+  const inner = skipWrappers(callee);
+  if (resolution.kind !== 'nodes' || !ts.isPropertyAccessExpression(inner)) return;
+  if (inner.expression.kind === ts.SyntaxKind.SuperKeyword) return;
+  if (resolution.ids.some((id) => context.overrides.has(id))) context.gaps.overriddenCalls++;
+}
+
+/**
+ * 위치의 스코프 id를 구하고, 없는 노드면 등록한다(1단계 경계 규칙이 놓친 경우의 안전장치).
+ *
+ * @param store 그래프 저장소
+ * @param path 프로젝트 기준 경로
+ * @param node 코드 노드
+ * @returns 스코프 id
+ */
+function ensureScope(store: GraphStore, path: string, node: ts.Node): string {
+  const id = scopeIdOf(node, path);
+  store.addNode(id, 'variable', path, node);
+  return id;
+}
+
+/**
+ * `super(...)`를 감싼 클래스의 `extends` 식이다.
+ *
+ * @param call super 호출
+ * @returns 기반 클래스 식 또는 undefined
+ */
+function baseClassExpression(call: ts.CallExpression): ts.Expression | undefined {
+  const owner = ts.findAncestor(call, ts.isClassLike);
+  const clause = owner?.heritageClauses?.find((heritage) => heritage.token === ts.SyntaxKind.ExtendsKeyword);
+  return clause?.types[0]?.expression;
+}
+
+/**
+ * 식별자가 값 참조 위치인지 본다. 선언 이름·호출 대상·속성 이름·JSX 태그·대입 왼쪽은 아니다.
+ *
+ * @param identifier 식별자
+ * @returns 값 참조면 true
+ */
+function isValueIdentifier(identifier: ts.Identifier): boolean {
+  const parent = identifier.parent;
+  if (isNamePosition(identifier, parent)) return false;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) return false;
+  if (ts.isQualifiedName(parent) || ts.isShorthandPropertyAssignment(parent)) return false;
+  return isReferencePosition(identifier);
+}
+
+/**
+ * 식이 호출 대상·JSX 태그·대입 왼쪽이 아닌 참조 위치인지 본다.
+ *
+ * @param expression 식별자·속성 접근
+ * @returns 참조 위치면 true
+ */
+function isReferencePosition(expression: ts.Expression): boolean {
+  const parent = expression.parent;
+  if ((ts.isCallExpression(parent) || ts.isNewExpression(parent) || ts.isDecorator(parent)) && parent.expression === expression) return false;
+  if (ts.isTaggedTemplateExpression(parent) && parent.tag === expression) return false;
+  if ((ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent)) && parent.tagName === expression) return false;
+  return !(ts.isBinaryExpression(parent) && parent.left === expression && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken);
+}
+
+/**
+ * 식별자가 선언·import/export·레이블의 이름 자리인지 본다.
+ *
+ * @param identifier 식별자
+ * @param parent 부모
+ * @returns 이름 자리면 true
+ */
+function isNamePosition(identifier: ts.Identifier, parent: ts.Node): boolean {
+  if (ts.isBindingElement(parent) && parent.propertyName === identifier) return true;
+  if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)
+    || ts.isNamespaceExport(parent) || ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)
+    || ts.isMetaProperty(parent)) {
+    return true;
+  }
+  // 속성 접근·축약 속성은 호출자가 먼저 걸렀으므로, 남은 `name` 자리는 선언·JSX 속성 이름이다.
+  return (parent as { name?: ts.Node }).name === identifier;
+}
+
+/**
+ * 식이 (래퍼를 벗겨) 호출·`new`의 인자인지 본다.
+ *
+ * @param node 식
+ * @returns 인자면 true
+ */
+function isArgument(node: ts.Node): boolean {
+  let current = node;
+  while (ts.isParenthesizedExpression(current.parent) || ts.isAsExpression(current.parent) || ts.isSatisfiesExpression(current.parent)
+    || ts.isNonNullExpression(current.parent)) {
+    current = current.parent;
+  }
+  const parent = current.parent;
+  if (!ts.isCallExpression(parent) && !ts.isNewExpression(parent)) return false;
+  const argumentsList: readonly ts.Node[] = parent.arguments ?? [];
+  return argumentsList.includes(current);
+}

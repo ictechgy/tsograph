@@ -12,6 +12,7 @@ import {
   usageFailure,
 } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
+import { graphUsage, impactUsage, reachUsage, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { openApiUsage, runOpenApiCommand } from './openapi-command.ts';
 import { routesUsage, runRoutesCommand } from './routes-command.ts';
 import { runSchemaCommand, schemaUsage } from './schema-command.ts';
@@ -31,6 +32,9 @@ const commandUsages: ReadonlyMap<string, string> = new Map([
   ['openapi', openApiUsage],
   ['routes', routesUsage],
   ['schema', schemaUsage],
+  ['graph', graphUsage],
+  ['reach', reachUsage],
+  ['impact', impactUsage],
 ]);
 
 /** 최상위 도움말이다. 명령이 늘면 여기에 한 줄씩 추가한다. */
@@ -40,6 +44,9 @@ Commands:
   openapi      Convert an OpenAPI 2.0/3.0/3.1 spec into isthmus route-contract facts
   routes       Extract Next.js server route declarations as isthmus route-decl facts
   schema       Extract Prisma/SQL relation-use facts for the isthmus persistence join
+  graph        Build the TypeScript/JavaScript call graph snapshot
+  reach        Symbols reachable from ids (isthmus language-traversal, dependencies)
+  impact       Symbols that reach ids (isthmus language-traversal, dependents)
   help         Show command help
 
 Options:
@@ -66,6 +73,9 @@ export async function runCli(
   if (command === 'openapi') return runOpenApiCommand(rest, environment);
   if (command === 'routes') return runRoutesCommand(rest, environment);
   if (command === 'schema') return runSchemaCommand(rest, environment);
+  if (command === 'graph') return runGraphCommand(rest, environment);
+  if (command === 'reach') return runReachCommand(rest, environment);
+  if (command === 'impact') return runImpactCommand(rest, environment);
   return usageFailure(`tsograph: unknown command; run 'tsograph --help' for the list.\n${rootHelp}`);
 }
 

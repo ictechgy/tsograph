@@ -1,0 +1,11 @@
+{
+  // 합성 fixture — 경로 별칭·JS·JSX를 검증한다.
+  "compilerOptions": {
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "allowJs": true,
+    "paths": { "@/*": ["./src/*"] }
+  }
+}
