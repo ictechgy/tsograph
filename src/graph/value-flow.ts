@@ -61,8 +61,8 @@ const EMPTY: ReadonlySet<AbstractValue> = new Set();
 /** 예산 초과 신호다. */
 class BudgetExceeded extends Error {}
 
-/** 메모 단위(심볼·함수 반환)의 키다. */
-type UnitKey = ts.Symbol | ts.Node;
+/** 메모 단위(심볼·함수 반환·메서드의 `this`)의 키다. */
+type UnitKey = object;
 
 /** 호출 위치 목록이다. `null`은 호출자를 다 볼 수 없다는 뜻이다. */
 type CallSites = readonly (readonly ts.Expression[])[] | null;
@@ -104,6 +104,8 @@ export class ValueFlow {
   private readonly active = new Map<UnitKey, number>();
   /** 계산 중인 단위의 잠정 결과(자기 순환 고정점 되풀이용) */
   private readonly provisional = new Map<UnitKey, Flow>();
+  /** 메서드 → `this` 단위 키 */
+  private readonly thisKeys = new Map<ts.MethodDeclaration, object>();
   /** 계산 중 다시 만난 단위 */
   private readonly reentered = new Set<UnitKey>();
   /** 현재 계산이 기댄 가장 낮은 계산 중 단위의 스택 위치 */
@@ -285,8 +287,26 @@ export class ValueFlow {
     if (owner === undefined || this.policy.isOpenCallable(owner.declaration)) return null;
     const classes = this.withSubclasses(owner.declaration);
     if (classes.some((declaration) => this.isEscapedClass(declaration))) return null;
-    if (owner.method !== undefined && this.isDetachable(owner.method, owner.declaration)) return null;
-    return new Set(classes);
+    const method = owner.method;
+    if (method === undefined) return new Set(classes);
+    // 떼어 내기 판정은 메서드 자신을 읽는 `this.m`의 흐름을 구하므로(`setTimeout(this.tick.bind(this))`)
+    // 메서드별 메모 단위로 감싼다. 재진입하면 빈 잠정값이 "닿을 수 있음"이 되어 보수적으로 끝난다.
+    return this.unit(this.thisKey(method), () => (this.isDetachable(method, owner.declaration) ? null : new Set(classes)));
+  }
+
+  /**
+   * 메서드 안 `this` 값의 메모 단위 키다(반환 값 단위와 겹치지 않게 따로 만든다).
+   *
+   * @param method 메서드
+   * @returns 단위 키
+   */
+  private thisKey(method: ts.MethodDeclaration): object {
+    let key = this.thisKeys.get(method);
+    if (key === undefined) {
+      key = { method };
+      this.thisKeys.set(method, key);
+    }
+    return key;
   }
 
   /**

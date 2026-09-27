@@ -280,6 +280,11 @@ test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·
     'export const h26 = new H26();',
     'const other26 = { s26: new LocalStore() as Store };',
     'export function write26() { other26.s26 = new RemoteStore(); }',
+    'declare function setTimeout(callback: () => void, delay: number): unknown;',
+    'class Poller27 { s27: Store = new LocalStore(); tick27(): void { this.s27.find("x"); setTimeout(this.tick27.bind(this), 1000); } }',
+    'export const poller27 = new Poller27();',
+    'class Pair28 { s28: Store = new LocalStore(); run28(): unknown { const other = this.stop28; return [other, this.s28.find("x")]; } stop28(): unknown { return this.run28; } }',
+    'export const pair28 = new Pair28();',
   ].join('\n');
   const graph = await graphOf({
     'src/store.ts': cachingStore,
@@ -319,6 +324,9 @@ test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·
     ['src/main.ts#A25.run25', []],
     // 수신자 흐름이 값을 담지 않음이 증명되면 같은 이름 쓰기는 닿지 않는다.
     ['src/main.ts#H26.run26', [LOCAL]],
+    // 메서드가 자기 자신·서로를 읽어도(폴링의 `this.tick.bind(this)`) 무한 재귀 없이 모름으로 끝난다.
+    ['src/main.ts#Poller27.tick27', []],
+    ['src/main.ts#Pair28.run28', []],
   ];
   assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
   assert.deepEqual(bound('src/main.ts#Holder2.upgrade'), ['src/store.ts#CachedStore.withCache', 'src/store.ts#LocalStore.withCache']);
