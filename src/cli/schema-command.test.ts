@@ -40,13 +40,27 @@ test('합성 fixture를 결정적인 persistence 문서로 바꾼다', async () 
     assert.ok(summary.includes(expected), expected);
   }
   assert.ok(!summary.includes('ImportBatch'));
+  // 소스 사실의 usr는 그래프 id(= qualifiedName), 스키마 선언·TypedSQL 사실의 usr는 그래프 노드가 아닌
+  // 별도 이름공간(`#model:`·`#typedsql:`)이다. 심볼이 있는 사실은 모두 usr를 싣는다.
+  const symbols = document.facts.filter((fact: RelationUseFact) => fact.symbol !== undefined)
+    .map((fact: RelationUseFact) => `${fact.location.path} ${fact.symbol!.qualifiedName} ${fact.symbol!.usr}`);
+  for (const expected of [
+    'src/lib/books.ts src/lib/books.ts#listBooks src/lib/books.ts#listBooks',
+    'prisma/schema/library.prisma Book prisma/schema/library.prisma#model:Book',
+    'prisma/schema/library.prisma Author.fullName prisma/schema/library.prisma#model:Author.fullName',
+    'prisma/schema/library.prisma Book.tags prisma/schema/library.prisma#model:Book.tags',
+    'prisma/sql/booksByGenre.sql prisma/sql/booksByGenre.sql#booksByGenre prisma/sql/booksByGenre.sql#typedsql:booksByGenre',
+  ]) {
+    assert.ok(symbols.includes(expected), expected);
+  }
+  assert.ok(document.facts.every((fact: RelationUseFact) => fact.symbol === undefined || fact.symbol.usr !== undefined));
   assert.ok(!summary.includes('Book.legacy'));
   assert.deepEqual(document.limitations, [
     'ignored-prisma-elements: 1 @@ignore model(s) and 1 @ignore field(s) are not emitted',
     'unsupported-db-packages: 1 source file(s) use SQL packages outside the supported surface: typeorm (1)',
     'dynamic-relation-names: 1 SQL argument(s), relation operand(s), or delegate access(es) were not statically readable; they are emitted as dynamic facts',
     'unresolved-client-receivers: 1 Prisma delegate call(s) use receivers that could not be traced to a PrismaClient; not emitted',
-    'missing-relation-symbols: 2 relation-use fact(s) have source locations but no enclosing declaration name',
+    'missing-relation-usrs: 2 relation-use fact(s) have source locations but no enclosing declaration name, so they carry no symbol and no usr',
   ]);
 });
 

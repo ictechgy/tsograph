@@ -53,6 +53,11 @@ test('함수·메서드·생성자·접근자·필드·변수·객체 속성 이
   ]);
 });
 
+test('export default 식 안은 default이고 export = 식은 심볼이 없다', () => {
+  assert.deepEqual(symbolsAt('export default wrap(async () => HERE);\n'), ['src/a.ts#default']);
+  assert.deepEqual(symbolsAt('export = wrap(() => HERE);\n'), [undefined]);
+});
+
 test('최상위 문장·계산된 이름은 심볼을 만들지 않는다', () => {
   assert.deepEqual(symbolsAt('HERE;\ndescribe("x", () => { HERE; });\nclass C { [key]() { HERE; } }\nconst o = { [k]: () => HERE };\n'), [
     undefined, undefined, undefined, undefined,

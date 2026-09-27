@@ -13,7 +13,8 @@ test('사실 수집기는 제어 문자 이름을 세고 같은 사실을 한 �
   const text = new SourceText('ab\n한글 x\n');
   const sink = new RelationFactSink();
   const base = { dynamic: false, text, symbol: 'a.ts#f' };
-  sink.add({ ...base, channel: 'b', path: 'b.ts', offset: 0 });
+  sink.add({ ...base, channel: 'b', path: 'b.ts', offset: 0, usr: 'a.ts#f' });
+  sink.add({ ...base, channel: 'c', path: 'b.ts', offset: 0, usr: 'bad\u0000usr' });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6, method: 'col' });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6, method: 'col' });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6 });
@@ -22,12 +23,13 @@ test('사실 수집기는 제어 문자 이름을 세고 같은 사실을 한 �
   sink.add({ ...base, channel: '  ', path: 'a.ts', offset: 0 });
   sink.add({ ...base, channel: 'ok', method: '\u0085', path: 'a.ts', offset: 0 });
   assert.equal(sink.invalidNames, 3);
-  assert.equal(sink.size, 4);
+  assert.equal(sink.size, 5);
   assert.deepEqual(sink.sorted().map((fact) => [fact.location, fact.channel, fact.method, fact.dynamic, fact.symbol]), [
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', undefined, false, { qualifiedName: 'a.ts#f' }],
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', undefined, true, undefined],
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', 'col', false, { qualifiedName: 'a.ts#f' }],
-    [{ path: 'b.ts', line: 1, column: 1 }, 'b', undefined, false, { qualifiedName: 'a.ts#f' }],
+    [{ path: 'b.ts', line: 1, column: 1 }, 'b', undefined, false, { qualifiedName: 'a.ts#f', usr: 'a.ts#f' }],
+    [{ path: 'b.ts', line: 1, column: 1 }, 'c', undefined, false, { qualifiedName: 'a.ts#f' }],
   ]);
 });
 

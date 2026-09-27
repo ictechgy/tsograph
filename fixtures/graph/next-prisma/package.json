@@ -1,0 +1,11 @@
+{
+  "name": "graph-fixture",
+  "private": true,
+  "dependencies": {
+    "@prisma/client": "7.8.0",
+    "next": "16.2.7"
+  },
+  "devDependencies": {
+    "prisma": "7.8.0"
+  }
+}

@@ -19,7 +19,8 @@ own language; isthmus joins the documents.
 | Other Node backend route declarations (Hono, Express, Fastify, NestJS, Koa) | Planned |
 | `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
 | TypeORM, Sequelize, Drizzle, Knex, raw drivers, D1 relation-use facts | Planned (counted as limitations today) |
-| Web/React Native client route-calls, call graph, impact | Planned |
+| `tsograph graph` / `reach` / `impact`: TypeScript/JavaScript call graph → isthmus `language-traversal` v1 | Implemented |
+| Web/React Native client route-calls | Planned |
 
 The isthmus `http` target is still a **draft** in isthmus `docs/GRAPH-EXCHANGE.md`
 ("개발 중: HTTP 경계 합의 초안"). Released isthmus versions reject `target: "http"` documents
@@ -263,8 +264,9 @@ bundled docs under `dist/docs/`), not guessed.
   that mixes brackets with other text (`v[id]`) is not documented by Next.js (its router and
   regex builder disagree), so the fact is `dynamic` with a `route-coverage:` limitation.
 - **`[[...x]]`** emits the `{**}` decl and the prefix decl without the catch-all (the
-  contract's zero-segment expansion). See Decisions for why the prefix decl does not carry
-  `catchAllPrefix`.
+  contract's zero-segment expansion). The prefix decl carries `catchAllPrefix: true` (same
+  method, symbol, and location as the `{**}` decl). isthmus requires `symbol.usr` on it, so a
+  CommonJS handler (no usr) gets a plain prefix decl instead.
 - **trailingSlash**: `strict` when the redirect rules above make one form canonical (the
   channel is that form), `optional` when no redirect applies and both forms reach the handler
   (`skipTrailingSlashRedirect: true`, `.well-known`, a last segment with a dot that neither
@@ -273,7 +275,14 @@ bundled docs under `dist/docs/`), not guessed.
 - **location**: the exported name token (`GET`), or `default` for Pages Router, as a 1-based
   line and 1-based UTF-8 byte column. A leading BOM counts as its three bytes.
 - **symbol.qualifiedName**: `<project-relative file>#<export name>`, for example
-  `src/app/api/items/route.ts#GET` or `pages/api/hello.ts#default`. No `usr` yet.
+  `src/app/api/items/route.ts#GET` or `pages/api/hello.ts#default`.
+- **symbol.usr**: the handler's tsograph graph id (see [Symbol ids](#symbol-ids)). It equals
+  `qualifiedName` except for a named default export (`export default function handler` →
+  `pages/api/hello.ts#handler`, because code inside it is attributed to `handler`). Aliases,
+  destructuring, and re-exports (`export { GET } from './impl'`, `export const { GET } = h`)
+  keep `<file>#<export name>`; `tsograph graph` has an export node with that id and an `alias`
+  edge to the real declaration. CommonJS handlers (`module.exports = …`) have no usr and are
+  counted under `missing-route-usrs:`.
 
 ### Configuration and limitations
 
@@ -297,6 +306,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
 | `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
 | No `app/` or `pages/` directory | zero facts + `route-coverage:` |
+| Handler exported through CommonJS (`module.exports = …`) | fact without `symbol.usr` + `missing-route-usrs:` |
 
 All server-side prefixes come from the contract's closed list, so isthmus reads each one as
 a server-side gap and downgrades `route-call-without-decl` to `-unverified` instead of
@@ -304,15 +314,13 @@ reporting a false error. Limitations carry counts and project-relative names onl
 
 ### Decisions (differences from the draft)
 
-- **No `usr`; qualifiedName is the join handle.** `<file>#<export>` names the module export
-  Next.js invokes. A later phase adds tsograph graph ids as `symbol.usr` by looking up the
-  same (module path, export name) pair, without changing `qualifiedName`.
-- **Optional catch-all prefix without `catchAllPrefix`.** The contract marks the expanded
-  prefix decl with `catchAllPrefix: true`, but isthmus requires `symbol.usr` on such a decl.
-  Until usr exists, the prefix decl is emitted as a plain decl (same method, symbol, and
-  location as the `{**}` decl). Next.js rejects an explicit route at the same place (build
-  error E458), so it cannot collide with an explicit decl; the cost is that it may appear in
-  `route-decl-without-call` / drift warnings. It becomes `catchAllPrefix: true` once usr lands.
+- **qualifiedName names the export, usr names the graph node.** `<file>#<export>` names the
+  module export Next.js invokes; `symbol.usr` is the id `tsograph graph`/`reach`/`impact` use for
+  the same handler, derived from the same (module path, export name) pair.
+- **Optional catch-all prefix and usr.** isthmus requires `symbol.usr` on a `catchAllPrefix`
+  decl. A CommonJS handler has no usr, so its prefix decl is emitted as a plain decl. Next.js
+  rejects an explicit route at the same place (build error E458), so it cannot collide with an
+  explicit decl; the cost is that it may appear in `route-decl-without-call` / drift warnings.
 - **Wrapped configs stay `root`.** Treating every `withX(config)` as an unknown basePath
   would make most real projects `base`; the literal inside is used and the uncertainty is
   reported with `unresolved-route-prefix:`, which already prevents false errors.
@@ -372,12 +380,24 @@ Channels are written as the code or mapping names them: `schema.table` when qual
 
 **Symbol format.** Source facts use `<project-relative POSIX path>#<Name>(.<Name>)*`, outermost
 declaration first: function declarations, named classes and class expressions, methods,
-accessors, class fields, `constructor`, `default` for anonymous default exports, variables at
+accessors, class fields, `constructor`, `default` for anonymous default exports (including the
+expression of `export default <expr>`), variables at
 module level or whose function-valued initializer contains the fact (`src/lib/jobs.ts#listJobs`,
 `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Anonymous callbacks are transparent. A
 computed name stops the symbol, and module-level statements have none; those facts are counted
-under `missing-relation-symbols:`. Schema facts use the model name (`Job`, `Job.title`), and
+under `missing-relation-usrs:` (the isthmus chain-only prefix; informational). Schema facts use the model name (`Job`, `Job.title`), and
 TypedSQL facts use `<path>#<file name>`.
+
+Source facts also carry `symbol.usr`, equal to `qualifiedName`: it is the tsograph graph id of
+the enclosing declaration ([Symbol ids](#symbol-ids)), so `tsograph reach` output can be joined
+with relation-use facts by exact string match.
+
+Schema declaration facts and TypedSQL facts also carry a stable usr, in namespaces that are **not**
+graph nodes: `<schema path>#model:<Model>` / `#model:<Model.field>` (for example
+`prisma/schema.prisma#model:Job`, `prisma/schema.prisma#model:Job.title`, and
+`#model:Book.tags` for an implicit many-to-many join table), and `<sql path>#typedsql:<name>`.
+They are declaration-side facts, so no traversal ever reaches them; isthmus `trace` reads an id
+that is absent from every traversal as unreached, not as a missing symbol.
 
 ### Prisma schema location (Prisma 7.8.0 CLI rules)
 
@@ -491,7 +511,7 @@ Cloudflare D1 (`D1Database`) queries are not interpreted. Files using them are c
 `prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
-`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-symbols:`,
+`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
 `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
@@ -512,6 +532,190 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app` is a synthetic project with its own migration; joined this way it
 reports no errors (one expected `relation-decl-without-use-unverified` warning for its `@@ignore` model).
+
+## `tsograph graph`, `tsograph reach`, `tsograph impact`
+
+```sh
+tsograph graph  --project <root> [--generated-at <timestamp>] [--format json]
+tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+```
+
+Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
+`Program` and `TypeChecker` over the root `tsconfig.json`, else `jsconfig.json`, else bundler-style
+defaults; `allowJs` is always on). The analyzed code is never executed and no diagnostics are
+computed.
+
+- `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
+  `nodes` (`id`, `kind`, `location`, optional `entries`), `edges` (`from`, `to`, `kinds`),
+  `statistics`, `limitations`, `graphRevision`, and `revision` when readable.
+- `reach` writes the symbols reachable from the root ids (`direction: "dependencies"`), and
+  `impact` the symbols that reach them (`direction: "dependents"`), as isthmus
+  [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md).
+- Ids are [symbol ids](#symbol-ids): the same strings as `symbol.usr` in `tsograph routes` and
+  `tsograph schema` output. An unknown id is a usage error (exit `64`) that lists the ids; tsograph
+  does not emit the contract's in-document `root-not-found` roots, because a typo in a root id should
+  stop the pipeline rather than produce a silently partial traversal. Duplicate
+  ids are kept once, in first-seen order (that order defines `reached[].roots` indices).
+- Exit codes: `0` success, `2` unreadable project or output over 16 Mi characters, `64` usage error.
+
+### Nodes and edges
+
+Nodes are only the project's own source files (the same walk as `tsograph schema`, minus Prisma
+generator output, plus every route file). Declarations in `node_modules`, TypeScript lib files, and
+generated clients are never nodes; calls into them are counted as external.
+
+| Node kind | What |
+|---|---|
+| `module` | `<path>#<module>`: top-level statements and code outside any named declaration |
+| `function`, `method`, `constructor`, `accessor`, `class`, `field`, `variable` | declarations named by the symbol id rules (function-valued variables and object properties are `function`) |
+| `export` | an export that is not itself a declaration (alias, re-export, destructuring) |
+
+| Edge kind | Meaning |
+|---|---|
+| `call` | direct call (also tagged templates, decorators, `super(...)`) |
+| `new` | `new C()` → the constructor with a body, else the class node |
+| `callback` | a function value passed as an argument (`items.map(format)`, `withAuth(handler)`) |
+| `reference` | any other function value reference (`export default handler`, `{ onClick: h }`, `action={fn}`) |
+| `jsx` | a JSX component (`<JobList />`) |
+| `alias` | export node → the declaration it resolves to |
+| `initializer` | constructor/class → instance field initializers, derived class without a constructor → base construction, module scope → top-level variable initializers and static fields |
+
+Calls are resolved through checker symbols across modules: named/default/namespace imports,
+re-exports (including `export *`), path aliases, value aliases (`const h = g`), destructuring
+(`const { GET } = handlers`, `const { f } = await import('./m')`), and object-literal members.
+Nothing is guessed:
+
+- A method called through an interface or type-literal signature is linked only when the receiver is
+  a `const` variable or `readonly` field initialized with `new C()` or an object literal (the
+  implementation is then proven). A union receiver links every member that has a body; unproven
+  parts are counted under `partial-dispatch:`.
+- A call to a method that subclasses override is linked to the statically resolved declaration
+  only and counted under `overridden-methods:`.
+- Calls through parameters, `any`, computed callees, non-function values, and unresolvable
+  project imports get no edge and are counted by reason under `unresolved-calls:`.
+- Calls through packages whose type declarations cannot be resolved (dependencies not installed,
+  untyped packages) are external and counted under `missing-dependencies:`.
+- Module scopes are not linked from importers (import-time side effects stay on the `<module>` node).
+
+### Entry points
+
+| `entries` | Source |
+|---|---|
+| `route-handler` | `symbol.usr` of the project's `tsograph routes` route-decl facts (test sources excluded) |
+| `scheduled` | a GET/ANY route handler whose template matches a `vercel.json` `crons[].path` (Vercel invokes crons with GET) |
+| `server-action` | exports of a `'use server'` module, functions whose body starts with `'use server'` |
+| `page` | default export and `generateMetadata`/`generateStaticParams`/… of App Router special files (`page`, `layout`, `template`, `default`, `error`, `not-found`, `loading`, …) and Pages Router pages (default, `getServerSideProps`, `getStaticProps`, …) |
+| `metadata-route` | default export of `sitemap`, `robots`, `manifest`, icon and Open Graph image files |
+| `middleware` | `proxy`/`middleware`/default export of `proxy.<ext>`/`middleware.<ext>` |
+| `instrumentation` | `register`/`onRequestError` of `instrumentation.<ext>` |
+
+Only `route-handler` entries are reachable through the isthmus http join. `reach`/`impact`
+documents count the other entry kinds among their roots and reached symbols under
+`non-http-entries:`, so isthmus `trace` can report them as `non-http-entry` gaps instead of
+missing routes.
+
+### language-traversal output
+
+- `roots[]`: `{ id, symbol: { usr, qualifiedName } }` in input order.
+- `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
+  sorted by (`depth`, `usr`). `depth` is the shortest distance to any root, `via` the previous
+  symbol on a shortest path from the nearest root (ties: the smallest root index, then the smallest
+  predecessor id; a root id at depth 1), `roots` every root index that reaches the symbol,
+  `relationships` the edge kinds between `via` and the symbol.
+- A root that is reached from **another** root is listed in `reached` too (a handler A calling a
+  helper H that is also a root lists H with `roots: [indexA]`). Its `roots` never contains its own
+  index, and its `depth`/`via` are measured from those other roots (`via` may be another root id).
+  A root reached only from itself (through a cycle) is not listed. Paths may pass through another
+  root, and symbols beyond it carry both root indices.
+- Budgets: `--max-depth` 1–128 (default 128), `--max-reached` up to 100,000 (default 100,000). When a
+  budget cuts the traversal, `truncated: true` with `truncationReasons` (`depth`, `max-reached`).
+  More than 64 root indices on one symbol keep the smallest 64 and set `rootsTruncated: true`.
+- The traversal is one multi-source, level-synchronous pass (all roots at once, not one search per
+  root). A root stops spreading through a symbol that already holds 65 smaller root indices, because
+  it can no longer change any listed `roots`, `depth`, or `via`; this bounds the work per symbol even
+  with 10,000 roots. A randomized test checks the pass against the per-root algorithm. When root
+  indices overflow (`rootsTruncated: true`), the `depth` reason is reported when a symbol is missing
+  because of the depth limit, not when only one root's provenance was cut; in a document also cut by
+  `max-reached`, overflow on dropped symbols still sets `rootsTruncated`.
+- `graphRevision` is `sha256:` over node ids, kinds, entries, and edges (locations excluded), so
+  `graph`, `reach`, and `impact` over the same graph agree. `revision` is the project root's git
+  `HEAD` commit read from `.git` (working-tree changes are not reflected).
+- `limitations` carries the graph's limitations plus the document-scoped `non-http-entries:`.
+- `--generated-at` fixes `generatedAt` for byte-identical output.
+
+Example (synthetic `fixtures/graph/next-prisma`, trimmed):
+
+```sh
+tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00:00:00.000Z 'src/app/api/jobs/route.ts#POST'
+```
+
+```json
+{
+  "direction": "dependencies",
+  "format": "language-traversal",
+  "generatedAt": "2026-09-27T00:00:00.000Z",
+  "graphRevision": "sha256:929a5ac7…",
+  "limitations": ["unresolved-calls: 6 call(s) could not be linked to a project declaration and were not guessed (parameter: 1, interface: 1, untyped: 1, computed: 1, indirect: 1, unresolved-import: 1)", "…"],
+  "platform": "js",
+  "project": "/work/example",
+  "reached": [
+    { "depth": 1, "relationships": ["call"], "roots": [0],
+      "symbol": { "kind": "function", "location": { "column": 23, "line": 8, "path": "src/lib/jobs.ts" },
+                  "qualifiedName": "src/lib/jobs.ts#createJob", "usr": "src/lib/jobs.ts#createJob" },
+      "via": "src/app/api/jobs/route.ts#POST" },
+    { "depth": 2, "relationships": ["call"], "roots": [0],
+      "symbol": { "kind": "function", "location": { "column": 23, "line": 3, "path": "src/lib/audit.ts" },
+                  "qualifiedName": "src/lib/audit.ts#audit", "usr": "src/lib/audit.ts#audit" },
+      "via": "src/lib/jobs.ts#createJob" },
+    { "depth": 2, "relationships": ["new"], "roots": [0],
+      "symbol": { "kind": "constructor", "location": { "column": 3, "line": 14, "path": "src/lib/repository.ts" },
+                  "qualifiedName": "src/lib/repository.ts#JobStore.constructor", "usr": "src/lib/repository.ts#JobStore.constructor" },
+      "via": "src/lib/repository.ts#saveProven" }
+  ],
+  "roots": [{ "id": "src/app/api/jobs/route.ts#POST",
+              "symbol": { "qualifiedName": "src/app/api/jobs/route.ts#POST", "usr": "src/app/api/jobs/route.ts#POST" } }],
+  "tool": { "name": "tsograph", "version": "0.1.0" },
+  "truncated": false,
+  "version": 1
+}
+```
+
+Joined with the relation-use facts of `tsograph schema` (`symbol.usr` ∈ reach set ∪ {handler}),
+`POST /api/jobs` touches `jobs` and `AuditLog`. The same documents pass the isthmus
+`language-traversal` parser and `isthmus trace` (route selection with a `forward` analysis, symbol
+selection with a `reverse` analysis) on the `feature/trace-language-traversal` consumer.
+
+### Graph limitation prefixes
+
+`unresolved-calls:`, `partial-dispatch:`, `overridden-methods:`, `missing-dependencies:`,
+`unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
+`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`.
+Counts only; no source text or absolute paths.
+
+## Symbol ids
+
+One id format is shared by `tsograph graph`/`reach`/`impact` nodes, `symbol.usr` on route-decl
+facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exact string match:
+
+```text
+<project-relative POSIX path>#<declaration path>
+```
+
+- The declaration path follows the schema [symbol format](#facts): names of the enclosing
+  declarations, outermost first, joined with `.`:
+  `src/lib/jobs.ts#listJobs`, `src/lib/repo.ts#Repo.save`, `src/lib/repo.ts#Repo.constructor`,
+  `src/auth.ts#handlers.GET`, `src/app/api/items/[id]/route.ts#GET`, `pages/api/hello.ts#handler`.
+- Code outside every named declaration (top-level statements, callbacks passed at module level,
+  members with computed names) belongs to the module scope `<path>#<module>`.
+- An anonymous default export is `<path>#default` (also for `export default <expr>`).
+- An export that is not itself a named declaration (`export { a as GET }`, `export { GET } from
+  './impl'`, `export const { GET } = handlers`, `export let x;`) gets an export node
+  `<path>#<export name>` with an `alias` edge to what it resolves to.
+- Declarations that produce the same id (overloads, a getter/setter pair, same-named functions in
+  sibling blocks) are one node.
+- Declaration-side relation-use facts use `#model:` and `#typedsql:` ids (see
+  [Facts](#facts)); these are never graph nodes.
 
 ## Development
 

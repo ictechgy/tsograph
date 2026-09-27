@@ -31,6 +31,7 @@ interface RoutesDocumentView {
     pathAnchor: string;
     trailingSlash?: string;
     testSource?: boolean;
+    catchAllPrefix?: boolean;
     service?: string;
     location: { path: string; line: number; column: number };
     symbol: { qualifiedName: string; usr?: string };
@@ -87,8 +88,11 @@ test('App Router fixture: 내보내기 형태·group·catch-all·비ASCII·미�
     'HEAD root /api/proxy strict @ src/app/api/proxy/route.ts:1:15',
     'GET root /api/v%5Bversion%5D - dynamic @ src/app/api/v[version]/route.ts:1:23',
   ]);
-  assert.ok(document.facts.every((fact) => fact.service === 'demo' && fact.symbol.usr === undefined));
+  assert.ok(document.facts.every((fact) => fact.service === 'demo'));
   assert.equal(document.facts[0]?.symbol.qualifiedName, 'src/app/(admin)/api/admin/stats/route.ts#GET');
+  // usr는 그래프 id다: 선언은 같은 이름, 구조 분해·재내보내기는 내보낸 이름의 export 노드다.
+  assert.deepEqual(document.facts.map((fact) => fact.symbol.usr), document.facts.map((fact) => fact.symbol.qualifiedName));
+  assert.deepEqual(document.facts.filter((fact) => fact.catchAllPrefix === true).map((fact) => fact.channel), ['/api/docs']);
   assert.deepEqual(document.limitations, [
     'framework-provided-routes: 2 metadata file(s) under the app directory (sitemap, robots, manifest, icons, Open Graph or Twitter images) serve framework-generated routes that are not modeled',
     'framework-provided-routes: src/proxy.ts can answer or rewrite requests before file routing (Next.js proxy/middleware); those paths are not modeled',
@@ -111,7 +115,14 @@ test('Pages Router fixture: ANY, basePath, trailingSlash true, CommonJS 기본 �
     'ANY root /docs/api/users/{} - @ pages/api/users/[id].ts:3:8',
   ]);
   assert.equal(document.facts[0]?.symbol.qualifiedName, 'pages/api/index.js#default');
+  // CommonJS 기본 내보내기는 usr가 없고, 이름 있는 default 함수는 함수 이름이 usr다.
+  assert.equal(document.facts[0]?.symbol.usr, undefined);
+  assert.deepEqual(document.facts.slice(1).map((fact) => fact.symbol.usr), [
+    'pages/api/files/[[...path]].ts#files', 'pages/api/files/[[...path]].ts#files', 'pages/api/hello.ts#handler', 'pages/api/users/[id].ts#default',
+  ]);
+  assert.deepEqual(document.facts.filter((fact) => fact.catchAllPrefix === true).map((fact) => fact.channel), ['/docs/api/files/']);
   assert.deepEqual(document.limitations, [
+    'missing-route-usrs: 1 route declaration(s) come from CommonJS exports and carry no symbol.usr; tsograph graph has no named node for them',
     'route-coverage: 1 pages/api file(s) have no statically visible default export or module.exports assignment; no declaration was emitted for them',
   ]);
   const withTests = await convertFixture('pages-api', ['--include-tests']);

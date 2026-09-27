@@ -4,8 +4,44 @@
 
 ## [Unreleased]
 
+### Changed
+
+- schema: 스키마 선언 사실(`<스키마 경로>#model:<Model[.field]>`)과 TypedSQL 사실(`<sql 경로>#typedsql:<이름>`)에
+  그래프 노드가 아닌 이름공간의 `symbol.usr`를 싣는다. isthmus trace가 이들을 `relation-use-without-symbol`이
+  아니라 닿지 않은 선언으로 읽게 하기 위해서다.
+- schema: limitation 접두사 `missing-relation-symbols:`를 isthmus 체인 전용 접두사 `missing-relation-usrs:`로
+  바꾼다(정보용, 심각도 영향 없음).
+- schema: `export default <식>`의 식 안 사실은 심볼 `<경로>#default`를 갖는다(전에는 심볼 없이
+  `missing-relation-symbols:`로 셌다). Pages Router 핸들러 id와 같게 하기 위해서다.
+
 ### Added
 
+- reach·impact 순회를 root별 탐색에서 다중 출발 단계 동기 단일 패스로 바꾼다(root 10,000개 × 정점 2만 개
+  합성 그래프에서 37.2초 → 4.4초). 더 작은 root 65개를 가진 심볼에서 큰 root 전파를 멈추고, via 동률은
+  작은 root 인덱스 → 작은 선행 id로 정한다. 옛 알고리즘을 오라클로 둔 무작위 비교 테스트를 더한다.
+- 콜백·참조 간선이 값 별칭·속성 별칭·객체 구조 분해를 따라가고, 전개 인자(`emit(...fns)`)를 콜백으로 본다.
+- language-traversal v1 개정 반영: 다른 root에서 닿는 root도 `reached`에 싣고(`roots`는 자기 인덱스를 뺀
+  다른 root만, depth·via도 그 기준), 자기 자신에게서만 닿는 root는 싣지 않는다. 모든 테이블을 root로 준
+  다중 root 순회에서 서로 닿는 root가 사라지던 정보 손실을 막는다.
+- `tsograph graph --project <root>`, `tsograph reach --project <root> <id>...`, `tsograph impact --project <root> <id>...`:
+  TypeScript 컴파일러 API(Program + TypeChecker, 프로젝트 tsconfig/jsconfig, JS 허용)로 호출 그래프를 만들고,
+  스냅샷(`tsograph-graph` v1, `graphRevision` = 노드·간선 해시)과 isthmus `language-traversal` v1
+  (`dependencies`·`dependents`, root 출처 보존, depth 1~128, `--max-depth`·`--max-reached`·`truncationReasons`,
+  `rootsTruncated`, `--generated-at`, git HEAD `revision`)을 낸다. 모르는 id는 목록과 함께 종료 코드 64다.
+- 간선 `call`·`new`·`callback`·`reference`·`jsx`·`alias`·`initializer`. import 별칭·재내보내기·기본 내보내기·
+  동적 import 구조 분해·객체 리터럴 멤버를 checker로 잇고, 인터페이스 메서드는 수신자 초기값으로 증명한
+  구현만 잇는다. 매개변수·`any`·계산된 호출·풀리지 않는 import는 `unresolved-calls:`, 재정의 메서드는
+  `overridden-methods:`, 타입 없는 패키지는 `missing-dependencies:`로 센다(추측하지 않는다).
+- 진입점 표식(`route-handler`·`scheduled`(vercel.json crons)·`server-action`·`page`·`metadata-route`·
+  `middleware`·`instrumentation`)과 HTTP 밖 진입점의 `non-http-entries:` limitation.
+- 합성 fixture `fixtures/graph/next-prisma`(모든 간선 종류, 모듈 사이 해석, 순환, 다중 root, route → 테이블)와
+  isthmus `language-traversal` 파서·`trace`로 왕복 검증했다.
+- 안정 심볼 id 형식 `<프로젝트 기준 POSIX 경로>#<선언 경로>`(모듈 스코프 `#<module>`, 이름 없는 기본 내보내기
+  `#default`, 별칭·재내보내기·구조 분해 내보내기는 `#<내보낸 이름>` export 노드)를 정하고, 이 값을 routes
+  route-decl과 schema relation-use(소스 사실만)의 `symbol.usr`로 싣는다. `qualifiedName`은 그대로다.
+  isthmus trace가 생산자 id를 정확한 문자열 일치로만 잇기 때문이다.
+- routes: optional catch-all 접두사 decl에 `catchAllPrefix: true`를 단다(usr가 생겨 isthmus 요구를 채운다).
+  usr가 없는 CommonJS 핸들러는 표식 없이 내고 `missing-route-usrs:`로 센다.
 - `tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]`:
   Next.js App Router route handler(`app/**/route.<ext>`, `src/app` 포함)와 Pages Router API route
   (`pages/api/**`)를 isthmus bridge-facts v1 http 문서(`platform: "js"`, `roles: ["server"]`,
@@ -19,9 +55,7 @@
 - `next.config.*`를 실행 없이 읽는다. 함수 내보내기·비리터럴 basePath는 `pathAnchor: "base"`와
   `unresolved-route-prefix:`, rewrites·redirects·i18n·proxy/middleware·메타데이터 파일·`public/`은
   `framework-provided-routes:`, package.json의 next 범위가 16.x가 아니면 `route-framework-version-unknown:`.
-- 결정: `usr`는 아직 싣지 않고 `symbol.qualifiedName`을 `<파일>#<내보낸 이름>`으로 둔다(이후 그래프 id로
-  `usr` 추가). isthmus가 `catchAllPrefix` decl에 `symbol.usr`를 요구하므로 optional catch-all 접두사 decl은
-  표식 없이 일반 decl로 낸다. 감싼 설정(`withX(config)`)은 안쪽 리터럴을 쓰고 `unresolved-route-prefix:`로
+- 결정: `symbol.qualifiedName`을 `<파일>#<내보낸 이름>`으로 둔다. 감싼 설정(`withX(config)`)은 안쪽 리터럴을 쓰고 `unresolved-route-prefix:`로
   알린다.
 - symlink 규칙을 최상위 후보까지 넓힌다: `app`·`pages`·`src`·`src/app`·`src/pages`·`public`·`next.config.*`·
   `package.json`이 symlink면 `stat` 대신 부모 목록으로 판별해 따라가지 않는다(프로젝트 밖 트리·설정을 읽던

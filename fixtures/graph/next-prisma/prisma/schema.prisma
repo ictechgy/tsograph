@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Job {
+  id        Int     @id
+  title     String
+  companyId Int
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@map("jobs")
+}
+
+model Company {
+  id   Int    @id
+  name String
+  jobs Job[]
+}
+
+model AuditLog {
+  id      Int    @id
+  message String
+}
