@@ -89,6 +89,30 @@ export interface MapEntry {
   readonly value: ParsedNode | null;
 }
 
+/**
+ * YAML 텍스트를 문서로 파싱하는 함수다. 기본은 `yaml`의 `parseDocument`이고, 테스트가
+ * 스택 초과 같은 드문 실패를 재현할 때만 바꾼다.
+ */
+export type YamlParser = (text: string, lineCounter: LineCounter) => Document.Parsed;
+
+/**
+ * 이 도구가 쓰는 설정으로 `yaml` 문서를 파싱한다.
+ *
+ * @param text 파싱할 텍스트
+ * @param lineCounter 줄 색인(파서가 채운다)
+ * @returns 파싱한 문서
+ */
+function parseYamlDocument(text: string, lineCounter: LineCounter): Document.Parsed {
+  return parseDocument(text, {
+    lineCounter,
+    prettyErrors: false,
+    strict: true,
+    uniqueKeys: false,
+    merge: false,
+    version: '1.2',
+  });
+}
+
 /** 매핑 하나에서 발견한 중복 키 정보다. */
 interface MapDuplicates {
   /** 두 번 이상 나온 키의 식별자(`타입:값`) → 그 키가 처음 다시 나온 줄이다. */
@@ -336,25 +360,41 @@ function scalarString(node: ParsedNode | null | undefined): string | undefined {
  * 앞의 BOM(U+FEFF)은 텍스트 편집기 관점의 열과 맞추기 위해 떼고 파싱한다.
  *
  * @param source UTF-8로 디코드한 파일 텍스트
+ * @param parse YAML 파서(테스트 주입용, 기본은 `yaml`)
  * @returns 스펙 트리
  * @throws SpecParseError 구문 오류·중복 키·여러 문서·깊이 초과
  */
-export function parseSpecTree(source: string): SpecTree {
+export function parseSpecTree(source: string, parse: YamlParser = parseYamlDocument): SpecTree {
   const text = source.startsWith('\uFEFF') ? source.slice(1) : source;
   precheckSpecText(text);
   const lineCounter = new LineCounter();
-  const document = parseDocument(text, {
-    lineCounter,
-    prettyErrors: false,
-    strict: true,
-    uniqueKeys: false,
-    merge: false,
-    version: '1.2',
-  });
+  const document = parseGuarded(parse, text, lineCounter);
   const firstError = document.errors[0];
   if (firstError !== undefined) throw toParseError(firstError, lineCounter);
   const index = indexDocument(document, lineCounter);
   return new SpecTree(document.contents, index.aliasTargets, text, lineCounter, index.duplicates);
+}
+
+/**
+ * 파서를 실행하고, 스택 초과(RangeError)를 resource-exhaustion 실패로 바꾼다.
+ *
+ * `yaml`은 컬렉션 합성 중의 스택 초과를 스스로 잡아 오류로 싣지만, 한계 근처에서는 그 처리
+ * 자체가 다시 넘칠 수 있다. 사전 검사는 flow 괄호만 세고 block 들여쓰기 중첩은 세지 않으므로,
+ * 여기서 한 번 더 막아 종료 코드 계약(2)을 지킨다.
+ *
+ * @param parse 파서
+ * @param text 파싱할 텍스트
+ * @param lineCounter 줄 색인
+ * @returns 파싱한 문서
+ * @throws SpecParseError 스택 초과면 resource-exhaustion
+ */
+function parseGuarded(parse: YamlParser, text: string, lineCounter: LineCounter): Document.Parsed {
+  try {
+    return parse(text, lineCounter);
+  } catch (error) {
+    if (error instanceof RangeError) throw new SpecParseError('resource-exhaustion');
+    throw error;
+  }
 }
 
 /**

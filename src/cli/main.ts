@@ -7,10 +7,10 @@
  */
 
 import { createNodeFileSystem } from './file-system.ts';
-import { runCli } from './run-cli.ts';
+import { runCliSafely } from './run-cli.ts';
 import { readToolVersion } from './tool-version.ts';
 
-const result = await runCli(process.argv.slice(2), {
+const result = await runCliSafely(process.argv.slice(2), {
   toolVersion: readToolVersion(),
   fileSystem: createNodeFileSystem(),
   now: () => new Date(),

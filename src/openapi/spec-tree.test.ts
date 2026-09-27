@@ -8,11 +8,12 @@ import {
   parseSpecTree,
   precheckSpecText,
   SpecParseError,
+  type YamlParser,
 } from './spec-tree.ts';
 
 /** 파싱 실패 이유와 줄을 기대한다. */
-function expectParseFailure(source: string, reason: string, line?: number): void {
-  assert.throws(() => parseSpecTree(source), (error: unknown) => {
+function expectParseFailure(source: string, reason: string, line?: number, parser?: YamlParser): void {
+  assert.throws(() => parseSpecTree(source, parser), (error: unknown) => {
     assert.ok(error instanceof SpecParseError);
     assert.equal(error.reason, reason);
     if (line !== undefined) assert.equal(error.line, line);
@@ -122,4 +123,16 @@ test('위치는 1부터 시작하는 줄과 UTF-8 바이트 열이고 BOM은 세
   const inner = tree.entries(entries[1]!.value) ?? [];
   assert.deepEqual(tree.position(inner[0]!.keyNode), { line: 2, column: 8 });
   assert.deepEqual(tree.position(entries[2]!.keyNode), { line: 3, column: 1 });
+});
+
+test('깊은 block 중첩(약 2만 단계)은 스택을 넘기지 않고 resource-exhaustion으로 거부한다', () => {
+  expectParseFailure(`${'- '.repeat(20_000)}x`, 'resource-exhaustion');
+  expectParseFailure(`${'? '.repeat(20_000)}x`, 'resource-exhaustion');
+});
+
+test('파서가 RangeError를 던져도 resource-exhaustion으로 바꾸고 다른 예외는 삼키지 않는다', () => {
+  const overflowing = () => { throw new RangeError('Maximum call stack size exceeded'); };
+  expectParseFailure('a: 1\n', 'resource-exhaustion', undefined, overflowing);
+  const broken = () => { throw new TypeError('bug'); };
+  assert.throws(() => parseSpecTree('a: 1\n', broken), TypeError);
 });

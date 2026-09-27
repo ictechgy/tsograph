@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createNodeFileSystem } from './file-system.ts';
-import { rootHelp, runCli } from './run-cli.ts';
+import { fileURLToPath } from 'node:url';
+
+import { rootHelp, runCli, runCliSafely } from './run-cli.ts';
 
 /** 테스트용 고정 실행 환경이다. */
 const environment = {
@@ -46,4 +48,15 @@ test('help openapi는 명령 사용법을 내고 openapi는 명령으로 분배�
   assert.equal(tooMany.exitCode, 64);
   const missingService = await runCli(['openapi', 'spec.yaml'], environment);
   assert.equal(missingService.exitCode, 64);
+});
+
+test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없는 문구로 바꾼다', async () => {
+  const throwing = { ...environment, now: (): Date => { throw new Error('secret /abs/path detail'); } };
+  const result = await runCliSafely(['openapi', fileURLToPath(new URL('../../fixtures/openapi/swagger-2.0.json', import.meta.url)), '--service', 'x'], throwing);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.standardError, /^tsograph: internal error/);
+  assert.equal(result.standardOutput, '');
+  assert.doesNotMatch(result.standardError, /secret|abs\/path/);
+  const ok = await runCliSafely(['--version'], environment);
+  assert.equal(ok.exitCode, 0);
 });
