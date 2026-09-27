@@ -260,17 +260,31 @@ function isNamePosition(identifier: ts.Identifier, parent: ts.Node): boolean {
 }
 
 /**
- * 식이 (래퍼를 벗겨) 호출·`new`의 인자인지 본다.
+ * 값을 바꾸지 않는 부모 래퍼(괄호·`as`·`satisfies`·non-null)를 위로 벗긴다.
  *
  * @param node 식
- * @returns 인자면 true
+ * @returns 가장 바깥 래퍼(없으면 식 자신)
  */
-function isArgument(node: ts.Node): boolean {
+function unwrapValueParents(node: ts.Node): ts.Node {
   let current = node;
   while (ts.isParenthesizedExpression(current.parent) || ts.isAsExpression(current.parent) || ts.isSatisfiesExpression(current.parent)
     || ts.isNonNullExpression(current.parent)) {
     current = current.parent;
   }
+  return current;
+}
+
+/**
+ * 식이 (래퍼를 벗겨) 호출·`new`의 인자(전개 원소 포함)인지 본다.
+ *
+ * @param node 식
+ * @returns 인자면 true
+ */
+function isArgument(node: ts.Node): boolean {
+  let current = unwrapValueParents(node);
+  // `emit(...handlers)`·`emit(...[a, b])`의 전개 원소도 인자로 넘긴 값이다.
+  if (ts.isArrayLiteralExpression(current.parent) && ts.isSpreadElement(current.parent.parent)) current = current.parent;
+  if (ts.isSpreadElement(current.parent)) current = current.parent;
   const parent = current.parent;
   if (!ts.isCallExpression(parent) && !ts.isNewExpression(parent)) return false;
   const argumentsList: readonly ts.Node[] = parent.arguments ?? [];

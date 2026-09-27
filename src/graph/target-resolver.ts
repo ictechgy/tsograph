@@ -81,17 +81,66 @@ export class TargetResolver {
 
   /**
    * 함수 값 참조(콜백·일반 참조)의 대상 노드를 고른다. 함수 값 선언만 인정한다 — 일반 변수 읽기는
-   * 호출 관계가 아니기 때문이다.
+   * 호출 관계가 아니기 때문이다. 값 별칭(`const h = g`, `const h = obj.g`), 객체 속성 별칭
+   * (`{ h: g }`, `{ g }`), 객체 구조 분해(`const { h } = obj`)는 호출과 같은 깊이 상한으로 따라간다.
    *
    * @param symbol 참조 식의 심볼
    * @returns 노드 id(정렬)
    */
   referenceTargets(symbol: ts.Symbol | undefined): string[] {
+    return [...new Set(this.functionValueTargets(symbol, 0))].sort(compareStrings);
+  }
+
+  /**
+   * 심볼이 가리키는 함수 값 선언의 노드 id를 모은다(별칭을 따라간다).
+   *
+   * @param symbol 심볼
+   * @param depth 별칭 추적 깊이
+   * @returns 노드 id(중복 가능)
+   */
+  private functionValueTargets(symbol: ts.Symbol | undefined, depth: number): string[] {
     const target = this.dealias(symbol);
-    const ids = (target?.declarations ?? []).filter(isFunctionValuedDeclaration)
-      .map((declaration) => this.resolveDeclaration(declaration, 0))
-      .flatMap((resolution) => (resolution.kind === 'nodes' ? resolution.ids : []));
-    return [...new Set(ids)].sort(compareStrings);
+    if (target === undefined || depth > MAX_FOLLOW_DEPTH) return [];
+    return (target.declarations ?? []).flatMap((declaration) => {
+      if (isFunctionValuedDeclaration(declaration)) {
+        const resolution = this.resolveDeclaration(declaration, depth);
+        return resolution.kind === 'nodes' ? resolution.ids : [];
+      }
+      return this.functionValueTargets(this.aliasedValueSymbol(declaration), depth + 1);
+    });
+  }
+
+  /**
+   * 값 별칭 선언이 가리키는 다음 심볼이다: 따라갈 수 있는 초기값, 축약 속성의 값, 객체 구조 분해의 속성.
+   *
+   * @param declaration 선언
+   * @returns 다음 심볼 또는 undefined(별칭이 아님)
+   */
+  private aliasedValueSymbol(declaration: ts.Declaration): ts.Symbol | undefined {
+    if (ts.isShorthandPropertyAssignment(declaration)) return this.checker.getShorthandAssignmentValueSymbol(declaration);
+    if (ts.isBindingElement(declaration)) {
+      const name = ts.isObjectBindingPattern(declaration.parent) ? bindingPropertyName(declaration) : undefined;
+      if (name === undefined || bindingRoot(declaration) === 'parameter') return undefined;
+      return this.checker.getPropertyOfType(this.checker.getTypeAtLocation(declaration.parent), name);
+    }
+    const initializer = ts.isVariableDeclaration(declaration) || ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)
+      ? declaration.initializer : undefined;
+    return initializer === undefined ? undefined : this.expressionSymbol(skipWrappers(initializer));
+  }
+
+  /**
+   * 따라갈 수 있는 식(식별자·속성 접근·리터럴 키 원소 접근)의 심볼이다.
+   *
+   * @param expression 래퍼를 벗긴 식
+   * @returns 심볼 또는 undefined
+   */
+  private expressionSymbol(expression: ts.Expression): ts.Symbol | undefined {
+    if (ts.isIdentifier(expression)) return this.checker.getSymbolAtLocation(expression);
+    if (ts.isPropertyAccessExpression(expression)) return this.checker.getSymbolAtLocation(expression.name);
+    if (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression)) {
+      return this.checker.getSymbolAtLocation(expression.argumentExpression);
+    }
+    return undefined;
   }
 
   /**

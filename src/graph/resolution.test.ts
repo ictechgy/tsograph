@@ -89,6 +89,43 @@ test('super·데코레이터·태그 템플릿·원소 접근·축약 속성·�
   assert.deepEqual(graph.nodes.find((node) => node.id === 'src/use.ts#action')?.entries, ['server-action']);
 });
 
+test('콜백·참조는 값 별칭·속성 별칭을 따라가고, 전개 인자도 콜백이다', async () => {
+  const graph = await graphOf({
+    'src/alias.ts': [
+      'function g() { return 1; }',
+      'function k() { return 2; }',
+      'function m() { return 3; }',
+      'declare function register(fn: unknown): void;',
+      'declare function emit(...fns: unknown[]): void;',
+      'export const h = g;',
+      'const obj = { g, k: k, deep: { m } };',
+      'const viaProperty = obj.g;',
+      'const { k: picked } = obj;',
+      'let loop1: unknown = 0;',
+      'const cycleA: unknown = cycleB;',
+      'const cycleB: unknown = cycleA;',
+      'export function wire() {',
+      '  register(h);',
+      '  register(viaProperty);',
+      '  register(obj.k);',
+      '  register(picked);',
+      '  register(obj.deep.m);',
+      '  register(loop1);',
+      '  register(cycleA);',
+      '  emit(...[m]);',
+      '  const local = h;',
+      '  return local;',
+      '}',
+    ].join('\n'),
+  });
+  const lines = edges(graph).filter((line) => line.startsWith('src/alias.ts#wire '));
+  assert.deepEqual(lines, [
+    'src/alias.ts#wire -> src/alias.ts#g callback,reference',
+    'src/alias.ts#wire -> src/alias.ts#k callback',
+    'src/alias.ts#wire -> src/alias.ts#m callback',
+  ]);
+});
+
 test('Pages Router 페이지·instrumentation·메타데이터 진입점과 cron 템플릿 매칭', async () => {
   const graph = await graphOf({
     'package.json': '{ "dependencies": { "next": "16.2.7" } }',
