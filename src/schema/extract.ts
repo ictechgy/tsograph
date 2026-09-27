@@ -79,7 +79,7 @@ function isRelational(catalog: PrismaCatalog | undefined): boolean {
 
 /**
  * 스키마 선언을 사실로 낸다: 모델 테이블(심볼 `Model`), 컬럼(심볼 `Model.field`), 조인 테이블과
- * 그 컬럼 `A`·`B`.
+ * 그 컬럼 `A`·`B`. usr는 그래프 노드가 아닌 선언 이름공간 `<스키마 경로>#model:<심볼>`이다.
  *
  * @param catalog 이름 표
  * @param sink 사실 수집기
@@ -87,20 +87,31 @@ function isRelational(catalog: PrismaCatalog | undefined): boolean {
 function emitSchemaFacts(catalog: PrismaCatalog, sink: RelationFactSink): void {
   for (const model of catalog.models) {
     const base = { path: model.file.path, text: model.file.text };
-    sink.add({ ...base, channel: model.table.channel, dynamic: model.table.dynamic, offset: model.nameOffset, symbol: model.name });
+    sink.add({ ...base, channel: model.table.channel, dynamic: model.table.dynamic, offset: model.nameOffset, ...declarationSymbol(model.file.path, model.name) });
     for (const column of model.columns) {
       sink.add({
         ...base, channel: model.table.channel, method: column.column, dynamic: false,
-        offset: column.nameOffset, symbol: `${model.name}.${column.field}`,
+        offset: column.nameOffset, ...declarationSymbol(model.file.path, `${model.name}.${column.field}`),
       });
     }
   }
   for (const join of catalog.joinTables) {
-    const base = { path: join.file.path, text: join.file.text, offset: join.nameOffset, symbol: join.symbol };
+    const base = { path: join.file.path, text: join.file.text, offset: join.nameOffset, ...declarationSymbol(join.file.path, join.symbol) };
     sink.add({ ...base, channel: join.table.channel, dynamic: join.table.dynamic });
     if (join.table.dynamic) continue;
     for (const column of ['A', 'B']) sink.add({ ...base, channel: join.table.channel, method: column, dynamic: false });
   }
+}
+
+/**
+ * 스키마 선언 사실의 symbol·usr 입력이다. usr는 그래프 노드와 겹치지 않는 `#model:` 이름공간이다.
+ *
+ * @param path 스키마 파일의 프로젝트 기준 경로
+ * @param symbol 모델 이름 또는 `Model.field`
+ * @returns 사실 입력의 symbol·usr
+ */
+function declarationSymbol(path: string, symbol: string): { symbol: string; usr: string } {
+  return { symbol, usr: `${path}#model:${symbol}` };
 }
 
 /**
@@ -141,14 +152,16 @@ function emitTypedSql(root: string, files: readonly string[], reader: ProjectRea
     if (text === undefined) continue;
     const path = toPosixRelative(root, file);
     const source = new SourceText(text);
-    const symbol = `${path}#${basename(file, extname(file))}`;
+    const name = basename(file, extname(file));
+    // usr는 그래프 노드가 아닌 `#typedsql:` 이름공간이다(생성 함수 호출은 그래프에서 외부다).
+    const symbol = { symbol: `${path}#${name}`, usr: `${path}#typedsql:${name}` };
     const result = sqlRelations(text);
     for (const relation of result.relations) {
-      sink.add({ channel: relation.name, dynamic: false, path, text: source, offset: relation.keyword, symbol });
+      sink.add({ channel: relation.name, dynamic: false, path, text: source, offset: relation.keyword, ...symbol });
     }
     if (result.unresolved > 0) {
       counts.dynamicRelations += result.unresolved;
-      sink.add({ channel: dynamicChannel(text), dynamic: true, path, text: source, offset: 0, symbol });
+      sink.add({ channel: dynamicChannel(text), dynamic: true, path, text: source, offset: 0, ...symbol });
     }
   }
 }
@@ -266,7 +279,7 @@ function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated 
   }
   const missingSymbols = facts.filter((fact) => fact.symbol === undefined).length;
   if (missingSymbols > 0) {
-    result.push(`missing-relation-symbols: ${missingSymbols} relation-use fact(s) have source locations but no enclosing declaration name`);
+    result.push(`missing-relation-usrs: ${missingSymbols} relation-use fact(s) have source locations but no enclosing declaration name, so they carry no symbol and no usr`);
   }
   if (sink.invalidNames > 0) {
     result.push(`invalid-relation-names: ${sink.invalidNames} relation or column name(s) contained control characters and were skipped`);

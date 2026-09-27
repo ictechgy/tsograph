@@ -607,10 +607,19 @@ export class ClientUsageScanner {
       path: this.module.path,
       text: this.module.text,
       offset: at.getStart(this.module.sourceFile),
-      symbol: enclosingSymbol(at, this.module.path),
-      symbolIsGraphId: true,
+      ...symbolFields(enclosingSymbol(at, this.module.path)),
     });
   }
+}
+
+/**
+ * 소스 사실의 symbol·usr 입력이다. 감싸는 선언 이름이 곧 그래프 id라 usr도 같은 값이다.
+ *
+ * @param symbol 감싸는 선언 이름
+ * @returns 사실 입력의 symbol·usr
+ */
+function symbolFields(symbol: string | undefined): { symbol: string | undefined; usr: string | undefined } {
+  return { symbol, usr: symbol };
 }
 
 /**

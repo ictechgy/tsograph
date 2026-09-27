@@ -293,12 +293,16 @@ tsograph schema --project <root> [--format json]
 export(`export default <식>`의 식 포함)의 `default`, 모듈 최상위 변수 또는 함수 값 초기값 안에 사실이 있는 변수
 (`src/lib/jobs.ts#listJobs`, `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). 이름 없는 콜백은
 투명하다. 계산된 이름이 끼면 심볼을 만들지 않고, 모듈 최상위 문장에는 심볼이 없다 — 이런 사실은
-`missing-relation-symbols:`로 센다. 스키마 사실은 모델 이름(`Job`, `Job.title`), TypedSQL 사실은
+`missing-relation-usrs:`(isthmus 체인 전용 접두사, 정보용)로 센다. 스키마 사실은 모델 이름(`Job`, `Job.title`), TypedSQL 사실은
 `<경로>#<파일 이름>`이다.
 
 소스 사실은 `qualifiedName`과 같은 값의 `symbol.usr`도 싣는다. 감싸는 선언의 tsograph 그래프
 id([심볼 id](#심볼-id))라서 `tsograph reach` 출력과 relation-use 사실을 정확한 문자열 일치로 이을 수 있다.
-스키마·TypedSQL 사실은 그래프 노드가 아니므로 usr가 없다.
+스키마 선언 사실과 TypedSQL 사실도 안정 usr를 싣지만, 그래프 노드가 **아닌** 이름공간을 쓴다:
+`<스키마 경로>#model:<Model>`·`#model:<Model.field>`(예: `prisma/schema.prisma#model:Job`,
+`prisma/schema.prisma#model:Job.title`, 암시적 다대다 조인 테이블은 `#model:Book.tags`)와
+`<sql 경로>#typedsql:<이름>`. 선언 측 사실이라 어떤 순회에도 나오지 않으며, isthmus `trace`는 모든 순회에 없는
+id를 "심볼 없음"이 아니라 "닿지 않음"으로 읽는다.
 
 ### Prisma 스키마 위치(Prisma 7.8.0 CLI 규칙)
 
@@ -399,7 +403,7 @@ MongoDB·DynamoDB·Firebase·Redis는 `non-relational-stores:`로 센다. 그 �
 `prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
-`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-symbols:`,
+`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
 `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
 심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
@@ -582,6 +586,7 @@ tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00
   `export const { GET } = handlers`, `export let x;`)는 `<경로>#<내보낸 이름>` export 노드가 되고, 해석한
   대상으로 `alias` 간선을 잇는다.
 - 같은 id가 되는 선언(오버로드, getter/setter 쌍, 형제 블록의 같은 이름 함수)은 한 노드다.
+- 선언 측 relation-use 사실은 `#model:`·`#typedsql:` id를 쓴다([사실](#사실)). 이 id는 그래프 노드가 아니다.
 
 ## 개발
 

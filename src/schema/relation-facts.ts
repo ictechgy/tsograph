@@ -18,8 +18,10 @@ export interface RelationUseFact {
   readonly dynamic: boolean;
   readonly location: BridgeLocation;
   /**
-   * 사실을 담은 선언이다. `usr`는 소스 코드 사실에만 싣는 tsograph 그래프 id로, 값은 qualifiedName과 같다
-   * (`src/graph/symbol-ids.ts`). 스키마 선언(`Model.field`)·TypedSQL 사실은 그래프 노드가 아니라 싣지 않는다.
+   * 사실을 담은 선언이다. `usr`는 소스 코드 사실이면 tsograph 그래프 id(= qualifiedName,
+   * `src/graph/symbol-ids.ts`)이고, 스키마 선언 사실이면 `<스키마 경로>#model:<Model[.field]>`, TypedSQL 사실이면
+   * `<sql 경로>#typedsql:<이름>`이다. 뒤의 두 이름공간은 그래프 노드가 아니다 — 선언 사실이라 어떤 순회에도
+   * 나오지 않고, isthmus trace는 이를 "심볼 없음"이 아니라 "닿지 않음"으로 읽는다.
    */
   readonly symbol?: { readonly qualifiedName: string; readonly usr?: string };
 }
@@ -33,8 +35,8 @@ export interface FactInput {
   readonly text: SourceText;
   readonly offset: number;
   readonly symbol: string | undefined;
-  /** symbol이 소스 선언 이름(곧 그래프 id)이면 true다. 이때만 `usr`를 싣는다. */
-  readonly symbolIsGraphId?: boolean;
+  /** 실을 `symbol.usr`다. symbol이 있을 때만 싣고, 금지 문자가 있으면 뺀다. */
+  readonly usr?: string | undefined;
 }
 
 /** dynamic 사실의 channel 요약 최대 길이(UTF-16 코드 단위)다. 가족 생산자와 같다. */
@@ -66,7 +68,7 @@ export class RelationFactSink {
       ...(input.method === undefined ? {} : { method: input.method }),
       dynamic: input.dynamic,
       location: { path: input.path, line, column },
-      ...(symbol === undefined ? {} : { symbol: symbolOf(symbol, input.symbolIsGraphId === true) }),
+      ...(symbol === undefined ? {} : { symbol: symbolOf(symbol, input.usr) }),
     };
     const key = [input.path, line, column, input.channel, input.method ?? '', input.dynamic].join('\u0000');
     if (!this.facts.has(key)) this.facts.set(key, fact);
@@ -91,11 +93,11 @@ export class RelationFactSink {
  * 사실의 symbol 객체를 만든다.
  *
  * @param qualifiedName 선언 이름
- * @param isGraphId 이름이 그래프 id이기도 한지
+ * @param usr 안정 식별자(없거나 안전하지 않으면 싣지 않는다)
  * @returns symbol 객체
  */
-function symbolOf(qualifiedName: string, isGraphId: boolean): NonNullable<RelationUseFact['symbol']> {
-  return isGraphId ? { qualifiedName, usr: qualifiedName } : { qualifiedName };
+function symbolOf(qualifiedName: string, usr: string | undefined): NonNullable<RelationUseFact['symbol']> {
+  return usr !== undefined && isSafeIdentifier(usr) ? { qualifiedName, usr } : { qualifiedName };
 }
 
 /**

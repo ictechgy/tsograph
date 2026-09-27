@@ -128,7 +128,7 @@ test('같은 입력의 그래프와 graphRevision은 같다', async () => {
   assert.match(computeGraphRevision(graph), /^sha256:[0-9a-f]{64}$/u);
 });
 
-test('모든 route-decl·relation-use usr는 그래프 노드다(모든 fixture)', async () => {
+test('모든 route-decl·소스 relation-use usr는 그래프 노드이고, 선언 사실 usr는 노드가 아니다(모든 fixture)', async () => {
   const environment = { fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) };
   const projects = ['graph/next-prisma', 'next/app-router', 'next/pages-api', 'schema/prisma-app'].map((name) => realpathSync(`${fixtures}${name}`));
   for (const project of projects) {
@@ -136,7 +136,9 @@ test('모든 route-decl·relation-use usr는 그래프 노드다(모든 fixture)
     const routes = usrsOf((await runRoutesCommand(['--role', 'server', '--project', project, '--include-tests'], environment)).standardOutput);
     const relations = usrsOf((await runSchemaCommand(['--project', project], environment)).standardOutput);
     assert.ok(routes.length + relations.length > 0, project);
-    for (const usr of [...routes, ...relations]) assert.ok(nodes.has(usr), `${project}: ${usr}`);
+    const isDeclarationId = (usr: string): boolean => /#(?:model|typedsql):/u.test(usr);
+    for (const usr of [...routes, ...relations.filter((usr) => !isDeclarationId(usr))]) assert.ok(nodes.has(usr), `${project}: ${usr}`);
+    for (const usr of relations.filter(isDeclarationId)) assert.ok(!nodes.has(usr), `${project}: ${usr}`);
   }
 });
 

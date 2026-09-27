@@ -6,6 +6,11 @@
 
 ### Changed
 
+- schema: 스키마 선언 사실(`<스키마 경로>#model:<Model[.field]>`)과 TypedSQL 사실(`<sql 경로>#typedsql:<이름>`)에
+  그래프 노드가 아닌 이름공간의 `symbol.usr`를 싣는다. isthmus trace가 이들을 `relation-use-without-symbol`이
+  아니라 닿지 않은 선언으로 읽게 하기 위해서다.
+- schema: limitation 접두사 `missing-relation-symbols:`를 isthmus 체인 전용 접두사 `missing-relation-usrs:`로
+  바꾼다(정보용, 심각도 영향 없음).
 - schema: `export default <식>`의 식 안 사실은 심볼 `<경로>#default`를 갖는다(전에는 심볼 없이
   `missing-relation-symbols:`로 셌다). Pages Router 핸들러 id와 같게 하기 위해서다.
 

@@ -385,13 +385,19 @@ expression of `export default <expr>`), variables at
 module level or whose function-valued initializer contains the fact (`src/lib/jobs.ts#listJobs`,
 `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Anonymous callbacks are transparent. A
 computed name stops the symbol, and module-level statements have none; those facts are counted
-under `missing-relation-symbols:`. Schema facts use the model name (`Job`, `Job.title`), and
+under `missing-relation-usrs:` (the isthmus chain-only prefix; informational). Schema facts use the model name (`Job`, `Job.title`), and
 TypedSQL facts use `<path>#<file name>`.
 
 Source facts also carry `symbol.usr`, equal to `qualifiedName`: it is the tsograph graph id of
 the enclosing declaration ([Symbol ids](#symbol-ids)), so `tsograph reach` output can be joined
-with relation-use facts by exact string match. Schema and TypedSQL facts are not graph nodes and
-carry no usr.
+with relation-use facts by exact string match.
+
+Schema declaration facts and TypedSQL facts also carry a stable usr, in namespaces that are **not**
+graph nodes: `<schema path>#model:<Model>` / `#model:<Model.field>` (for example
+`prisma/schema.prisma#model:Job`, `prisma/schema.prisma#model:Job.title`, and
+`#model:Book.tags` for an implicit many-to-many join table), and `<sql path>#typedsql:<name>`.
+They are declaration-side facts, so no traversal ever reaches them; isthmus `trace` reads an id
+that is absent from every traversal as unreached, not as a missing symbol.
 
 ### Prisma schema location (Prisma 7.8.0 CLI rules)
 
@@ -505,7 +511,7 @@ Cloudflare D1 (`D1Database`) queries are not interpreted. Files using them are c
 `prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
-`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-symbols:`,
+`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
 `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
@@ -700,6 +706,8 @@ facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exac
   `<path>#<export name>` with an `alias` edge to what it resolves to.
 - Declarations that produce the same id (overloads, a getter/setter pair, same-named functions in
   sibling blocks) are one node.
+- Declaration-side relation-use facts use `#model:` and `#typedsql:` ids (see
+  [Facts](#facts)); these are never graph nodes.
 
 ## Development
 

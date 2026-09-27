@@ -12,7 +12,7 @@
  *   `routes`의 Pages Router 핸들러 id(`#default`)와 같아야 하기 때문이다.
  * - 이름 없는 콜백(화살표·함수 식)은 투명하다 — 감싸는 선언에 귀속한다.
  * - 계산된 이름이 끼면 이름을 만들지 않는다(추측하지 않는다). 이름이 하나도 없으면(모듈 최상위 문장)
- *   심볼을 생략하고 호출자가 `missing-relation-symbols`로 센다.
+ *   심볼을 생략하고 호출자가 `missing-relation-usrs:`로 센다(isthmus 체인 전용 접두사).
  *
  * 이 이름은 그대로 tsograph 그래프 id(`symbol.usr`)다(`src/graph/symbol-ids.ts`).
  */
