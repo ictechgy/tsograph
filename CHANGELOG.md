@@ -6,6 +6,12 @@
 
 ### Changed
 
+- reach·impact: 그래프 노드가 아닌 root id가 하나라도 있으면 표준 출력 없이 64로 끝나던 동작을 계약(isthmus
+  `language-traversal` v1)과 형제 생산자(cartograph·kartograph)에 맞춘다. 나머지 root로 문서를 내고, 그런 id는 요청한
+  자리에 `symbol` 없는 `roots` 항목으로 남기며 `truncated: true`·`truncationReasons: ["root-not-found"]`·`root-not-found:`
+  limitation을 단 뒤 64로 끝난다. isthmus capture가 relation-use의 선언 쪽 usr(`#model:`·`#typedsql:`)까지 root로 넘기면
+  순회 전체가 빈 출력으로 죽던 문제를 고친다. limitation과 표준 오류는 선언 이름공간 id와 모르는 id를 구별해 알린다.
+
 - schema: 스키마 선언 사실(`<스키마 경로>#model:<Model[.field]>`)과 TypedSQL 사실(`<sql 경로>#typedsql:<이름>`)에
   그래프 노드가 아닌 이름공간의 `symbol.usr`를 싣는다. isthmus trace가 이들을 `relation-use-without-symbol`이
   아니라 닿지 않은 선언으로 읽게 하기 위해서다.

@@ -124,13 +124,67 @@ test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 
   assert.ok(!byUsr.has('src/app/api/jobs/route.ts#POST'));
 });
 
-test('모르는 id는 64이고 목록을 알린다', async () => {
+test('모르는 id는 문서에 root-not-found로 남기고 64로 끝나며 표준 오류에 목록을 알린다', async () => {
   const ids = Array.from({ length: 22 }, (_, index) => `x.ts#missing${index}`);
   const result = await runReachCommand(['--project', '.', ...ids, 'a.ts#a'], environment({ buildGraph: async () => tinyGraph }));
   assert.equal(result.exitCode, 64);
-  assert.match(result.standardError, /22 unknown symbol id\(s\)/u);
-  assert.match(result.standardError, /x\.ts#missing19\n {2}… and 2 more/u);
+  assert.match(result.standardError, /22 root id\(s\) are not graph nodes/u);
+  assert.match(result.standardError, /x\.ts#missing19 \(unknown id\)\n {2}… and 2 more/u);
   assert.doesNotMatch(result.standardError, /a\.ts#a/u);
+  const document = JSON.parse(result.standardOutput);
+  assert.equal(document.roots.length, 23);
+  assert.deepEqual(document.roots[22], { id: 'a.ts#a', symbol: { usr: 'a.ts#a', qualifiedName: 'a.ts#a' } });
+  assert.deepEqual(document.reached.map((entry: { symbol: { usr: string }; roots: number[] }) => [entry.symbol.usr, entry.roots]), [['a.ts#b', [22]]]);
+});
+
+/** 스키마 선언 id다. schema가 선언 쪽 relation-use에 싣는, 그래프 노드가 아닌 usr다. */
+const modelId = 'prisma/schema.prisma#model:Job';
+
+test('선언 id·모르는 id가 섞여도 아는 root로 문서를 내고 인덱스는 요청 순서를 따른다', async () => {
+  const known = ['src/app/api/jobs/route.ts#POST', 'src/lib/jobs.ts#createJob'];
+  const requested = [modelId, known[0]!, 'src/nope.ts#missing', 'prisma/sql/x.sql#typedsql:x', known[1]!];
+  const result = await runReachCommand(['--project', fixture, ...requested], environment());
+  assert.equal(result.exitCode, 64);
+  assert.match(result.standardError, /^tsograph: 3 root id\(s\) are not graph nodes;/u);
+  assert.match(result.standardError, /prisma\/schema\.prisma#model:Job \(schema declaration id; never a graph node\)\n {2}src\/nope\.ts#missing \(unknown id\)\n {2}prisma\/sql\/x\.sql#typedsql:x \(schema declaration id; never a graph node\)\n$/u);
+  const document = JSON.parse(result.standardOutput);
+  assert.deepEqual(document.roots.map((root: { id: string; symbol?: unknown }) => [root.id, root.symbol !== undefined]), requested.map((id) => [id, known.includes(id)]));
+  assert.equal(document.truncated, true);
+  assert.deepEqual(document.truncationReasons, ['root-not-found']);
+  assert.deepEqual(document.limitations.filter((line: string) => line.startsWith('root-not-found:')), [
+    "root-not-found: 3 requested root(s) are not graph nodes and are listed without symbol: 2 Prisma schema/TypedSQL declaration id(s) (#model:, #typedsql:), which are declaration-side relation-use ids and never graph nodes, so no traversal reaches them; leave them out of traversal roots; 1 unknown id(s); pass graph node ids from 'tsograph graph --project <root>'",
+  ]);
+  const baseline = JSON.parse((await runReachCommand(['--project', fixture, ...known], environment())).standardOutput);
+  const toRequested = [1, 4];
+  assert.deepEqual(document.reached, baseline.reached.map((entry: { roots: number[] }) => ({ ...entry, roots: entry.roots.map((index) => toRequested[index]) })));
+  assert.deepEqual(document.limitations.filter((line: string) => !line.startsWith('root-not-found:')), baseline.limitations);
+});
+
+test('모르는 id만 받으면 빈 도달 목록의 문서를 내고 64로 끝난다', async () => {
+  const result = await runImpactCommand(['--project', fixture, '--max-depth', '1', modelId], environment());
+  assert.equal(result.exitCode, 64);
+  const document = JSON.parse(result.standardOutput);
+  assert.deepEqual(document.roots, [{ id: modelId }]);
+  assert.deepEqual(document.reached, []);
+  assert.equal(document.truncated, true);
+  assert.deepEqual(document.truncationReasons, ['root-not-found']);
+  assert.ok(document.limitations.some((line: string) => line.startsWith('root-not-found: 1 requested root(s) are not graph nodes and are listed without symbol: 1 Prisma schema/TypedSQL declaration id(s)')));
+  assert.ok(!document.limitations.some((line: string) => line.includes('unknown id(s)')));
+});
+
+test('깊이 잘림과 root-not-found는 정렬된 이유로 함께 실린다', async () => {
+  const result = await runImpactCommand(['--project', fixture, '--max-depth', '1', 'src/lib/jobs.ts#createJob', 'src/nope.ts#missing'], environment());
+  assert.equal(result.exitCode, 64);
+  const document = JSON.parse(result.standardOutput);
+  assert.deepEqual(document.truncationReasons, ['depth', 'root-not-found']);
+  assert.ok(document.limitations.includes("root-not-found: 1 requested root(s) are not graph nodes and are listed without symbol: 1 unknown id(s); pass graph node ids from 'tsograph graph --project <root>'"));
+});
+
+test('root-not-found 문서도 출력 상한을 넘으면 문서 없이 2다', async () => {
+  const hugeRoots = Array.from({ length: 10_000 }, (_, index) => `x.ts#${'m'.repeat(1_700)}${index}`);
+  const result = await runReachCommand(['--project', '.', ...hugeRoots], environment({ buildGraph: async () => tinyGraph }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.standardOutput, '');
 });
 
 test('주입 그래프: root 밖 진입점은 세지 않고 그래프 limitation은 싣는다', async () => {
@@ -193,7 +247,8 @@ test('unresolvedCalls 상한(1,000,000)을 넘으면 상한으로 싣고 limitat
 
 test('근거 등급을 근사한 문서는 evidence-approximated limitation을 싣는다', () => {
   const document = createTraversalDocument({
-    graph: tinyGraph, graphRevision: 'sha256:0', direction: 'dependencies', dispatch: 'candidates', rootIds: ['a.ts#a'],
+    graph: tinyGraph, graphRevision: 'sha256:0', direction: 'dependencies', dispatch: 'candidates',
+    roots: { requestedIds: ['a.ts#a'], resolvedIds: ['a.ts#a'], unresolved: new Map() },
     header: { toolVersion: '0', generatedAt: fixedNow, project: '/work/x', revision: undefined },
     result: { reached: [], truncationReasons: [], rootsTruncated: false, evidenceApproximated: true },
   });

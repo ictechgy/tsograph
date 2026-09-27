@@ -7,7 +7,8 @@
  * - `impact <id>...`: root에 닿는 심볼(역방향 `dependents`)을 같은 형식으로 낸다.
  * - reach·impact의 `--dispatch direct|bound|candidates`(기본 bound)는 따라갈 간선 근거 범위다.
  *
- * 모르는 id는 사용법 오류(64)이고 목록을 알린다. 프로젝트를 읽지 못하거나 출력이 상한을 넘으면 2다.
+ * 그래프 노드가 아닌 root id가 있으면 cartograph·kartograph처럼 아는 root로 문서를 내고 그 id를 계약대로
+ * `root-not-found`로 기록한 뒤 64로 끝난다(표준 오류에 목록). 프로젝트를 읽지 못하거나 출력이 상한을 넘으면 2다.
  * 분석 대상 코드는 실행하지 않는다(TypeScript 컴파일러 API로 읽기만 한다).
  */
 
@@ -17,9 +18,10 @@ import { buildCallGraph } from '../graph/build-graph.ts';
 import { readGitRevision } from '../graph/git-revision.ts';
 import { computeGraphRevision, createGraphSnapshot, type DocumentHeader } from '../graph/graph-document.ts';
 import { DISPATCH_MODES, type CallGraph, type DispatchMode } from '../graph/graph-model.ts';
+import { EMPTY_TRAVERSAL_RESULT, remapRootIndices, resolveRoots, type RootResolution, type UnresolvedRootKind } from '../graph/root-resolution.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
-import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection } from '../graph/traversal.ts';
-import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
+import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection, type TraversalResult } from '../graph/traversal.ts';
+import { type CommandResult, inputFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
@@ -66,9 +68,12 @@ const traversalOptions = `Options:
   --format json               Output format (json is the only format)
 
 Ids are graph node ids (<path>#<declaration path>), the same strings as symbol.usr in
-tsograph routes and schema output. Unknown ids are a usage error (64) and are listed.
+tsograph routes and schema output. Ids that are not graph nodes (typos, or the #model:/#typedsql:
+declaration ids of tsograph schema) are kept in the document as roots without symbol, reported as
+root-not-found (truncated), and listed on stderr; the document is still written and the exit code is 64.
 
-Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error.
+Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error or root-not-found
+(the document is written only for root-not-found).
 `;
 
 /** reach 명령 사용법이다. */
@@ -169,20 +174,33 @@ async function runTraversalCommand(
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${usage}`);
   const loaded = await loadGraph(parsed.project, withClock(environment, parsed.generatedAt));
   if ('exitCode' in loaded) return loaded;
-  const known = new Set(loaded.graph.nodes.map((node) => node.id));
-  const unknown = parsed.rootIds.filter((id) => !known.has(id));
-  if (unknown.length > 0) return usageFailure(unknownIdsMessage(unknown));
-  const { rootIds, maxDepth, maxReached, dispatch } = parsed;
-  const result = traverse(loaded.graph, { rootIds, direction, maxDepth, maxReached, dispatch });
-  return render(createTraversalDocument({
+  const roots = resolveRoots(parsed.rootIds, new Set(loaded.graph.nodes.map((node) => node.id)));
+  const rendered = render(createTraversalDocument({
     graph: loaded.graph,
     graphRevision: computeGraphRevision(loaded.graph),
     header: loaded.header,
     direction,
-    dispatch,
-    rootIds,
-    result,
+    dispatch: parsed.dispatch,
+    roots,
+    result: traverseResolvedRoots(loaded.graph, parsed, direction, roots),
   }));
+  if (rendered.exitCode !== 0 || roots.unresolved.size === 0) return rendered;
+  return usageFailureWithOutput(rendered.standardOutput, unresolvedRootsMessage(roots.unresolved));
+}
+
+/**
+ * 그래프 노드인 root만으로 순회하고 root 인덱스를 요청 순서로 옮긴다. 해석한 root가 없으면 빈 결과다.
+ *
+ * @param graph 호출 그래프
+ * @param parsed 검증한 순회 인자
+ * @param direction 순회 방향
+ * @param roots root 대조 결과
+ * @returns 요청 순서의 인덱스를 쓰는 순회 결과
+ */
+function traverseResolvedRoots(graph: CallGraph, parsed: TraversalArguments, direction: TraversalDirection, roots: RootResolution): TraversalResult {
+  if (roots.resolvedIds.length === 0) return EMPTY_TRAVERSAL_RESULT;
+  const { maxDepth, maxReached, dispatch } = parsed;
+  return remapRootIndices(traverse(graph, { rootIds: roots.resolvedIds, direction, maxDepth, maxReached, dispatch }), roots);
 }
 
 /**
@@ -266,16 +284,25 @@ function withClock(environment: GraphEnvironment, generatedAt: Date | undefined)
   return generatedAt === undefined ? environment : { ...environment, now: () => generatedAt };
 }
 
+/** 해석하지 못한 root 종류별 표준 오류 꼬리표다. */
+const UNRESOLVED_ROOT_LABELS: Record<UnresolvedRootKind, string> = {
+  declaration: 'schema declaration id; never a graph node',
+  unknown: 'unknown id',
+};
+
 /**
- * 모르는 id 오류 문구를 만든다. 제어 문자는 앞에서 걸렀고, 목록은 앞 20개만 싣는다.
+ * 해석하지 못한 root 안내 문구를 만든다. 제어 문자는 앞에서 걸렀고, 목록은 앞 20개만 싣는다.
+ * 문서는 이미 표준 출력에 나가므로 무엇이 빠졌고 어떻게 고치는지만 알린다.
  *
- * @param unknown 모르는 id
- * @returns 오류 문구
+ * @param unresolved 해석하지 못한 root id → 종류(요청 순서)
+ * @returns 표준 오류 문구
  */
-function unknownIdsMessage(unknown: readonly string[]): string {
-  const listed = unknown.slice(0, MAX_LISTED_UNKNOWN_IDS).map((id) => `  ${id}\n`).join('');
-  const more = unknown.length > MAX_LISTED_UNKNOWN_IDS ? `  … and ${unknown.length - MAX_LISTED_UNKNOWN_IDS} more\n` : '';
-  return `tsograph: ${unknown.length} unknown symbol id(s); ids are graph node ids such as src/lib/jobs.ts#listJobs (see 'tsograph graph --project <root>'):\n${listed}${more}`;
+function unresolvedRootsMessage(unresolved: ReadonlyMap<string, UnresolvedRootKind>): string {
+  const entries = [...unresolved];
+  const listed = entries.slice(0, MAX_LISTED_UNKNOWN_IDS).map(([id, kind]) => `  ${id} (${UNRESOLVED_ROOT_LABELS[kind]})\n`).join('');
+  const more = entries.length > MAX_LISTED_UNKNOWN_IDS ? `  … and ${entries.length - MAX_LISTED_UNKNOWN_IDS} more\n` : '';
+  return `tsograph: ${entries.length} root id(s) are not graph nodes; the document lists them without symbol as root-not-found and traverses the other roots. `
+    + `Pass graph node ids such as src/lib/jobs.ts#listJobs (see 'tsograph graph --project <root>'); #model:/#typedsql: ids are declaration-side facts that no traversal reaches:\n${listed}${more}`;
 }
 
 /** 읽은 그래프와 문서 머리다. */

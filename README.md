@@ -558,11 +558,21 @@ computed.
   `impact` the symbols that reach them (`direction: "dependents"`), as isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md).
 - Ids are [symbol ids](#symbol-ids): the same strings as `symbol.usr` in `tsograph routes` and
-  `tsograph schema` output. An unknown id is a usage error (exit `64`) that lists the ids; tsograph
-  does not emit the contract's in-document `root-not-found` roots, because a typo in a root id should
-  stop the pipeline rather than produce a silently partial traversal. Duplicate
-  ids are kept once, in first-seen order (that order defines `reached[].roots` indices).
-- Exit codes: `0` success, `2` unreadable project or output over 16 Mi characters, `64` usage error.
+  `tsograph schema` output. Duplicate ids are kept once, in first-seen order (that order defines
+  `reached[].roots` indices).
+- **Roots that are not graph nodes** follow the contract's `root-not-found` rule, like cartograph and
+  kartograph: the document is still written for the other roots; each such id stays in `roots` in
+  its requested position, with its text as `id` and **no `symbol`** (isthmus `trace` links only roots
+  with a symbol), and the document gets `truncated: true`, `root-not-found` in `truncationReasons`, and
+  one `root-not-found:` limitation. Then the command **exits `64` after printing**, listing the ids on
+  stderr, so a typo still stops a pipeline that checks the exit code; a caller that accepts partial
+  traversals (for example isthmus capture with `acceptExitCodes: [0, 64]`) reads the document, and a
+  plain usage error is told apart by its empty stdout. When no root is a graph node the document has
+  an empty `reached`. The limitation and stderr tell the two kinds apart: `#model:`/`#typedsql:`
+  [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
+  traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
+- Exit codes: `0` success, `2` unreadable project or output over 16 Mi characters (no document), `64`
+  usage error (empty stdout) or root-not-found (document written).
 
 ### Nodes and edges
 

@@ -446,10 +446,17 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   (`direction: "dependents"`)을 isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md)로 낸다.
 - id는 [심볼 id](#심볼-id)다. `tsograph routes`·`tsograph schema` 출력의 `symbol.usr`와 같은 문자열이다.
-  모르는 id는 사용법 오류(종료 코드 `64`)이고 목록을 알린다. 계약의 문서 안 `root-not-found` root는 내지 않는다 —
-  root id 오타는 조용히 부분 순회를 내기보다 파이프라인을 멈추는 편이 안전하기 때문이다. 중복 id는 처음 나온 순서로 한 번만 둔다(그 순서가
-  `reached[].roots` 인덱스의 뜻이다).
-- 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음, `64` 사용법 오류.
+  중복 id는 처음 나온 순서로 한 번만 둔다(그 순서가 `reached[].roots` 인덱스의 뜻이다).
+- **그래프 노드가 아닌 root**는 cartograph·kartograph처럼 계약의 `root-not-found` 규칙을 따른다. 나머지 root로 문서를
+  그대로 내고, 그런 id는 요청한 자리의 `roots` 항목에 원문 `id`만 두고 **`symbol`을 싣지 않는다**(isthmus `trace`는
+  symbol이 있는 root만 잇는다). 문서에는 `truncated: true`, `truncationReasons`의 `root-not-found`, `root-not-found:`
+  limitation 하나를 단다. 그리고 **문서를 출력한 뒤 `64`로 끝나며** 표준 오류에 id 목록을 알린다 — 종료 코드를 보는
+  파이프라인은 오타에 여전히 멈추고, 부분 순회를 받는 호출자(예: `acceptExitCodes: [0, 64]`를 준 isthmus capture)는 문서를
+  읽는다. 순수 사용법 오류는 표준 출력이 비어 있어 구별된다. 그래프 노드인 root가 하나도 없으면 `reached`가 빈 문서다.
+  limitation과 표준 오류는 두 종류를 구별한다: `#model:`·`#typedsql:` [선언 id](#사실)는 어떤 순회도 닿지 않는 것으로
+  이미 아는 비노드 id이고(순회 root에서 빼면 된다), 그 밖은 모르는 id다. 형제 생산자처럼 strict 옵션은 따로 없다.
+- 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음(문서 없음), `64` 사용법 오류(표준 출력 비어
+  있음) 또는 root-not-found(문서 출력).
 
 ### 노드와 간선
 
