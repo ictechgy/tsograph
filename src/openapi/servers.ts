@@ -8,7 +8,11 @@
  * 서버 변수 규칙(fail-closed, README 결정 목록):
  * - `enum`이 있으면 값 집합이 닫혀 있으므로 값마다 펼친다(조합 상한 있음).
  * - `enum` 없이 `default`만 있으면 클라이언트가 임의 값으로 바꿀 수 있는 열린 값이라
- *   경로 부분에 있을 때 확정하지 않는다. scheme·host 부분에 있으면 버려지므로 무관하다.
+ *   경로 부분에 있을 때 확정하지 않는다. 리터럴 `scheme://` 또는 `//` 뒤의 authority
+ *   안에 있으면 버려지므로 무관하다. authority가 리터럴로 확정되지 않은 URL(`{base}/v1`)의
+ *   열린 변수는 경로를 바꿀 수 있어 확정하지 않는다.
+ * - URL 해석기가 경로를 바꾸는 표기(`.`·`..` 세그먼트, `%2E`, 백슬래시, 탭·줄바꿈)는 WHATWG와
+ *   RFC 3986 해석기의 결과가 갈릴 수 있어 확정하지 않는다.
  */
 
 import { canonicalizeLiteralTemplate } from './path-template.ts';
@@ -83,8 +87,9 @@ export function resolveBasePath(basePath: string | undefined, isPresent: boolean
   const isValid = basePath !== undefined
     && basePath.startsWith('/')
     && basePath.isWellFormed()
-    && !/[{}?#]/u.test(basePath);
-  return isValid ? { roots: [canonicalizeLiteralPath(basePath)], baseTails: [] } : UNRESOLVED_SERVER_PREFIXES;
+    && !/[{}?#\\\t\n\r]/u.test(basePath);
+  const prefix = isValid ? canonicalizeLiteralPath(basePath) : undefined;
+  return prefix === undefined || hasDotSegment(prefix) ? UNRESOLVED_SERVER_PREFIXES : { roots: [prefix], baseTails: [] };
 }
 
 /**
@@ -211,6 +216,7 @@ function substituteVariables(
  * @returns 분류 결과
  */
 function classifyConcreteUrl(rawText: string, rawSpans: readonly FreeSpan[]): ConcreteResolution {
+  if (hasAmbiguousUrlCharacter(rawText, rawSpans)) return { kind: 'base', tail: '' };
   const cut = rawText.search(/[?#]/u);
   const text = cut === -1 ? rawText : rawText.slice(0, cut);
   const spans = rawSpans
@@ -219,12 +225,44 @@ function classifyConcreteUrl(rawText: string, rawSpans: readonly FreeSpan[]): Co
   const authorityStart = findAuthorityStart(text);
   if (authorityStart === 'opaque') return { kind: 'base', tail: '' };
   if (authorityStart === undefined && !text.startsWith('/')) {
-    return { kind: 'base', tail: literalTail(text, 0, spans, true) };
+    // 문서 기준 상대 URL. 열린 변수가 있으면 `{scheme}://` 같은 구조일 수 있어 꼬리를 믿지 않는다.
+    return { kind: 'base', tail: spans.length > 0 ? '' : literalTail(text, 0, [], true) };
   }
   const pathStart = authorityStart === undefined ? 0 : findPathStart(text, authorityStart);
-  const pathSpans = spans.filter((span) => !isHarmlessAuthoritySpan(text, span, pathStart));
-  if (pathSpans.length > 0) return { kind: 'base', tail: literalTail(text, pathStart, pathSpans, false) };
-  return { kind: 'root', prefix: canonicalizeLiteralPath(text.slice(pathStart)) };
+  const pathSpans = authorityStart === undefined
+    ? spans
+    : spans.filter((span) => !isHarmlessAuthoritySpan(text, span, pathStart));
+  const resolution: ConcreteResolution = pathSpans.length > 0
+    ? { kind: 'base', tail: literalTail(text, pathStart, pathSpans, false) }
+    : { kind: 'root', prefix: canonicalizeLiteralPath(text.slice(pathStart)) };
+  return hasDotSegment(resolution.kind === 'root' ? resolution.prefix : resolution.tail)
+    ? { kind: 'base', tail: '' }
+    : resolution;
+}
+
+/**
+ * URL 해석기마다 결과가 갈리거나 열린 변수가 구조를 바꿀 수 있는 표기가 있는지 확인한다.
+ *
+ * 백슬래시는 WHATWG에서 `/`로, 탭·줄바꿈은 제거로 해석된다. 열린 변수 값의 `?`·`#`는
+ * 다른 값으로 바뀌면 query 절단 위치가 달라진다.
+ *
+ * @param text 치환한 URL
+ * @param spans 열린 변수 구간
+ * @returns 확정하지 말아야 하면 true
+ */
+function hasAmbiguousUrlCharacter(text: string, spans: readonly FreeSpan[]): boolean {
+  if (/[\\\t\n\r]/u.test(text)) return true;
+  return spans.some((span) => /[?#]/u.test(text.slice(span.start, span.end)));
+}
+
+/**
+ * 정규 경로에 `.`·`..` 세그먼트가 있는지 확인한다(`%2E`는 정규화에서 `.`로 디코드된다).
+ *
+ * @param path 정규 경로
+ * @returns dot 세그먼트가 있으면 true
+ */
+export function hasDotSegment(path: string): boolean {
+  return path.split('/').some((segment) => segment === '.' || segment === '..');
 }
 
 /**

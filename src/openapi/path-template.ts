@@ -29,10 +29,13 @@ export type PathTemplateResult =
   | {
     readonly kind: 'dynamic';
     readonly channel: string;
-    readonly reason: 'multi-parameter-segment' | 'unbalanced-braces' | 'malformed-text';
+    readonly reason: DynamicReason;
   }
   /** `/`로 시작하지 않아 경로 템플릿이 아니다. */
   | { readonly kind: 'rejected' };
+
+/** dynamic으로 내린 이유다. */
+export type DynamicReason = 'multi-parameter-segment' | 'unbalanced-braces' | 'malformed-text' | 'dot-segment';
 
 /** 세그먼트를 리터럴 조각과 파라미터 수로 나눈 결과다. */
 interface SegmentParts {
@@ -57,6 +60,8 @@ export function canonicalizePathTemplate(rawPath: string): PathTemplateResult {
     if (parts.literals.length > 2) return dynamic(path, 'multi-parameter-segment');
     segments.push(parts.literals.map(canonicalizeLiteral).join('{}'));
   }
+  // `.`·`..`(`%2E` 포함) 세그먼트는 클라이언트 URL 정규화가 지워 실제 경로가 달라진다.
+  if (segments.some((segment) => segment === '.' || segment === '..')) return dynamic(path, 'dot-segment');
   return { kind: 'static', template: segments.join('/') };
 }
 
@@ -122,10 +127,7 @@ function splitSegment(segment: string): SegmentParts | undefined {
  * @param reason dynamic으로 내린 이유
  * @returns dynamic 결과
  */
-function dynamic(
-  path: string,
-  reason: 'multi-parameter-segment' | 'unbalanced-braces' | 'malformed-text',
-): PathTemplateResult {
+function dynamic(path: string, reason: DynamicReason): PathTemplateResult {
   return { kind: 'dynamic', channel: sanitizeDynamicChannel(path), reason };
 }
 

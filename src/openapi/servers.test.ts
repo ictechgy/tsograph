@@ -79,9 +79,30 @@ test('값에 /가 있는 열린 변수가 authority 자리에 있으면 경로 �
   assert.deepEqual(resolveServerUrl('https://{host}/v1', hostWithPath), { roots: [], baseTails: ['/v1'] });
 });
 
-test('열린 변수가 문서 기준 상대 URL에 있으면 그 뒤만 남긴다', () => {
-  const declared = variables({ stage: { values: undefined, defaultValue: 'prod' } });
-  assert.deepEqual(resolveServerUrl('{stage}/v1', declared), { roots: [], baseTails: ['/v1'] });
+test('열린 변수가 문서 기준 상대 URL에 있으면 구조를 믿지 않고 꼬리를 비운다', () => {
+  const declared = variables({ stage: { values: undefined, defaultValue: 'prod' }, scheme: { values: undefined, defaultValue: undefined } });
+  assert.deepEqual(resolveServerUrl('{stage}/v1', declared), UNRESOLVED_SERVER_PREFIXES);
+  assert.deepEqual(resolveServerUrl('{scheme}://h.test/v1', declared), UNRESOLVED_SERVER_PREFIXES);
+});
+
+test('authority가 리터럴이 아닌 URL 앞의 열린 변수는 경로를 바꿀 수 있어 base다', () => {
+  const declared = variables({ base: { values: undefined, defaultValue: '' } });
+  assert.deepEqual(resolveServerUrl('{base}/v1', declared), { roots: [], baseTails: ['/v1'] });
+  assert.deepEqual(resolveServerUrl('{undeclared}/v1', new Map()), { roots: [], baseTails: ['/v1'] });
+});
+
+test('URL 해석기마다 갈리는 표기와 dot 세그먼트는 확정하지 않는다', () => {
+  for (const url of ['https://h/api/../v2', 'https://h/api/%2e%2e/v2', 'https://h/./v1', 'https://h\\v1/x', 'https://h/v\t1', '/a/..']) {
+    assert.deepEqual(resolvePlain(url), UNRESOLVED_SERVER_PREFIXES, url);
+  }
+  const declared = variables({ tenant: { values: undefined, defaultValue: 'x' } });
+  assert.deepEqual(resolveServerUrl('https://h/{tenant}/../v1', declared), UNRESOLVED_SERVER_PREFIXES);
+});
+
+test('열린 변수 값에 ?·#가 있으면 절단 위치를 확정하지 않는다', () => {
+  const declared = variables({ q: { values: undefined, defaultValue: '?x' }, port: { values: undefined, defaultValue: '#' } });
+  assert.deepEqual(resolveServerUrl('https://h/v1{q}', declared), UNRESOLVED_SERVER_PREFIXES);
+  assert.deepEqual(resolveServerUrl('https://h{port}/v1', declared), UNRESOLVED_SERVER_PREFIXES);
 });
 
 test('query 뒤의 변수는 경로에 영향이 없다', () => {
@@ -99,7 +120,7 @@ test('basePath는 /로 시작하는 리터럴만 root로 받는다', () => {
   assert.deepEqual(resolveBasePath(undefined, false), DEFAULT_SERVER_PREFIXES);
   assert.deepEqual(resolveBasePath('/v2/', true), { roots: ['/v2'], baseTails: [] });
   assert.deepEqual(resolveBasePath('/', true), { roots: [''], baseTails: [] });
-  for (const invalid of ['v2', '/v{n}', '/v2?x', '/\uD800']) {
+  for (const invalid of ['v2', '/v{n}', '/v2?x', '/\uD800', '/a/../b', '/a\\b', '/%2E']) {
     assert.deepEqual(resolveBasePath(invalid, true), UNRESOLVED_SERVER_PREFIXES, invalid);
   }
   assert.deepEqual(resolveBasePath(undefined, true), UNRESOLVED_SERVER_PREFIXES);

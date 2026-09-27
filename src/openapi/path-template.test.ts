@@ -58,6 +58,14 @@ test('짝 없는 서러게이트가 있으면 안전하게 인코딩한 dynamic�
   assert.deepEqual(result, { kind: 'dynamic', channel: '/a/%EF%BF%BD', reason: 'malformed-text' });
 });
 
+test('. 또는 ..(%2E 포함) 세그먼트는 dynamic이다', () => {
+  for (const raw of ['/a/../b', '/a/./b', '/a/%2E%2e/b', '/..']) {
+    const result = canonicalizePathTemplate(raw);
+    assert.equal(result.kind === 'dynamic' ? result.reason : result.kind, 'dot-segment', raw);
+  }
+  assert.equal(staticTemplate('/a/.../b.c'), '/a/.../b.c');
+});
+
 test('/로 시작하지 않으면 거부한다', () => {
   assert.deepEqual(canonicalizePathTemplate('users'), { kind: 'rejected' });
   assert.deepEqual(canonicalizePathTemplate('?x=/y'), { kind: 'rejected' });
