@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { type CommandFileSystem, createNodeFileSystem } from './file-system.ts';
-import { MAX_SERVICE_LENGTH, MAX_SPEC_BYTES, runOpenApiCommand } from './openapi-command.ts';
+import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH, MAX_SPEC_BYTES, runOpenApiCommand } from './openapi-command.ts';
 
 /** 저장소 루트다. fixture 위치를 이 루트 기준으로 싣는다. */
 const repositoryRoot = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
@@ -142,6 +142,9 @@ test('읽을 수 없거나 잘못된 스펙은 2이고 원문을 싣지 않는�
       ['v32.yaml', 'openapi: 3.2.0\npaths: {}\n', /version is not supported/],
       ['nopaths.yaml', 'openapi: 3.0.0\n', /no "paths" object/],
       ['badpaths.yaml', 'openapi: 3.0.0\npaths: 1\n', /"paths" field is not an object/],
+      ['merge.yaml', 'openapi: 3.0.0\nx: &d {servers: [{url: /api}]}\n<<: *d\npaths: {}\n', /merge key \(<<\) \(line 3\)/],
+      ['aliaskey.yaml', 'openapi: 3.0.0\nk: &k servers\n*k : []\npaths: {}\n', /alias or collection as a mapping key/],
+      ['flat.json', `{"x": [${'0,'.repeat(1_600_000)}0]}`, /safe parser budget/],
     ];
     for (const [name, content, message] of cases) {
       const path = join(directory, name);
@@ -218,4 +221,25 @@ test('한 줄로 압축한 큰 JSON 스펙도 선형에 가까운 시간에 변�
   const last = document.facts.at(-1)!;
   assert.equal(last.location.line, 1);
   assert.equal(last.location.column, text.indexOf('"get"', text.indexOf('"P9999"')) + 1);
+});
+
+test('사실 상한을 넘는 조합 폭발은 사실을 만들기 전에 2로 끝난다', { timeout: 20_000 }, async () => {
+  const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  const variables = names.map((name) => `${name}: {default: x, enum: [x, y]}`).join(', ');
+  const lines = ['openapi: 3.0.0', `servers: [{url: "/${names.map((name) => `{${name}}`).join('')}", variables: {${variables}}}]`, 'paths:'];
+  for (let index = 0; index < 30_000; index++) lines.push(`  /p${index}: {get: {}, put: {}, post: {}, delete: {}}`);
+  const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(lines.join('\n')) });
+  const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.standardError, /more than 100000 route-contract facts/);
+});
+
+test('isthmus 입력 상한을 넘는 출력은 쓰지 않고 2로 끝난다', { timeout: 20_000 }, async () => {
+  const variants = Array.from({ length: 256 }, (_, index) => `v${index}`).join(', ');
+  const lines = ['openapi: 3.0.0', `servers: [{url: "/{v}", variables: {v: {default: v0, enum: [${variants}]}}}]`, 'paths:'];
+  for (let index = 0; index < 40; index++) lines.push(`  /p${index}: {get: {}, put: {}, post: {}, delete: {}, options: {}, head: {}, patch: {}, trace: {}}`);
+  const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(lines.join('\n')) });
+  const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.standardError, new RegExp(`exceed ${MAX_OUTPUT_LENGTH} characters`));
 });

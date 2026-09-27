@@ -74,9 +74,26 @@ const knownPathItemFields: Readonly<Record<SpecVersion, ReadonlySet<string>>> = 
   '3.1': new Set(['summary', 'description', 'servers', 'parameters']),
 };
 
+/**
+ * path item 층(매핑 노드) 하나를 한 번 훑어 만든 요약이다.
+ *
+ * 같은 노드를 여러 `$ref`·alias가 가리켜도 항목을 다시 훑지 않도록 노드별로 캐시한다.
+ * 그러지 않으면 큰 매핑을 가리키는 참조 N개가 N × 항목 수의 제곱 시간이 된다.
+ */
+interface LayerSummary {
+  /** operation 키 항목(버전별 최대 8개)이다. */
+  readonly methodFields: readonly MapEntry[];
+  /** operation도 알려진 필드도 확장도 아닌 항목 수다. */
+  readonly unknownFieldCount: number;
+  /** servers 값(있으면)이다. */
+  readonly servers: ParsedNode | undefined;
+  /** `$ref` 값(있으면)이다. */
+  readonly reference: ParsedNode | null | undefined;
+}
+
 /** 한 path item의 실제 필드 층이다. `$ref`를 따라간 순서(형제 필드가 먼저)다. */
 type PathItemLayers =
-  | { readonly kind: 'layers'; readonly layers: readonly (readonly MapEntry[])[] }
+  | { readonly kind: 'layers'; readonly layers: readonly LayerSummary[] }
   | { readonly kind: 'gap'; readonly gap: keyof ExtractionGaps };
 
 /** 서버 목록 선택 결과다. */
@@ -121,6 +138,10 @@ interface ExtractionContext {
   readonly rootPrefixes: ServerPrefixes;
   /** 같은 servers 노드를 여러 operation이 공유할 때 다시 해석하지 않기 위한 캐시다. */
   readonly serverCache: Map<ParsedNode, ServerPrefixes>;
+  /** path item 층 노드별 요약 캐시다. */
+  readonly layerCache: Map<ParsedNode, LayerSummary>;
+  /** 모르는 필드를 이미 센 층이다. 여러 번 참조된 층의 필드를 한 번만 센다. */
+  readonly countedLayers: Set<LayerSummary>;
 }
 
 /**
@@ -150,7 +171,15 @@ function emptyGaps(): ExtractionGaps {
  */
 function createContext(tree: SpecTree, version: SpecVersion, gaps: ExtractionGaps): ExtractionContext {
   const serverCache = new Map<ParsedNode, ServerPrefixes>();
-  const partial = { tree, version, gaps, serverCache, rootPrefixes: DEFAULT_SERVER_PREFIXES };
+  const partial = {
+    tree,
+    version,
+    gaps,
+    serverCache,
+    layerCache: new Map<ParsedNode, LayerSummary>(),
+    countedLayers: new Set<LayerSummary>(),
+    rootPrefixes: DEFAULT_SERVER_PREFIXES,
+  };
   const rootPrefixes = version === '2.0'
     ? resolveSwaggerBasePath(tree)
     : prefixesFor(partial, [pickServerSource(tree, tree.get(tree.root, 'servers'))], DEFAULT_SERVER_PREFIXES);
@@ -181,25 +210,36 @@ function extractPathItem(
   pathKey: string,
   value: ParsedNode | null,
 ): ExtractedOperation[] {
-  const resolved = resolvePathItemLayers(context.tree, value);
+  const resolved = resolvePathItemLayers(context, value);
   if (resolved.kind === 'gap') {
     context.gaps[resolved.gap] += 1;
     return [];
   }
-  const fields = resolved.layers.flat().filter((entry) => entry.key !== '$ref');
-  const pathServers = pickServerSource(context.tree, firstFieldValue(context.tree, fields, 'servers'));
+  countUnknownFields(context, resolved.layers);
+  const serversValue = resolved.layers.find((layer) => layer.servers !== undefined)?.servers;
+  const pathServers = pickServerSource(context.tree, serversValue);
   const operations: ExtractedOperation[] = [];
-  for (const field of fields) {
-    const method = operationMethod(context.version, field.key);
-    if (method === undefined) {
-      if (!isKnownPathItemField(context.version, field.key)) context.gaps.unknownPathItemFields += 1;
-      continue;
-    }
+  for (const field of resolved.layers.flatMap((layer) => layer.methodFields)) {
+    const method = operationMethod(context.version, field.key)!;
     const operation = extractOperation(context, pathKey, method, field, pathServers);
     if (operation === undefined) context.gaps.nonObjectOperations += 1;
     else operations.push(operation);
   }
   return operations;
+}
+
+/**
+ * 층들의 모르는 필드 수를 더한다. 이미 센 층은 다시 세지 않는다.
+ *
+ * @param context 수집 상태
+ * @param layers path item 층 요약
+ */
+function countUnknownFields(context: ExtractionContext, layers: readonly LayerSummary[]): void {
+  for (const layer of layers) {
+    if (context.countedLayers.has(layer)) continue;
+    context.countedLayers.add(layer);
+    context.gaps.unknownPathItemFields += layer.unknownFieldCount;
+  }
 }
 
 /**
@@ -220,7 +260,7 @@ function extractOperation(
   pathServers: ServerSource,
 ): ExtractedOperation | undefined {
   const { tree } = context;
-  if (tree.entries(field.value) === undefined) return undefined;
+  if (!tree.isMapping(field.value)) return undefined;
   const operationServers = context.version === '2.0'
     ? { kind: 'none' as const }
     : pickServerSource(tree, tree.get(field.value, 'servers'));
@@ -240,27 +280,52 @@ function extractOperation(
  * 추측해 하나를 버리지 않고 둘 다 층으로 남긴다(같은 method가 두 위치에서 나오면
  * 두 사실이 되고, 키 집합은 같다). 서버는 형제 필드가 먼저다.
  *
- * @param tree 스펙 트리
+ * @param context 수집 상태
  * @param value path item 값
  * @returns 필드 층 또는 읽지 못한 이유
  */
-function resolvePathItemLayers(tree: SpecTree, value: ParsedNode | null): PathItemLayers {
-  const layers: (readonly MapEntry[])[] = [];
+function resolvePathItemLayers(context: ExtractionContext, value: ParsedNode | null): PathItemLayers {
+  const { tree } = context;
+  const layers: LayerSummary[] = [];
   const visited = new Set<ParsedNode>();
   let current = tree.resolve(value);
   for (let hop = 0; current !== undefined && !isNullScalar(current); hop++) {
-    const entries = tree.entries(current);
-    if (entries === undefined) return { kind: 'gap', gap: 'nonObjectPathItems' };
+    if (!tree.isMapping(current)) return { kind: 'gap', gap: 'nonObjectPathItems' };
     if (visited.has(current) || hop > MAX_PATH_ITEM_REFERENCE_HOPS) return { kind: 'gap', gap: 'cyclicReferences' };
     visited.add(current);
-    layers.push(entries);
-    const referenceNode = entries.find((entry) => entry.key === '$ref');
-    if (referenceNode === undefined) break;
-    const next = followReference(tree, referenceNode.value);
+    const layer = summarizeLayer(context, current);
+    layers.push(layer);
+    if (layer.reference === undefined) break;
+    const next = followReference(tree, layer.reference);
     if (next.kind === 'gap') return next;
     current = next.node;
   }
   return { kind: 'layers', layers };
+}
+
+/**
+ * path item 층 노드를 한 번 훑어 요약하고 캐시한다.
+ *
+ * @param context 수집 상태
+ * @param node 매핑 노드
+ * @returns 층 요약
+ */
+function summarizeLayer(context: ExtractionContext, node: ParsedNode): LayerSummary {
+  const cached = context.layerCache.get(node);
+  if (cached !== undefined) return cached;
+  const methodFields: MapEntry[] = [];
+  let unknownFieldCount = 0;
+  let servers: ParsedNode | undefined;
+  let reference: ParsedNode | null | undefined;
+  for (const entry of context.tree.entries(node) ?? []) {
+    if (entry.key === '$ref') reference ??= entry.value;
+    else if (operationMethod(context.version, entry.key) !== undefined) methodFields.push(entry);
+    else if (!isKnownPathItemField(context.version, entry.key)) unknownFieldCount += 1;
+    else if (entry.key === 'servers') servers ??= context.tree.resolve(entry.value);
+  }
+  const summary = { methodFields, unknownFieldCount, servers, reference };
+  context.layerCache.set(node, summary);
+  return summary;
 }
 
 /**
@@ -290,19 +355,6 @@ function followReference(
  */
 function isNullScalar(node: ParsedNode): boolean {
   return isScalar(node) && node.value === null;
-}
-
-/**
- * 필드 목록에서 키의 첫 값을 찾는다.
- *
- * @param tree 스펙 트리
- * @param fields 필드 목록
- * @param key 찾을 키
- * @returns 값 노드 또는 undefined
- */
-function firstFieldValue(tree: SpecTree, fields: readonly MapEntry[], key: string): ParsedNode | undefined {
-  const found = fields.find((entry) => entry.key === key);
-  return found === undefined ? undefined : tree.resolve(found.value);
 }
 
 /**
@@ -426,7 +478,8 @@ function enumValues(tree: SpecTree, node: ParsedNode | undefined): string[] | un
   const items = tree.items(node);
   if (items === undefined || items.length === 0) return undefined;
   const values = items.map((item) => scalarText(tree, item));
-  return values.every((value) => value !== undefined) ? (values as string[]) : undefined;
+  // 짝 없는 서러게이트가 든 값은 정규화에서 U+FFFD로 바뀌어 원문과 다른 접두사가 되므로 열린 변수로 본다.
+  return values.every((value) => value !== undefined && value.isWellFormed()) ? (values as string[]) : undefined;
 }
 
 /**

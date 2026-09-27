@@ -29,6 +29,14 @@ import { readSpecShape } from './spec-version.ts';
 /** 문서 하나에 담는 최대 사실 수다. isthmus 입력 상한과 같다. */
 export const MAX_FACTS = 100_000;
 
+/**
+ * 문서에 싣는 operationId의 최대 길이다.
+ *
+ * operationId는 사실마다 두 번(symbol·operationId) 복사되고 서버 접두사 수만큼 늘어나므로,
+ * 상한이 없으면 작은 입력이 거대한 출력이 된다. 넘으면 이름만 빼고 센다.
+ */
+export const MAX_OPERATION_ID_LENGTH = 1024;
+
 /** 사실 수가 상한을 넘었다. 부분 문서를 내지 않고 실패한다. */
 export class FactLimitError extends Error {
   constructor() {
@@ -69,9 +77,9 @@ interface FactCounters {
 export function createContractDocument(input: ContractDocumentInput): RouteContractDocument {
   const shape = readSpecShape(input.tree);
   const extraction = extractOperations(input.tree, shape.version, shape.paths);
+  assertFactBudget(extraction.operations);
   const counters: FactCounters = { unresolvedServerOperations: 0, dynamicTemplates: 0, unsafeOperationIds: 0 };
   const facts = extraction.operations.flatMap((operation) => operationFacts(input, operation, counters));
-  if (facts.length > MAX_FACTS) throw new FactLimitError();
   return {
     format: 'bridge-facts',
     version: 1,
@@ -86,6 +94,22 @@ export function createContractDocument(input: ContractDocumentInput): RouteContr
     facts: sortAndDeduplicate(facts),
     limitations: buildLimitations(extraction.gaps, counters),
   };
+}
+
+/**
+ * 사실을 만들기 전에 사실 수를 세어 상한을 확인한다.
+ *
+ * 사실을 다 만든 뒤 세면 상한을 넘는 입력이 먼저 메모리를 다 쓴다.
+ *
+ * @param operations 모은 operation
+ * @throws FactLimitError 사실 수가 상한을 넘을 때
+ */
+function assertFactBudget(operations: readonly ExtractedOperation[]): void {
+  let total = 0;
+  for (const operation of operations) {
+    total += operation.prefixes.roots.length + operation.prefixes.baseTails.length;
+    if (total > MAX_FACTS) throw new FactLimitError();
+  }
 }
 
 /**
@@ -149,7 +173,7 @@ function composeChannel(prefix: string, template: PathTemplateResult): { channel
 /**
  * operationId를 문서에 실어도 안전한지 확인한다.
  *
- * operationId는 정보용이라 안전하지 않으면 사실은 유지하고 이름만 뺀 뒤 센다.
+ * operationId는 정보용이라 안전하지 않거나 너무 길면 사실은 유지하고 이름만 뺀 뒤 센다.
  *
  * @param operationId 원문 operationId
  * @param counters 한계 개수(갱신)
@@ -157,7 +181,7 @@ function composeChannel(prefix: string, template: PathTemplateResult): { channel
  */
 function safeOperationId(operationId: string | undefined, counters: FactCounters): string | undefined {
   if (operationId === undefined) return undefined;
-  if (isSafeIdentifier(operationId)) return operationId;
+  if (isSafeIdentifier(operationId) && operationId.length <= MAX_OPERATION_ID_LENGTH) return operationId;
   counters.unsafeOperationIds += 1;
   return undefined;
 }
@@ -207,12 +231,12 @@ function buildLimitations(gaps: ExtractionGaps, counters: FactCounters): string[
   const unreadableItems = gaps.nonLocalReferences + gaps.brokenReferences + gaps.cyclicReferences + gaps.nonObjectPathItems;
   const candidates: [number, string][] = [
     [counters.unresolvedServerOperations, `unresolved-contract-servers: ${counters.unresolvedServerOperations} operations use a server URL or basePath whose path prefix could not be resolved (open server variables, relative server URLs, or invalid values); their facts use pathAnchor base`],
-    [counters.dynamicTemplates, `contract-coverage: ${counters.dynamicTemplates} operation path templates have unbalanced braces, more than one parameter in a segment, malformed text, or exceed ${MAX_TEMPLATE_LENGTH} characters; they are reported as dynamic`],
+    [counters.dynamicTemplates, `contract-coverage: ${counters.dynamicTemplates} operation path templates have unbalanced braces, more than one parameter in a segment, dot segments, malformed text, or exceed ${MAX_TEMPLATE_LENGTH} characters; they are reported as dynamic`],
     [gaps.nonRootedPathKeys, `contract-coverage: ${gaps.nonRootedPathKeys} paths keys do not start with "/" and were skipped`],
     [unreadableItems, `contract-coverage: ${unreadableItems} path items could not be read (${gaps.nonLocalReferences} non-local $ref, ${gaps.brokenReferences} broken $ref, ${gaps.cyclicReferences} cyclic $ref, ${gaps.nonObjectPathItems} non-object) and were skipped`],
     [gaps.nonObjectOperations, `contract-coverage: ${gaps.nonObjectOperations} operations are not objects and were skipped`],
     [gaps.unknownPathItemFields, `contract-coverage: ${gaps.unknownPathItemFields} path item fields are neither operations for this OpenAPI version nor known fields and were skipped`],
-    [counters.unsafeOperationIds, `unsafe-operation-ids: ${counters.unsafeOperationIds} operationId values contain characters the exchange format forbids and were omitted`],
+    [counters.unsafeOperationIds, `unsafe-operation-ids: ${counters.unsafeOperationIds} operationId values contain characters the exchange format forbids or exceed ${MAX_OPERATION_ID_LENGTH} characters and were omitted`],
   ];
   return candidates.filter(([count]) => count > 0).map(([, text]) => text).sort(compareStrings);
 }

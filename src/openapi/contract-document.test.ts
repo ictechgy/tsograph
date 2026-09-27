@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { RouteContractDocument } from '../exchange/bridge-facts.ts';
-import { createContractDocument, FactLimitError, MAX_FACTS } from './contract-document.ts';
+import { createContractDocument, FactLimitError, MAX_FACTS, MAX_OPERATION_ID_LENGTH } from './contract-document.ts';
 import { MAX_PATH_ITEM_REFERENCE_HOPS } from './operations.ts';
 import { MAX_DYNAMIC_CHANNEL_LENGTH, MAX_TEMPLATE_LENGTH } from './path-template.ts';
 import { parseSpecTree } from './spec-tree.ts';
@@ -59,10 +59,12 @@ test('operationId는 symbol.qualifiedName과 operationId 증거로 싣는다', (
 });
 
 test('안전하지 않은 operationId는 빼고 정보용 limitation으로 센다', () => {
-  const document = documentFor('openapi: 3.0.0\npaths:\n  /a:\n    get: {operationId: "bad\\u0007id"}\n');
+  const long = 'o'.repeat(MAX_OPERATION_ID_LENGTH + 1);
+  const document = documentFor(`openapi: 3.0.0\npaths:\n  /a:\n    get: {operationId: "bad\\u0007id"}\n    post: {operationId: ${long}}\n`);
   assert.equal(document.facts[0]?.symbol, undefined);
   assert.equal(document.facts[0]?.operationId, undefined);
-  assert.deepEqual(document.limitations, ['unsafe-operation-ids: 1 operationId values contain characters the exchange format forbids and were omitted']);
+  assert.equal(document.facts[1]?.operationId, undefined);
+  assert.deepEqual(document.limitations, [`unsafe-operation-ids: 2 operationId values contain characters the exchange format forbids or exceed ${MAX_OPERATION_ID_LENGTH} characters and were omitted`]);
 });
 
 test('사실 0건 스펙도 target http와 server 역할을 유지한다', () => {
@@ -135,6 +137,8 @@ test('경로의 enum 서버 변수는 값마다 root 사실을 낸다', () => {
 test('정수 enum·잘못된 서버 객체·배열이 아닌 servers를 fail-closed로 처리한다', () => {
   const integers = documentFor('openapi: 3.0.0\nservers: [{url: "/{n}", variables: {n: {enum: [1, 2]}}}]\npaths: {/a: {get: {}}}\n');
   assert.deepEqual(routes(integers), ['GET root /1/a', 'GET root /2/a']);
+  const surrogate = documentFor('openapi: 3.0.0\nservers: [{url: "/{n}", variables: {n: {enum: ["\\uD800"]}}}]\npaths: {/a: {get: {}}}\n');
+  assert.deepEqual(routes(surrogate), ['GET base /a']);
   const mixed = documentFor('openapi: 3.0.0\nservers: [{url: "/{n}", variables: {n: {enum: [1.5, x]}}}]\npaths: {/a: {get: {}}}\n');
   assert.deepEqual(routes(mixed), ['GET base /a']);
   const noUrl = documentFor('openapi: 3.0.0\nservers: [{description: x}, "string"]\npaths: {/a: {get: {}}}\n');
@@ -271,6 +275,21 @@ test('같은 정규 키를 가진 서로 다른 경로 키는 위치마다 사�
 test('같은 위치·같은 키의 완전 중복 사실은 하나로 줄인다', () => {
   const document = documentFor('openapi: 3.1.0\npaths:\n  /a: {$ref: "#/components/pathItems/A", get: {}}\ncomponents: {pathItems: {A: {}}}\n');
   assert.equal(document.facts.length, 1);
+});
+
+test('authority가 리터럴이 아닌 서버 URL 앞의 변수는 root로 확정하지 않는다', () => {
+  const document = documentFor('openapi: 3.0.0\nservers: [{url: "{base}/v1"}]\npaths: {/users: {get: {}}}\n');
+  assert.deepEqual(routes(document), ['GET base /v1/users']);
+  assert.match(document.limitations[0]!, /^unresolved-contract-servers: 1 /);
+});
+
+test('큰 매핑을 여러 번 가리켜도 한 번만 훑고 모르는 필드는 한 번만 센다', { timeout: 20_000 }, () => {
+  const keys = Array.from({ length: 40_000 }, (_, index) => `k${index}: 1`).join(', ');
+  const refs = Array.from({ length: 4000 }, (_, index) => `  /r${index}: {$ref: "#/x-big"}`);
+  const aliases = Array.from({ length: 4000 }, (_, index) => `  /a${index}: {get: *o}`);
+  const document = documentFor(['openapi: 3.0.0', `x-big: {${keys}}`, `x-o: &o {operationId: shared, ${keys}}`, 'paths:', ...refs, ...aliases].join('\n'));
+  assert.equal(document.facts.length, 4000);
+  assert.deepEqual(document.limitations, ['contract-coverage: 40000 path item fields are neither operations for this OpenAPI version nor known fields and were skipped']);
 });
 
 test('사실 수가 상한을 넘으면 부분 문서 대신 실패한다', () => {

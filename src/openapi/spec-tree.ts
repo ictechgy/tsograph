@@ -9,7 +9,12 @@
  * - JS 객체로 변환(toJS)하지 않는다. 그래서 alias 확장 폭탄과 `__proto__` 키가
  *   객체를 만들지 않고, 사용자 태그도 실행되지 않는다(`yaml`은 태그를 실행하지 않는다).
  * - alias는 한 번 만든 색인으로 O(1)에 따라가고, 따라간 횟수에 상한을 둔다.
- * - merge key(`<<`)는 적용하지 않는다. 일반 키로 남아 모르는 필드로 집계된다.
+ * - merge key(`<<`)는 펼치지 않고 문서째 거부한다. 다른 도구는 펼치므로, 일반 키로
+ *   남기면 servers 같은 필드가 조용히 사라져 잘못된 root 접두사가 된다.
+ * - alias·컬렉션 키는 거부한다. 중복 키 판정과 조회가 스칼라 키만 비교하기 때문이다.
+ * - 파싱 전에 선형 사전 검사로 노드 수 추정치와 flow 중첩 깊이를 제한한다. `yaml`은
+ *   노드마다 약 1 KB를 쓰고 깊이 검사도 CST를 다 만든 뒤라, 상한 안의 파일로도 메모리가
+ *   바닥날 수 있다(원소 200만 개 flow 배열에 RSS 약 2 GB 실측).
  */
 
 import {
@@ -31,12 +36,26 @@ import { ByteColumnIndex } from './byte-columns.ts';
 /** 한 번의 추출에서 alias를 따라갈 수 있는 최대 횟수다. 정상 스펙은 수백 회를 넘지 않는다. */
 export const MAX_ALIAS_DEREFERENCES = 100_000;
 
+/**
+ * 파싱 전 노드 수 추정치(쉼표 + 콜론 + 줄바꿈 수) 상한이다.
+ *
+ * 추정치는 flow 배열·block 시퀀스에서 스칼라 수와 같고, 보기 좋게 정렬한 JSON에서는
+ * 약 1.5배로 넉넉하게 센다. 상한에서 파서 메모리는 약 1.5 GB 이하다.
+ */
+export const MAX_ESTIMATED_NODES = 1_500_000;
+
+/** flow 컬렉션(`[`·`{`) 중첩 깊이 상한이다. 문자열 안 괄호도 세므로 넉넉하게 둔다. */
+export const MAX_FLOW_DEPTH = 1000;
+
 /** 스펙을 트리로 만들 수 없는 이유다. CLI가 원인·해결 방향 문구로 바꾼다. */
 export type SpecParseFailureReason =
   | 'syntax'
   | 'duplicate-key'
   | 'multiple-documents'
   | 'resource-exhaustion'
+  | 'too-many-nodes'
+  | 'merge-key'
+  | 'complex-key'
   | 'alias-budget';
 
 /**
@@ -245,7 +264,8 @@ function scalarString(node: ParsedNode | null | undefined): string | undefined {
  * @throws SpecParseError 구문 오류·중복 키·여러 문서·깊이 초과
  */
 export function parseSpecTree(source: string): SpecTree {
-  const text = source.startsWith('﻿') ? source.slice(1) : source;
+  const text = source.startsWith('\uFEFF') ? source.slice(1) : source;
+  precheckSpecText(text);
   const lineCounter = new LineCounter();
   const document = parseDocument(text, {
     lineCounter,
@@ -258,6 +278,27 @@ export function parseSpecTree(source: string): SpecTree {
   const firstError = document.errors[0];
   if (firstError !== undefined) throw toParseError(firstError, lineCounter);
   return new SpecTree(document.contents, indexDocument(document, lineCounter), text, lineCounter);
+}
+
+/**
+ * 파싱 전에 노드 수 추정치와 flow 중첩 깊이를 한 번의 선형 스캔으로 확인한다.
+ *
+ * 문자열 안의 문자도 세므로 실제보다 크게 센다(안전한 방향).
+ *
+ * @param text 파싱할 텍스트
+ * @throws SpecParseError 추정치가 상한을 넘으면 too-many-nodes, 깊이가 넘으면 resource-exhaustion
+ */
+export function precheckSpecText(text: string): void {
+  let estimatedNodes = 0;
+  let depth = 0;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code === 0x2c || code === 0x3a || code === 0x0a) estimatedNodes += 1;
+    else if (code === 0x5b || code === 0x7b) depth += 1;
+    else if ((code === 0x5d || code === 0x7d) && depth > 0) depth -= 1;
+    if (depth > MAX_FLOW_DEPTH) throw new SpecParseError('resource-exhaustion');
+  }
+  if (estimatedNodes > MAX_ESTIMATED_NODES) throw new SpecParseError('too-many-nodes');
 }
 
 /**
@@ -297,10 +338,7 @@ function indexDocument(document: Document.Parsed, lineCounter: LineCounter): Rea
     // anchor가 달린 매핑이 Node 방문자를 건너뛴다. 한 방문자에서 모두 처리한다.
     visit(document, {
       Node(_key, node) {
-        if (isMap(node)) {
-          const duplicate = findDuplicateKey(node.items.map((pair) => pair.key));
-          if (duplicate !== undefined) throw duplicateKeyError(duplicate, lineCounter);
-        }
+        if (isMap(node)) checkMapKeys(node.items.map((pair) => pair.key), lineCounter);
         if (isAlias(node)) {
           const target = latestAnchors.get(node.source);
           if (target !== undefined) targets.set(node, target);
@@ -320,32 +358,37 @@ function indexDocument(document: Document.Parsed, lineCounter: LineCounter): Rea
 }
 
 /**
- * 매핑 키 목록에서 두 번째로 나온 같은 스칼라 키를 찾는다.
+ * 매핑 키 목록을 확인한다: 스칼라 키만, merge key 없음, 중복 없음.
  *
- * alias·컬렉션 키는 `yaml`의 기본 동작처럼 깊은 비교를 하지 않는다.
+ * 중복 판정은 `yaml`의 기본 비교(스칼라 값의 `===`)와 같다. `%YAML 1.1` 지시문이
+ * 있으면 `yaml`이 merge key를 심볼 값으로 읽으므로 그 표기도 merge key로 본다.
  *
  * @param keys 매핑 키 노드 목록
- * @returns 중복된 키 노드 또는 undefined
+ * @param lineCounter 줄 색인(위치 보고용)
+ * @throws SpecParseError complex-key·merge-key·duplicate-key
  */
-function findDuplicateKey(keys: readonly unknown[]): ParsedNode | undefined {
+function checkMapKeys(keys: readonly unknown[], lineCounter: LineCounter): void {
   const seen = new Set<string>();
   for (const key of keys) {
-    if (!isScalar(key)) continue;
+    if (!isScalar(key)) throw keyError('complex-key', key, lineCounter);
+    const isMergeKey = typeof key.value === 'symbol' || (key.value === '<<' && key.type === 'PLAIN');
+    if (isMergeKey) throw keyError('merge-key', key, lineCounter);
     const identity = `${typeof key.value}:${String(key.value)}`;
-    if (seen.has(identity)) return key as ParsedNode;
+    if (seen.has(identity)) throw keyError('duplicate-key', key, lineCounter);
     seen.add(identity);
   }
-  return undefined;
 }
 
 /**
- * 중복 키 위치를 줄 번호로 바꾼 실패를 만든다.
+ * 키 위치를 줄 번호로 바꾼 실패를 만든다.
  *
- * @param key 중복된 키 노드
+ * @param reason 실패 분류
+ * @param key 문제의 키 노드
  * @param lineCounter 줄 색인
- * @returns duplicate-key 실패
+ * @returns 실패
  */
-function duplicateKeyError(key: ParsedNode, lineCounter: LineCounter): SpecParseError {
-  const { line } = lineCounter.linePos(key.range?.[0] ?? 0);
-  return new SpecParseError('duplicate-key', line > 0 ? line : undefined);
+function keyError(reason: SpecParseFailureReason, key: unknown, lineCounter: LineCounter): SpecParseError {
+  const offset = (key as { range?: [number, number, number] } | null)?.range?.[0];
+  const line = offset === undefined ? 0 : lineCounter.linePos(offset).line;
+  return new SpecParseError(reason, line > 0 ? line : undefined);
 }

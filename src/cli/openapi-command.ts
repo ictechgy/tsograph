@@ -12,7 +12,7 @@ import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJson } from '../exchange/sorted-json.ts';
 import { createContractDocument, FactLimitError, MAX_FACTS } from '../openapi/contract-document.ts';
-import { MAX_ALIAS_DEREFERENCES, parseSpecTree, SpecParseError } from '../openapi/spec-tree.ts';
+import { MAX_ALIAS_DEREFERENCES, MAX_ESTIMATED_NODES, parseSpecTree, SpecParseError } from '../openapi/spec-tree.ts';
 import { SpecContentError } from '../openapi/spec-version.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -20,6 +20,14 @@ import { parseArguments } from './parse-arguments.ts';
 
 /** 스펙 파일 크기 상한(바이트)이다. isthmus의 입력 파일 상한과 같은 규모다. */
 export const MAX_SPEC_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 출력 문서의 최대 길이(UTF-16 코드 단위)다.
+ *
+ * isthmus는 입력 파일 하나가 이 길이를 넘으면 파싱 전에 거부한다. 소비자가 거부할
+ * 문서를 쓰지 않고, 출력 문자열 생성의 메모리 한계(RangeError)도 같은 실패로 보고한다.
+ */
+export const MAX_OUTPUT_LENGTH = 16 * 1024 * 1024;
 
 /** `--service` 값의 최대 길이다. 서비스 신원은 짧은 이름이다. */
 export const MAX_SERVICE_LENGTH = 256;
@@ -194,10 +202,37 @@ function convertSpec(loaded: LoadedSpec, service: string, environment: OpenApiEn
       generatedAt: environment.now(),
       sourceModifiedAt: loaded.modifiedAt,
     });
-    return success(encodeSortedJson(document));
+    return encodeOutput(document);
   } catch (error) {
     return conversionFailure(error);
   }
+}
+
+/**
+ * 문서를 JSON으로 직렬화하고 출력 길이 상한을 확인한다.
+ *
+ * @param document 조립한 문서
+ * @returns 성공 또는 길이 초과 실패
+ */
+function encodeOutput(document: unknown): CommandResult {
+  let text: string;
+  try {
+    text = encodeSortedJson(document);
+  } catch (error) {
+    if (error instanceof RangeError) return outputTooLarge();
+    /* node:coverage ignore next */
+    throw error;
+  }
+  return text.length > MAX_OUTPUT_LENGTH ? outputTooLarge() : success(text);
+}
+
+/**
+ * 출력 길이 초과 실패를 만든다.
+ *
+ * @returns 코드 2 결과
+ */
+function outputTooLarge(): CommandResult {
+  return inputFailure(`the output document would exceed ${MAX_OUTPUT_LENGTH} characters, which isthmus rejects; split the spec.`);
 }
 
 /**
@@ -229,6 +264,9 @@ function parseFailureMessage(error: SpecParseError): string {
     case 'multiple-documents': return 'the spec contains more than one YAML document; keep a single document per file.';
     case 'resource-exhaustion': return `the spec is nested too deeply to parse safely${where}; flatten the document.`;
     case 'alias-budget': return `the spec dereferences more than ${MAX_ALIAS_DEREFERENCES} YAML aliases; reduce alias use.`;
+    case 'too-many-nodes': return `the spec has more than about ${MAX_ESTIMATED_NODES} values, which exceeds the safe parser budget; split the spec.`;
+    case 'merge-key': return `the spec uses a YAML merge key (<<)${where}, which tsograph does not expand; inline the merged mapping.`;
+    case 'complex-key': return `the spec uses an alias or collection as a mapping key${where}; use plain string keys.`;
     default: return `the spec is not valid JSON or YAML${where}; fix the syntax and retry.`;
   }
 }

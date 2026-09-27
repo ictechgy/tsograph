@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { MAX_ALIAS_DEREFERENCES, parseSpecTree, SpecParseError } from './spec-tree.ts';
+import {
+  MAX_ALIAS_DEREFERENCES,
+  MAX_ESTIMATED_NODES,
+  MAX_FLOW_DEPTH,
+  parseSpecTree,
+  precheckSpecText,
+  SpecParseError,
+} from './spec-tree.ts';
 
 /** 파싱 실패 이유와 줄을 기대한다. */
 function expectParseFailure(source: string, reason: string, line?: number): void {
@@ -42,15 +49,31 @@ test('숫자 키와 문자열 키는 다른 키이고 깊은 곳의 중복도 �
 test('여러 문서·구문 오류·과도한 중첩을 거부한다', () => {
   expectParseFailure('a: 1\n---\nb: 2\n', 'multiple-documents');
   expectParseFailure('a: [1, 2\n', 'syntax');
-  expectParseFailure(`${'['.repeat(100_000)}${']'.repeat(100_000)}`, 'resource-exhaustion');
+  expectParseFailure(`${'['.repeat(900)}${']'.repeat(900)}`, 'resource-exhaustion');
 });
 
-test('alias는 앞선 마지막 anchor로 따라가고 merge key는 적용하지 않는다', () => {
-  const tree = parseSpecTree('base: &x {v: 1}\nother: &x {v: 2}\nuse: *x\nm:\n  <<: *x\n');
+test('alias는 앞선 마지막 anchor로 따라간다', () => {
+  const tree = parseSpecTree('base: &x {v: 1}\nother: &x {v: 2}\nuse: *x\n');
   assert.equal(tree.entries(tree.get(tree.root, 'use'))?.[0]?.key, 'v');
-  const merged = tree.entries(tree.get(tree.root, 'm'));
-  assert.deepEqual(merged?.map((entry) => entry.key), ['<<']);
   assert.equal(tree.get(tree.get(tree.root, 'use'), 'v')?.toString(), '2');
+});
+
+test('merge key는 펼치지 않고 거부하며 따옴표 키 "<<"는 일반 키다', () => {
+  expectParseFailure('x: &a {servers: []}\n<<: *a\n', 'merge-key', 2);
+  expectParseFailure('%YAML 1.1\n---\nx: &a {p: 1}\ny:\n  <<: *a\n', 'merge-key', 5);
+  const tree = parseSpecTree('m: {"<<": 1}\n');
+  assert.equal(tree.entries(tree.get(tree.root, 'm'))?.[0]?.key, '<<');
+});
+
+test('alias·컬렉션 키는 거부한다', () => {
+  expectParseFailure('k: &k servers\nservers: 1\n*k : 2\n', 'complex-key', 3);
+  expectParseFailure('? [a, b]\n: 1\n', 'complex-key', 1);
+});
+
+test('파싱 전 사전 검사가 노드 수 추정치와 flow 깊이를 제한한다', () => {
+  expectParseFailure(`x: [${'0,'.repeat(MAX_ESTIMATED_NODES)}0]`, 'too-many-nodes');
+  expectParseFailure(`${'['.repeat(MAX_FLOW_DEPTH + 1)}`, 'resource-exhaustion');
+  assert.doesNotThrow(() => precheckSpecText(`${'['.repeat(MAX_FLOW_DEPTH)}${']'.repeat(MAX_FLOW_DEPTH + 5)}`));
 });
 
 test('alias 역참조가 상한을 넘으면 alias-budget으로 멈춘다', () => {
