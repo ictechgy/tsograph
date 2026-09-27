@@ -661,13 +661,16 @@ What `bound` guarantees, and what it does not:
   non-private property; the document then says so under `bound-dispatch:`. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
-  parameter value alone is never taken as the whole flow) unless a syntactic re-scan proves the index
-  complete for it — every identifier, `#name`, or string literal with its name or an alias's local name
-  that resolves to it is a declaration name, an import/export binding, a type position, or an indexed
-  reference. The reference index resolves every value
-  identifier, every property-access name (including file-local `namespace App` members such as
+  parameter value alone is never taken as the whole flow) unless a strict syntactic re-scan proves it
+  has no reference at all: across the analyzed files, the only identifier, `#name`, or string-literal
+  token whose text equals its name or an alias's local name is its own declaration name. Any other
+  occurrence — a destructuring property name, a property-access name, `export default`, a type
+  position, or an unrelated symbol with the same name — fails the proof. The reference index resolves
+  every value identifier, every property-access name (including file-local `namespace App` members such as
   `new App.Repo(…)` and `globalThis.f`), and every string-literal element access (`App["load"](…)`); a
-  module or value namespace used as a value or read with a computed key (`App[key]`) opens all its
+  module or value namespace reached by an identifier, a property chain (`App.Repo`, `helpers.sub`), or a
+  literal element access and then used as a value (an argument, a destructuring initializer such as
+  `const { run } = App.Repo`, a spread) or read with a computed key (`App.Repo[key]`) opens all its
   members. Exports of framework files — App Router `route` and special files, everything under
   `pages/`, `proxy`/`middleware`/`instrumentation`, even when they only `export * from` — and every
   declaration they re-export are open, as are top-level declarations of files that are not ES
