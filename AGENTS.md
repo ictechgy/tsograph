@@ -11,9 +11,12 @@
   [isthmus](https://github.com/ictechgy/isthmus)가 하고, tsograph는 **자기 언어에서 본 사실만** 낸다.
 - 출력 계약은 isthmus `docs/GRAPH-EXCHANGE.md`(bridge-facts v1)다. http 절은 아직 "개발 중" 초안이므로
   계약 관련 변경 전에 그 문서를 먼저 읽고, 초안과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
-- 장기 범위: Node 백엔드 라우트 선언(Next.js·Hono·Express·Fastify·NestJS·Koa), ORM/SQL
-  relation-use(Prisma·TypeORM·Sequelize·Drizzle·Knex·raw SQL·D1), 웹/RN 클라이언트 route-call,
-  호출 그래프·영향. 구현된 것과 계획을 구분해 적는다.
+- 구현: `tsograph openapi`(OpenAPI 2.0/3.0/3.1 → http `route-contract`). 장기 범위: Node 백엔드
+  라우트 선언(Next.js·Hono·Express·Fastify·NestJS·Koa), ORM/SQL relation-use(Prisma·TypeORM·
+  Sequelize·Drizzle·Knex·raw SQL·D1), 웹/RN 클라이언트 route-call, 호출 그래프·영향.
+  구현된 것과 계획을 구분해 적는다.
+- 정규 경로 템플릿 규칙은 isthmus 공유 벡터(`conformance/http-template.json`)와 맞춘다.
+  벡터가 생기면 `src/openapi/conformance.test.ts`가 검증한다.
 - MIT·영구 무료·텔레메트리 없음. 네트워크를 쓰지 않고, 분석 대상 코드를 실행하지 않는다.
 - 관찰 근거와 `limitations`를 보존한다. 빈 결과·코드 0을 완전성의 증거로 삼지 않는다.
   확정하지 못한 값은 추측해 정적 사실로 내지 않고 `dynamic`·`pathAnchor: "base"`·limitation으로 낸다.
