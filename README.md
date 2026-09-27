@@ -160,8 +160,19 @@ downgrades errors instead of reporting false ones.
 - Before parsing, a linear pre-scan caps the estimated value count (commas + colons + line
   breaks) at 1,500,000 and flow nesting depth at 1,000. The YAML parser uses about 1 KB per
   node, so larger inputs could exhaust memory. Split very large specs.
-- Duplicate mapping keys are rejected, found by a linear-time scan (the parser's built-in
-  check is quadratic in map size). Alias and collection mapping keys are rejected.
+- Duplicate mapping keys are found by a linear-time scan (the parser's built-in check is
+  quadratic in map size) and handled by where they occur:
+  - **Rejected (exit 2)** where they can change facts or their locations: any root key
+    (`openapi`, `swagger`, `servers`, `basePath`, `host`, `paths`, …), keys inside `paths`,
+    every key of a path item (including one reached through a local `$ref`), the operation keys
+    tsograph reads (`operationId`, `servers`), every key of a server object and of each server
+    variable, and each key a followed `$ref` pointer passes through.
+  - **Ignored** everywhere else (for example `components.schemas`, descriptions, examples,
+    unused components, or an operation's `responses`). Parsing continues, the **first**
+    occurrence wins (it cannot affect any fact), and the document gets the informational
+    limitation `duplicate-mapping-keys: <count> duplicate key(s) outside route-bearing sections
+    were ignored (first at line N)`, so the gap stays visible.
+- Alias and collection mapping keys are rejected.
 - YAML merge keys (`<<`) are rejected rather than ignored, because other tools expand them
   and silently dropping them could hide `servers`. YAML aliases are followed through a
   precomputed index with a budget of 100,000 dereferences. Custom tags are never executed, and

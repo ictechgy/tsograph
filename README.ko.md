@@ -91,8 +91,17 @@ limitation 접두사를 써서 isthmus가 거짓 error 대신 판정을 낮추�
 - 파싱 전 선형 사전 검사로 값 수 추정치(쉼표 + 콜론 + 줄바꿈)를 1,500,000, flow 중첩 깊이를
   1,000으로 제한한다. YAML 파서가 노드마다 약 1 KB를 써서 더 큰 입력은 메모리를 다 쓸 수 있다.
   아주 큰 스펙은 나눈다.
-- 중복 매핑 키는 거부한다. 파서 내장 검사가 매핑 크기에 대해 제곱 시간이라 선형 시간 검사로 찾는다.
-  alias·컬렉션 매핑 키도 거부한다.
+- 중복 매핑 키는 선형 시간 검사로 찾는다(파서 내장 검사는 매핑 크기에 대해 제곱 시간이다).
+  처리는 위치에 따라 다르다.
+  - **거부(코드 2)**: 사실이나 그 위치를 바꿀 수 있는 곳. 모든 루트 키(`openapi`·`swagger`·
+    `servers`·`basePath`·`host`·`paths` 등), `paths` 안의 키, path item의 모든 키(로컬 `$ref`로
+    따라간 것 포함), tsograph가 읽는 operation 키(`operationId`·`servers`), 서버 객체와 서버
+    변수의 모든 키, 따라간 `$ref` 포인터가 지나가는 각 키다.
+  - **무시**: 그 밖의 곳(예: `components.schemas`, 설명, 예시, 쓰지 않는 components, operation의
+    `responses`). 파싱을 계속하고 **첫 번째** 값을 쓰며(어느 사실에도 영향이 없다), 공백이 보이도록
+    정보용 limitation `duplicate-mapping-keys: <count> duplicate key(s) outside route-bearing
+    sections were ignored (first at line N)`을 싣는다.
+- alias·컬렉션 매핑 키는 거부한다.
 - YAML merge key(`<<`)는 무시하지 않고 거부한다. 다른 도구는 펼치므로 조용히 버리면 `servers`가
   사라질 수 있다. alias는 미리 만든 색인으로 따라가고 역참조는 100,000회로 제한한다. 사용자
   태그는 실행하지 않고, 트리를 JS 객체로 바꾸지 않는다.
