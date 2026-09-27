@@ -619,10 +619,10 @@ assignment, parameters (default value plus the same-position argument at every c
 function declaration, a `const`-bound function, or a constructor, including `super(...)` and the
 implicit `super` of subclasses without a constructor), object destructuring, properties of object
 literals and class instances (initializer, parameter property, getter return, plus every same-named
-property write anywhere; a write is skipped only when it resolves to a member of a class that, like the
-value's class, has `private`/`protected`/`#` members and neither class is assignable to the other —
-TypeScript's structural rules, array covariance, and method-parameter bivariance let any other type
-reach the value), return values of called functions
+property write anywhere; a write is skipped only when the flow of its receiver expression is known,
+non-empty, and holds neither the value nor, for a class, an instance of one of its project
+subclasses — types alone never exclude a write, because structural assignability, array covariance,
+and method-parameter bivariance let an instance reach any typed slot without a cast), return values of called functions
 (interface-typed factories are resolved through their receiver's values), `await`, `?:`, `??`, `||`,
 `&&`, and the comma operator. A slot that feeds itself through a call or property
 (`this.store = this.store.withCache()`, a recursive wrapper) is iterated to its fixpoint. Composition roots such as
@@ -648,8 +648,8 @@ What `bound` guarantees, and what it does not:
   classes with decorators (DI containers construct them) and decorated methods, fields, and accessors,
   classes that call `new this()`, `this` in a class used as a value other than `new`/`extends`/static
   access (mixins can subclass it), `this` in a method whose name is read other than as a call callee anywhere (`h.run.bind(x)`,
-  `const { run } = h`, `({ run } = h)`) unless the read provably cannot reach the class under the same
-  nominal rule, exports reachable from a
+  `const { run } = h`, `({ run } = h)`) unless the read's receiver flow provably excludes the class and
+  its subclasses (same rule as writes), exports reachable from a
   loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
   `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
@@ -659,11 +659,11 @@ What `bound` guarantees, and what it does not:
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound.
 - **Not modeled** (documented gaps): writes through computed keys (`obj[key] = v`), prototype mutation,
-  `eval`, type assertions that lie about a value's type (`x as unknown as Other`), values that leave the
+  `eval`, values that leave the
   project through library code and come back, and properties that library code mutates. When
-  dependencies are not installed, their types are errors and count as `any`. Same-named writes and
-  method reads elsewhere in the project can therefore block `bound` for unrelated classes (fewer `bound`
-  edges, never wrong ones). Dynamic `import()`/`require()` with a non-string specifier and file-pattern
+  dependencies are not installed, values that pass through their APIs are unknown, so same-named
+  writes and method reads on such values elsewhere in the project can block `bound` for unrelated
+  classes (fewer `bound` edges, never wrong ones). Dynamic `import()`/`require()` with a non-string specifier and file-pattern
   loaders (`import.meta.glob`, `require.context`) open every export. `Object.assign`,
   `Object.defineProperty(ies)`, `Reflect.set`, and `Reflect.defineProperty` targets are handled
   conservatively (their properties and members become unknown, including for statically resolved member
