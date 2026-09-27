@@ -619,9 +619,12 @@ assignment, parameters (default value plus the same-position argument at every c
 function declaration, a `const`-bound function, or a constructor, including `super(...)` and the
 implicit `super` of subclasses without a constructor), object destructuring, properties of object
 literals and class instances (initializer, parameter property, getter return, plus every same-named
-property write anywhere unless its target resolves to a member of an unrelated project class), return
-values of called functions (interface-typed factories are resolved through their receiver's values),
-`await`, `?:`, `??`, `||`, `&&`, and the comma operator. Composition roots such as
+property write anywhere unless the write's receiver type cannot hold the value — structural
+assignability via `isTypeAssignableTo`, so a write through another structurally compatible class type
+counts; `any`, `unknown`, and unconstrained type parameters count), return values of called functions
+(interface-typed factories are resolved through their receiver's values), `await`, `?:`, `??`, `||`,
+`&&`, and the comma operator. A slot that feeds itself through a call or property
+(`this.store = this.store.withCache()`, a recursive wrapper) is iterated to its fixpoint. Composition roots such as
 `new ItemHandler({ store: new SqlItemStore(client) })`, `createLookup({ store })`, `new ItemService(sql)`,
 default-parameter DI (`store: ItemStore = new MemoryItemStore()`), and module singletons created by a
 factory are followed across modules.
@@ -641,7 +644,11 @@ What `bound` guarantees, and what it does not:
   modules loaded with a dynamic `import()`/`require()` or used as a namespace value, parameters of
   methods, object-literal members, and callbacks (their callers cannot be enumerated), functions and
   classes referenced other than as a callee (passed as a value, `.call`/`.bind`, JSX, tagged templates),
-  classes with decorators (DI containers construct them), classes that call `new this()`, and
+  classes with decorators (DI containers construct them) and decorated methods, fields, and accessors,
+  classes that call `new this()`, `this` in a class used as a value other than `new`/`extends`/static
+  access (mixins can subclass it), `this` in a method read other than as a call callee anywhere
+  through a type that can hold the class (`h.run.bind(x)`, `const { run } = h`), exports reachable from a
+  loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
   `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
   1 MiB), or an incomplete scan (skipped, oversized, unreadable, or
@@ -650,11 +657,14 @@ What `bound` guarantees, and what it does not:
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound.
 - **Not modeled** (documented gaps): writes through computed keys (`obj[key] = v`), prototype mutation,
-  `eval`, values that leave the project through library code and come back, and properties that
-  library code mutates. Dynamic `import()`/`require()` with a non-string specifier and file-pattern
+  `eval`, type assertions that lie about a value's type (`x as unknown as Other`), values that leave the
+  project through library code and come back, and properties that library code mutates. When
+  dependencies are not installed, their types are errors and count as `any`, which makes more writes and
+  member reads reach every value (fewer `bound` edges, never wrong ones). Dynamic `import()`/`require()` with a non-string specifier and file-pattern
   loaders (`import.meta.glob`, `require.context`) open every export. `Object.assign`,
   `Object.defineProperty(ies)`, `Reflect.set`, and `Reflect.defineProperty` targets are handled
-  conservatively (their properties become unknown). A same-named property write that replaces a
+  conservatively (their properties and members become unknown, including for statically resolved member
+  calls). A same-named property write that replaces a
   method (monkey patching) blocks `bound` for that method.
 - **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
   `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the
