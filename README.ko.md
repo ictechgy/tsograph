@@ -503,8 +503,8 @@ isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impa
 
 - `roots[]`: 입력 순서의 `{ id, symbol: { usr, qualifiedName } }`.
 - `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
-  (`depth`, `usr`) 순. `depth`는 가장 가까운 root까지의 거리, `via`는 그 경로의 직전 심볼(깊이 1이면
-  root id), `roots`는 그 심볼에 닿는 모든 root 인덱스, `relationships`는 `via`와 심볼 사이 간선 종류다.
+  (`depth`, `usr`) 순. `depth`는 가장 가까운 root까지의 거리, `via`는 가장 가까운 root에서의 최단 경로의
+  직전 심볼(같으면 작은 root 인덱스, 그다음 작은 선행 id, 깊이 1이면 root id), `roots`는 그 심볼에 닿는 모든 root 인덱스, `relationships`는 `via`와 심볼 사이 간선 종류다.
 - **다른** root에서 닿는 root도 `reached`에 싣는다(핸들러 A가 부르는 도우미 H도 root면 H는
   `roots: [A의 인덱스]`). 그 `roots`에는 자기 인덱스를 넣지 않고, `depth`·`via`도 그 다른 root들 기준이다
   (`via`는 다른 root id일 수 있다). 자기 자신에게서만(순환으로) 닿는 root는 싣지 않는다. 경로는 다른 root를
@@ -512,6 +512,12 @@ isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impa
 - 예산: `--max-depth` 1–128(기본 128), `--max-reached` 최대 100,000(기본 100,000). 예산이 순회를 자르면
   `truncated: true`와 `truncationReasons`(`depth`·`max-reached`)를 싣는다. 한 심볼의 root 인덱스가 64개를
   넘으면 작은 64개만 싣고 `rootsTruncated: true`를 단다.
+- 순회는 root마다 따로 도는 탐색이 아니라 모든 root를 한 번에 출발시키는 단계 동기 단일 패스다. 더 작은 root
+  인덱스를 이미 65개 가진 심볼에서는 더 큰 root가 전파를 멈춘다 — 싣는 `roots`·`depth`·`via`를 더는 바꾸지
+  못하기 때문이며, root가 10,000개여도 심볼당 작업이 묶인다. root별 알고리즘과의 동등성은 무작위 테스트로
+  확인한다. root 인덱스가 넘치면(`rootsTruncated: true`) `depth` 이유는 깊이 상한 때문에 심볼이 빠졌을 때
+  싣고, 한 root의 출처만 잘린 경우에는 싣지 않는다. `max-reached`로도 잘린 문서에서는 버린 심볼의 root
+  초과도 `rootsTruncated`로 알린다.
 - `graphRevision`은 노드 id·종류·진입점과 간선의 `sha256:` 해시다(위치 제외). 같은 그래프의 `graph`·
   `reach`·`impact`가 같은 값을 싣는다. `revision`은 `.git`에서 읽은 프로젝트 루트의 git `HEAD` 커밋이다
   (작업 트리 변경은 반영하지 않는다).

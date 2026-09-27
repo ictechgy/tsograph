@@ -620,7 +620,8 @@ missing routes.
 - `roots[]`: `{ id, symbol: { usr, qualifiedName } }` in input order.
 - `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
   sorted by (`depth`, `usr`). `depth` is the shortest distance to any root, `via` the previous
-  symbol on that path (a root id at depth 1), `roots` every root index that reaches the symbol,
+  symbol on a shortest path from the nearest root (ties: the smallest root index, then the smallest
+  predecessor id; a root id at depth 1), `roots` every root index that reaches the symbol,
   `relationships` the edge kinds between `via` and the symbol.
 - A root that is reached from **another** root is listed in `reached` too (a handler A calling a
   helper H that is also a root lists H with `roots: [indexA]`). Its `roots` never contains its own
@@ -630,6 +631,13 @@ missing routes.
 - Budgets: `--max-depth` 1–128 (default 128), `--max-reached` up to 100,000 (default 100,000). When a
   budget cuts the traversal, `truncated: true` with `truncationReasons` (`depth`, `max-reached`).
   More than 64 root indices on one symbol keep the smallest 64 and set `rootsTruncated: true`.
+- The traversal is one multi-source, level-synchronous pass (all roots at once, not one search per
+  root). A root stops spreading through a symbol that already holds 65 smaller root indices, because
+  it can no longer change any listed `roots`, `depth`, or `via`; this bounds the work per symbol even
+  with 10,000 roots. A randomized test checks the pass against the per-root algorithm. When root
+  indices overflow (`rootsTruncated: true`), the `depth` reason is reported when a symbol is missing
+  because of the depth limit, not when only one root's provenance was cut; in a document also cut by
+  `max-reached`, overflow on dropped symbols still sets `rootsTruncated`.
 - `graphRevision` is `sha256:` over node ids, kinds, entries, and edges (locations excluded), so
   `graph`, `reach`, and `impact` over the same graph agree. `revision` is the project root's git
   `HEAD` commit read from `.git` (working-tree changes are not reflected).

@@ -1,15 +1,20 @@
 /**
  * 그래프를 root 집합에서 정방향(dependencies) 또는 역방향(dependents)으로 훑는다.
  *
- * root마다 너비 우선 탐색을 따로 돌려 `roots`(그 노드에 닿는 root 인덱스)를 정확히 보존한다. 각 노드의
- * `depth`는 모든 root에 걸친 최단 거리, `via`는 그 최단 경로의 직전 노드(깊이 1이면 root)다. 같은 깊이면
- * 먼저 온 root, 같은 root 안에서는 정렬된 이웃 순서로 먼저 발견한 부모가 이긴다 — 출력이 결정적이다.
+ * 의미(isthmus `language-traversal` v1, 2026-09-27 개정):
+ * - `reached`는 자기 자신이 아닌 root에서 1개 이상의 간선으로(깊이 상한 안에서) 닿은 정점 전부다. root이기도
+ *   한 정점도 싣되 `roots`에는 그에 닿는 **다른** root만 넣는다. 자기 자신에게서만 닿는 root는 싣지 않는다.
+ * - `depth`는 그 root들 중 가장 가까운 것까지의 거리, `via`는 가장 가까운 root(같은 거리면 작은 인덱스)에서
+ *   depth-1 거리에 있는 선행 정점 중 id가 가장 작은 것이다(깊이 1이면 그 root id).
  *
- * isthmus `language-traversal` v1 규칙(2026-09-27 개정)을 따른다: `reached`는 자기 자신이 아닌 root에서
- * 한 개 이상의 간선으로 닿은 정점 전부이고, root이기도 한 정점도 포함한다. 그런 정점의 `roots`는 그에 닿는
- * **다른** root만 싣고(자기 인덱스는 넣지 않는다), depth·via도 그 root들 기준의 최단 경로다(via는 다른
- * root id일 수 있다). 자기 자신에게서만(순환으로) 닿는 root는 싣지 않는다 — root 하나의 탐색은 자기
- * 자신을 기록하지 않기 때문에 이 규칙이 저절로 성립한다. 깊이는 1~128이다.
+ * 구현은 모든 root를 한 번에 출발시키는 단계 동기(level-synchronous) 너비 우선 패스다. 정점마다
+ * (root 인덱스 → 처음 닿은 단계)를 기록하고 새로 닿은 쌍만 다음 단계로 넘긴다. 정점이 자기 자신이 아닌
+ * root 중 더 작은 인덱스를 이미 65개 이상 가졌다면 더 큰 인덱스 root는 그 정점에서 전파를 멈춘다 — 그 65개가
+ * 같은 경로로 같거나 더 얕게 닿으므로, 그 너머 정점이 자기 인덱스 하나를 빼도 더 작은 root가 64개 남아 그
+ * root는 어디서도 출력(작은 인덱스 64개, depth, via)을 바꾸지 못한다(64개면 아래 정점이 자기 인덱스를 빼는
+ * 순간 모자란다 — 무작위 비교 테스트가 찾은 경우다). 그래서 root 수가 많아도 정점당 쌍 수가 대략 65로 묶인다.
+ * 옛 root별 알고리즘과의 동등성은 무작위 그래프 테스트(`traversal-oracle.test.ts`)로 확인한다. 전파를 멈춘
+ * 경우(`rootsTruncated: true`)에는 깊이 잘림(`depth`)을 도달 정점 집합이 불완전할 때만 알린다.
  */
 
 import { compareStrings } from '../exchange/sorted-json.ts';
@@ -59,44 +64,171 @@ export interface TraversalResult {
 /** 방향에 맞춘 이웃 목록과 간선 종류 조회표다. */
 interface Adjacency {
   readonly neighbors: ReadonlyMap<string, readonly string[]>;
+  /** 방향 기준 선행 정점(id 순) */
+  readonly predecessors: ReadonlyMap<string, readonly string[]>;
   /** `from\0to`(방향 기준) → 종류 */
   readonly kinds: ReadonlyMap<string, readonly EdgeKind[]>;
 }
 
-/** 전역 기록(모든 root에 걸친 최단)이다. */
-interface Record {
-  depth: number;
-  via: string;
-  readonly roots: Set<number>;
+/** 정점별 (root 인덱스 → 처음 닿은 단계) 기록이다. */
+type Levels = Map<string, Map<number, number>>;
+
+/** 단일 패스의 결과다. */
+interface PassResult {
+  readonly levels: Levels;
+  readonly depthCut: boolean;
+  readonly pruned: boolean;
 }
 
 /**
  * 탐색한다.
  *
  * @param graph 호출 그래프
- * @param request 탐색 요청(root id는 모두 노드여야 한다)
+ * @param request 탐색 요청(root id는 모두 노드이고 서로 다르다)
  * @returns 탐색 결과
  */
 export function traverse(graph: CallGraph, request: TraversalRequest): TraversalResult {
   const adjacency = buildAdjacency(graph, request.direction);
-  const records = new Map<string, Record>();
-  let depthCut = false;
-  request.rootIds.forEach((root, index) => {
-    depthCut = searchFromRoot(adjacency, { root, index }, request.maxDepth, records) || depthCut;
-  });
-  const ordered = [...records].sort(([leftId, left], [rightId, right]) => left.depth - right.depth || compareStrings(leftId, rightId));
-  const kept = ordered.slice(0, request.maxReached);
+  const pass = propagate(adjacency, request.rootIds, request.maxDepth);
+  const rows = reachedRows(adjacency, pass.levels, request.rootIds);
+  const kept = rows.slice(0, request.maxReached);
   const reasons: TruncationReason[] = [];
-  if (depthCut) reasons.push('depth');
-  if (ordered.length > kept.length) reasons.push('max-reached');
-  let rootsTruncated = false;
-  const reached = kept.map(([id, record]) => {
-    const roots = [...record.roots].sort((left, right) => left - right);
-    if (roots.length > MAX_ROOTS_PER_NODE) rootsTruncated = true;
-    const relationships = adjacency.kinds.get(`${record.via}\u0000${id}`) ?? [];
-    return { id, via: record.via, depth: record.depth, roots: roots.slice(0, MAX_ROOTS_PER_NODE), relationships };
-  });
+  if (pass.depthCut) reasons.push('depth');
+  if (rows.length > kept.length) reasons.push('max-reached');
+  const rootsTruncated = pass.pruned || kept.some((row) => row.roots.length > MAX_ROOTS_PER_NODE);
+  const reached = kept.map((row) => ({ ...row, roots: row.roots.slice(0, MAX_ROOTS_PER_NODE) }));
   return { reached, truncationReasons: reasons, rootsTruncated };
+}
+
+/**
+ * 모든 root에서 단계 동기로 전파한다.
+ *
+ * @param adjacency 인접 목록
+ * @param rootIds root id
+ * @param maxDepth 최대 깊이
+ * @returns 정점별 단계 기록과 잘림·전파 중단 여부
+ */
+function propagate(adjacency: Adjacency, rootIds: readonly string[], maxDepth: number): PassResult {
+  const levels: Levels = new Map();
+  const owners = new Map(rootIds.map((root, index) => [root, index]));
+  let frontier = new Map<string, number[]>();
+  rootIds.forEach((root, index) => {
+    levels.set(root, new Map([[index, 0]]));
+    frontier.set(root, [index]);
+  });
+  let pruned = false;
+  for (let level = 0; level < maxDepth && frontier.size > 0; level++) {
+    const next = new Map<string, number[]>();
+    for (const [node, roots] of frontier) {
+      for (const neighbor of adjacency.neighbors.get(node) ?? []) {
+        pruned = spread(levels, owners.get(neighbor), neighbor, roots, level + 1, next) || pruned;
+      }
+    }
+    frontier = next;
+  }
+  return { levels, depthCut: hasDepthCut(adjacency, levels, frontier), pruned };
+}
+
+/**
+ * 한 간선으로 root 인덱스들을 이웃에 전파한다.
+ *
+ * @param levels 단계 기록(갱신)
+ * @param owner 이웃이 root면 그 인덱스
+ * @param neighbor 이웃 정점
+ * @param roots 넘길 root 인덱스
+ * @param level 이웃이 닿는 단계
+ * @param next 다음 단계 경계(갱신)
+ * @returns 전파를 멈춘 쌍이 있었으면 true
+ */
+function spread(levels: Levels, owner: number | undefined, neighbor: string, roots: readonly number[], level: number, next: Map<string, number[]>): boolean {
+  let held = levels.get(neighbor);
+  if (held === undefined) {
+    held = new Map();
+    levels.set(neighbor, held);
+  }
+  let pruned = false;
+  for (const root of roots) {
+    if (held.has(root)) continue;
+    if (dominated(held, owner, root)) {
+      pruned = true;
+      continue;
+    }
+    held.set(root, level);
+    const list = next.get(neighbor);
+    if (list === undefined) next.set(neighbor, [root]);
+    else list.push(root);
+  }
+  return pruned;
+}
+
+/** 전파를 멈추게 하는 더 작은 root 수다. 아래 정점이 자기 인덱스 하나를 빼도 64개가 남도록 하나 더 둔다. */
+const DOMINATING_ROOTS = MAX_ROOTS_PER_NODE + 1;
+
+/**
+ * 정점이 자기 자신이 아닌 root 중 이 root보다 작은 인덱스를 이미 65개 이상 가졌는지 본다.
+ *
+ * @param held 정점의 root 기록
+ * @param owner 정점이 root면 그 인덱스(세지 않는다)
+ * @param root 새 root 인덱스
+ * @returns 65개 이상이면 true
+ */
+function dominated(held: ReadonlyMap<number, number>, owner: number | undefined, root: number): boolean {
+  if (held.size - (owner === undefined ? 0 : 1) < DOMINATING_ROOTS) return false;
+  let smaller = 0;
+  for (const index of held.keys()) {
+    if (index !== owner && index < root && ++smaller >= DOMINATING_ROOTS) return true;
+  }
+  return false;
+}
+
+/**
+ * 마지막 단계 경계에서 아직 그 root를 갖지 않은 이웃이 있으면 깊이 상한에 잘린 것이다.
+ *
+ * @param adjacency 인접 목록
+ * @param levels 단계 기록
+ * @param frontier 최대 깊이 단계의 경계(상한 전에 끝났으면 비어 있다)
+ * @returns 잘렸으면 true
+ */
+function hasDepthCut(adjacency: Adjacency, levels: Levels, frontier: ReadonlyMap<string, readonly number[]>): boolean {
+  for (const [node, roots] of frontier) {
+    for (const neighbor of adjacency.neighbors.get(node) ?? []) {
+      const held = levels.get(neighbor);
+      if (roots.some((root) => held?.has(root) !== true)) return true;
+    }
+  }
+  return false;
+}
+
+/** 출력 전 도달 행이다. */
+interface ReachedRow {
+  readonly id: string;
+  readonly via: string;
+  readonly depth: number;
+  readonly roots: readonly number[];
+  readonly relationships: readonly EdgeKind[];
+}
+
+/**
+ * 단계 기록에서 도달 행을 만든다. (depth, id) 순이다.
+ *
+ * @param adjacency 인접 목록
+ * @param levels 단계 기록
+ * @param rootIds root id
+ * @returns 도달 행
+ */
+function reachedRows(adjacency: Adjacency, levels: Levels, rootIds: readonly string[]): ReachedRow[] {
+  const owners = new Map(rootIds.map((root, index) => [root, index]));
+  const rows: ReachedRow[] = [];
+  for (const [id, held] of levels) {
+    const owner = owners.get(id);
+    const roots = [...held.keys()].filter((index) => index !== owner).sort((left, right) => left - right);
+    if (roots.length === 0) continue;
+    const depth = Math.min(...roots.map((index) => held.get(index)!));
+    const nearest = roots.find((index) => held.get(index) === depth)!;
+    const via = (adjacency.predecessors.get(id) ?? []).find((candidate) => levels.get(candidate)?.get(nearest) === depth - 1)!;
+    rows.push({ id, via, depth, roots, relationships: adjacency.kinds.get(`${via}\u0000${id}`) ?? [] });
+  }
+  return rows.sort((left, right) => left.depth - right.depth || compareStrings(left.id, right.id));
 }
 
 /**
@@ -108,73 +240,27 @@ export function traverse(graph: CallGraph, request: TraversalRequest): Traversal
  */
 function buildAdjacency(graph: CallGraph, direction: TraversalDirection): Adjacency {
   const neighbors = new Map<string, string[]>();
+  const predecessors = new Map<string, string[]>();
   const kinds = new Map<string, readonly EdgeKind[]>();
   for (const edge of graph.edges) {
     const [from, to] = direction === 'dependencies' ? [edge.from, edge.to] : [edge.to, edge.from];
-    const list = neighbors.get(from);
-    if (list === undefined) neighbors.set(from, [to]);
-    else list.push(to);
+    appendTo(neighbors, from, to);
+    appendTo(predecessors, to, from);
     kinds.set(`${from}\u0000${to}`, edge.kinds);
   }
-  for (const list of neighbors.values()) list.sort(compareStrings);
-  return { neighbors, kinds };
-}
-
-/** 탐색 중인 root다. */
-interface SearchRoot {
-  readonly root: string;
-  readonly index: number;
+  for (const list of predecessors.values()) list.sort(compareStrings);
+  return { neighbors, predecessors, kinds };
 }
 
 /**
- * root 하나에서 너비 우선으로 훑어 전역 기록을 갱신한다. 다른 root도 지나가며 기록하고, 자기 자신은
- * (순환으로 돌아와도) 기록하지 않는다.
+ * 목록 맵에 값을 더한다.
  *
- * @param adjacency 인접 목록
- * @param search 탐색 중인 root
- * @param maxDepth 최대 깊이
- * @param records 전역 기록(갱신)
- * @returns 깊이 제한 때문에 닿지 못한 이웃이 있었으면 true
+ * @param map 키 → 목록
+ * @param key 키
+ * @param value 값
  */
-function searchFromRoot(adjacency: Adjacency, search: SearchRoot, maxDepth: number, records: Map<string, Record>): boolean {
-  const depths = new Map<string, number>([[search.root, 0]]);
-  const queue = [search.root];
-  let depthCut = false;
-  for (let head = 0; head < queue.length; head++) {
-    const node = queue[head]!;
-    const depth = depths.get(node)!;
-    const next = adjacency.neighbors.get(node) ?? [];
-    if (depth >= maxDepth) {
-      depthCut ||= next.some((neighbor) => !depths.has(neighbor));
-      continue;
-    }
-    for (const neighbor of next.filter((candidate) => !depths.has(candidate))) {
-      depths.set(neighbor, depth + 1);
-      queue.push(neighbor);
-      record(records, neighbor, depth + 1, node, search.index);
-    }
-  }
-  return depthCut;
-}
-
-/**
- * 도달 하나를 기록한다. 더 짧은 깊이만 via를 바꾸고(같은 깊이면 먼저 온 root), root 인덱스는 언제나 더한다.
- *
- * @param records 전역 기록
- * @param id 노드 id
- * @param depth 깊이
- * @param via 직전 노드
- * @param rootIndex root 인덱스
- */
-function record(records: Map<string, Record>, id: string, depth: number, via: string, rootIndex: number): void {
-  const existing = records.get(id);
-  if (existing === undefined) {
-    records.set(id, { depth, via, roots: new Set([rootIndex]) });
-    return;
-  }
-  if (depth < existing.depth) {
-    existing.depth = depth;
-    existing.via = via;
-  }
-  existing.roots.add(rootIndex);
+function appendTo(map: Map<string, string[]>, key: string, value: string): void {
+  const list = map.get(key);
+  if (list === undefined) map.set(key, [value]);
+  else list.push(value);
 }
