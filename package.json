@@ -43,5 +43,8 @@
   "devDependencies": {
     "@types/node": "22.19.7",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
   }
 }
