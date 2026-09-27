@@ -16,7 +16,8 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` 사실 | 구현됨 |
 | `tsograph routes --role server`: Next.js App Router route handler·Pages Router API route → `route-decl` 사실 | 구현됨 |
 | 그 밖의 Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa) | 계획 |
-| ORM/SQL relation-use(Prisma·TypeORM·Sequelize·Drizzle·Knex·raw SQL·D1) | 계획 |
+| `tsograph schema`: Prisma 스키마·Prisma Client·원시 SQL → persistence `relation-use` 사실 | 구현됨 |
+| TypeORM·Sequelize·Drizzle·Knex·raw 드라이버·D1 relation-use | 계획(현재는 limitation으로 센다) |
 | 웹/React Native 클라이언트 route-call, 호출 그래프, 영향 | 계획 |
 
 isthmus의 `http` target은 아직 isthmus `docs/GRAPH-EXCHANGE.md`의 **초안**("개발 중: HTTP 경계
@@ -246,6 +247,167 @@ node <isthmus>/src/cli/main.ts check contract.json decl.json client.json
 check는 코드 0으로 끝나고 의도한 드리프트를 보고한다(`GET /api/health`·`PUT /api/items/{}`의
 `route-contract-without-decl`, 스펙에 없는 핸들러의 `route-decl-without-contract`).
 
+## `tsograph schema`
+
+```sh
+tsograph schema --project <root> [--format json]
+```
+
+프로젝트의 Prisma 스키마, Prisma Client 사용, SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에
+쓴다. `platform: "js"`, `target: "persistence"`(사실이 없으면 `null`), 관찰한 관계·컬럼 참조마다
+`relation-use` 사실 하나다. isthmus가 `docs/GRAPH-EXCHANGE.md` persistence 규칙으로
+`platform: "sql"` 문서(schemagraph `facts --document <catalog>`)와 조인한다.
+
+- `--project`(필수): 조인 루트. `project`는 그 POSIX realpath이고 모든 `location.path`는 그 기준
+  상대 경로다. 심볼릭 링크는 따라가지 않는다.
+- 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
+  사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다.
+- 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
+  generator 출력 디렉터리, `*.d.ts`, 4 MiB 넘는 파일(개수로 센다).
+
+### 사실
+
+| 원천 | `channel` | `method` | `location` | `symbol.qualifiedName` |
+|---|---|---|---|---|
+| Prisma `model`/`view` | 해석한 테이블 이름 | — | 모델 이름 | `Model` |
+| Prisma 스칼라 필드 | 해석한 테이블 이름 | 해석한 컬럼 | 필드 이름 | `Model.field` |
+| 암시적 다대다 | `_<관계 이름>` | —와 `A`, `B` | 첫 관계 필드 | `Model.field` |
+| `client.<delegate>` 접근 | 모델의 테이블 | — | delegate 이름 | 감싸는 선언 |
+| delegate 호출 인자 | 모델의 테이블 | 컬럼 | 객체 키·문자열 | 감싸는 선언 |
+| 원시 SQL(`$queryRaw`·`$executeRaw`·`Prisma.sql`·`…Unsafe`·TypedSQL·대문자 리터럴) | 쓰인 그대로의 관계 | — | SQL 리터럴(TypedSQL은 키워드) | 감싸는 선언 |
+
+채널은 코드·매핑이 쓴 그대로다. 한정됐으면(`@@schema`, `FROM s.t`) `schema.table`, 아니면
+비한정이다 — PostgreSQL 기본 스키마는 연결 설정이 정하므로 `public` 같은 값을 추측하지 않는다.
+이름 자체에 `.`가 있으면(`@@map("a.b")`, SQL의 `"a.b"`) 한 세그먼트로 `a%2Eb`처럼 escape하고,
+`%`는 `%25`로 escape한다.
+
+**심볼 형식.** 소스 사실은 `<프로젝트 기준 POSIX 경로>#<이름>(.<이름>)*`이고 바깥 선언부터 적는다.
+함수 선언, 이름 있는 클래스·클래스 식, 메서드, 접근자, 클래스 필드, `constructor`, 이름 없는 default
+export의 `default`, 모듈 최상위 변수 또는 함수 값 초기값 안에 사실이 있는 변수
+(`src/lib/jobs.ts#listJobs`, `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). 이름 없는 콜백은
+투명하다. 계산된 이름이 끼면 심볼을 만들지 않고, 모듈 최상위 문장에는 심볼이 없다 — 이런 사실은
+`missing-relation-symbols:`로 센다. 스키마 사실은 모델 이름(`Job`, `Job.title`), TypedSQL 사실은
+`<경로>#<파일 이름>`이다.
+
+### Prisma 스키마 위치(Prisma 7.8.0 CLI 규칙)
+
+프로젝트 루트, `prisma.config.*`가 있는 디렉터리, `prisma`·`@prisma/client`에 의존하는
+package.json이 있는 패키지마다:
+
+1. `prisma.config.{js,ts,mjs,cjs,mts,cts}`, `.config/prisma.*`, `.config/prisma.config.*` 중 첫
+   설정 파일. default export(`defineConfig({...})`, 객체 리터럴, 같은 파일 `const`)의 `schema`가
+   문자열 리터럴일 때만 읽는다. 디렉터리면 다중 파일 스키마이고 그 아래 `.prisma`를 재귀로 모두 읽는다.
+2. `schema`가 없으면 `<기준>/schema.prisma`, 그다음 `<기준>/prisma/schema.prisma` 한 파일.
+3. package.json `"prisma": { "schema" }`는 설치된 Prisma가 6.x 이하일 때만 쓴다(7.x는 읽지 않는다).
+
+리터럴이 아닌 설정 값(`path.join(...)`, 환경 변수)은 추측하지 않는다: `unresolved-prisma-config:`.
+설정한 경로가 없으면 `missing-prisma-schemas:`.
+
+### Prisma 이름 규칙
+
+고정 버전의 Prisma 소스로 확인했다(`@prisma/internals@7.8.0`이 고정한 prisma-engines 커밋,
+`@prisma/client-generator-ts@7.8.0`, `@prisma/client-common@7.8.0`,
+`@prisma/orm-family-sql@8.0.0-rc.1`–`rc.12`).
+
+- **테이블**: `@@map` 값, 없으면 모델 이름 그대로(`psl/parser-database/src/walkers/model.rs`
+  `database_name()`). `@prisma/orm-family-sql` 8.0.0-rc.1–rc.11은 첫 글자를 소문자로 바꾸고
+  (`lowerFirst(model.name)`), rc.12가 모델 이름 그대로로 되돌렸다(`defaultTableName`, 릴리스 노트).
+- **컬럼**: `@map` 값, 없으면 필드 이름(`walkers/scalar_field.rs`, 8.x도 같다).
+- **스키마**: `@@schema("s")`가 테이블을 한정한다(6.13부터 GA, PostgreSQL·CockroachDB·SQL Server).
+  없으면 비한정이다.
+- **암시적 다대다**: 테이블은 `_` + 관계 이름. 기본 관계 이름은 두 모델 이름을 코드 포인트 순
+  (대문자가 소문자보다 앞)으로 이은 `<A>To<B>`, `@relation("Name")`이면 `_Name`, 컬럼은 `A`·`B`,
+  스키마는 모델 `A`의 스키마다. 63자를 넘는 이름은 잘림 규칙을 추측하지 않고 dynamic으로 낸다.
+  Prisma 8 네이티브 PSL에는 암시적 다대다가 없다.
+- **내지 않는 것**: 관계 필드, `@ignore` 필드, `@@ignore` 모델(클라이언트에 없다), composite `type`,
+  datasource provider가 `mongodb`인 모든 모델(`non-relational-stores:`). `Unsupported("…")` 필드는
+  컬럼이라 낸다.
+- **클라이언트 delegate**: 모델 이름의 첫 글자만 소문자(`uncapitalize`). 런타임이 모델 이름 그대로의
+  키도 받으므로 그것도 인정한다.
+
+**버전 선택.** 잠금 파일(`pnpm-lock.yaml`, `package-lock.json`, `npm-shrinkwrap.json`,
+`yarn.lock`, `bun.lock`)에서, 잠금 파일이 Prisma를 담지 않으면 package.json의 정확한 버전·`^`·`~`
+명세에서 읽는다. `prisma`·`@prisma/client` 2.x–7.x는 Prisma 7 규칙, `@prisma/orm-family-sql`은 8.x
+규칙을 고른다(8.x `prisma` 패키지는 다른 CLI라 무시한다). 버전을 모르거나 확인하지 않은 버전
+(예: rc.13 이상, 8.0.0)이거나 규칙이 여럿 설치됐으면 후보 규칙을 모두 평가해, 같은 이름은 내고 갈리는
+이름은 컬럼 없는 dynamic 사실로 내며 `prisma-naming-unverified:`를 싣는다. Prisma 8 contract 파일과
+클라이언트 API는 읽지 않는다(`prisma-8-surface-unscanned:`).
+
+### Prisma Client 사용
+
+수신자의 출처가 구문으로 증명될 때만 클라이언트로 본다. 타입 검사기를 돌리지 않고 아무것도
+실행하지 않는다.
+
+- `@prisma/client`(`/edge`·`/wasm` 등), `.prisma/client`, generator `output` 디렉터리(스키마 파일 기준,
+  상대 경로·tsconfig/jsconfig `paths`로 맞추며 생성물이 커밋되지 않았어도 된다)에서 가져온
+  `PrismaClient`의 `new PrismaClient(...)`
+- `PrismaClient`·`Prisma.TransactionClient`, 그 지역 별칭, `Omit/Pick/Readonly/NonNullable/Required<…>`,
+  교차 타입, `typeof client`, 이를 상속한 인터페이스로 표기한 선언, 그리고 반환 타입(또는 `Promise<…>`)을
+  그렇게 표기한 함수
+- 한쪽이 클라이언트인 `a ?? b`·`a || b`(`globalThis.prisma ?? new PrismaClient()`),
+  `client.$extends(...)`, `client.$transaction(async (tx) => …)` 콜백의 첫 매개변수, 클래스 필드와
+  생성자 매개변수 속성(`this.db`)
+- 파일 사이 바인딩: 이름·default·이름공간 import, 재수출, `export *`, CommonJS
+  `require`·`module.exports`, `await import(...)`. TypeScript 모듈 해석기와 가장 가까운
+  `tsconfig.json`/`jsconfig.json`(프로젝트 안으로 제한)으로 풀고 고정점까지 반복한다.
+
+지역 변수·매개변수는 바깥 클라이언트를 가린다. 출처를 추적하지 못한 수신자의
+`x.<delegate>.<operation>(...)` 모양 호출은 내지 않고 `unresolved-client-receivers:`로 센다. 증명된
+클라이언트의 모르는·계산된 delegate(`prisma[name]`)는 dynamic 사실이다.
+
+컬럼 사실은 delegate 호출 객체 리터럴의 `select`·`omit`·`where`·`data`·`cursor`·`create`·`update`·
+`orderBy` 최상위 키와 `distinct`·`by` 문자열 중, 그 모델의 스칼라 필드인 것만 낸다.
+
+### SQL 텍스트
+
+SQL은 가족 공유 어휘 추출기(dartograph `sql_relations.dart`·cartograph `SqlRelations.swift`를 한
+줄씩 옮기고 같은 벡터로 검증한 포트)로 읽어, 같은 SQL이 생산자와 무관하게 같은 관계가 된다.
+
+- `$queryRaw`·`$executeRaw` 태그 템플릿과 `Prisma.sql` 조각: 보간은 바인드 파라미터라 `?`
+  플레이스홀더로 바꾼다. 중첩 `Prisma.sql`, `Prisma.raw('리터럴')`, `Prisma.empty`는 펼친다. 관계 자리의
+  플레이스홀더(`FROM ${table}`)는 미해석 피연산자라 dynamic 사실 하나를 더한다.
+- `$queryRawUnsafe`·`$executeRawUnsafe`: 문자열 리터럴·같은 파일 `const`는 읽고, 보간 템플릿과 그 밖의
+  식은 dynamic 사실이다(가족 규칙).
+- TypedSQL: generator가 `typedSql` preview를 켜면 설정 `typedSql.path` 또는 `<스키마 루트>/sql`의
+  최상위 `.sql` 파일을 읽는다.
+- 그 밖의 문자열 리터럴은 SQL 동사와 관계 키워드가 대문자일 때만 읽는다(strict). 소문자 SQL처럼 보이는
+  리터럴은 `skipped-sql-literals:`로 센다.
+
+### 지원 표면 밖
+
+TypeORM, Sequelize, Drizzle, Knex, Kysely, Objection, MikroORM, `pg`, `postgres`, `mysql`, `mysql2`,
+SQLite 드라이버, libSQL, Neon, Vercel Postgres, PlanetScale, MSSQL, Oracle, slonik, Cloudflare D1
+(`D1Database`)의 쿼리는 해석하지 않는다. 이를 쓰는 파일 수를 `unsupported-db-packages:`로, Mongoose·
+MongoDB·DynamoDB·Firebase·Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터럴은
+여전히 SQL 텍스트로 읽는다.
+
+### limitation 접두사
+
+`prisma-schema-not-found:`, `unresolved-prisma-config:`, `missing-prisma-schemas:`,
+`schema-outside-project:`, `non-relational-stores:`, `prisma-naming-unverified:`,
+`prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
+`ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
+`unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
+`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-symbols:`,
+`invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
+`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
+심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
+
+### 카탈로그와 조인
+
+schemagraph는 DDL 파일을 직접 읽지 않으므로, Prisma 마이그레이션 폴더의 카탈로그는 임시
+데이터베이스에서 모은다. `prisma/migrations/*/migration.sql`을 버릴 PostgreSQL에 순서대로 적용한 뒤:
+
+```sh
+schemagraph scan "postgres://…/scratch" --source-id prisma-migrations --emit-document catalog.json -o graph.json
+schemagraph facts --document catalog.json --project <root> -o sql-facts.json
+tsograph schema --project <root> > js-facts.json
+isthmus check --pairs js-facts.json sql-facts.json
+```
+
+`fixtures/schema/prisma-app`은 자체 마이그레이션을 가진 합성 프로젝트다. 이렇게 조인하면 오류가 없다
+(`@@ignore` 모델에 대한 예상된 `relation-decl-without-use-unverified` 경고 하나).
+
 ## 개발
 
 ```sh
@@ -253,6 +415,9 @@ npm ci
 npm run verify   # 타입 검사, 라인·분기·함수 90% 게이트 테스트, clean build, CLI 계약
 node --test src/openapi/path-template.test.ts   # 집중 실행
 ```
+
+`src/schema/sql-relations.test.ts`는 가족 공유 SQL 관계 벡터(cartograph `SqlRelationsTests`·
+dartograph `sql_relations_test`와 같은 기대값)를 담는다.
 
 `src/openapi/conformance.test.ts`는 isthmus 공유 벡터 `conformance/http-template.json`이 있으면
 (`TSOGRAPH_CONFORMANCE_DIR`, `./conformance/`, 형제 `../isthmus/conformance/`) 템플릿 정규화기를

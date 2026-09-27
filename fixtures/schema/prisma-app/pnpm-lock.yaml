@@ -1,0 +1,27 @@
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@prisma/client':
+        specifier: ^7.8.0
+        version: 7.8.0(prisma@7.8.0)
+    devDependencies:
+      prisma:
+        specifier: ^7.8.0
+        version: 7.8.0
+
+packages:
+
+  '@prisma/client@7.8.0':
+    resolution: {integrity: sha512-synthetic}
+
+  prisma@7.8.0:
+    resolution: {integrity: sha512-synthetic}
+
+snapshots:
+
+  '@prisma/client@7.8.0(prisma@7.8.0)': {}
+
+  prisma@7.8.0: {}

@@ -9,6 +9,7 @@ import { runChild } from './run-child.mjs';
 const binaryPath = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const fixtures = fileURLToPath(new URL('../fixtures/openapi/', import.meta.url));
 const nextFixtures = fileURLToPath(new URL('../fixtures/next/', import.meta.url));
+const schemaFixture = fileURLToPath(new URL('../fixtures/schema/prisma-app/', import.meta.url));
 const packageDocument = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 );
@@ -21,6 +22,7 @@ verifyOpenApiInputErrors();
 verifyOpenApiUsageErrors();
 verifyRoutesSuccess();
 verifyRoutesErrors();
+verifySchema();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -101,6 +103,27 @@ function verifyRoutesErrors() {
   verify(run(['routes', '--role', 'client', '--project', project]).status === 64, 'routes client role');
   verify(run(['routes', '--role', 'server']).status === 64, 'routes missing project');
   verify(run(['routes', '--role', 'server', '--project', join(project, 'missing')]).status === 2, 'routes missing project directory');
+}
+
+/** schema 명령이 결정적인 persistence 문서를 내고 0/2/64 계약을 지키는지 확인한다. */
+function verifySchema() {
+  const args = ['schema', '--project', schemaFixture, '--format', 'json'];
+  const first = run(args);
+  verify(first.status === 0, 'schema exit code');
+  const document = JSON.parse(first.stdout);
+  verify(document.format === 'bridge-facts' && document.version === 1, 'schema envelope');
+  verify(document.platform === 'js' && document.target === 'persistence', 'schema platform');
+  verify(document.facts.length > 0 && document.facts.every((fact) => fact.kind === 'relation-use'), 'schema facts');
+  verify(withoutGeneratedAt(first.stdout) === withoutGeneratedAt(run(args).stdout), 'schema determinism');
+  verify(run(['help', 'schema']).stdout.startsWith('Usage: tsograph schema'), 'schema help');
+  verify(run(['schema']).status === 64, 'schema missing project');
+  verify(run(['schema', '--project', schemaFixture, '--format', 'yaml']).status === 64, 'schema format');
+  const directory = mkdtempSync(join(tmpdir(), 'tsograph-cli-contract-'));
+  try {
+    verify(run(['schema', '--project', join(directory, 'missing')]).status === 2, 'schema missing directory');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /** 추출 시각만 다른 두 출력을 비교할 수 있게 generatedAt 줄을 지운다. */

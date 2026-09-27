@@ -1,0 +1,37 @@
+/// 저자 — 테이블 이름을 @@map으로 바꾼다.
+model Author {
+  id        Int      @id @default(autoincrement())
+  fullName  String   @map("full_name")
+  books     Book[]
+  createdAt DateTime @default(now())
+
+  @@map("authors")
+}
+
+model Book {
+  id       Int     @id @default(autoincrement())
+  title    String
+  genre    Genre
+  authorId Int
+  author   Author  @relation(fields: [authorId], references: [id])
+  tags     Tag[]
+  legacy   String? @ignore
+  search   Unsupported("tsvector")?
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  label String @unique
+  books Book[]
+}
+
+model ImportBatch {
+  id Int @id
+
+  @@ignore
+}
+
+enum Genre {
+  FICTION
+  ESSAY
+}

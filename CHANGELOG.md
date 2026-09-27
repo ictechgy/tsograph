@@ -30,6 +30,21 @@
   matcher 소스로 확인해 테스트로 고정한다.
 - `CommandFileSystem.listDirectory`(symlink를 따라가지 않는 디렉터리 읽기)와 `RouteDeclFact`·
   `RouteDeclDocument` 교환 타입을 더한다. 구문 트리를 읽기 위해 `typescript`를 런타임 의존성으로 옮긴다.
+- `tsograph schema --project <root> [--format json]`: Prisma 스키마·Prisma Client 사용·원시 SQL을
+  isthmus bridge-facts v1 persistence 문서(`platform: "js"`, `target: "persistence"`,
+  `relation-use` 사실)로 바꾼다. schemagraph 카탈로그 문서와 isthmus `check --pairs`로 왕복 검증했다.
+- Prisma 스키마: prisma.config·기본 위치·다중 파일 폴더 탐색(7.8.0 CLI 규칙), 모델 테이블·스칼라
+  컬럼·암시적 다대다 조인 테이블(`_AToB`, `A`·`B`) 사실, `@map`·`@@map`·`@@schema`·`@ignore`·
+  `@@ignore`·composite type·`Unsupported` 처리. 이름 규칙은 Prisma 소스로 확인한 버전 범위만 인정하고
+  (잠금 파일로 판정), 모르는 버전은 규칙마다 갈리는 이름만 dynamic과 `prisma-naming-unverified:`로 낸다.
+- Prisma Client: 구문으로 증명한 클라이언트 출처(생성·타입 표기·팩토리·`$transaction` 콜백·클래스
+  멤버·파일 사이 import/재수출/CommonJS/동적 import 고정점)만 인정하고, delegate 접근과 호출 인자의
+  스칼라 필드 키를 사실로 낸다. 추적하지 못한 수신자는 개수로만 센다.
+- 원시 SQL: dartograph·cartograph와 같은 공유 SQL 관계 추출기 포트와 같은 벡터. `$queryRaw` 태그
+  템플릿 보간은 바인드 파라미터로 읽고, `…Unsafe` 보간·비리터럴은 dynamic, TypedSQL `.sql`, 대문자
+  SQL 리터럴을 읽는다.
+- 심볼 형식 `<경로>#<선언 이름>`(스키마 사실은 모델 이름), 지원 표면 밖 ORM·드라이버·D1·비관계 저장소
+  사용 계수 limitation.
 - `tsograph openapi <spec> --service <name> [--project <root>] [--format json]`:
   Swagger 2.0·OpenAPI 3.0.x/3.1.x(JSON·YAML)를 isthmus bridge-facts v1 http 문서
   (`platform: "openapi"`, `target: "http"`, `roles: ["server"]`, `route-contract` 사실)로 바꾼다.
