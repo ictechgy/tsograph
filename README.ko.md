@@ -14,7 +14,8 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | 영역 | 상태 |
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` 사실 | 구현됨 |
-| Node 백엔드 라우트 선언(Next.js·Hono·Express·Fastify·NestJS·Koa) | 계획 |
+| `tsograph routes --role server`: Next.js App Router route handler·Pages Router API route → `route-decl` 사실 | 구현됨 |
+| 그 밖의 Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa) | 계획 |
 | ORM/SQL relation-use(Prisma·TypeORM·Sequelize·Drizzle·Knex·raw SQL·D1) | 계획 |
 | 웹/React Native 클라이언트 route-call, 호출 그래프, 영향 | 계획 |
 
@@ -118,6 +119,128 @@ limitation 접두사를 써서 isthmus가 거짓 error 대신 판정을 낮추�
 - 사실은 최대 100,000개(사실을 만들기 전에 센다)이고, 출력은 isthmus 파일당 입력 상한인
   16 Mi 문자 안이어야 한다. 넘으면 부분 문서 대신 실패한다.
 
+## `tsograph routes --role server`
+
+```sh
+tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
+```
+
+Next.js 프로젝트를 스캔해 bridge-facts v1 문서를 표준 출력에 쓴다: `platform: "js"`,
+`target: "http"`, `roles: ["server"]`, `dispatch: "specificity"`, `sourceSets`, (route 파일, HTTP
+method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파서로 읽기만 하고 실행하지 않는다.
+모듈 해석·타입 검사·네트워크 접근도 하지 않는다.
+
+- `--role server`(필수): 선언 측만 구현했다. `client`는 route-call 추출이 생기기 전까지 사용법 오류다.
+- `--project`(필수): Next.js 프로젝트 루트(`next.config.*`와 `app/`·`pages/`가 있는 곳). `project`는
+  그 POSIX realpath이고 `location.path`는 그 기준 상대 경로다.
+- `--service`: 문서와 모든 사실에 싣는 서비스 신원.
+- `--include-tests`: 테스트로 보이는 route 파일도 `testSource: true`와 `sourceSets.tests: "included"`로
+  낸다. 없으면 건너뛰고 `sourceSets.tests: "excluded"`를 선언한다. 테스트 경로는 `*.test.*`·`*.spec.*`와
+  `__tests__/`·`__mocks__/` 아래 파일이다. `test/` 폴더는 Next.js에서 실제 URL 세그먼트라
+  (`app/api/test/route.ts`는 `/api/test`) 테스트로 보지 않는다.
+- 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트나 상한을
+  넘는 출력(사실 100,000개 초과, 16 Mi 문자 초과), `64` 사용법 오류. route 파일 하나를 읽지 못하는 것은
+  실패가 아니라 limitation이다.
+
+### 확인한 Next.js 동작(next 16.2.7)
+
+아래 규칙은 추측하지 않고 `next@16.2.7` 패키지(`dist/` 소스와 `dist/docs/`의 번들 문서)로 확인했다.
+
+| 규칙 | `next/dist` 출처 |
+|---|---|
+| `app/`·`pages/`는 프로젝트 루트를 먼저, 없으면 `src/`를 본다 | `lib/find-pages-dir.js`(`findDir`) |
+| route handler는 `pageExtensions`마다 `route.<ext>`다(기본 `tsx`·`ts`·`jsx`·`js`, `.mts`는 기본값이 **아니다**) | `server/lib/find-page-file.js`, `server/config-shared.js` |
+| 핸들러 method는 내보낸 이름 `GET`·`HEAD`·`OPTIONS`·`POST`·`PUT`·`DELETE`·`PATCH`다. 소문자 이름과 `default`는 핸들러가 아니다 | `server/web/http.js`, `server/route-modules/app-route/module.js` |
+| `HEAD`(GET이 있을 때)와 `OPTIONS`는 자동 구현되므로 decl로 내지 **않는다**(isthmus가 `head-as-get`·`options-any`로 맞춘다) | `server/route-modules/app-route/helpers/auto-implement-methods.js` |
+| route group `(name)`과 `@slot` 세그먼트는 경로에서 빠진다 | `shared/lib/router/utils/app-paths.js`(`normalizeAppPath`), `shared/lib/segment.js` |
+| `_`로 시작하는 파일·폴더는 App Router 스캔에서 빠지고, `%5F`는 리터럴 밑줄이다 | `build/route-discovery.js`(`ignorePartFilter`), project-structure 문서 |
+| 동적 세그먼트는 세그먼트 전체일 때만이다: `[x]` → `{}`, `[...x]` → `{**}`(1개 이상), `[[...x]]` → 0개 이상. `[[x]]`, 끝이 아닌 catch-all, `.`로 시작하는 이름, 반복된 이름은 빌드 오류다 | `shared/lib/router/utils/sorted-routes.js`, `route-regex.js` |
+| `pages/api` 아래(와 `pages/api.<ext>`)의 페이지 확장자 파일은 `.d.ts`를 빼고 모두 API route다. 여기서는 `_`에 특별한 뜻이 없고, 핸들러가 모든 method를 받는다 | `lib/is-api-route.js`, `build/route-discovery.js`, API Routes 문서 |
+| 설정 파일은 `next.config.js`, `.mjs`, `.ts` 순서로 찾는다(`.mts`는 런타임이 TypeScript를 지원할 때만) | `shared/lib/constants.js`(`CONFIG_FILES`) |
+| `basePath`는 빈 문자열이거나 `/`로 시작하고 `/`로 끝나지 않아야 한다 | `server/config.js` |
+| 끝 슬래시: `trailingSlash: false`(기본)면 `/x/`를 `/x`로 308 redirect하고, `true`면 마지막 세그먼트가 `name.ext` 모양이거나 `.well-known` 아래가 아닌 한 `/x`를 `/x/`로 보낸다. `skipTrailingSlashRedirect: true`면 redirect가 없고 매칭은 끝 슬래시를 무시한다 | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
+| `proxy.<ext>`·`middleware.<ext>`는 `app`/`pages` 옆(루트 또는 `src/`)에 둔다 | `build/index.js`, `lib/constants.js` |
+| 메타데이터 파일(`sitemap`·`robots`·`manifest`·`icon`·`apple-icon`·`opengraph-image`·`twitter-image`·`favicon.ico`)은 framework 라우트를 만든다 | `lib/metadata/is-metadata-route.js` |
+| 라우팅은 가장 구체적인 후보를 고른다(정적 > `[x]` > `[...x]` > `[[...x]]`). 그래서 문서는 `dispatch: "specificity"`다 | `shared/lib/router/utils/sorted-routes.js` |
+
+### 사실을 만드는 규칙
+
+- **내보내기 형태**: `export [async] function GET`, `export const GET = …`, 구조 분해
+  (`export const { GET, POST } = handlers`), `export { handler as GET }`, 재내보내기
+  (`export { GET } from './impl'`, `export { x as POST } from '…'`). Next는 내보낸 **이름**으로
+  고르므로 값이 다른 모듈에서 와도 이름은 확정된다. 타입 전용·`declare` 내보내기는 뺀다.
+- **확정할 수 없는 내보내기**는 추측하지 않는다: `export * from '…'`와 CommonJS 할당
+  (`module.exports`·`exports.x`·`export =`)은 `route-coverage:`로 센다.
+- **Pages Router**: API 파일마다 `ANY` decl 하나, 위치는 `export default`(없으면 첫 CommonJS 내보내기)다.
+  정적으로 보이는 기본 내보내기가 없는 파일은 내지 않고 `route-coverage:`로 센다(`pages/api` 아래 둔
+  도우미 파일이 출력에 섞이지 않는다).
+- **channel**: `basePath` + 폴더 경로의 정규 템플릿. 정적 세그먼트는 `tsograph openapi`와 같은 RFC 3986
+  리터럴 정규화를 쓴다(`café` → `caf%C3%A9`). 대괄호와 다른 글자가 섞인 세그먼트(`v[id]`)는 Next.js가
+  문서화하지 않았고 라우터와 정규식 생성기가 다르게 해석하므로 `dynamic`과 `route-coverage:`로 낸다.
+- **`[[...x]]`**는 `{**}` decl과 catch-all을 뗀 접두사 decl을 함께 낸다(계약의 0세그먼트 펼침). 접두사
+  decl에 `catchAllPrefix`가 없는 이유는 아래 결정 목록에 있다.
+- **trailingSlash**: 위 redirect 규칙으로 한 형태가 정규이면 `strict`(channel은 그 형태), redirect가 없어
+  두 형태가 모두 핸들러에 닿으면 `optional`(`skipTrailingSlashRedirect: true`, `.well-known`, 두 redirect에
+  모두 걸리지 않는 점 있는 마지막 세그먼트), 파라미터 값에 달렸거나 설정 값이 리터럴이 아니면 생략
+  (unknown)한다. `caseInsensitive`는 증명하지 못했으므로 내지 않는다.
+- **location**: 내보낸 이름 토큰(`GET`, Pages Router는 `default`)의 1부터 시작하는 줄과 UTF-8 바이트 열.
+  앞의 BOM은 3바이트로 센다.
+- **symbol.qualifiedName**: `<프로젝트 기준 파일 경로>#<내보낸 이름>`, 예: `src/app/api/items/route.ts#GET`,
+  `pages/api/hello.ts#default`. 아직 `usr`는 없다.
+
+### 설정과 limitation
+
+`next.config.*`는 정적으로 읽는다: `export default`·`module.exports`·`export =`를 `const` 바인딩,
+`satisfies`/`as`, 따라갈 수 있는 전개까지 따라간다. 재할당·속성 변경·`Object.assign` 대상이 된 이름은
+따라가지 않는다.
+
+| 상황 | 결과 |
+|---|---|
+| 설정이 함수·비객체를 내보내거나, 내보내기가 없거나, 구문 오류 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| `basePath`가 문자열 리터럴이 아니거나 Next.js가 거부하는 값 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| 설정을 감싼 호출(`withX(config)`) | 안쪽 리터럴 값을 쓰고 `root`, 그리고 `unresolved-route-prefix:`(감싼 함수가 값을 바꾸거나 라우트를 더할 수 있다) |
+| `pageExtensions`가 리터럴 문자열 배열이 아님 | 기본 확장자 + `route-coverage:` |
+| `rewrites`·`redirects`·`i18n`, 또는 열거할 수 없는 키 | `framework-provided-routes:` |
+| `proxy`/`middleware` 파일, 메타데이터 파일, 비어 있지 않은 `public/` | `framework-provided-routes:`(합성 decl 없음) |
+| route 파일 위에 `@slot`·intercepting route(`(.)x`) 폴더 | 모델링하지 않음(Next 문서가 페이지에 대해서만 설명), `route-coverage:` |
+| Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
+| `package.json`에 `next`가 없거나 범위가 주 버전 16에 한정되지 않음 | `route-framework-version-unknown:` |
+| `app/`·`pages/` 디렉터리가 없음 | 사실 0건 + `route-coverage:` |
+
+서버 측 접두사는 모두 계약의 닫힌 목록에서 쓴다. 그래서 isthmus는 각각을 서버 측 공백으로 읽고
+`route-call-without-decl`을 거짓 error 대신 `-unverified`로 내린다. limitation에는 개수와 프로젝트 기준
+이름만 싣는다.
+
+### 결정 사항(초안과 다른 부분)
+
+- **`usr` 없음, qualifiedName이 조인 손잡이.** `<file>#<export>`는 Next.js가 호출하는 모듈 내보내기를
+  가리킨다. 이후 단계에서 tsograph 그래프 id를 같은 (모듈 경로, 내보낸 이름) 쌍으로 찾아 `symbol.usr`로
+  더한다. `qualifiedName`은 바꾸지 않는다.
+- **optional catch-all 접두사에 `catchAllPrefix`를 달지 않는다.** 계약은 펼친 접두사 decl에
+  `catchAllPrefix: true`를 달게 하지만, isthmus는 그런 decl에 `symbol.usr`를 요구한다. usr가 생기기 전까지는
+  접두사 decl을 일반 decl로 낸다(`{**}` decl과 같은 method·symbol·location). Next.js는 같은 자리의 명시
+  라우트를 빌드 오류(E458)로 막으므로 명시 decl과 충돌하지 않는다. 대신 `route-decl-without-call`·드리프트
+  경고에 나타날 수 있다. usr가 생기면 `catchAllPrefix: true`로 바꾼다.
+- **감싼 설정은 `root`를 유지한다.** `withX(config)`를 모두 basePath 미상으로 보면 실제 프로젝트 대부분이
+  `base`가 된다. 안쪽 리터럴을 쓰고 불확실성은 `unresolved-route-prefix:`로 알린다. 이 limitation이 이미
+  거짓 error를 막는다.
+- **설정은 프로젝트 루트에서만 찾는다.** Next.js는 부모 디렉터리도 찾는다(`find-up`). `next.config.*`가 있는
+  디렉터리를 넘긴다.
+
+### isthmus로 검증
+
+`fixtures/next/`의 합성 fixture를 isthmus `main` 소비자로 확인했다:
+
+```sh
+tsograph openapi fixtures/next/app-router/openapi.yaml --service demo --project fixtures/next/app-router > contract.json
+tsograph routes --role server --project fixtures/next/app-router --service demo > decl.json
+# client.json: roles ["client"], 같은 project·service의 사실 0건 문서
+node <isthmus>/src/cli/main.ts check contract.json decl.json client.json
+```
+
+check는 코드 0으로 끝나고 의도한 드리프트를 보고한다(`GET /api/health`·`PUT /api/items/{}`의
+`route-contract-without-decl`, 스펙에 없는 핸들러의 `route-decl-without-contract`).
+
 ## 개발
 
 ```sh
@@ -129,6 +252,10 @@ node --test src/openapi/path-template.test.ts   # 집중 실행
 `src/openapi/conformance.test.ts`는 isthmus 공유 벡터 `conformance/http-template.json`이 있으면
 (`TSOGRAPH_CONFORMANCE_DIR`, `./conformance/`, 형제 `../isthmus/conformance/`) 템플릿 정규화기를
 그 벡터로 검증하고, 없으면 이유를 알리고 건너뛴다.
+
+`src/routes/conformance.test.ts`는 Next fixture가 내는 모든 정적 channel을 벤더링한
+`conformance/http-template.json`의 문법 사례로 검사하고, 확인한 Next.js 변환표(`next/dist` 출처 포함)를
+isthmus 벡터 모양으로 두어 `producer:nextjs` 사례로 올릴 수 있게 한다.
 
 ## 라이선스
 
