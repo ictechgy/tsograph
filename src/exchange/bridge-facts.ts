@@ -91,3 +91,43 @@ export function isSafeIdentifier(value: string): boolean {
 export function formatBridgeTimestamp(instant: Date): string {
   return instant.toISOString();
 }
+
+/** `route-decl` 전용 method다. `ANY`는 method를 정적으로 알 수 없는 선언(Pages Router API 등)이다. */
+export type RouteDeclMethod = HttpMethod | 'ANY';
+
+/** 서버 코드의 라우트 선언 하나를 나타내는 `route-decl` 사실이다. */
+export interface RouteDeclFact {
+  readonly kind: 'route-decl';
+  readonly method: RouteDeclMethod;
+  /** 정규 경로 템플릿. dynamic이면 안전하게 인코딩한 원문(길이 상한)이다. */
+  readonly channel: string;
+  readonly dynamic: boolean;
+  readonly pathAnchor: PathAnchor;
+  readonly service?: string;
+  /** 끝 슬래시 규칙. 생략은 unknown이다. */
+  readonly trailingSlash?: 'strict' | 'optional';
+  /** `--include-tests`로 낸 테스트 소스 사실에만 단다. */
+  readonly testSource?: true;
+  readonly location: BridgeLocation;
+  /** `usr`는 아직 싣지 않는다(tsograph 그래프 id가 생기면 추가한다). */
+  readonly symbol: { readonly qualifiedName: string };
+}
+
+/** tsograph routes --role server가 내는 bridge-facts v1 문서다. */
+export interface RouteDeclDocument {
+  readonly format: 'bridge-facts';
+  readonly version: 1;
+  readonly tool: { readonly name: 'tsograph'; readonly version: string };
+  readonly generatedAt: string;
+  readonly platform: 'js';
+  /** roles가 있는 http 문서는 사실이 0건이어도 target을 유지한다. */
+  readonly target: 'http';
+  readonly roles: readonly ['server'];
+  /** 파일 라우터(Next.js)는 구체성 순서로 고른다. */
+  readonly dispatch: 'specificity';
+  readonly sourceSets: { readonly tests: 'excluded' | 'included' };
+  readonly service?: string;
+  readonly project: string;
+  readonly facts: readonly RouteDeclFact[];
+  readonly limitations: readonly string[];
+}

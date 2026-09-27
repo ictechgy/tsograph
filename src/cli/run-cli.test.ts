@@ -50,6 +50,16 @@ test('help openapi는 명령 사용법을 내고 openapi는 명령으로 분배�
   assert.equal(missingService.exitCode, 64);
 });
 
+test('help routes는 명령 사용법을 내고 routes는 명령으로 분배된다', async () => {
+  const help = await runCli(['help', 'routes'], environment);
+  assert.equal(help.exitCode, 0);
+  assert.match(help.standardOutput, /^Usage: tsograph routes/);
+  assert.match(rootHelp, /routes {7}Extract Next\.js server route declarations/);
+  const missingRole = await runCli(['routes', '--project', '.'], environment);
+  assert.equal(missingRole.exitCode, 64);
+  assert.match(missingRole.standardError, /--role server is required/);
+});
+
 test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없는 문구로 바꾼다', async () => {
   const throwing = { ...environment, now: (): Date => { throw new Error('secret /abs/path detail'); } };
   const result = await runCliSafely(['openapi', fileURLToPath(new URL('../../fixtures/openapi/swagger-2.0.json', import.meta.url)), '--service', 'x'], throwing);

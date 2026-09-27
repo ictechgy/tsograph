@@ -13,6 +13,7 @@ import {
 } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { openApiUsage, runOpenApiCommand } from './openapi-command.ts';
+import { routesUsage, runRoutesCommand } from './routes-command.ts';
 
 /** 분배기가 명령 구현에 넘기는 실행 환경이다. */
 export interface CliEnvironment {
@@ -25,13 +26,14 @@ export interface CliEnvironment {
 }
 
 /** 명령 이름 → 사용법이다. */
-const commandUsages: ReadonlyMap<string, string> = new Map([['openapi', openApiUsage]]);
+const commandUsages: ReadonlyMap<string, string> = new Map([['openapi', openApiUsage], ['routes', routesUsage]]);
 
 /** 최상위 도움말이다. 명령이 늘면 여기에 한 줄씩 추가한다. */
 export const rootHelp = `Usage: tsograph <command> [options]
 
 Commands:
   openapi      Convert an OpenAPI 2.0/3.0/3.1 spec into isthmus route-contract facts
+  routes       Extract Next.js server route declarations as isthmus route-decl facts
   help         Show command help
 
 Options:
@@ -56,6 +58,7 @@ export async function runCli(
   if (command === '--version') return success(`${environment.toolVersion}\n`);
   if (command === 'help') return runHelp(rest);
   if (command === 'openapi') return runOpenApiCommand(rest, environment);
+  if (command === 'routes') return runRoutesCommand(rest, environment);
   return usageFailure(`tsograph: unknown command; run 'tsograph --help' for the list.\n${rootHelp}`);
 }
 

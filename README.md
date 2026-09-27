@@ -15,7 +15,8 @@ own language; isthmus joins the documents.
 | Area | State |
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` facts | Implemented |
-| Node backend route declarations (Next.js, Hono, Express, Fastify, NestJS, Koa) | Planned |
+| `tsograph routes --role server`: Next.js App Router route handlers and Pages Router API routes → `route-decl` facts | Implemented |
+| Other Node backend route declarations (Hono, Express, Fastify, NestJS, Koa) | Planned |
 | ORM/SQL relation-use facts (Prisma, TypeORM, Sequelize, Drizzle, Knex, raw SQL, D1) | Planned |
 | Web/React Native client route-calls, call graph, impact | Planned |
 
@@ -195,6 +196,143 @@ downgrades errors instead of reporting false ones.
   fit the isthmus per-file input cap of 16 Mi characters. Beyond either limit the command
   fails instead of writing a partial document.
 
+## `tsograph routes --role server`
+
+```sh
+tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
+```
+
+Scans a Next.js project and writes a bridge-facts v1 document to stdout: `platform: "js"`,
+`target: "http"`, `roles: ["server"]`, `dispatch: "specificity"`, `sourceSets`, and one
+`route-decl` fact per (route file, HTTP method). The analyzed code is parsed with the
+TypeScript parser only; it is never executed, and no module resolution, type checking, or
+network access happens.
+
+- `--role server` (required): only the declaration side is implemented. `client` is a usage
+  error until route-call extraction exists.
+- `--project` (required): the Next.js project root (where `next.config.*` and `app/` or
+  `pages/` live). `project` is its POSIX realpath and `location.path` is relative to it.
+- `--service`: service identity recorded on the document and on every fact.
+- `--include-tests`: also emit route files that look like tests, with `testSource: true`
+  and `sourceSets.tests: "included"`. Without it they are skipped and the document declares
+  `sourceSets.tests: "excluded"`. Test paths are `*.test.*`, `*.spec.*`, and files under
+  `__tests__/` or `__mocks__/`. `test/` folders are not treated as tests, because in Next.js
+  they are real URL segments (`app/api/test/route.ts` serves `/api/test`).
+- Exit codes: `0` success (zero facts is still success, not proof of completeness), `2`
+  unreadable project or oversized output (more than 100,000 facts, or more than 16 Mi
+  characters), `64` usage error. A single unreadable route file is a limitation, not a failure.
+
+### Verified Next.js semantics (next 16.2.7)
+
+Each rule below was checked against the `next@16.2.7` package (its `dist/` sources and the
+bundled docs under `dist/docs/`), not guessed.
+
+| Rule | Source in `next/dist` |
+|---|---|
+| `app/` and `pages/` are looked up at the project root first, then under `src/` | `lib/find-pages-dir.js` (`findDir`) |
+| A route handler is `route.<ext>` for each `pageExtensions` entry (default `tsx`, `ts`, `jsx`, `js`; `.mts` is **not** a default) | `server/lib/find-page-file.js`, `server/config-shared.js` |
+| Handler methods are the exported names `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `DELETE`, `PATCH`; lowercase names and `default` are not handlers | `server/web/http.js`, `server/route-modules/app-route/module.js` |
+| `HEAD` (when `GET` exists) and `OPTIONS` are implemented automatically; they are **not** emitted as decls (isthmus matches them with `head-as-get` / `options-any`) | `server/route-modules/app-route/helpers/auto-implement-methods.js` |
+| Route groups `(name)` are removed from the path; `@slot` segments are removed too | `shared/lib/router/utils/app-paths.js` (`normalizeAppPath`), `shared/lib/segment.js` |
+| Files and folders starting with `_` are excluded from the App Router scan; `%5F` spells a literal underscore | `build/route-discovery.js` (`ignorePartFilter`), project-structure docs |
+| Dynamic segments are whole segments only: `[x]` → `{}`, `[...x]` → `{**}` (one or more segments), `[[...x]]` → zero or more; `[[x]]`, a non-final catch-all, names starting with `.`, and repeated names are build errors | `shared/lib/router/utils/sorted-routes.js`, `route-regex.js` |
+| Every file under `pages/api` (and `pages/api.<ext>`) with a page extension is an API route, except `.d.ts`; `_` has no special meaning there; the handler receives every method | `lib/is-api-route.js`, `build/route-discovery.js`, API Routes docs |
+| Pages Router API routes support `[...x]` and optional `[[...x]]` (`pages/api/post/[[...slug]].js` matches `/api/post` and deeper paths) | API Routes docs ("Optional catch all API routes"), `server/route-matchers/pages-api-route-matcher.js` (`RouteMatcher` + `getRouteRegex`) |
+| Config files are tried in the order `next.config.js`, `.mjs`, `.ts` (`.mts` only when the runtime supports TypeScript) | `shared/lib/constants.js` (`CONFIG_FILES`) |
+| `basePath` must be empty, or start with `/` without a trailing `/` | `server/config.js` |
+| Trailing slash: with `trailingSlash: false` (default) `/x/` is 308-redirected to `/x`; with `true`, `/x` is redirected to `/x/` unless the last segment looks like `name.ext` or the path is under `.well-known`; `skipTrailingSlashRedirect: true` disables the redirect, and matching ignores the trailing slash | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
+| `proxy.<ext>` / `middleware.<ext>` sit next to `app`/`pages` (root or `src/`) | `build/index.js`, `lib/constants.js` |
+| Metadata files (`sitemap`, `robots`, `manifest`, `icon`, `apple-icon`, `opengraph-image`, `twitter-image`, `favicon.ico`) create framework routes | `lib/metadata/is-metadata-route.js` |
+| Routing picks the most specific match (static > `[x]` > `[...x]` > `[[...x]]`), so documents declare `dispatch: "specificity"` | `shared/lib/router/utils/sorted-routes.js` |
+
+### How facts are built
+
+- **Export forms**: `export [async] function GET`, `export const GET = …`, destructuring
+  (`export const { GET, POST } = handlers`), `export { handler as GET }`, and re-exports
+  (`export { GET } from './impl'`, `export { x as POST } from '…'`). Next dispatches on the
+  exported **name**, so the name is certain even when the value comes from another module.
+  Type-only and `declare` exports are ignored.
+- **Unresolvable exports** are not guessed: `export * from '…'` and CommonJS assignments
+  (`module.exports`, `exports.x`, `export =`) are counted under `route-coverage:`.
+- **Pages Router**: one `ANY` decl per API file, located at `export default` (or the first
+  CommonJS export). Files without a statically visible default export emit nothing and are
+  counted under `route-coverage:` (helpers placed under `pages/api` stay out of the output).
+- **channel**: `basePath` + the canonical template of the folder path. Static segments use the
+  same RFC 3986 literal normalization as `tsograph openapi` (`café` → `caf%C3%A9`). A segment
+  that mixes brackets with other text (`v[id]`) is not documented by Next.js (its router and
+  regex builder disagree), so the fact is `dynamic` with a `route-coverage:` limitation.
+- **`[[...x]]`** emits the `{**}` decl and the prefix decl without the catch-all (the
+  contract's zero-segment expansion). See Decisions for why the prefix decl does not carry
+  `catchAllPrefix`.
+- **trailingSlash**: `strict` when the redirect rules above make one form canonical (the
+  channel is that form), `optional` when no redirect applies and both forms reach the handler
+  (`skipTrailingSlashRedirect: true`, `.well-known`, a last segment with a dot that neither
+  redirect matches), omitted (unknown) when it depends on a parameter value or the config
+  value is not a literal. `caseInsensitive` is never emitted (not proven).
+- **location**: the exported name token (`GET`), or `default` for Pages Router, as a 1-based
+  line and 1-based UTF-8 byte column. A leading BOM counts as its three bytes.
+- **symbol.qualifiedName**: `<project-relative file>#<export name>`, for example
+  `src/app/api/items/route.ts#GET` or `pages/api/hello.ts#default`. No `usr` yet.
+
+### Configuration and limitations
+
+`next.config.*` is read statically: `export default`, `module.exports`, or `export =`,
+followed through `const` bindings, `satisfies`/`as`, and resolvable spreads. Names that are
+reassigned, mutated, or passed to `Object.assign` are not followed.
+
+| Situation | Result |
+|---|---|
+| Config exports a function, a non-object, nothing, or has syntax errors | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| `basePath` is not a string literal, or is a value Next.js rejects | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| Config passes through wrapper calls (`withX(config)`) | values read from the wrapped literal, `root`, plus `unresolved-route-prefix:` (a wrapper may change them or add routes) |
+| `pageExtensions` is not a literal string array | default extensions + `route-coverage:` |
+| `rewrites`, `redirects`, `i18n`, or keys tsograph cannot enumerate | `framework-provided-routes:` |
+| `proxy`/`middleware` file, metadata files, non-empty `public/` | `framework-provided-routes:` (no synthetic decls) |
+| `@slot` or intercepting-route (`(.)x`) folders above a route file | not modeled (Next documents them for pages), `route-coverage:` |
+| `app`, `pages`, `src`, `src/app`, or `src/pages` is a symbolic link | not followed (Next.js would pick it, so tsograph does not fall back to `src/`), `route-coverage:` naming the location |
+| `next.config.*` is a symbolic link | not read, `pathAnchor: "base"` + `unresolved-route-prefix:`; a dangling link is treated as absent, like Next's `existsSync` |
+| `package.json` is a symbolic link | not read, `route-framework-version-unknown:` |
+| `public/` or a proxy/middleware file is a symbolic link | not read; still reported under `framework-provided-routes:` |
+| Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
+| `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
+| No `app/` or `pages/` directory | zero facts + `route-coverage:` |
+
+All server-side prefixes come from the contract's closed list, so isthmus reads each one as
+a server-side gap and downgrades `route-call-without-decl` to `-unverified` instead of
+reporting a false error. Limitations carry counts and project-relative names only.
+
+### Decisions (differences from the draft)
+
+- **No `usr`; qualifiedName is the join handle.** `<file>#<export>` names the module export
+  Next.js invokes. A later phase adds tsograph graph ids as `symbol.usr` by looking up the
+  same (module path, export name) pair, without changing `qualifiedName`.
+- **Optional catch-all prefix without `catchAllPrefix`.** The contract marks the expanded
+  prefix decl with `catchAllPrefix: true`, but isthmus requires `symbol.usr` on such a decl.
+  Until usr exists, the prefix decl is emitted as a plain decl (same method, symbol, and
+  location as the `{**}` decl). Next.js rejects an explicit route at the same place (build
+  error E458), so it cannot collide with an explicit decl; the cost is that it may appear in
+  `route-decl-without-call` / drift warnings. It becomes `catchAllPrefix: true` once usr lands.
+- **Wrapped configs stay `root`.** Treating every `withX(config)` as an unknown basePath
+  would make most real projects `base`; the literal inside is used and the uncertainty is
+  reported with `unresolved-route-prefix:`, which already prevents false errors.
+- **Config lookup is the project root only.** Next.js searches parent directories too
+  (`find-up`); pass the directory that holds `next.config.*`.
+
+### Validation with isthmus
+
+The synthetic fixtures under `fixtures/next/` were checked with the isthmus `main` consumer:
+
+```sh
+tsograph openapi fixtures/next/app-router/openapi.yaml --service demo --project fixtures/next/app-router > contract.json
+tsograph routes --role server --project fixtures/next/app-router --service demo > decl.json
+# client.json: a zero-fact document with roles ["client"], the same project and service
+node <isthmus>/src/cli/main.ts check contract.json decl.json client.json
+```
+
+The check exits 0 and reports the intended drift (`route-contract-without-decl` for
+`GET /api/health` and `PUT /api/items/{}`, `route-decl-without-contract` for handlers the spec
+does not list).
+
 ## Development
 
 ```sh
@@ -202,6 +340,11 @@ npm ci
 npm run verify   # typecheck, tests with a 90% line/branch/function gate, clean build, CLI contract
 node --test src/openapi/path-template.test.ts   # focused run
 ```
+
+`src/routes/conformance.test.ts` checks every static channel from the Next fixtures against
+the grammar cases of the vendored `conformance/http-template.json`, and keeps the verified
+Next.js conversion table (with `next/dist` sources) in the isthmus vector shape so it can be
+upstreamed as `producer:nextjs` cases.
 
 `src/openapi/conformance.test.ts` runs the template canonicalizer against the isthmus shared
 vector `conformance/http-template.json` when one is available (`TSOGRAPH_CONFORMANCE_DIR`,
