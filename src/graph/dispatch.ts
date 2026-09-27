@@ -28,7 +28,7 @@ import { compareStrings } from '../exchange/sorted-json.ts';
 import { isTestSourcePath } from '../routes/next-routes.ts';
 import { CandidateFinder } from './dispatch-candidates.ts';
 import type { PendingDispatch } from './edge-collector.ts';
-import { buildFlowIndex, climbWrappers, type FlowIndex, stringLeaves } from './flow-index.ts';
+import { buildFileIndex, climbWrappers, type FlowIndex, mergeFlowIndexes, type ModuleResolver, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
 import { scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
@@ -48,6 +48,11 @@ export interface DispatchContext {
   readonly calls: CallStatistics;
   /** 스캔 밖 코드가 내보낸 선언을 부를 수 있다고 볼지(공개 패키지·불완전 스캔) */
   readonly openProgram: boolean;
+  /**
+   * 프레임워크가 불러와 내보내기를 부르는 파일(`isFrameworkFile`). 진입점 표식이 없어도(`export * from`) 넣는다 — 그 파일의
+   * 내보내기와 재내보내기로 닿는 선언 전부가 열린 자리다(진입점 표식이 달린 파일은 정책이 따로 더한다).
+   */
+  readonly frameworkFiles: ReadonlySet<string>;
 }
 
 /**
@@ -57,13 +62,17 @@ export interface DispatchContext {
  */
 export function resolveDispatch(context: DispatchContext): void {
   if (context.pending.length === 0) return;
+  const resolveModule = moduleResolver(context.program, context.checker);
+  const indexes = fileIndexCache(context, resolveModule);
   const testPaths = new Set([...context.files.keys()].filter(isTestSourcePath));
-  const separate = testPaths.size > 0 && !importsTestSources(context, testPaths);
-  const production = lazyView(context, separate ? new Map([...context.files].filter(([path]) => !testPaths.has(path))) : context.files);
-  const whole = separate ? lazyView(context, context.files) : production;
+  const separate = testPaths.size > 0 && !importsTestSources(context, testPaths, resolveModule);
+  const production = lazyView(context, separate ? new Map([...context.files].filter(([path]) => !testPaths.has(path))) : context.files, indexes);
+  const whole = separate ? lazyView(context, context.files, indexes) : production;
   for (const site of context.pending) {
     const view = testPaths.has(site.path) ? whole() : production();
+    const before = view.flow.budgetExceededQueries();
     const bound = boundTargets(context, view.flow, site);
+    if (view.flow.budgetExceededQueries() > before) context.calls.dispatch.overBudget++;
     if (bound !== undefined) {
       linkSite(context, site, bound, 'bound');
       continue;
@@ -85,13 +94,14 @@ interface DispatchView {
  *
  * @param context 디스패치 입력
  * @param files 범위의 노드 파일
+ * @param indexes 파일별 색인(한 번만 만든다)
  * @returns 범위를 돌려주는 함수
  */
-function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.SourceFile>): () => DispatchView {
+function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.SourceFile>, indexes: (path: string) => FlowIndex): () => DispatchView {
   let view: DispatchView | undefined;
   return () => {
     if (view === undefined) {
-      const index = buildFlowIndex(context.checker, files.values(), moduleResolver(context.program, context.checker));
+      const index = mergeFlowIndexes([...files.keys()].map(indexes));
       const flow = new ValueFlow(context.checker, index, new OpenCallablePolicy(context, index, files));
       view = { flow, finder: new CandidateFinder(context.checker, context.resolver, [...files.values()]) };
     }
@@ -104,11 +114,11 @@ function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.Source
  *
  * @param context 디스패치 입력
  * @param testPaths 테스트 소스 경로
+ * @param resolve 모듈 지정자 해석기
  * @returns 불러오면 true
  */
-function importsTestSources(context: DispatchContext, testPaths: ReadonlySet<string>): boolean {
+function importsTestSources(context: DispatchContext, testPaths: ReadonlySet<string>, resolve: ModuleResolver): boolean {
   const pathByFile = new Map([...context.files].map(([path, sourceFile]) => [sourceFile, path]));
-  const resolve = moduleResolver(context.program, context.checker);
   for (const [path, sourceFile] of context.files) {
     if (testPaths.has(path)) continue;
     const loadsTest = moduleSpecifiers(sourceFile).some((specifier) => {
@@ -144,17 +154,42 @@ function moduleSpecifiers(sourceFile: ts.SourceFile): ts.StringLiteralLike[] {
 }
 
 /**
- * 문자열 지정자를 Program과 같은 컴파일러 옵션으로 풀어 모듈 심볼을 돌려주는 함수를 만든다.
+ * 문자열 지정자를 Program과 같은 컴파일러 옵션으로 풀어 모듈 심볼을 돌려주는 함수를 만든다(해석 캐시와 결과 메모를 둔다).
  *
  * @param program Program
  * @param checker TypeChecker
  * @returns 지정자 → 모듈 심볼(풀리지 않거나 Program 밖 파일이면 undefined)
  */
-function moduleResolver(program: ts.Program, checker: ts.TypeChecker): (specifier: string, from: ts.SourceFile) => ts.Symbol | undefined {
+function moduleResolver(program: ts.Program, checker: ts.TypeChecker): ModuleResolver {
+  const cache = ts.createModuleResolutionCache(program.getCurrentDirectory(), (name) => name, program.getCompilerOptions());
+  const memo = new Map<string, ts.Symbol | undefined>();
   return (specifier, from) => {
-    const resolved = ts.resolveModuleName(specifier, from.fileName, program.getCompilerOptions(), ts.sys).resolvedModule;
+    const key = `${from.fileName}\u0000${specifier}`;
+    if (memo.has(key)) return memo.get(key);
+    const resolved = ts.resolveModuleName(specifier, from.fileName, program.getCompilerOptions(), ts.sys, cache).resolvedModule;
     const sourceFile = resolved === undefined ? undefined : program.getSourceFile(resolved.resolvedFileName);
-    return sourceFile === undefined ? undefined : checker.getSymbolAtLocation(sourceFile);
+    const module = sourceFile === undefined ? undefined : checker.getSymbolAtLocation(sourceFile);
+    memo.set(key, module);
+    return module;
+  };
+}
+
+/**
+ * 파일별 흐름 색인을 처음 물을 때 한 번만 만드는 함수를 돌려준다(분석 범위가 둘이어도 파일은 한 번 훑는다).
+ *
+ * @param context 디스패치 입력
+ * @param resolveModule 모듈 지정자 해석기
+ * @returns 경로 → 파일 색인
+ */
+function fileIndexCache(context: DispatchContext, resolveModule: ModuleResolver): (path: string) => FlowIndex {
+  const cache = new Map<string, FlowIndex>();
+  return (path) => {
+    let index = cache.get(path);
+    if (index === undefined) {
+      index = buildFileIndex(context.checker, context.files.get(path)!, resolveModule);
+      cache.set(path, index);
+    }
+    return index;
   };
 }
 
@@ -176,7 +211,8 @@ function boundTargets(context: DispatchContext, flow: ValueFlow, site: PendingDi
     if (resolution.kind !== 'nodes' || resolution.partial !== undefined) return undefined;
     resolution.ids.forEach((id) => ids.add(id));
   }
-  return [...ids].sort(compareStrings);
+  // 대상이 하나도 없으면 이은 것이 아니다(빈 bound로 호출을 해석됨으로 세지 않는다).
+  return ids.size === 0 ? undefined : [...ids].sort(compareStrings);
 }
 
 /**
@@ -210,7 +246,7 @@ class OpenCallablePolicy implements FlowPolicy {
   private readonly pathByFile: ReadonlyMap<ts.SourceFile, string>;
   /** 진입점과, 진입점에서 alias·reference 간선으로 닿는 노드 id */
   private readonly entryTargets: ReadonlySet<string>;
-  /** 진입점 노드가 있는 파일 경로 */
+  /** 진입점 노드가 있는 파일과 route 파일 경로 */
   private readonly entryPaths: ReadonlySet<string>;
   /** 열린 모듈(동적 import·값으로 쓰인 네임스페이스)이 내보내는 선언 심볼(재내보내기·배럴을 따라간다) */
   private readonly openExports: ReadonlySet<ts.Symbol>;
@@ -226,9 +262,14 @@ class OpenCallablePolicy implements FlowPolicy {
     this.openProperties = context.openProgram;
     this.pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
     const entries = context.store.entryRecords();
-    this.entryPaths = new Set(entries.map((entry) => entry.path));
+    this.entryPaths = new Set([...entries.map((entry) => entry.path), ...context.frameworkFiles]);
     this.entryTargets = entryClosure(context.store, entries.map((entry) => entry.id));
-    this.openExports = moduleExportClosure(context.checker, index.openModules);
+    const frameworkModules = [...this.entryPaths].flatMap((path) => {
+      const sourceFile = context.files.get(path);
+      const module = sourceFile === undefined ? undefined : context.checker.getSymbolAtLocation(sourceFile);
+      return module === undefined ? [] : [module];
+    });
+    this.openExports = moduleExportClosure(context.checker, new Set([...index.openModules, ...frameworkModules]));
   }
 
   /**
@@ -250,7 +291,8 @@ class OpenCallablePolicy implements FlowPolicy {
   isOpenCallable(declaration: ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration): boolean {
     const sourceFile = declaration.getSourceFile();
     const path = this.pathByFile.get(sourceFile);
-    if (path === undefined) return true;
+    // 모듈이 아닌 스크립트 파일의 최상위 선언은 전역이라 HTML·다른 스크립트·`globalThis[key]`가 부를 수 있다.
+    if (path === undefined || !ts.isExternalModule(sourceFile)) return true;
     if (declarationIds(declaration, path).some((id) => this.entryTargets.has(id))) return true;
     if (!this.isExported(declaration)) return false;
     const symbol = declarationSymbol(this.context.checker, declaration);

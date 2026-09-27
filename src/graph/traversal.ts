@@ -54,7 +54,12 @@ export interface TraversalRequest {
   readonly maxReached: number;
   /** 따라갈 간선 근거 범위 */
   readonly dispatch: DispatchMode;
+  /** 정확한 등급 비교에 쓸 비트 집합 메모리 상한(바이트, 테스트 주입용). 기본 `EVIDENCE_MEMORY_BYTES` */
+  readonly evidenceMemoryBytes?: number;
 }
+
+/** 정확한 등급 비교(root당 비트 하나)가 쓸 수 있는 메모리 상한이다. 넘으면 보수적 근사로 바꾼다. */
+export const EVIDENCE_MEMORY_BYTES = 64 * 1024 * 1024;
 
 /** 도달한 노드 하나다. */
 export interface ReachedSymbol {
@@ -78,6 +83,8 @@ export interface TraversalResult {
   readonly reached: readonly ReachedSymbol[];
   readonly truncationReasons: readonly TruncationReason[];
   readonly rootsTruncated: boolean;
+  /** 메모리 상한 때문에 `evidence`를 보수적으로 근사했으면 true(더 약하게 적을 수는 있어도 부풀리지 않는다) */
+  readonly evidenceApproximated: boolean;
 }
 
 /** 방향에 맞춘 이웃 목록과 간선 종류 조회표다. */
@@ -116,9 +123,15 @@ export function traverse(graph: CallGraph, request: TraversalRequest): Traversal
   if (pass.depthCut) reasons.push('depth');
   if (rows.length > kept.length) reasons.push('max-reached');
   const rootsTruncated = pass.pruned || kept.some((row) => row.roots.length > MAX_ROOTS_PER_NODE);
-  const evidence = evidenceTiers(graph, request, adjacency, tier);
-  const reached = kept.map((row) => ({ ...row, roots: row.roots.slice(0, MAX_ROOTS_PER_NODE), evidence: evidence(row.id) }));
-  return { reached, truncationReasons: reasons, rootsTruncated };
+  const evidence = evidenceTiers(graph, request, adjacency, tier, pass.levels);
+  const reached = kept.map((row) => ({ ...row, roots: row.roots.slice(0, MAX_ROOTS_PER_NODE), evidence: evidence.of(row.id) }));
+  return { reached, truncationReasons: reasons, rootsTruncated, evidenceApproximated: evidence.approximated };
+}
+
+/** 정점별 근거 등급 조회와 근사 여부다. */
+interface EvidenceLookup {
+  readonly of: (id: string) => EdgeEvidence;
+  readonly approximated: boolean;
 }
 
 /** 정점별 root 비트 집합이다(비트 위치 = 등급 비교 대상 root의 순번). */
@@ -133,19 +146,58 @@ type RootBits = Map<string, Uint32Array>;
  * @param tier 모드가 허용하는 가장 약한 근거
  * @returns 정점 id → 근거 등급
  */
-function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjacency, tier: EdgeEvidence): (id: string) => EdgeEvidence {
+function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjacency, tier: EdgeEvidence, levels: Levels): EvidenceLookup {
   const tiers = EDGE_EVIDENCE_ORDER.slice(0, EDGE_EVIDENCE_ORDER.indexOf(tier) + 1);
-  const weakSources = new Set(graph.edges.filter((edge) => edge.evidence !== 'direct' && evidenceAllowed(edge.evidence, request.dispatch))
-    .map((edge) => (request.direction === 'dependencies' ? edge.from : edge.to)));
+  const weakEdges = graph.edges.filter((edge) => edge.evidence !== 'direct' && evidenceAllowed(edge.evidence, request.dispatch));
+  const weakSources = new Set(weakEdges.map((edge) => (request.direction === 'dependencies' ? edge.from : edge.to)));
   const compared = weakTouchingRoots(full, request.rootIds, weakSources, request.maxDepth);
-  if (tiers.length === 1 || compared.length === 0) return () => 'direct';
+  if (tiers.length === 1 || compared.length === 0) return { of: () => 'direct', approximated: false };
+  const estimate = graph.nodes.length * Math.ceil(compared.length / 32) * 4 * (tiers.length + 1);
+  if (estimate > (request.evidenceMemoryBytes ?? EVIDENCE_MEMORY_BYTES)) {
+    return { of: approximateEvidence(full, weakEdges, request.direction, levels), approximated: true };
+  }
   const fullBits = reachBits(full, compared, request.maxDepth);
   const lowerBits = tiers.slice(0, -1).map((lower) => reachBits(buildAdjacency(graph, request.direction, lower), compared, request.maxDepth));
-  return (id) => {
+  const of = (id: string): EdgeEvidence => {
     const reference = fullBits.get(id);
     const index = lowerBits.findIndex((bits) => sameBits(bits.get(id), reference));
     return tiers[index === -1 ? tiers.length - 1 : index]!;
   };
+  return { of, approximated: false };
+}
+
+/**
+ * 메모리 상한을 넘을 때의 보수적 근거 등급이다: root에서 닿는(단계 기록에 있는) 출발점을 가진 약한 간선의 도착점에서
+ * 깊이 제한 없이 닿는 정점을 등급별로 표시하고, 정점이 속한 가장 약한 등급을 싣는다. 어느 표시에도 들지 않는 정점은
+ * 모든 root에서 약한 간선 없이 닿으므로 정확히 direct다. candidate 표시가 없으면 어느 root도 candidate 간선이 필요 없어
+ * bound 이하이므로, 이 값은 정확한 root별 하한보다 약하게 적을 수는 있어도 부풀리지 않는다.
+ *
+ * @param full 모드가 허용하는 전체 인접 목록
+ * @param weakEdges 모드가 허용하는 약한(direct가 아닌) 간선
+ * @param direction 방향
+ * @param levels 전체 그래프 단계 기록(root에서 깊이 상한 안에 닿은 정점)
+ * @returns 정점 id → 근거 등급
+ */
+function approximateEvidence(full: Adjacency, weakEdges: CallGraph['edges'], direction: TraversalDirection, levels: Levels): (id: string) => EdgeEvidence {
+  const marks = new Map<string, EdgeEvidence>();
+  for (const evidence of ['bound', 'candidate'] as const) {
+    const heads = weakEdges.filter((edge) => edge.evidence === evidence)
+      .map((edge) => (direction === 'dependencies' ? [edge.from, edge.to] : [edge.to, edge.from]) as [string, string])
+      .filter(([tail]) => levels.has(tail)).map(([, head]) => head);
+    const queue = [...new Set(heads)];
+    const seen = new Set(queue);
+    while (queue.length > 0) {
+      const node = queue.pop()!;
+      marks.set(node, evidence);
+      for (const next of full.neighbors.get(node) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  }
+  return (id) => marks.get(id) ?? 'direct';
 }
 
 /**

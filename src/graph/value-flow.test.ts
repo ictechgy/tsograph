@@ -9,9 +9,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import ts from 'typescript';
+
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
+import { buildFileIndex, type FlowIndex } from './flow-index.ts';
 import type { CallGraph } from './graph-model.ts';
+import { type FlowPolicy, ValueFlow } from './value-flow.ts';
 
 /**
  * 임시 프로젝트의 그래프를 만든다.
@@ -330,4 +334,120 @@ test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·
   ];
   assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
   assert.deepEqual(bound('src/main.ts#Holder2.upgrade'), ['src/store.ts#CachedStore.withCache', 'src/store.ts#LocalStore.withCache']);
+});
+
+test('GLM 지적: 파일 안 namespace·문자열 원소 접근 참조, 호출 없는 함수, 되풀이한 var, #비공개·계산된 필드', async () => {
+  const main = [
+    'import { LocalStore, RemoteStore, type Store } from "./store";',
+    // S1: `new App.Repo(...)`·`App["load"](...)`가 참조로 잡혀야 기본값만 흐른다고 보지 않는다.
+    'namespace App {',
+    '  export class Repo { constructor(private readonly s: Store = new LocalStore()) {} run() { return this.s.find("x"); } }',
+    '  export function load(s: Store = new LocalStore()) { return s.find("y"); }',
+    '}',
+    'export const repo1 = new App.Repo(new RemoteStore());',
+    'export const loaded1 = App["load"](new RemoteStore());',
+    // S1: `Extend(Lib.Service)`로 새어 나간 클래스의 this는 모름이다.
+    'namespace Lib { export class Service { s2: Store = new LocalStore(); run2() { return this.s2.find("z"); } } }',
+    'function Extend2<T extends new (...args: any[]) => object>(Base: T) { return class extends Base {}; }',
+    'export const Extended2 = Extend2(Lib.Service);',
+    'export const service2 = new Lib.Service();',
+    // S1: 계산된 키로 읽힌 네임스페이스의 멤버는 호출자를 다 볼 수 없다.
+    'namespace Dyn { export function use3(s: Store) { return s.find("w"); } }',
+    'declare const key3: "use3";',
+    'export const r3 = () => Dyn.use3(new LocalStore());',
+    'export const d3 = () => Dyn[key3](new RemoteStore());',
+    // S1 fail-closed: 색인된 호출이 없는 함수는 기본값만 흐른다고 추측하지 않는다.
+    'function lonely4(s: Store = new LocalStore()) { return s.find("v"); }',
+    'export const keep4 = typeof lonely4;',
+    // S2: 되풀이한 var 선언은 모든 초기값을 합친다.
+    'var dup5: Store = new LocalStore();',
+    'var dup5: Store = new RemoteStore();',
+    'export function p5() { return dup5.find("u"); }',
+    // 확인: #비공개 필드와 계산된 이름 필드.
+    'class Priv6 { #s6: Store = new LocalStore(); run6() { return this.#s6.find("t"); } swap6() { this.#s6 = new RemoteStore(); } }',
+    'export const priv6 = new Priv6();',
+    'const key7 = "s7";',
+    'class Comp7 { [key7]: Store = new LocalStore(); run7() { return this[key7].find("s"); } }',
+    'export const comp7 = new Comp7();',
+  ].join('\n');
+  const graph = await graphOf({ 'src/store.ts': cachingStore, 'src/main.ts': main });
+  const bound = (from: string): string[] => graph.edges.filter((edge) => edge.from === from && edge.evidence === 'bound').map((edge) => edge.to);
+  const expectations: [string, string[]][] = [
+    // 네임스페이스는 심볼 id의 이름 조각이 아니다(schema `qualifiedName` 규칙).
+    ['src/main.ts#Repo.run', [LOCAL, REMOTE]],
+    ['src/main.ts#load', [LOCAL, REMOTE]],
+    ['src/main.ts#Service.run2', []],
+    ['src/main.ts#use3', []],
+    ['src/main.ts#lonely4', []],
+    ['src/main.ts#p5', [LOCAL, REMOTE]],
+    ['src/main.ts#Priv6.run6', [LOCAL, REMOTE]],
+    ['src/main.ts#Comp7.run7', []],
+  ];
+  assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
+});
+
+test('GLM 지적 C1: 흐름 재귀가 깊어도 예산으로 끝나 모름이 되고 dispatch-budget으로 알린다', async () => {
+  const chain = Array.from({ length: 240 }, (_, index) => `const c${index + 1}: Store = c${index} ?? c${index};`).join('\n');
+  const graph = await graphOf({
+    'src/store.ts': cachingStore,
+    'src/main.ts': `import { LocalStore, type Store } from "./store";\nconst c0: Store = new LocalStore();\n${chain}\nexport function p() { return c240.find("x"); }\n`,
+  });
+  assert.deepEqual(graph.edges.filter((edge) => edge.evidence === 'bound'), []);
+  assert.equal(graph.statistics.calls.dispatch.overBudget, 1);
+  assert.ok(graph.limitations.some((line) => line.startsWith('dispatch-budget: 1 interface call(s) exceeded the flow-analysis budget')));
+});
+
+test('GLM 지적 C1: 질의 안의 스택 초과(RangeError)는 모름으로 바꾸고, 다른 예외는 그대로 던진다', () => {
+  const host = ts.createCompilerHost({ strict: true });
+  const source = 'interface S { f(): void }\nclass A implements S { f() {} }\nconst a: S = new A();\nexport const x = a;\n';
+  const original = host.getSourceFile;
+  host.getSourceFile = (name, version) => (name === 'main.ts' ? ts.createSourceFile(name, source, version, true) : original.call(host, name, version));
+  const program = ts.createProgram({ rootNames: ['main.ts'], options: { strict: true, noLib: true }, host });
+  const checker = program.getTypeChecker();
+  const file = program.getSourceFile('main.ts')!;
+  const receiver = (file.statements[3] as ts.VariableStatement).declarationList.declarations[0]!.initializer!;
+  const policy = (failure: Error): FlowPolicy => ({
+    isProjectFile: () => {
+      throw failure;
+    },
+    isOpenCallable: () => false,
+    isOverridden: () => false,
+    openProperties: false,
+  });
+  const index = buildFileIndex(checker, file, () => undefined);
+  const flow = new ValueFlow(checker, index, policy(new RangeError('Maximum call stack size exceeded')));
+  assert.equal(flow.valuesOf(receiver), null);
+  assert.equal(flow.budgetExceededQueries(), 1);
+  assert.throws(() => new ValueFlow(checker, index, policy(new TypeError('bug'))).valuesOf(receiver), TypeError);
+});
+
+test('GLM 지적 S1: 색인이 참조를 빠뜨려도 완전성 검사가 "호출 없음"을 믿지 않아 기본값만으로 잇지 않는다', () => {
+  const source = [
+    'interface S { f(): void }',
+    'class A implements S { f() {} }',
+    'class B implements S { f() {} }',
+    'function use(s: S = new A()) { return s; }',
+    'use(new B());',
+    'function unused(s: S = new A()) { return s; }',
+    'export const probeUse = use;',
+  ].join('\n');
+  const host = ts.createCompilerHost({ strict: true });
+  const original = host.getSourceFile;
+  host.getSourceFile = (name, version) => (name === 'main.ts' ? ts.createSourceFile(name, source, version, true) : original.call(host, name, version));
+  const program = ts.createProgram({ rootNames: ['main.ts'], options: { strict: true, noLib: true }, host });
+  const checker = program.getTypeChecker();
+  const file = program.getSourceFile('main.ts')!;
+  const policy: FlowPolicy = { isProjectFile: (sourceFile) => sourceFile === file, isOpenCallable: () => false, isOverridden: () => false, openProperties: false };
+  const full = buildFileIndex(checker, file, () => undefined);
+  const parameterOf = (index: number): ts.Identifier => ((file.statements[index] as ts.FunctionDeclaration).parameters[0]!.name as ts.Identifier);
+  const useSymbol = checker.getSymbolAtLocation((file.statements[3] as ts.FunctionDeclaration).name!)!;
+  // `use`의 참조를 모두 뺀 색인을 흉내 낸다(색인 공백). 완전성 검사가 빠진 참조 토큰을 찾아 모름으로 둔다.
+  const damaged: FlowIndex = { ...full, references: new Map([...full.references].filter(([symbol]) => symbol !== useSymbol)) };
+  const values = (index: FlowIndex, parameter: number): string[] | null => {
+    const flow = new ValueFlow(checker, index, policy).valuesOf(parameterOf(parameter));
+    return flow === null ? null : [...flow].map((value) => (value as ts.ClassDeclaration).name!.text).sort();
+  };
+  assert.equal(values(damaged, 3), null);
+  // 참조가 정말 없는 함수는 완전성이 증명되어 기본값만 흐른다.
+  assert.deepEqual(values(full, 5), ['A']);
 });

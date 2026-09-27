@@ -21,7 +21,8 @@ function graphOf(edges: readonly string[]): CallGraph {
     nodes: ids.map((id) => ({ id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 } })),
     edges: parsed,
     limitations: [],
-    statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 } } },
+      limitationsByMode: { direct: [], bound: [], candidates: [] },
+    statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 } } },
   };
 }
 

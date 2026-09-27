@@ -88,7 +88,7 @@ test('fixture: 주입 방식별 bound 간선과 증명하지 못한 호출의 ca
     'src/lib/service.ts#ItemService.save -> src/lib/store.ts#SqlItemStore.saveItem bound',
     'src/lib/singleton.ts#readSingleton -> src/lib/store.ts#SqlItemStore.findItem bound',
   ]);
-  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 7, boundPartial: 0, candidate: 4, candidatePartial: 0 });
+  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 7, boundPartial: 0, candidate: 4, candidatePartial: 0, overBudget: 0 });
   assert.equal(graph.statistics.calls.unresolved.interface, 11);
 });
 
@@ -256,7 +256,7 @@ test('union 수신자의 인터페이스 부분만 bound로 잇고, 순환 흐�
     'src/main.ts#readEither -> src/main.ts#Direct.find direct',
     'src/main.ts#readEither -> src/store.ts#RemoteStore.find bound',
   ]);
-  assert.deepEqual(result.statistics.calls.dispatch, { bound: 1, boundPartial: 1, candidate: 0, candidatePartial: 0 });
+  assert.deepEqual(result.statistics.calls.dispatch, { bound: 1, boundPartial: 1, candidate: 0, candidatePartial: 0, overBudget: 0 });
 });
 
 test('진입점 별칭(export { h as GET })의 대상 함수 매개변수는 열린 자리다', async () => {
@@ -298,4 +298,45 @@ test('모듈 200개에 흩어진 주입 호출도 모두 bound로 잇고 예산 
   assert.equal(result.statistics.calls.dispatch.bound, count);
   assert.equal(result.edges.filter((edge) => edge.evidence === 'bound').length, count);
   assert.ok(elapsed < 60_000, `took ${Math.round(elapsed)} ms`);
+});
+
+test('export *로 route 파일에 다시 내보낸 핸들러와 스크립트(비모듈) 파일의 전역 함수는 열린 자리다', async () => {
+  const result = await graphOf({
+    'package.json': '{ "dependencies": { "next": "16.2.7" } }',
+    'src/store.ts': storeModule,
+    'src/impl.ts': [
+      'import { LocalStore, type Store } from "./store";',
+      'export async function GET(request: Request, store: Store = new LocalStore()) { return new Response(store.find(request.url)); }',
+      'export const warm = () => GET(new Request("http://x"));',
+    ].join('\n'),
+    'app/api/x/route.ts': 'export * from "../../../src/impl";\n',
+    'src/legacy.js': [
+      '/** @param {import("./store").Store} store */',
+      'function legacyFind(store) { return store.find("x"); }',
+      'legacyFind(new (require("./store").LocalStore)());',
+    ].join('\n'),
+  });
+  assert.deepEqual(result.edges.filter((edge) => edge.evidence === 'bound'), []);
+});
+
+test('흔한 멤버 이름의 쓰기·읽기가 모듈 600개에 흩어져도 메모로 예산 안에서 모두 bound로 잇는다', async () => {
+  const count = 600;
+  const files: Record<string, string> = { 'src/store.ts': storeModule };
+  for (let index = 0; index < count; index++) {
+    files[`src/m${index}.ts`] = [
+      'import { LocalStore, RemoteStore, type Store } from "./store";',
+      `export interface Deps${index} { store: Store }`,
+      `export class Handler${index} { store: Store; constructor(private readonly deps: Deps${index}) { this.store = deps.store; } run(): string { return this.deps.store.find("${index}") + this.store.find("x"); } }`,
+      `export const h${index} = new Handler${index}({ store: ${index % 2 === 0 ? 'new RemoteStore()' : 'new LocalStore()'} });`,
+      `const other${index} = { store: new LocalStore() as Store, run: () => "o" };`,
+      `export function rewire${index}() { other${index}.store = new RemoteStore(); }`,
+      `export function call${index}() { const fn = other${index}.run; return fn(); }`,
+    ].join('\n');
+  }
+  const started = performance.now();
+  const result = await graphOf(files);
+  const elapsed = performance.now() - started;
+  assert.deepEqual(result.statistics.calls.dispatch, { bound: 2 * count, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 });
+  // 메모 전(18547b7)에는 같은 모양 1,500개 모듈에서 21.7초, 메모 후 2.5초였다.
+  assert.ok(elapsed < 30_000, `took ${Math.round(elapsed)} ms`);
 });

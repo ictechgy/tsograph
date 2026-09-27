@@ -3,7 +3,8 @@
  *
  * 노드 파일을 한 번 훑어 다음을 모은다.
  * - 함수·클래스·변수 심볼의 값 참조 위치(별칭을 푼 심볼 기준). 호출 위치를 찾고, 호출 대상이 아닌 자리에
- *   쓰인(값으로 새어 나간) 함수를 가려내는 데 쓴다. 네임스페이스 import의 `ns.f`도 `f`의 참조다.
+ *   쓰인(값으로 새어 나간) 함수를 가려내는 데 쓴다. 값 자리의 식별자, 모든 속성 접근 이름(`ns.f`, 파일 안
+ *   `namespace App`의 `App.Repo`, `globalThis.f`), 문자열 리터럴 원소 접근(`App["load"]`)을 checker로 풀어 모은다.
  * - 식별자 대입(`x = e`, `x ??= e` …)과 속성 대입(`a.b = e`, `a["b"] = e`)을 대상별로. 구조 분해 대입·
  *   증감·복합 대입처럼 값을 모르는 쓰기는 값 없이 기록한다.
  * - `new this()`를 쓰는 클래스, `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·
@@ -31,8 +32,8 @@ export interface PropertyWrite {
 
 /** 모은 색인이다. */
 export interface FlowIndex {
-  /** 별칭을 푼 함수·클래스·변수 심볼 → 값 참조 식별자 */
-  readonly references: ReadonlyMap<ts.Symbol, readonly ts.Identifier[]>;
+  /** 별칭을 푼 함수·클래스·변수 심볼 → 값 참조 토큰(식별자, 원소 접근의 문자열 리터럴). `referenceSite`로 식을 얻는다. */
+  readonly references: ReadonlyMap<ts.Symbol, readonly ts.Node[]>;
   /** 별칭을 푼 변수·매개변수 심볼 → 대입한 값(모르면 undefined) */
   readonly identifierWrites: ReadonlyMap<ts.Symbol, readonly (ts.Expression | undefined)[]>;
   /** 속성 이름 → 쓰기 */
@@ -43,7 +44,7 @@ export interface FlowIndex {
   readonly reflectiveTargets: readonly ts.Expression[];
   /** `export { x }`·`export default x`로 내보낸(별칭을 푼) 심볼 */
   readonly exportedSymbols: ReadonlySet<ts.Symbol>;
-  /** 멤버 참조를 다 볼 수 없는 모듈 심볼(동적 import 대상, 값으로 쓰인 네임스페이스) */
+  /** 멤버 참조를 다 볼 수 없는 모듈·네임스페이스 심볼(동적 import 대상, 값으로 쓰이거나 계산된 키로 읽힌 네임스페이스) */
   readonly openModules: ReadonlySet<ts.Symbol>;
   /** 지정자가 문자열이 아닌 동적 import·require가 있으면 true(어느 모듈이든 열릴 수 있다) */
   readonly hasOpaqueImport: boolean;
@@ -54,7 +55,14 @@ export interface FlowIndex {
    * `const { run } = h`, `({ run } = h)`). 메서드를 떼어 내 다른 `this`로 부를 수 있는지 판정하는 데 쓴다.
    */
   readonly memberReads: ReadonlyMap<string, readonly ts.Node[]>;
+  /** 별칭을 푼 심볼 → 그것을 다른 이름으로 들여온 import·export 별칭의 지역 이름(완전성 검사용) */
+  readonly aliasNames: ReadonlyMap<ts.Symbol, readonly string[]>;
+  /** 색인한 파일 */
+  readonly files: readonly ts.SourceFile[];
 }
+
+/** 조건식 지정자를 따라가는 최대 깊이다(넘으면 어느 모듈이든 열릴 수 있다고 본다). */
+const MAX_SPECIFIER_DEPTH = 64;
 
 /** 참조를 모으는 심볼 종류다. */
 const TRACKED_FLAGS = ts.SymbolFlags.Function | ts.SymbolFlags.Class | ts.SymbolFlags.Variable;
@@ -72,7 +80,7 @@ const REFLECTIVE_WRITERS: Readonly<Record<string, ReadonlySet<string>>> = {
 
 /** 색인을 채우는 가변 저장소다. */
 interface MutableIndex {
-  references: Map<ts.Symbol, ts.Identifier[]>;
+  references: Map<ts.Symbol, ts.Node[]>;
   identifierWrites: Map<ts.Symbol, (ts.Expression | undefined)[]>;
   propertyWrites: Map<string, PropertyWrite[]>;
   newThisClasses: Set<ts.ClassLikeDeclaration>;
@@ -82,28 +90,78 @@ interface MutableIndex {
   hasOpaqueImport: boolean;
   subclasses: Map<ts.ClassLikeDeclaration, ts.ClassLikeDeclaration[]>;
   memberReads: Map<string, ts.Node[]>;
+  aliasNames: Map<ts.Symbol, string[]>;
+  files: ts.SourceFile[];
 }
 
 /** 모듈 지정자를 모듈 심볼로 푸는 함수다(인자 자리가 아닌 문자열 지정자용). */
 export type ModuleResolver = (specifier: string, from: ts.SourceFile) => ts.Symbol | undefined;
 
 /**
- * 노드 파일 전체의 색인을 만든다.
+ * 빈 색인을 만든다.
  *
- * @param checker TypeChecker
- * @param files 노드 파일
- * @param resolveModule 조건식 안 문자열 지정자(`import(a ? "./x" : "./y")`)를 모듈 심볼로 푸는 함수
- * @returns 색인
+ * @returns 빈 가변 색인
  */
-export function buildFlowIndex(checker: ts.TypeChecker, files: Iterable<ts.SourceFile>, resolveModule: ModuleResolver): FlowIndex {
-  const index: MutableIndex = {
+function emptyIndex(): MutableIndex {
+  return {
     references: new Map(), identifierWrites: new Map(), propertyWrites: new Map(), newThisClasses: new Set(),
     reflectiveTargets: [], exportedSymbols: new Set(), openModules: new Set(), hasOpaqueImport: false, subclasses: new Map(),
-    memberReads: new Map(),
+    memberReads: new Map(), aliasNames: new Map(), files: [],
   };
-  const collector = new IndexCollector(checker, index, resolveModule);
-  for (const sourceFile of files) collector.visitFile(sourceFile);
+}
+
+/**
+ * 파일 하나의 색인을 만든다. 분석 범위(테스트 소스 포함·제외)마다 다시 훑지 않도록 파일별로 만들어 합친다.
+ *
+ * @param checker TypeChecker
+ * @param sourceFile 노드 파일
+ * @param resolveModule 조건식 안 문자열 지정자(`import(a ? "./x" : "./y")`)를 모듈 심볼로 푸는 함수
+ * @returns 파일 색인
+ */
+export function buildFileIndex(checker: ts.TypeChecker, sourceFile: ts.SourceFile, resolveModule: ModuleResolver): FlowIndex {
+  const index = emptyIndex();
+  new IndexCollector(checker, index, resolveModule).visitFile(sourceFile);
+  index.files.push(sourceFile);
   return index;
+}
+
+/**
+ * 파일 색인들을 주어진 순서로 합친다(목록은 이어 붙이고 집합은 합친다).
+ *
+ * @param parts 파일 색인
+ * @returns 합친 색인
+ */
+export function mergeFlowIndexes(parts: Iterable<FlowIndex>): FlowIndex {
+  const index = emptyIndex();
+  for (const part of parts) {
+    mergeLists(index.references, part.references);
+    mergeLists(index.identifierWrites, part.identifierWrites);
+    mergeLists(index.propertyWrites, part.propertyWrites);
+    mergeLists(index.subclasses, part.subclasses);
+    mergeLists(index.memberReads, part.memberReads);
+    mergeLists(index.aliasNames, part.aliasNames);
+    index.files.push(...part.files);
+    part.newThisClasses.forEach((value) => index.newThisClasses.add(value));
+    part.exportedSymbols.forEach((value) => index.exportedSymbols.add(value));
+    part.openModules.forEach((value) => index.openModules.add(value));
+    index.reflectiveTargets.push(...part.reflectiveTargets);
+    index.hasOpaqueImport ||= part.hasOpaqueImport;
+  }
+  return index;
+}
+
+/**
+ * 목록 맵을 다른 목록 맵에 이어 붙인다.
+ *
+ * @param target 모으는 맵(갱신)
+ * @param source 더할 맵
+ */
+function mergeLists<K, V>(target: Map<K, V[]>, source: ReadonlyMap<K, readonly V[]>): void {
+  for (const [key, values] of source) {
+    const list = target.get(key);
+    if (list === undefined) target.set(key, [...values]);
+    else list.push(...values);
+  }
 }
 
 /** 색인 수집기다. */
@@ -145,6 +203,7 @@ class IndexCollector {
   private visitNode(node: ts.Node): void {
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) this.visitMemberRead(node);
     else if (ts.isBindingElement(node)) this.visitBindingRead(node);
+    if (ts.isElementAccessExpression(node)) this.visitElementAccess(node);
     if (ts.isIdentifier(node)) this.visitIdentifier(node);
     else if (ts.isShorthandPropertyAssignment(node)) this.addReference(node.name, this.checker.getShorthandAssignmentValueSymbol(node));
     else if (ts.isBinaryExpression(node)) this.visitBinary(node);
@@ -153,6 +212,10 @@ class IndexCollector {
     else if (ts.isNewExpression(node)) this.visitNew(node);
     else if (ts.isCallExpression(node)) this.visitCall(node);
     else if (ts.isExportSpecifier(node)) this.visitExportSpecifier(node);
+    if (ts.isImportSpecifier(node) || ts.isImportClause(node) || ts.isNamespaceImport(node) || ts.isExportSpecifier(node)
+      || ts.isImportEqualsDeclaration(node)) {
+      this.visitAliasName(node);
+    }
     else if (ts.isExportAssignment(node)) this.addExported(this.expressionSymbol(node.expression));
     else if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) this.visitClass(node);
   }
@@ -187,59 +250,61 @@ class IndexCollector {
   }
 
   /**
-   * 값 참조 식별자를 기록한다. 네임스페이스 import가 `ns.x` 밖에서 값으로 쓰이면 그 모듈을 연다.
+   * 값 참조 식별자를 기록한다. 속성 접근 이름은 왼쪽이 무엇이든 checker로 풀어 기록한다(파일 안 `namespace`,
+   * `globalThis`, 중첩 네임스페이스를 빠뜨리지 않기 위해서다 — 추적하지 않는 심볼 종류는 `addReference`가 거른다).
+   * 모듈·네임스페이스가 `ns.x`·`ns["x"]` 밖에서 값으로 쓰이면 그 멤버 참조를 다 볼 수 없어 연다.
    *
    * @param identifier 식별자
    */
   private visitIdentifier(identifier: ts.Identifier): void {
     const parent = identifier.parent;
     if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) {
-      if (this.isNamespaceAlias(parent.expression)) this.addReference(identifier, this.checker.getSymbolAtLocation(identifier));
+      this.addReference(identifier, this.checker.getSymbolAtLocation(identifier));
       return;
     }
     if (!isReferencePosition(identifier)) return;
     const symbol = this.checker.getSymbolAtLocation(identifier);
-    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) this.noteNamespaceUse(identifier, symbol);
+    this.noteNamespaceUse(identifier, symbol);
     this.addReference(identifier, symbol);
   }
 
   /**
-   * 식이 네임스페이스·모듈을 가리키는 import 별칭 식별자인지 본다(`import * as ns`, `export * as ns`).
+   * 원소 접근: 문자열 리터럴 키(`App["load"]`)는 그 멤버의 참조로 기록한다. 계산된 키가 모듈·네임스페이스를
+   * 읽으면(`App[key]`) 멤버를 다 볼 수 없어 연다(왼쪽 식별자는 `noteNamespaceUse`가 연다).
    *
-   * @param expression 속성 접근의 왼쪽
-   * @returns 모듈 별칭이면 true
+   * @param access 원소 접근
    */
-  private isNamespaceAlias(expression: ts.Expression): boolean {
-    if (!ts.isIdentifier(expression)) return false;
-    const symbol = this.checker.getSymbolAtLocation(expression);
-    if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Alias) === 0) return false;
-    return (this.checker.getAliasedSymbol(symbol).flags & ts.SymbolFlags.ValueModule) !== 0;
+  private visitElementAccess(access: ts.ElementAccessExpression): void {
+    const key = skipWrappers(access.argumentExpression);
+    if (ts.isStringLiteralLike(key)) this.addReference(key, this.checker.getSymbolAtLocation(key));
   }
 
   /**
-   * 모듈 별칭이 `ns.x` 밖(인자·대입·전개 등)에서 쓰이면 그 모듈의 멤버 참조를 다 볼 수 없다.
+   * 모듈·값 네임스페이스 심볼(별칭이면 풀어서)이 `ns.x`·`ns["리터럴"]` 밖(인자·대입·전개·계산된 키 등)에서 쓰이면 연다.
    *
    * @param identifier 식별자
-   * @param symbol 별칭 심볼
+   * @param symbol 식별자의 심볼
    */
-  private noteNamespaceUse(identifier: ts.Identifier, symbol: ts.Symbol): void {
-    const target = this.checker.getAliasedSymbol(symbol);
-    if ((target.flags & ts.SymbolFlags.ValueModule) === 0) return;
+  private noteNamespaceUse(identifier: ts.Identifier, symbol: ts.Symbol | undefined): void {
+    const target = this.dealias(symbol);
+    if (target === undefined || (target.flags & ts.SymbolFlags.ValueModule) === 0) return;
     const outer = climbWrappers(identifier);
-    if (ts.isPropertyAccessExpression(outer.parent) && outer.parent.expression === outer) return;
+    const parent = outer.parent;
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === outer) return;
+    if (ts.isElementAccessExpression(parent) && parent.expression === outer && ts.isStringLiteralLike(skipWrappers(parent.argumentExpression))) return;
     this.index.openModules.add(target);
   }
 
   /**
    * 참조를 기록한다(별칭을 풀고, 추적하는 종류만).
    *
-   * @param identifier 참조 식별자
+   * @param token 참조 토큰(식별자, 원소 접근의 문자열 리터럴)
    * @param symbol 심볼
    */
-  private addReference(identifier: ts.Identifier, symbol: ts.Symbol | undefined): void {
+  private addReference(token: ts.Node, symbol: ts.Symbol | undefined): void {
     const target = this.dealias(symbol);
     if (target === undefined || (target.flags & TRACKED_FLAGS) === 0) return;
-    appendTo(this.index.references, target, identifier);
+    appendTo(this.index.references, target, token);
   }
 
   /**
@@ -385,6 +450,17 @@ class IndexCollector {
   }
 
   /**
+   * 별칭 선언의 지역 이름을 대상 심볼별로 기록한다(`import { f as g }`의 g, `import g from`의 g).
+   *
+   * @param node import·export 별칭 선언
+   */
+  private visitAliasName(node: ts.ImportSpecifier | ts.ImportClause | ts.NamespaceImport | ts.ExportSpecifier | ts.ImportEqualsDeclaration): void {
+    if (node.name === undefined) return;
+    const target = this.dealias(this.checker.getSymbolAtLocation(node.name));
+    if (target !== undefined && (target.flags & TRACKED_FLAGS) !== 0) appendTo(this.index.aliasNames, target, node.name.text);
+  }
+
+  /**
    * 지역 `export { x }`·`export { x as y }`의 대상을 내보낸 심볼로 기록한다.
    *
    * @param specifier export 지정자
@@ -485,15 +561,30 @@ function isPatternModuleLoader(callee: ts.Expression): boolean {
  * @param expression 식
  * @returns 문자열 리터럴 목록, 문자열이 아닌 값이 섞이면 undefined
  */
-export function stringLeaves(expression: ts.Expression): ts.StringLiteralLike[] | undefined {
+export function stringLeaves(expression: ts.Expression, depth = 0): ts.StringLiteralLike[] | undefined {
   const inner = skipWrappers(expression);
   if (ts.isStringLiteralLike(inner)) return [inner];
+  if (depth > MAX_SPECIFIER_DEPTH) return undefined;
   const branches = ts.isConditionalExpression(inner) ? [inner.whenTrue, inner.whenFalse]
     : ts.isBinaryExpression(inner) && (inner.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || inner.operatorToken.kind === ts.SyntaxKind.BarBarToken)
       ? [inner.left, inner.right] : undefined;
   if (branches === undefined) return undefined;
-  const leaves = branches.map(stringLeaves);
+  const leaves = branches.map((branch) => stringLeaves(branch, depth + 1));
   return leaves.includes(undefined) ? undefined : leaves.flat() as ts.StringLiteralLike[];
+}
+
+/**
+ * 참조 토큰이 가리키는 값 식이다: 속성 접근 이름이면 그 속성 접근, 원소 접근의 문자열 키면 그 원소 접근, 그 밖은
+ * 토큰 자신. 부모 래퍼까지 벗겨 올라간다.
+ *
+ * @param token 참조 토큰
+ * @returns 값 식(래퍼 포함 가장 바깥)
+ */
+export function referenceSite(token: ts.Node): ts.Node {
+  const parent = token.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === token) return climbWrappers(parent);
+  if (ts.isElementAccessExpression(parent) && skipWrappers(parent.argumentExpression) === token) return climbWrappers(parent);
+  return climbWrappers(token);
 }
 
 /**

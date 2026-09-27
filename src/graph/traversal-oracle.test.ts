@@ -117,6 +117,7 @@ function oracle(graph: CallGraph, request: TraversalRequest): TraversalResult {
     })),
     truncationReasons: reasons,
     rootsTruncated: kept.some((row) => row.roots.length > MAX_ROOTS_PER_NODE),
+    evidenceApproximated: false,
   };
 }
 
@@ -158,7 +159,8 @@ function randomCase(next: () => number, size: number, density: number, rootCount
       nodes: ids.map((id) => ({ id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 } })),
       edges,
       limitations: [],
-      statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 } } },
+      limitationsByMode: { direct: [], bound: [], candidates: [] },
+      statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 } } },
     },
     request: {
       rootIds: shuffled.slice(0, rootCount),
@@ -271,4 +273,27 @@ test('무작위 사례가 세 등급을 모두 낸다(등급 비교가 실제로
     traverse(graph, { ...request, dispatch: 'candidates' }).reached.forEach((row) => seen.add(row.evidence));
   }
   assert.deepEqual([...seen].sort(), ['bound', 'candidate', 'direct']);
+});
+
+test('메모리 상한을 넘으면 evidence를 근사하되 오라클보다 강하게 적지 않고 근사를 알린다', () => {
+  const next = random(4242);
+  let approximated = 0;
+  let understated = 0;
+  for (let iteration = 0; iteration < 400; iteration++) {
+    const size = 2 + Math.floor(next() * 14);
+    const { graph, request } = randomCase(next, size, 0.1 + next() * 0.3, 1 + Math.floor(next() * 4));
+    const bounded = { ...request, dispatch: 'candidates' as const, evidenceMemoryBytes: 1 };
+    const expected = oracle(graph, bounded);
+    const actual = traverse(graph, bounded);
+    // 도달 목록·depth·via·roots는 근사와 무관하게 같다.
+    assert.deepEqual(actual.reached.map(({ evidence: _e, ...row }) => row), expected.reached.map(({ evidence: _e, ...row }) => row));
+    for (const row of actual.reached) {
+      const exact = expected.reached.find((candidate) => candidate.id === row.id)!.evidence;
+      const stronger = EDGE_EVIDENCE_ORDER.indexOf(row.evidence) < EDGE_EVIDENCE_ORDER.indexOf(exact);
+      assert.ok(!stronger, `#${iteration} ${row.id}: ${row.evidence} overstates ${exact}`);
+      if (row.evidence !== exact) understated++;
+    }
+    if (actual.evidenceApproximated) approximated++;
+  }
+  assert.ok(approximated > 0 && understated > 0, `approximated ${approximated}, understated ${understated}`);
 });

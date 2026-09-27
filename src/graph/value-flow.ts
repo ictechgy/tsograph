@@ -22,7 +22,7 @@
 import ts from 'typescript';
 
 import { memberName } from '../schema/scope-builder.ts';
-import { climbWrappers, type FlowIndex, type PropertyWrite } from './flow-index.ts';
+import { climbWrappers, type FlowIndex, type PropertyWrite, referenceSite } from './flow-index.ts';
 import { isFunctionValued, skipWrappers } from './node-collector.ts';
 
 /** 추상 값: 프로젝트 클래스의 인스턴스, 또는 객체 리터럴 하나가 만든 객체다. */
@@ -52,8 +52,11 @@ const MAX_ALIAS_DEPTH = 8;
 /** 한 단위의 순환 고정점 되풀이 상한이다. */
 const MAX_ROUNDS = 64;
 
-/** 질의 하나의 최대 재귀 깊이다(스택 보호). */
+/** 질의 하나의 최대 메모 단위 중첩 깊이다. */
 const MAX_DEPTH = 256;
+
+/** 질의 하나의 최대 식 재귀 깊이다(깊게 중첩된 객체 리터럴·속성 사슬에서 스택을 지킨다). */
+const MAX_FRAMES = 400;
 
 /** 빈 값 집합(공유)이다. */
 const EMPTY: ReadonlySet<AbstractValue> = new Set();
@@ -112,6 +115,13 @@ export class ValueFlow {
   private lowestOpen = Number.POSITIVE_INFINITY;
   private steps = 0;
   private depth = 0;
+  private frames = 0;
+  /** 예산(단계·깊이·스택)을 넘어 모름으로 끝난 질의 수(진단용) */
+  private overBudget = 0;
+  /** (종류, 노드·값) → 파생 메모 단위 키 */
+  private readonly derivedKeys = new Map<string, Map<object, object>>();
+  /** 클래스 → 자신과 프로젝트 하위 클래스 */
+  private readonly subclassMemo = new Map<ts.ClassLikeDeclaration, readonly ts.ClassLikeDeclaration[]>();
   /** 호출 위치(함수·클래스별) 메모 */
   private readonly sitesMemo = new Map<ts.Node, CallSites>();
   /** 반사적 쓰기 대상 값(지연 계산) */
@@ -160,6 +170,15 @@ export class ValueFlow {
   }
 
   /**
+   * 지금까지 예산을 넘어 모름으로 끝난 질의 수다. 디스패치가 호출별로 증가를 보고 `dispatch-budget:`으로 알린다.
+   *
+   * @returns 누적 수
+   */
+  budgetExceededQueries(): number {
+    return this.overBudget;
+  }
+
+  /**
    * 반사적 쓰기 대상 값을 처음 한 번 구한다. 반사적 쓰기는 속성 값을 모름으로만 바꾸므로(값을 더하지
    * 않는다), 빈 가정으로 구한 집합을 그 집합 가정으로 다시 구해 같으면 고정점이고, 다르면 모름으로 둔다.
    * 가정 아래 계산한 메모는 버린다.
@@ -167,7 +186,10 @@ export class ValueFlow {
   private ensureReflective(): void {
     if (this.reflective !== undefined) return;
     this.reflective = EMPTY;
+    if (this.index.reflectiveTargets.length === 0) return;
     const first = this.query(() => this.reflectiveValues());
+    // 빈 가정으로 빈 집합을 얻었으면 가정이 곧 답이라 메모를 버릴 필요가 없다.
+    if (first !== null && first.size === 0) return;
     this.memo.clear();
     this.reflective = first;
     const second = first === null ? null : this.query(() => this.reflectiveValues());
@@ -184,11 +206,13 @@ export class ValueFlow {
   private query(run: () => Flow): Flow {
     this.steps = 0;
     this.depth = 0;
+    this.frames = 0;
     try {
       return run();
     } catch (error) {
-      if (!(error instanceof BudgetExceeded)) throw error;
-      // 예산 초과는 증명 실패다(모름). 메모에는 완결된 단위만 남아 있다.
+      // 예산 초과와 스택 초과(RangeError)는 증명 실패다(모름). 메모에는 완결된 단위만 남아 있다.
+      if (!(error instanceof BudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.overBudget++;
       this.active.clear();
       this.provisional.clear();
       this.reentered.clear();
@@ -205,7 +229,21 @@ export class ValueFlow {
    */
   private expressionValues(node: ts.Expression): Flow {
     this.step();
-    const expression = skipWrappers(node);
+    if (++this.frames > MAX_FRAMES) throw new BudgetExceeded();
+    try {
+      return this.expressionKindValues(skipWrappers(node));
+    } finally {
+      this.frames--;
+    }
+  }
+
+  /**
+   * 식 종류별로 값을 구한다.
+   *
+   * @param expression 래퍼를 벗긴 식
+   * @returns 값 집합, 모르면 null
+   */
+  private expressionKindValues(expression: ts.Expression): Flow {
     if (ts.isObjectLiteralExpression(expression)) return new Set([expression]);
     if (ts.isNewExpression(expression)) return this.newValues(expression);
     if (ts.isIdentifier(expression)) return this.identifierValues(expression);
@@ -319,7 +357,7 @@ export class ValueFlow {
   private isEscapedClass(declaration: ts.ClassLikeDeclaration): boolean {
     const symbol = this.classSymbol(declaration);
     if (symbol === undefined) return true;
-    return (this.index.references.get(symbol) ?? []).some((reference) => !isHarmlessClassUse(climbWrappers(reference)));
+    return (this.index.references.get(symbol) ?? []).some((reference) => !isHarmlessClassUse(referenceSite(reference)));
   }
 
   /**
@@ -344,7 +382,7 @@ export class ValueFlow {
    * @returns 원본 값
    */
   private readSource(read: ts.Node): Flow {
-    if (ts.isPropertyAccessExpression(read) || ts.isElementAccessExpression(read)) return this.expressionValues(read.expression);
+    if (ts.isPropertyAccessExpression(read) || ts.isElementAccessExpression(read)) return this.expressionUnit(read.expression);
     return ts.isBindingElement(read) && ts.isObjectBindingPattern(read.parent) ? this.patternSource(read.parent) : null;
   }
 
@@ -354,12 +392,52 @@ export class ValueFlow {
    * @param declaration 클래스
    * @returns 클래스 목록(자신 먼저)
    */
-  private withSubclasses(declaration: ts.ClassLikeDeclaration): ts.ClassLikeDeclaration[] {
+  private withSubclasses(declaration: ts.ClassLikeDeclaration): readonly ts.ClassLikeDeclaration[] {
+    const cached = this.subclassMemo.get(declaration);
+    if (cached !== undefined) return cached;
+    const seen = new Set([declaration]);
     const result = [declaration];
     for (let index = 0; index < result.length; index++) {
-      for (const child of this.index.subclasses.get(result[index]!) ?? []) if (!result.includes(child)) result.push(child);
+      for (const child of this.index.subclasses.get(result[index]!) ?? []) {
+        if (!seen.has(child)) {
+          seen.add(child);
+          result.push(child);
+        }
+      }
     }
+    this.subclassMemo.set(declaration, result);
     return result;
+  }
+
+  /**
+   * (종류, 노드·값)에 대한 파생 메모 단위 키다. 같은 노드라도 종류가 다르면 다른 단위다.
+   *
+   * @param kind 단위 종류
+   * @param subject 노드·추상 값
+   * @returns 단위 키
+   */
+  private keyFor(kind: string, subject: object): object {
+    let byKind = this.derivedKeys.get(kind);
+    if (byKind === undefined) {
+      byKind = new Map();
+      this.derivedKeys.set(kind, byKind);
+    }
+    let key = byKind.get(subject);
+    if (key === undefined) {
+      key = { kind, subject };
+      byKind.set(subject, key);
+    }
+    return key;
+  }
+
+  /**
+   * 식의 값을 메모 단위로 구한다. 이름으로 모은 쓰기·읽기 위치처럼 여러 질의가 되풀이해 묻는 식에 쓴다.
+   *
+   * @param expression 식
+   * @returns 값 집합
+   */
+  private expressionUnit(expression: ts.Expression): Flow {
+    return this.unit(this.keyFor('expression', expression), () => this.expressionValues(expression));
   }
 
   /**
@@ -371,6 +449,10 @@ export class ValueFlow {
   private accessValues(expression: ts.PropertyAccessExpression | ts.ElementAccessExpression): Flow {
     const name = accessName(expression);
     if (name === undefined) return null;
+    // `#이름` 필드는 선언한 클래스 본문만 읽고 쓸 수 있어 심볼로 바로 구한다(이름으로 타입 멤버를 찾을 수 없다).
+    if (ts.isPropertyAccessExpression(expression) && ts.isPrivateIdentifier(expression.name)) {
+      return this.symbolValues(this.checker.getSymbolAtLocation(expression.name));
+    }
     const owner = skipWrappers(expression.expression);
     const ownerSymbol = ts.isIdentifier(owner) ? this.dealias(this.checker.getSymbolAtLocation(owner)) : undefined;
     if (ownerSymbol !== undefined && (ownerSymbol.flags & (ts.SymbolFlags.ValueModule | ts.SymbolFlags.Class)) !== 0) {
@@ -471,7 +553,7 @@ export class ValueFlow {
    * @returns 값 집합
    */
   private computeSymbolValues(symbol: ts.Symbol, declaration: ts.Declaration): Flow {
-    if (ts.isVariableDeclaration(declaration)) return unionFlows(this.variableValues(declaration), this.identifierWrites(symbol));
+    if (ts.isVariableDeclaration(declaration)) return unionFlows(this.allVariableValues(symbol), this.identifierWrites(symbol));
     if (ts.isBindingElement(declaration)) return unionFlows(this.bindingValues(declaration), this.identifierWrites(symbol));
     if (ts.isParameter(declaration)) {
       const flow = unionFlows(this.parameterValues(declaration), this.identifierWrites(symbol));
@@ -482,6 +564,22 @@ export class ValueFlow {
       return ts.isObjectLiteralExpression(declaration.parent) ? this.literalProperty(declaration.parent, symbol.name) : null;
     }
     return null;
+  }
+
+  /**
+   * 변수 심볼의 모든 선언(`var x = a; var x = b;`처럼 되풀이한 선언 포함)의 값 합이다. 변수가 아닌 선언이 섞이면 모름이다.
+   *
+   * @param symbol 변수 심볼
+   * @returns 값 집합
+   */
+  private allVariableValues(symbol: ts.Symbol): Flow {
+    let result: Flow = EMPTY;
+    for (const declaration of symbol.declarations ?? []) {
+      if (!ts.isVariableDeclaration(declaration) || !this.policy.isProjectFile(declaration.getSourceFile())) return null;
+      result = unionFlows(result, this.variableValues(declaration));
+      if (result === null) return null;
+    }
+    return result;
   }
 
   /**
@@ -572,11 +670,56 @@ export class ValueFlow {
     if (symbol === undefined || this.policy.isOpenCallable(owner as ts.FunctionLikeDeclaration)) return null;
     const sites: ts.Expression[][] = [];
     for (const reference of this.index.references.get(symbol) ?? []) {
-      const outer = climbWrappers(ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference ? reference.parent : reference);
+      const outer = referenceSite(reference);
       if (!ts.isCallExpression(outer.parent) || outer.parent.expression !== outer) return null;
       sites.push([...outer.parent.arguments]);
     }
-    return sites;
+    // 색인된 호출이 없으면, 참조 색인이 그 심볼에 대해 완전함을 증명할 때만 "호출 없음"으로 본다. 아니면 기본값만
+    // 흐른다고 추측하지 않고 모름이다.
+    return sites.length === 0 && !this.hasCompleteReferences(symbol) ? null : sites;
+  }
+
+  /**
+   * 분석 범위의 파일을 문법적으로 다시 훑어, 심볼을 가리킬 수 있는 모든 토큰(심볼 이름·별칭 지역 이름과 같은 텍스트의
+   * 식별자·`#이름`·문자열 리터럴)이 선언 이름·별칭 선언·타입 자리이거나 색인된 참조임을 확인한다. 하나라도 색인에서
+   * 빠졌으면 완전하지 않다(그 심볼의 "호출 없음"을 믿지 않는다).
+   *
+   * @param symbol 함수·클래스 심볼
+   * @returns 완전하면 true
+   */
+  private hasCompleteReferences(symbol: ts.Symbol): boolean {
+    const indexed = new Set(this.index.references.get(symbol) ?? []);
+    const names = new Set([symbol.name, ...(this.index.aliasNames.get(symbol) ?? [])]);
+    for (const sourceFile of this.index.files) {
+      if (![...names].some((name) => sourceFile.text.includes(name))) continue;
+      if (this.hasStrayToken(sourceFile, symbol, names, indexed)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * 파일에 색인에서 빠진, 심볼로 해석되는 토큰이 있는지 본다.
+   *
+   * @param sourceFile 파일
+   * @param symbol 심볼
+   * @param names 심볼을 가리킬 수 있는 이름
+   * @param indexed 색인된 참조 토큰
+   * @returns 빠진 토큰이 있으면 true
+   */
+  private hasStrayToken(sourceFile: ts.SourceFile, symbol: ts.Symbol, names: ReadonlySet<string>, indexed: ReadonlySet<ts.Node>): boolean {
+    let stray = false;
+    const visit = (node: ts.Node): void => {
+      if (stray || (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))) return;
+      const text = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
+      if (text !== undefined && names.has(text) && !indexed.has(node) && !isNameDeclaration(node)
+        && this.dealias(this.checker.getSymbolAtLocation(node)) === symbol) {
+        stray = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sourceFile, visit);
+    return stray;
   }
 
   /**
@@ -598,19 +741,22 @@ export class ValueFlow {
    * 생성 위치. 데코레이터(DI 컨테이너가 생성)·`new this()`·값으로 새어 나간 클래스·밖에서 부를 수 있는 클래스면 null이다.
    *
    * @param declaration 클래스
+   * @param isSlotOwner 값을 구하는 매개변수의 클래스이면 true(하위 클래스로 따라 들어온 경우는 false)
    * @returns 인자 목록들 또는 null
    */
-  private constructorSites(declaration: ts.ClassLikeDeclaration): CallSites {
+  private constructorSites(declaration: ts.ClassLikeDeclaration, isSlotOwner = true): CallSites {
     if (hasDecorators(declaration) || this.index.newThisClasses.has(declaration) || this.policy.isOpenCallable(declaration)) return null;
     const symbol = this.classSymbol(declaration);
     if (symbol === undefined) return null;
     const sites: (readonly ts.Expression[])[] = [];
     for (const reference of this.index.references.get(symbol) ?? []) {
-      const found = this.constructorUse(climbWrappers(reference));
+      const found = this.constructorUse(referenceSite(reference));
       if (found === null) return null;
       sites.push(...found);
     }
-    return sites;
+    // 매개변수의 클래스에 색인된 생성 위치가 없으면, 참조 색인의 완전함을 증명할 때만 "생성 없음"으로 본다. 생성되지
+    // 않는 하위 클래스는 기반 생성자에 인자를 더하지 않을 뿐이다.
+    return sites.length === 0 && isSlotOwner && !this.hasCompleteReferences(symbol) ? null : sites;
   }
 
   /**
@@ -639,7 +785,7 @@ export class ValueFlow {
    */
   private subclassSites(subclass: ts.ClassLikeDeclaration): CallSites {
     const constructor = subclass.members.find((member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member) && member.body !== undefined);
-    if (constructor === undefined) return this.constructorSites(subclass);
+    if (constructor === undefined) return this.constructorSites(subclass, false);
     const calls: ts.Expression[][] = [];
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.SuperKeyword) calls.push([...node.arguments]);
@@ -696,13 +842,17 @@ export class ValueFlow {
    * @returns 값 집합
    */
   private foreignWrites(name: string, owner: AbstractValue): Flow {
-    let result: Flow = EMPTY;
-    for (const write of this.index.propertyWrites.get(name) ?? []) {
-      if (this.isUnrelatedClassWrite(write, owner)) continue;
-      result = unionFlows(result, write.value === undefined ? null : this.expressionValues(write.value));
-      if (result === null) return null;
-    }
-    return result;
+    const writes = this.index.propertyWrites.get(name) ?? [];
+    if (writes.length === 0) return EMPTY;
+    return this.unit(this.keyFor(`writes:${name}`, owner), () => {
+      let result: Flow = EMPTY;
+      for (const write of writes) {
+        if (this.isUnrelatedClassWrite(write, owner)) continue;
+        result = unionFlows(result, write.value === undefined ? null : this.expressionUnit(write.value));
+        if (result === null) return null;
+      }
+      return result;
+    });
   }
 
   /**
@@ -713,7 +863,7 @@ export class ValueFlow {
    * @returns 닿을 수 없으면 true
    */
   private isUnrelatedClassWrite(write: PropertyWrite, owner: AbstractValue): boolean {
-    return this.cannotReach(this.expressionValues(write.target.expression), owner);
+    return this.cannotReach(this.expressionUnit(write.target.expression), owner);
   }
 
   /**
@@ -728,8 +878,8 @@ export class ValueFlow {
   private cannotReach(receivers: Flow, owner: AbstractValue): boolean {
     // 빈 흐름(프로젝트 안 호출자가 없는 내보낸 함수의 매개변수 등)은 스캔 밖에서 채워질 수 있어 증명으로 쓰지 않는다.
     if (receivers === null || receivers.size === 0) return false;
-    const targets: readonly AbstractValue[] = ts.isClassLike(owner) ? this.withSubclasses(owner) : [owner];
-    return ![...receivers].some((value) => targets.includes(value));
+    const targets = new Set<AbstractValue>(ts.isClassLike(owner) ? this.withSubclasses(owner) : [owner]);
+    return ![...receivers].some((value) => targets.has(value));
   }
 
   /**
@@ -888,8 +1038,13 @@ export class ValueFlow {
    */
   private hasForeignMemberWrites(declaration: ts.Declaration, name: string): boolean {
     const owner = declaration.parent;
-    if (!ts.isClassLike(owner) && !ts.isObjectLiteralExpression(owner)) return (this.index.propertyWrites.get(name) ?? []).length > 0;
-    return (this.index.propertyWrites.get(name) ?? []).some((write) => !this.isUnrelatedClassWrite(write, owner));
+    const writes = this.index.propertyWrites.get(name) ?? [];
+    if (writes.length === 0) return false;
+    if (!ts.isClassLike(owner) && !ts.isObjectLiteralExpression(owner)) return true;
+    // 모름(null)을 "바꿀 수 있는 쓰기가 있다"로 쓰는 메모 단위다.
+    const verdict = this.unit(this.keyFor(`patch:${name}`, owner), () =>
+      (writes.some((write) => !this.isUnrelatedClassWrite(write, owner)) ? null : EMPTY));
+    return verdict === null;
   }
 
   /**
@@ -1057,6 +1212,23 @@ export class ValueFlow {
 export function instanceTypeOf(checker: ts.TypeChecker, declaration: ts.ClassLikeDeclaration): ts.Type {
   const type = checker.getTypeAtLocation(declaration);
   return ts.isClassExpression(declaration) ? type.getConstructSignatures()[0]?.getReturnType() ?? type : type;
+}
+
+/**
+ * 토큰이 선언의 이름 자리인지 본다(선언 이름, import·export 별칭 이름, 구조 분해 속성 이름, 객체 리터럴 속성 이름).
+ *
+ * @param token 식별자·문자열 토큰
+ * @returns 이름 자리면 true
+ */
+function isNameDeclaration(token: ts.Node): boolean {
+  const parent = token.parent;
+  if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)
+    || ts.isImportEqualsDeclaration(parent) || ts.isExternalModuleReference(parent) || ts.isImportDeclaration(parent)
+    || ts.isExportDeclaration(parent) || ts.isExportAssignment(parent) || ts.isLiteralTypeNode(parent)) {
+    return true;
+  }
+  if (ts.isBindingElement(parent) && parent.propertyName === token) return true;
+  return (parent as { name?: ts.Node }).name === token && !ts.isPropertyAccessExpression(parent);
 }
 
 /**

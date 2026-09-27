@@ -101,7 +101,7 @@ test('잇지 못한 호출은 이유별로 세고 추측하지 않는다', () =>
     'entry-points: 1 vercel.json cron path(s) match no GET route handler',
   ]);
   // `saveVia(store: Store)`는 프로젝트 안 호출자가 없는 내보낸 함수라 흐름을 증명하지 못한다: bound 없음, candidate 둘.
-  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 0, boundPartial: 0, candidate: 1, candidatePartial: 0 });
+  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 0, boundPartial: 0, candidate: 1, candidatePartial: 0, overBudget: 0 });
   assert.deepEqual(graph.edges.filter((edge) => edge.evidence !== 'direct').map((edge) => `${edge.from} -> ${edge.to} ${edge.evidence}`), [
     'src/lib/repository.ts#saveVia -> src/lib/repository.ts#JobStore.save candidate',
     'src/lib/repository.ts#saveVia -> src/lib/repository.ts#MemoryStore.save candidate',

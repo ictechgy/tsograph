@@ -137,9 +137,29 @@ function symbolOf(id: string): TraversalSymbol {
 function traversalLimitations(input: TraversalDocumentInput): string[] {
   const touched = new Set([...input.rootIds, ...input.result.reached.map((entry) => entry.id)]);
   const nodes: GraphNode[] = input.graph.nodes.filter((node) => touched.has(node.id));
-  const graphLimitations = input.graph.limitationsByMode?.[input.dispatch] ?? input.graph.limitations;
+  const graphLimitations = input.graph.limitationsByMode[input.dispatch];
   return [
     ...graphLimitations.filter((line) => !line.startsWith('non-http-entries:')),
     ...nonHttpEntryLimitations(nodes),
+    ...documentLimitations(input, nodes),
   ];
+}
+
+/**
+ * 이 문서에서만 생기는 limitation이다: 근거 등급 근사, `unresolvedCalls` 상한 적용.
+ *
+ * @param input 조립 입력
+ * @param nodes 이 문서의 root·도달 노드
+ * @returns limitation 목록
+ */
+function documentLimitations(input: TraversalDocumentInput, nodes: readonly GraphNode[]): string[] {
+  const result: string[] = [];
+  if (input.result.evidenceApproximated) {
+    result.push('evidence-approximated: exact per-root evidence tiers would exceed the memory budget; evidence is the weakest tier of any non-direct edge upstream of the symbol, which may understate but never overstates it');
+  }
+  const capped = nodes.filter((node) => (node.unresolvedCalls?.[input.dispatch] ?? 0) > MAX_UNRESOLVED_CALLS).length;
+  if (capped > 0) {
+    result.push(`unresolved-calls-capped: ${capped} symbol(s) have more than ${MAX_UNRESOLVED_CALLS} unresolved call sites; unresolvedCalls reports ${MAX_UNRESOLVED_CALLS} for them (the graph snapshot keeps the exact counts)`);
+  }
+  return result;
 }

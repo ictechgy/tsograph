@@ -28,7 +28,7 @@ import { isSourceFileName } from '../schema/source-module.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
-import { markEntryPoints } from './entry-points.ts';
+import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
 import {
   type CallGraph,
@@ -104,16 +104,18 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const files = nodeFiles(program, inputs.sources);
   const analysis = analyzeFiles(program, checker, files);
   const crons = readCronPaths(project);
-  const unmatchedCrons = markEntryPoints(analysis.store, files, {
+  const entryInput: EntryInput = {
     routeFacts: routes.facts,
     cronPaths: crons.paths,
     appDirectory: routes.extraction.routerDirectories.appDirectory,
     pagesDirectory: routes.extraction.routerDirectories.pagesDirectory,
     pageExtensions: routes.pageExtensions,
-  });
+  };
+  const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrors = countParseErrors(files);
   const openProgram = openProgramReason(project, inputs, parseErrors);
-  resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined });
+  const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
+  resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
     ...analysis, config: status, inputs, parseErrors, unmatchedCrons, openProgram,
@@ -318,7 +320,7 @@ function createCallStatistics(): CallStatistics {
     external: 0,
     missingDependencies: 0,
     unresolved: Object.fromEntries(UNRESOLVED_REASONS.map((reason) => [reason, 0])) as CallStatistics['unresolved'],
-    dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 },
+    dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 },
   };
 }
 
@@ -456,6 +458,9 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
     const reason = openProgram === 'public-package' ? 'package.json declares public entry points'
       : openProgram === 'unreadable-manifest' ? 'package.json could not be read as a JSON object within 1 MiB' : 'the scan is incomplete';
     result.push(`bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`);
+  }
+  if (calls.dispatch.overBudget > 0) {
+    result.push(`dispatch-budget: ${calls.dispatch.overBudget} interface call(s) exceeded the flow-analysis budget (steps, nesting, or stack); their flows count as unknown and they are not bound`);
   }
   if (view !== 'bound' && candidate + candidatePartial > 0) {
     const candidateScope = view === 'snapshot' ? ' (followed only with --dispatch candidates)' : '';

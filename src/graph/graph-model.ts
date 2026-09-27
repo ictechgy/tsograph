@@ -123,6 +123,8 @@ export interface DispatchStatistics {
   boundPartial: number;
   candidate: number;
   candidatePartial: number;
+  /** 흐름 질의가 예산(단계·깊이·스택)을 넘어 bound를 증명하지 못한 호출 수 */
+  overBudget: number;
 }
 
 /**
@@ -146,8 +148,8 @@ export interface CallGraph {
   readonly edges: readonly GraphEdge[];
   /** 스냅샷 limitation(호출 계수는 direct 기준, 디스패치 계수 줄 포함) */
   readonly limitations: readonly string[];
-  /** reach·impact 문서가 모드별로 싣는 limitation. 없으면 `limitations`를 쓴다. */
-  readonly limitationsByMode?: Readonly<Record<DispatchMode, readonly string[]>>;
+  /** reach·impact 문서가 모드별로 싣는 limitation */
+  readonly limitationsByMode: Readonly<Record<DispatchMode, readonly string[]>>;
   readonly statistics: GraphStatistics;
 }
 
