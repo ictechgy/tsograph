@@ -40,6 +40,12 @@ test('합성 fixture를 결정적인 persistence 문서로 바꾼다', async () 
     assert.ok(summary.includes(expected), expected);
   }
   assert.ok(!summary.includes('ImportBatch'));
+  // 소스 사실만 그래프 id(usr = qualifiedName)를 싣고, 스키마 선언·TypedSQL 사실은 싣지 않는다.
+  const symbols = document.facts.filter((fact: RelationUseFact) => fact.symbol !== undefined).map((fact: RelationUseFact) => fact.symbol!);
+  assert.ok(symbols.some((symbol: { usr?: string }) => symbol.usr === 'src/lib/books.ts#listBooks'));
+  assert.ok(symbols.every((symbol: { qualifiedName: string; usr?: string }) => symbol.usr === undefined || symbol.usr === symbol.qualifiedName));
+  assert.ok(symbols.filter((symbol: { qualifiedName: string }) => !symbol.qualifiedName.includes('#')).every((symbol: { usr?: string }) => symbol.usr === undefined));
+  assert.ok(symbols.filter((symbol: { qualifiedName: string }) => symbol.qualifiedName.endsWith('.sql#booksByGenre')).every((symbol: { usr?: string }) => symbol.usr === undefined));
   assert.ok(!summary.includes('Book.legacy'));
   assert.deepEqual(document.limitations, [
     'ignored-prisma-elements: 1 @@ignore model(s) and 1 @ignore field(s) are not emitted',

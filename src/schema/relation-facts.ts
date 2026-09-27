@@ -17,7 +17,11 @@ export interface RelationUseFact {
   readonly method?: string;
   readonly dynamic: boolean;
   readonly location: BridgeLocation;
-  readonly symbol?: { readonly qualifiedName: string };
+  /**
+   * 사실을 담은 선언이다. `usr`는 소스 코드 사실에만 싣는 tsograph 그래프 id로, 값은 qualifiedName과 같다
+   * (`src/graph/symbol-ids.ts`). 스키마 선언(`Model.field`)·TypedSQL 사실은 그래프 노드가 아니라 싣지 않는다.
+   */
+  readonly symbol?: { readonly qualifiedName: string; readonly usr?: string };
 }
 
 /** 사실 하나를 만들 입력이다. */
@@ -29,6 +33,8 @@ export interface FactInput {
   readonly text: SourceText;
   readonly offset: number;
   readonly symbol: string | undefined;
+  /** symbol이 소스 선언 이름(곧 그래프 id)이면 true다. 이때만 `usr`를 싣는다. */
+  readonly symbolIsGraphId?: boolean;
 }
 
 /** dynamic 사실의 channel 요약 최대 길이(UTF-16 코드 단위)다. 가족 생산자와 같다. */
@@ -60,7 +66,7 @@ export class RelationFactSink {
       ...(input.method === undefined ? {} : { method: input.method }),
       dynamic: input.dynamic,
       location: { path: input.path, line, column },
-      ...(symbol === undefined ? {} : { symbol: { qualifiedName: symbol } }),
+      ...(symbol === undefined ? {} : { symbol: symbolOf(symbol, input.symbolIsGraphId === true) }),
     };
     const key = [input.path, line, column, input.channel, input.method ?? '', input.dynamic].join('\u0000');
     if (!this.facts.has(key)) this.facts.set(key, fact);
@@ -79,6 +85,17 @@ export class RelationFactSink {
   get size(): number {
     return this.facts.size;
   }
+}
+
+/**
+ * 사실의 symbol 객체를 만든다.
+ *
+ * @param qualifiedName 선언 이름
+ * @param isGraphId 이름이 그래프 id이기도 한지
+ * @returns symbol 객체
+ */
+function symbolOf(qualifiedName: string, isGraphId: boolean): NonNullable<RelationUseFact['symbol']> {
+  return isGraphId ? { qualifiedName, usr: qualifiedName } : { qualifiedName };
 }
 
 /**

@@ -31,6 +31,7 @@ import {
 } from './project-scan.ts';
 import { parseSource, scriptKindOf, type SourcePosition } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
+import { exportBindingId } from '../graph/symbol-ids.ts';
 
 /** App Router route handler가 받을 수 있는 method다(`next/dist/server/web/http.js`). */
 export const APP_ROUTE_METHODS: readonly RouteDeclMethod[] = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'DELETE', 'PATCH'];
@@ -46,6 +47,11 @@ export interface DeclaredRoute {
   readonly file: string;
   /** Next가 호출하는 내보낸 이름(`GET`, Pages Router는 `default`) */
   readonly exportName: string;
+  /**
+   * 핸들러의 tsograph 그래프 id(`symbol.usr`, `src/graph/symbol-ids.ts`). CommonJS 내보내기는 그래프가
+   * 이름 있는 노드를 만들지 않아 undefined다.
+   */
+  readonly usr: string | undefined;
   readonly position: SourcePosition;
   readonly testSource: boolean;
 }
@@ -172,6 +178,7 @@ async function appRouteDeclarations(context: RouteFileContext, appDirectory: str
     method: exported.name as RouteDeclMethod,
     file,
     exportName: exported.name,
+    usr: exportBindingId(file, exported.name, exported.node),
     position: exports.positionOf(exported.node),
     testSource,
   }));
@@ -223,7 +230,8 @@ async function pagesApiDeclarations(context: RouteFileContext, pagesDirectory: s
     return [];
   }
   if (path.kind === 'dynamic') context.gaps.dynamicPathFiles += 1;
-  return [{ path, method: 'ANY', file, exportName: 'default', position: exports.positionOf(handler), testSource }];
+  const usr = exports.module.defaultExport === undefined ? undefined : exportBindingId(file, 'default', handler);
+  return [{ path, method: 'ANY', file, exportName: 'default', usr, position: exports.positionOf(handler), testSource }];
 }
 
 /**

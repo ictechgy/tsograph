@@ -8,11 +8,13 @@
  * - 변수 선언: 모듈 최상위 변수이거나, 사실이 그 초기값 안의 함수 안에 있을 때만 이름이 된다
  *   (함수 안 지역 결과 변수 `const rows = await …`는 이름이 아니다).
  * - 객체 리터럴의 메서드·함수 값 속성: 속성 이름(`handlers.GET`).
+ * - `export default <식>`(CommonJS `export =`는 제외)의 식 안은 `default`다 — 모듈이 내보낸 값이고
+ *   `routes`의 Pages Router 핸들러 id(`#default`)와 같아야 하기 때문이다.
  * - 이름 없는 콜백(화살표·함수 식)은 투명하다 — 감싸는 선언에 귀속한다.
  * - 계산된 이름이 끼면 이름을 만들지 않는다(추측하지 않는다). 이름이 하나도 없으면(모듈 최상위 문장)
  *   심볼을 생략하고 호출자가 `missing-relation-symbols`로 센다.
  *
- * 뒤 단계가 tsograph 그래프 id와 잇도록 경로를 앞에 붙인다.
+ * 이 이름은 그대로 tsograph 그래프 id(`symbol.usr`)다(`src/graph/symbol-ids.ts`).
  */
 
 import ts from 'typescript';
@@ -60,6 +62,7 @@ function declarationSegment(node: ts.Node, child: ts.Node, insideFunction: boole
     return memberName(node.name) ?? null;
   }
   if (ts.isVariableDeclaration(node)) return variableSegment(node, child, insideFunction);
+  if (ts.isExportAssignment(node) && node.isExportEquals !== true) return 'default';
   return undefined;
 }
 

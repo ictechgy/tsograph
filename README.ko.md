@@ -180,7 +180,8 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
   리터럴 정규화를 쓴다(`café` → `caf%C3%A9`). 대괄호와 다른 글자가 섞인 세그먼트(`v[id]`)는 Next.js가
   문서화하지 않았고 라우터와 정규식 생성기가 다르게 해석하므로 `dynamic`과 `route-coverage:`로 낸다.
 - **`[[...x]]`**는 `{**}` decl과 catch-all을 뗀 접두사 decl을 함께 낸다(계약의 0세그먼트 펼침). 접두사
-  decl에 `catchAllPrefix`가 없는 이유는 아래 결정 목록에 있다.
+  decl은 `catchAllPrefix: true`를 단다(`{**}` decl과 같은 method·symbol·location). isthmus가 이 표식에
+  `symbol.usr`를 요구하므로 usr가 없는 CommonJS 핸들러는 표식 없는 접두사 decl을 낸다.
 - **trailingSlash**: 위 redirect 규칙으로 한 형태가 정규이면 `strict`(channel은 그 형태), redirect가 없어
   두 형태가 모두 핸들러에 닿으면 `optional`(`skipTrailingSlashRedirect: true`, `.well-known`, 두 redirect에
   모두 걸리지 않는 점 있는 마지막 세그먼트), 파라미터 값에 달렸거나 설정 값이 리터럴이 아니면 생략
@@ -188,7 +189,13 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 - **location**: 내보낸 이름 토큰(`GET`, Pages Router는 `default`)의 1부터 시작하는 줄과 UTF-8 바이트 열.
   앞의 BOM은 3바이트로 센다.
 - **symbol.qualifiedName**: `<프로젝트 기준 파일 경로>#<내보낸 이름>`, 예: `src/app/api/items/route.ts#GET`,
-  `pages/api/hello.ts#default`. 아직 `usr`는 없다.
+  `pages/api/hello.ts#default`.
+- **symbol.usr**: 핸들러의 tsograph 그래프 id([심볼 id](#심볼-id)). 이름 있는 기본 내보내기
+  (`export default function handler` → `pages/api/hello.ts#handler`, 안쪽 코드가 `handler`에 귀속되므로)를
+  빼면 `qualifiedName`과 같다. 별칭·구조 분해·재내보내기(`export { GET } from './impl'`,
+  `export const { GET } = h`)는 `<파일>#<내보낸 이름>`을 유지하고, `tsograph graph`가 같은 id의 export 노드와
+  실제 선언으로 가는 `alias` 간선을 만든다. CommonJS 핸들러(`module.exports = …`)는 usr가 없고
+  `missing-route-usrs:`로 센다.
 
 ### 설정과 limitation
 
@@ -212,6 +219,7 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 | Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
 | `package.json`에 `next`가 없거나 범위가 주 버전 16에 한정되지 않음 | `route-framework-version-unknown:` |
 | `app/`·`pages/` 디렉터리가 없음 | 사실 0건 + `route-coverage:` |
+| 핸들러를 CommonJS(`module.exports = …`)로 내보냄 | `symbol.usr` 없는 사실 + `missing-route-usrs:` |
 
 서버 측 접두사는 모두 계약의 닫힌 목록에서 쓴다. 그래서 isthmus는 각각을 서버 측 공백으로 읽고
 `route-call-without-decl`을 거짓 error 대신 `-unverified`로 내린다. limitation에는 개수와 프로젝트 기준
@@ -219,14 +227,12 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 
 ### 결정 사항(초안과 다른 부분)
 
-- **`usr` 없음, qualifiedName이 조인 손잡이.** `<file>#<export>`는 Next.js가 호출하는 모듈 내보내기를
-  가리킨다. 이후 단계에서 tsograph 그래프 id를 같은 (모듈 경로, 내보낸 이름) 쌍으로 찾아 `symbol.usr`로
-  더한다. `qualifiedName`은 바꾸지 않는다.
-- **optional catch-all 접두사에 `catchAllPrefix`를 달지 않는다.** 계약은 펼친 접두사 decl에
-  `catchAllPrefix: true`를 달게 하지만, isthmus는 그런 decl에 `symbol.usr`를 요구한다. usr가 생기기 전까지는
-  접두사 decl을 일반 decl로 낸다(`{**}` decl과 같은 method·symbol·location). Next.js는 같은 자리의 명시
-  라우트를 빌드 오류(E458)로 막으므로 명시 decl과 충돌하지 않는다. 대신 `route-decl-without-call`·드리프트
-  경고에 나타날 수 있다. usr가 생기면 `catchAllPrefix: true`로 바꾼다.
+- **qualifiedName은 내보내기, usr는 그래프 노드.** `<file>#<export>`는 Next.js가 호출하는 모듈 내보내기를
+  가리키고, `symbol.usr`는 같은 (모듈 경로, 내보낸 이름) 쌍에서 만든 `tsograph graph`/`reach`/`impact`의
+  핸들러 id다.
+- **optional catch-all 접두사와 usr.** isthmus는 `catchAllPrefix` decl에 `symbol.usr`를 요구한다. usr가 없는
+  CommonJS 핸들러의 접두사 decl은 일반 decl로 낸다. Next.js는 같은 자리의 명시 라우트를 빌드 오류(E458)로
+  막으므로 명시 decl과 충돌하지 않는다. 대신 `route-decl-without-call`·드리프트 경고에 나타날 수 있다.
 - **감싼 설정은 `root`를 유지한다.** `withX(config)`를 모두 basePath 미상으로 보면 실제 프로젝트 대부분이
   `base`가 된다. 안쪽 리터럴을 쓰고 불확실성은 `unresolved-route-prefix:`로 알린다. 이 limitation이 이미
   거짓 error를 막는다.
@@ -283,11 +289,15 @@ tsograph schema --project <root> [--format json]
 
 **심볼 형식.** 소스 사실은 `<프로젝트 기준 POSIX 경로>#<이름>(.<이름>)*`이고 바깥 선언부터 적는다.
 함수 선언, 이름 있는 클래스·클래스 식, 메서드, 접근자, 클래스 필드, `constructor`, 이름 없는 default
-export의 `default`, 모듈 최상위 변수 또는 함수 값 초기값 안에 사실이 있는 변수
+export(`export default <식>`의 식 포함)의 `default`, 모듈 최상위 변수 또는 함수 값 초기값 안에 사실이 있는 변수
 (`src/lib/jobs.ts#listJobs`, `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). 이름 없는 콜백은
 투명하다. 계산된 이름이 끼면 심볼을 만들지 않고, 모듈 최상위 문장에는 심볼이 없다 — 이런 사실은
 `missing-relation-symbols:`로 센다. 스키마 사실은 모델 이름(`Job`, `Job.title`), TypedSQL 사실은
 `<경로>#<파일 이름>`이다.
+
+소스 사실은 `qualifiedName`과 같은 값의 `symbol.usr`도 싣는다. 감싸는 선언의 tsograph 그래프
+id([심볼 id](#심볼-id))라서 `tsograph reach` 출력과 relation-use 사실을 정확한 문자열 일치로 이을 수 있다.
+스키마·TypedSQL 사실은 그래프 노드가 아니므로 usr가 없다.
 
 ### Prisma 스키마 위치(Prisma 7.8.0 CLI 규칙)
 
@@ -407,6 +417,26 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app`은 자체 마이그레이션을 가진 합성 프로젝트다. 이렇게 조인하면 오류가 없다
 (`@@ignore` 모델에 대한 예상된 `relation-decl-without-use-unverified` 경고 하나).
+
+## 심볼 id
+
+`tsograph graph`/`reach`/`impact`의 노드, route-decl 사실의 `symbol.usr`, relation-use 사실의 `symbol.usr`가
+한 가지 id 형식을 같이 쓴다. 그래서 isthmus가 정확한 문자열 일치만으로 셋을 잇는다.
+
+```text
+<프로젝트 기준 POSIX 경로>#<선언 경로>
+```
+
+- 선언 경로는 schema [심볼 형식](#사실)과 같다. 감싸는 선언 이름을 바깥부터 `.`으로 잇는다:
+  `src/lib/jobs.ts#listJobs`, `src/lib/repo.ts#Repo.save`, `src/lib/repo.ts#Repo.constructor`,
+  `src/auth.ts#handlers.GET`, `src/app/api/items/[id]/route.ts#GET`, `pages/api/hello.ts#handler`.
+- 이름 있는 선언 밖의 코드(최상위 문장, 모듈 최상위에서 넘긴 콜백, 계산된 이름 멤버)는 모듈 스코프
+  `<경로>#<module>`에 속한다.
+- 이름 없는 기본 내보내기는 `<경로>#default`다(`export default <식>` 포함).
+- 그 자체가 이름 있는 선언이 아닌 내보내기(`export { a as GET }`, `export { GET } from './impl'`,
+  `export const { GET } = handlers`, `export let x;`)는 `<경로>#<내보낸 이름>` export 노드가 되고, 해석한
+  대상으로 `alias` 간선을 잇는다.
+- 같은 id가 되는 선언(오버로드, getter/setter 쌍, 형제 블록의 같은 이름 함수)은 한 노드다.
 
 ## 개발
 

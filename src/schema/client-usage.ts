@@ -608,6 +608,7 @@ export class ClientUsageScanner {
       text: this.module.text,
       offset: at.getStart(this.module.sourceFile),
       symbol: enclosingSymbol(at, this.module.path),
+      symbolIsGraphId: true,
     });
   }
 }

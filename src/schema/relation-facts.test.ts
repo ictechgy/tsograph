@@ -13,7 +13,7 @@ test('사실 수집기는 제어 문자 이름을 세고 같은 사실을 한 �
   const text = new SourceText('ab\n한글 x\n');
   const sink = new RelationFactSink();
   const base = { dynamic: false, text, symbol: 'a.ts#f' };
-  sink.add({ ...base, channel: 'b', path: 'b.ts', offset: 0 });
+  sink.add({ ...base, channel: 'b', path: 'b.ts', offset: 0, symbolIsGraphId: true });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6, method: 'col' });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6, method: 'col' });
   sink.add({ ...base, channel: 'a', path: 'a.ts', offset: 6 });
@@ -27,7 +27,7 @@ test('사실 수집기는 제어 문자 이름을 세고 같은 사실을 한 �
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', undefined, false, { qualifiedName: 'a.ts#f' }],
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', undefined, true, undefined],
     [{ path: 'a.ts', line: 2, column: 8 }, 'a', 'col', false, { qualifiedName: 'a.ts#f' }],
-    [{ path: 'b.ts', line: 1, column: 1 }, 'b', undefined, false, { qualifiedName: 'a.ts#f' }],
+    [{ path: 'b.ts', line: 1, column: 1 }, 'b', undefined, false, { qualifiedName: 'a.ts#f', usr: 'a.ts#f' }],
   ]);
 });
 

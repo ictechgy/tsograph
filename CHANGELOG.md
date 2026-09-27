@@ -4,8 +4,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- schema: `export default <식>`의 식 안 사실은 심볼 `<경로>#default`를 갖는다(전에는 심볼 없이
+  `missing-relation-symbols:`로 셌다). Pages Router 핸들러 id와 같게 하기 위해서다.
+
 ### Added
 
+- 안정 심볼 id 형식 `<프로젝트 기준 POSIX 경로>#<선언 경로>`(모듈 스코프 `#<module>`, 이름 없는 기본 내보내기
+  `#default`, 별칭·재내보내기·구조 분해 내보내기는 `#<내보낸 이름>` export 노드)를 정하고, 이 값을 routes
+  route-decl과 schema relation-use(소스 사실만)의 `symbol.usr`로 싣는다. `qualifiedName`은 그대로다.
+  isthmus trace가 생산자 id를 정확한 문자열 일치로만 잇기 때문이다.
+- routes: optional catch-all 접두사 decl에 `catchAllPrefix: true`를 단다(usr가 생겨 isthmus 요구를 채운다).
+  usr가 없는 CommonJS 핸들러는 표식 없이 내고 `missing-route-usrs:`로 센다.
 - `tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]`:
   Next.js App Router route handler(`app/**/route.<ext>`, `src/app` 포함)와 Pages Router API route
   (`pages/api/**`)를 isthmus bridge-facts v1 http 문서(`platform: "js"`, `roles: ["server"]`,
@@ -19,9 +30,7 @@
 - `next.config.*`를 실행 없이 읽는다. 함수 내보내기·비리터럴 basePath는 `pathAnchor: "base"`와
   `unresolved-route-prefix:`, rewrites·redirects·i18n·proxy/middleware·메타데이터 파일·`public/`은
   `framework-provided-routes:`, package.json의 next 범위가 16.x가 아니면 `route-framework-version-unknown:`.
-- 결정: `usr`는 아직 싣지 않고 `symbol.qualifiedName`을 `<파일>#<내보낸 이름>`으로 둔다(이후 그래프 id로
-  `usr` 추가). isthmus가 `catchAllPrefix` decl에 `symbol.usr`를 요구하므로 optional catch-all 접두사 decl은
-  표식 없이 일반 decl로 낸다. 감싼 설정(`withX(config)`)은 안쪽 리터럴을 쓰고 `unresolved-route-prefix:`로
+- 결정: `symbol.qualifiedName`을 `<파일>#<내보낸 이름>`으로 둔다. 감싼 설정(`withX(config)`)은 안쪽 리터럴을 쓰고 `unresolved-route-prefix:`로
   알린다.
 - symlink 규칙을 최상위 후보까지 넓힌다: `app`·`pages`·`src`·`src/app`·`src/pages`·`public`·`next.config.*`·
   `package.json`이 symlink면 `stat` 대신 부모 목록으로 판별해 따라가지 않는다(프로젝트 밖 트리·설정을 읽던

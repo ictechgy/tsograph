@@ -3,11 +3,12 @@
  *
  * 파일 시스템을 읽지 않는 순수 조립이다. 결정 사항(README "Decisions"와 같다):
  * - `symbol.qualifiedName`은 `<프로젝트 기준 파일 경로>#<내보낸 이름>`이다. Next가 호출하는 것은
- *   모듈의 내보낸 이름이므로 (모듈 경로, 내보낸 이름) 쌍이 핸들러 신원이다. 이후 tsograph 그래프 id가
- *   생기면 같은 쌍으로 찾아 `usr`를 더한다. 지금은 `usr`를 싣지 않는다.
- * - `[[...x]]`는 `{**}` decl과 catch-all을 뗀 접두사 decl을 함께 낸다. 계약의 `catchAllPrefix`
- *   표식은 `symbol.usr`를 요구하므로(isthmus가 검증), usr가 없는 지금은 표식 없이 일반 decl로 낸다.
- *   Next는 같은 자리의 명시 라우트를 빌드 오류(E458)로 막으므로 접두사 decl이 명시 decl과 충돌하지 않는다.
+ *   모듈의 내보낸 이름이므로 (모듈 경로, 내보낸 이름) 쌍이 핸들러 신원이다. `symbol.usr`는 같은 쌍에서
+ *   만든 tsograph 그래프 id다(`src/graph/symbol-ids.ts`). CommonJS 내보내기는 usr가 없고
+ *   `missing-route-usrs:`로 센다.
+ * - `[[...x]]`는 `{**}` decl과 catch-all을 뗀 접두사 decl을 함께 낸다. 접두사 decl은 계약대로
+ *   `catchAllPrefix: true`를 단다. isthmus가 이 표식에 `symbol.usr`를 요구하므로 usr가 없으면 표식 없이
+ *   일반 decl로 낸다(Next는 같은 자리의 명시 라우트를 빌드 오류 E458로 막아 충돌하지 않는다).
  */
 
 import {
@@ -114,7 +115,10 @@ function routeFacts(route: DeclaredRoute, policy: ChannelPolicy, service: string
     return [fact(route, dynamicChannel(joinTemplate(policy.basePath, [route.path.raw.slice(1)]), policy.pathAnchor), service)];
   }
   const facts = [fact(route, channelFor(route.path.segments, policy), service)];
-  if (route.path.optionalCatchAll) facts.push(fact(route, channelFor(route.path.segments.slice(0, -1), policy), service));
+  if (route.path.optionalCatchAll) {
+    const prefix = fact(route, channelFor(route.path.segments.slice(0, -1), policy), service);
+    facts.push(route.usr === undefined ? prefix : { ...prefix, catchAllPrefix: true });
+  }
   return facts;
 }
 
@@ -138,7 +142,10 @@ function fact(route: DeclaredRoute, shape: RouteChannel, service: string | undef
     ...(shape.trailingSlash === undefined ? {} : { trailingSlash: shape.trailingSlash }),
     ...(route.testSource ? { testSource: true as const } : {}),
     location,
-    symbol: { qualifiedName: `${route.file}#${route.exportName}` },
+    symbol: {
+      qualifiedName: `${route.file}#${route.exportName}`,
+      ...(route.usr === undefined ? {} : { usr: route.usr }),
+    },
   };
 }
 
@@ -184,6 +191,7 @@ function buildLimitations(input: RouteDocumentInput, decision: BasePathDecision)
     ...gapLimitations(input.extraction.gaps),
     ...directoryLimitations(input.extraction),
     ...versionLimitations(input.versionStatus),
+    ...usrLimitations(input.extraction.routes),
   ].sort(compareStrings);
 }
 
@@ -279,6 +287,18 @@ function directoryLimitations(extraction: NextRoutesResult): string[] {
   ];
   if (appDirectory !== undefined || pagesDirectory !== undefined || symlinkedLocations.length > 0) return lines;
   return ['route-coverage: no app or pages directory was found at the project root or under src/; no Next.js routes were scanned'];
+}
+
+/**
+ * 그래프 id가 없는 선언의 limitation이다. isthmus trace가 핸들러에서 언어 내부로 이어가지 못하는 곳이다.
+ *
+ * @param routes 선언 목록
+ * @returns limitation 목록
+ */
+function usrLimitations(routes: readonly DeclaredRoute[]): string[] {
+  const missing = routes.filter((route) => route.usr === undefined).length;
+  if (missing === 0) return [];
+  return [`missing-route-usrs: ${missing} route declaration(s) come from CommonJS exports and carry no symbol.usr; tsograph graph has no named node for them`];
 }
 
 /**

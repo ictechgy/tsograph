@@ -263,8 +263,9 @@ bundled docs under `dist/docs/`), not guessed.
   that mixes brackets with other text (`v[id]`) is not documented by Next.js (its router and
   regex builder disagree), so the fact is `dynamic` with a `route-coverage:` limitation.
 - **`[[...x]]`** emits the `{**}` decl and the prefix decl without the catch-all (the
-  contract's zero-segment expansion). See Decisions for why the prefix decl does not carry
-  `catchAllPrefix`.
+  contract's zero-segment expansion). The prefix decl carries `catchAllPrefix: true` (same
+  method, symbol, and location as the `{**}` decl). isthmus requires `symbol.usr` on it, so a
+  CommonJS handler (no usr) gets a plain prefix decl instead.
 - **trailingSlash**: `strict` when the redirect rules above make one form canonical (the
   channel is that form), `optional` when no redirect applies and both forms reach the handler
   (`skipTrailingSlashRedirect: true`, `.well-known`, a last segment with a dot that neither
@@ -273,7 +274,14 @@ bundled docs under `dist/docs/`), not guessed.
 - **location**: the exported name token (`GET`), or `default` for Pages Router, as a 1-based
   line and 1-based UTF-8 byte column. A leading BOM counts as its three bytes.
 - **symbol.qualifiedName**: `<project-relative file>#<export name>`, for example
-  `src/app/api/items/route.ts#GET` or `pages/api/hello.ts#default`. No `usr` yet.
+  `src/app/api/items/route.ts#GET` or `pages/api/hello.ts#default`.
+- **symbol.usr**: the handler's tsograph graph id (see [Symbol ids](#symbol-ids)). It equals
+  `qualifiedName` except for a named default export (`export default function handler` →
+  `pages/api/hello.ts#handler`, because code inside it is attributed to `handler`). Aliases,
+  destructuring, and re-exports (`export { GET } from './impl'`, `export const { GET } = h`)
+  keep `<file>#<export name>`; `tsograph graph` has an export node with that id and an `alias`
+  edge to the real declaration. CommonJS handlers (`module.exports = …`) have no usr and are
+  counted under `missing-route-usrs:`.
 
 ### Configuration and limitations
 
@@ -297,6 +305,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
 | `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
 | No `app/` or `pages/` directory | zero facts + `route-coverage:` |
+| Handler exported through CommonJS (`module.exports = …`) | fact without `symbol.usr` + `missing-route-usrs:` |
 
 All server-side prefixes come from the contract's closed list, so isthmus reads each one as
 a server-side gap and downgrades `route-call-without-decl` to `-unverified` instead of
@@ -304,15 +313,13 @@ reporting a false error. Limitations carry counts and project-relative names onl
 
 ### Decisions (differences from the draft)
 
-- **No `usr`; qualifiedName is the join handle.** `<file>#<export>` names the module export
-  Next.js invokes. A later phase adds tsograph graph ids as `symbol.usr` by looking up the
-  same (module path, export name) pair, without changing `qualifiedName`.
-- **Optional catch-all prefix without `catchAllPrefix`.** The contract marks the expanded
-  prefix decl with `catchAllPrefix: true`, but isthmus requires `symbol.usr` on such a decl.
-  Until usr exists, the prefix decl is emitted as a plain decl (same method, symbol, and
-  location as the `{**}` decl). Next.js rejects an explicit route at the same place (build
-  error E458), so it cannot collide with an explicit decl; the cost is that it may appear in
-  `route-decl-without-call` / drift warnings. It becomes `catchAllPrefix: true` once usr lands.
+- **qualifiedName names the export, usr names the graph node.** `<file>#<export>` names the
+  module export Next.js invokes; `symbol.usr` is the id `tsograph graph`/`reach`/`impact` use for
+  the same handler, derived from the same (module path, export name) pair.
+- **Optional catch-all prefix and usr.** isthmus requires `symbol.usr` on a `catchAllPrefix`
+  decl. A CommonJS handler has no usr, so its prefix decl is emitted as a plain decl. Next.js
+  rejects an explicit route at the same place (build error E458), so it cannot collide with an
+  explicit decl; the cost is that it may appear in `route-decl-without-call` / drift warnings.
 - **Wrapped configs stay `root`.** Treating every `withX(config)` as an unknown basePath
   would make most real projects `base`; the literal inside is used and the uncertainty is
   reported with `unresolved-route-prefix:`, which already prevents false errors.
@@ -372,12 +379,18 @@ Channels are written as the code or mapping names them: `schema.table` when qual
 
 **Symbol format.** Source facts use `<project-relative POSIX path>#<Name>(.<Name>)*`, outermost
 declaration first: function declarations, named classes and class expressions, methods,
-accessors, class fields, `constructor`, `default` for anonymous default exports, variables at
+accessors, class fields, `constructor`, `default` for anonymous default exports (including the
+expression of `export default <expr>`), variables at
 module level or whose function-valued initializer contains the fact (`src/lib/jobs.ts#listJobs`,
 `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Anonymous callbacks are transparent. A
 computed name stops the symbol, and module-level statements have none; those facts are counted
 under `missing-relation-symbols:`. Schema facts use the model name (`Job`, `Job.title`), and
 TypedSQL facts use `<path>#<file name>`.
+
+Source facts also carry `symbol.usr`, equal to `qualifiedName`: it is the tsograph graph id of
+the enclosing declaration ([Symbol ids](#symbol-ids)), so `tsograph reach` output can be joined
+with relation-use facts by exact string match. Schema and TypedSQL facts are not graph nodes and
+carry no usr.
 
 ### Prisma schema location (Prisma 7.8.0 CLI rules)
 
@@ -512,6 +525,28 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app` is a synthetic project with its own migration; joined this way it
 reports no errors (one expected `relation-decl-without-use-unverified` warning for its `@@ignore` model).
+
+## Symbol ids
+
+One id format is shared by `tsograph graph`/`reach`/`impact` nodes, `symbol.usr` on route-decl
+facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exact string match:
+
+```text
+<project-relative POSIX path>#<declaration path>
+```
+
+- The declaration path follows the schema [symbol format](#facts): names of the enclosing
+  declarations, outermost first, joined with `.`:
+  `src/lib/jobs.ts#listJobs`, `src/lib/repo.ts#Repo.save`, `src/lib/repo.ts#Repo.constructor`,
+  `src/auth.ts#handlers.GET`, `src/app/api/items/[id]/route.ts#GET`, `pages/api/hello.ts#handler`.
+- Code outside every named declaration (top-level statements, callbacks passed at module level,
+  members with computed names) belongs to the module scope `<path>#<module>`.
+- An anonymous default export is `<path>#default` (also for `export default <expr>`).
+- An export that is not itself a named declaration (`export { a as GET }`, `export { GET } from
+  './impl'`, `export const { GET } = handlers`, `export let x;`) gets an export node
+  `<path>#<export name>` with an `alias` edge to what it resolves to.
+- Declarations that produce the same id (overloads, a getter/setter pair, same-named functions in
+  sibling blocks) are one node.
 
 ## Development
 

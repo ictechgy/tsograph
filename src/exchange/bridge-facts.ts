@@ -108,9 +108,11 @@ export interface RouteDeclFact {
   readonly trailingSlash?: 'strict' | 'optional';
   /** `--include-tests`로 낸 테스트 소스 사실에만 단다. */
   readonly testSource?: true;
+  /** optional catch-all(`[[...x]]`)을 펼친 접두사 decl 표식이다. `symbol.usr`가 있을 때만 단다(isthmus 검증). */
+  readonly catchAllPrefix?: true;
   readonly location: BridgeLocation;
-  /** `usr`는 아직 싣지 않는다(tsograph 그래프 id가 생기면 추가한다). */
-  readonly symbol: { readonly qualifiedName: string };
+  /** qualifiedName은 `<파일>#<내보낸 이름>`, usr는 핸들러의 tsograph 그래프 id다(CommonJS 내보내기는 생략). */
+  readonly symbol: { readonly qualifiedName: string; readonly usr?: string };
 }
 
 /** tsograph routes --role server가 내는 bridge-facts v1 문서다. */
