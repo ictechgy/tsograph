@@ -1,0 +1,47 @@
+{
+  "name": "tsograph",
+  "version": "0.1.0",
+  "description": "Static facts for TypeScript/JavaScript (Node) services: HTTP route contracts for the isthmus bridge-facts exchange.",
+  "keywords": [
+    "openapi",
+    "static-analysis",
+    "http",
+    "routes",
+    "isthmus"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ictechgy/tsograph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ictechgy/tsograph/issues"
+  },
+  "homepage": "https://github.com/ictechgy/tsograph#readme",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "tsograph": "dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "README.ko.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "verify:build": "node scripts/verify-build-contract.mjs",
+    "verify:cli": "npm run verify:build && node scripts/verify-cli-contract.mjs",
+    "verify": "npm run typecheck && npm test && npm run verify:build && node scripts/verify-cli-contract.mjs",
+    "prepublishOnly": "npm run verify"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.7",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,28 @@
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# 커버리지·프로파일링 생성물
+*.profraw
+*.profdata
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+
+# 로컬 상태
+.omc/
+.claude/settings.local.json
+.serena/
+
+# 비밀
+.env
+.env.*
+*.pem
+*-service-account*.json
