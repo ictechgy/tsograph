@@ -1,0 +1,16 @@
+openapi: 3.0.3
+info:
+  title: fixture app-router contract
+  version: 1.0.0
+paths:
+  /api/items:
+    get: {operationId: listItems}
+    post: {operationId: createItem}
+  /api/items/{id}:
+    get: {operationId: getItem}
+    delete: {operationId: deleteItem}
+    put: {operationId: replaceItem}
+  /api/items/featured:
+    get: {operationId: listFeaturedItems}
+  /api/health:
+    get: {operationId: health}

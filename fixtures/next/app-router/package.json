@@ -1,0 +1,7 @@
+{
+  "name": "fixture-app-router",
+  "private": true,
+  "dependencies": {
+    "next": "16.2.7"
+  }
+}

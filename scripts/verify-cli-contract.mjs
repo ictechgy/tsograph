@@ -8,6 +8,7 @@ import { runChild } from './run-child.mjs';
 // 빌드된 CLI(dist)가 종료 코드 계약(0/2/64, 1은 예약)을 지키는지 실제 프로세스로 확인한다.
 const binaryPath = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const fixtures = fileURLToPath(new URL('../fixtures/openapi/', import.meta.url));
+const nextFixtures = fileURLToPath(new URL('../fixtures/next/', import.meta.url));
 const packageDocument = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 );
@@ -18,6 +19,8 @@ verifyUsageErrors();
 verifyOpenApiSuccess();
 verifyOpenApiInputErrors();
 verifyOpenApiUsageErrors();
+verifyRoutesSuccess();
+verifyRoutesErrors();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -73,6 +76,31 @@ function verifyOpenApiUsageErrors() {
   verify(run(['openapi', spec]).status === 64, 'openapi missing service');
   verify(run(['openapi', spec, '--service', 'x', '--format', 'yaml']).status === 64, 'openapi format');
   verify(run(['openapi', '--service', 'x']).status === 64, 'openapi missing spec');
+}
+
+/** 합성 Next 프로젝트가 결정적인 route-decl 문서로 변환되는지 확인한다. */
+function verifyRoutesSuccess() {
+  for (const name of ['app-router', 'pages-api']) {
+    const args = ['routes', '--role', 'server', '--project', join(nextFixtures, name), '--service', 'contract-check', '--format', 'json'];
+    const first = run(args);
+    verify(first.status === 0, `routes ${name} exit code`);
+    const document = JSON.parse(first.stdout);
+    verify(document.format === 'bridge-facts' && document.version === 1, `routes ${name} envelope`);
+    verify(document.platform === 'js' && document.target === 'http' && document.dispatch === 'specificity', `routes ${name} platform`);
+    verify(document.facts.length > 0 && document.facts.every((fact) => fact.kind === 'route-decl'), `routes ${name} facts`);
+    const second = run(args);
+    verify(withoutGeneratedAt(first.stdout) === withoutGeneratedAt(second.stdout), `routes ${name} determinism`);
+  }
+  verify(run(['help', 'routes']).stdout.startsWith('Usage: tsograph routes'), 'routes help');
+}
+
+/** routes의 잘못된 호출은 64, 읽을 수 없는 프로젝트는 2로 끝나는지 확인한다. */
+function verifyRoutesErrors() {
+  const project = join(nextFixtures, 'app-router');
+  verify(run(['routes', '--project', project]).status === 64, 'routes missing role');
+  verify(run(['routes', '--role', 'client', '--project', project]).status === 64, 'routes client role');
+  verify(run(['routes', '--role', 'server']).status === 64, 'routes missing project');
+  verify(run(['routes', '--role', 'server', '--project', join(project, 'missing')]).status === 2, 'routes missing project directory');
 }
 
 /** 추출 시각만 다른 두 출력을 비교할 수 있게 generatedAt 줄을 지운다. */
