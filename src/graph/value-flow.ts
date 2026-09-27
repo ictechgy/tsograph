@@ -110,6 +110,8 @@ export class ValueFlow {
   private lowestOpen = Number.POSITIVE_INFINITY;
   private steps = 0;
   private depth = 0;
+  /** 클래스별 명목 여부 메모 */
+  private readonly nominal = new Map<ts.ClassLikeDeclaration, boolean>();
   /** 호출 위치(함수·클래스별) 메모 */
   private readonly sitesMemo = new Map<ts.Node, CallSites>();
   /** 반사적 쓰기 대상 값(지연 계산) */
@@ -298,8 +300,8 @@ export class ValueFlow {
 
   /**
    * 메서드를 떼어 내 다른 `this`로 부를 수 있는지 본다: 이름이 같은 멤버를 호출 대상이 아닌 자리에서 읽는 위치
-   * (`h.run.bind(x)`, `const f = h.run`, `const { run } = h`)가 있고, 그 읽기의 원본 객체가 이 클래스의 인스턴스일
-   * 수 있다(타입이 대입 가능하다).
+   * (`h.run.bind(x)`, `const f = h.run`, `const { run } = h`, `({ run } = h)`)가 있고, 그 읽기가 이 클래스의
+   * 인스턴스에 닿을 수 없음을 명목 타입으로 증명하지 못한다.
    *
    * @param method 메서드
    * @param owner 소유 클래스
@@ -308,10 +310,22 @@ export class ValueFlow {
   private isDetachable(method: ts.MethodDeclaration, owner: ts.ClassLikeDeclaration): boolean {
     const name = memberName(method.name);
     if (name === undefined) return true;
-    return (this.index.memberReads.get(name) ?? []).some((read) => {
-      if (ts.isBindingElement(read)) return this.mayReachType(this.checker.getTypeAtLocation(read.parent), owner);
-      return this.mayReach((read as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression, owner);
-    });
+    return (this.index.memberReads.get(name) ?? []).some((read) => !this.cannotReach(this.readSymbol(read, name), owner));
+  }
+
+  /**
+   * 멤버 읽기 위치가 해석되는 멤버 심볼이다.
+   *
+   * @param read 속성 접근·바인딩 요소·대입 패턴 속성
+   * @param name 멤버 이름
+   * @returns 심볼 또는 undefined
+   */
+  private readSymbol(read: ts.Node, name: string): ts.Symbol | undefined {
+    if (ts.isPropertyAccessExpression(read)) return this.checker.getSymbolAtLocation(read.name);
+    if (ts.isElementAccessExpression(read)) return this.checker.getSymbolAtLocation(read.argumentExpression);
+    // 대입 구조 분해 패턴(`({ run } = h)`)은 원본 타입을 여기서 알 수 없어 undefined(닿을 수 있음)로 둔다.
+    if (!ts.isBindingElement(read)) return undefined;
+    return this.checker.getPropertyOfType(this.checker.getTypeAtLocation(read.parent), name);
   }
 
   /**
@@ -672,46 +686,50 @@ export class ValueFlow {
   }
 
   /**
-   * 속성 쓰기가 값에 닿을 수 없는지 본다: 쓰기 수신자 식의 타입에 값의 타입이 대입될 수 없다(구조적 타이핑 —
-   * `const o: Other = holder`처럼 다른 클래스 타입을 거쳐도 대입 가능하면 닿을 수 있다). `any`·`unknown` 수신자는
-   * 무엇에든 닿을 수 있다. 형변환(`as`)으로 타입을 속인 쓰기는 모델링하지 않는다(README).
+   * 속성 쓰기가 값에 닿을 수 없는지 본다(`cannotReach`).
    *
    * @param write 속성 쓰기
    * @param owner 값(클래스·객체 리터럴)
    * @returns 닿을 수 없으면 true
    */
   private isUnrelatedClassWrite(write: PropertyWrite, owner: AbstractValue): boolean {
-    return !this.mayReach(write.target.expression, owner);
+    const member = ts.isPropertyAccessExpression(write.target) ? write.target.name : write.target.argumentExpression;
+    return this.cannotReach(this.checker.getSymbolAtLocation(member), owner);
   }
 
   /**
-   * 수신자 식이 가리키는 객체가 이 값일 수 있는지 타입으로 본다.
+   * 멤버 심볼로 해석되는 접근이 이 값에 닿을 수 없음을 증명할 수 있는지 본다. TypeScript 대입 규칙은 구조적이고
+   * 배열 공변성·메서드 매개변수 이변성처럼 비건전한 규칙도 있어, 타입만으로는 **명목** 클래스끼리만 가를 수 있다:
+   * 값의 클래스와 멤버가 선언된 클래스가 모두 비공개·보호·`#` 멤버를 가진 클래스이고, 서로 어느 쪽으로도 대입될 수
+   * 없으면 닿지 않는다. 그 밖(객체 리터럴 값, 구조적 클래스, 인터페이스·any로 해석된 접근)은 닿을 수 있다고 본다.
    *
-   * @param receiver 수신자 식
-   * @param value 추상 값
-   * @returns 그럴 수 있으면 true
+   * @param symbol 접근이 해석된 멤버 심볼
+   * @param owner 값(클래스·객체 리터럴)
+   * @returns 닿을 수 없으면 true
    */
-  private mayReach(receiver: ts.Expression, value: AbstractValue): boolean {
-    return this.mayReachType(this.checker.getTypeAtLocation(receiver), value);
+  private cannotReach(symbol: ts.Symbol | undefined, owner: AbstractValue): boolean {
+    if (!ts.isClassLike(owner) || !this.isNominalClass(owner)) return false;
+    const memberClass = symbol?.valueDeclaration === undefined ? undefined : classOfMember(symbol.valueDeclaration);
+    if (memberClass === undefined || !this.isNominalClass(memberClass)) return false;
+    const ownerType = instanceTypeOf(this.checker, owner);
+    const memberType = instanceTypeOf(this.checker, memberClass);
+    return !this.checker.isTypeAssignableTo(ownerType, memberType) && !this.checker.isTypeAssignableTo(memberType, ownerType);
   }
 
   /**
-   * 타입의 자리에 이 값이 올 수 있는지 본다(`any`·`unknown`·제약 없는 타입 매개변수면 언제나).
+   * 클래스 인스턴스 타입에 비공개·보호·`#` 멤버가 있는지 본다(있으면 구조가 같은 다른 선언의 타입이 대입될 수 없다).
    *
-   * @param type 자리의 타입
-   * @param value 추상 값
-   * @returns 올 수 있으면 true
+   * @param declaration 클래스
+   * @returns 명목 클래스면 true
    */
-  private mayReachType(type: ts.Type, value: AbstractValue): boolean {
-    let target = type;
-    if ((target.flags & ts.TypeFlags.TypeParameter) !== 0) {
-      // 다형 `this` 타입·제네릭 매개변수는 제약 타입으로 본다. 제약이 없으면 무엇이든 올 수 있다.
-      const constraint = this.checker.getBaseConstraintOfType(target);
-      if (constraint === undefined) return true;
-      target = constraint;
+  private isNominalClass(declaration: ts.ClassLikeDeclaration): boolean {
+    let cached = this.nominal.get(declaration);
+    if (cached === undefined) {
+      cached = this.checker.getPropertiesOfType(instanceTypeOf(this.checker, declaration)).some((property) =>
+        (property.declarations ?? []).some(isNonPublicMember));
+      this.nominal.set(declaration, cached);
     }
-    if ((target.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
-    return this.checker.isTypeAssignableTo(this.valueType(value), target);
+    return cached;
   }
 
   /**
@@ -1179,6 +1197,35 @@ function isAmbient(declaration: ts.Node): boolean {
  */
 function isStatic(member: ts.ClassElement): boolean {
   return (ts.canHaveModifiers(member) ? ts.getModifiers(member) ?? [] : []).some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword);
+}
+
+/**
+ * 멤버 선언이 속한 클래스다(필드·매개변수 속성·메서드·접근자).
+ *
+ * @param declaration 멤버 선언
+ * @returns 클래스 또는 undefined
+ */
+function classOfMember(declaration: ts.Declaration): ts.ClassLikeDeclaration | undefined {
+  if (ts.isParameter(declaration)) {
+    const owner = declaration.parent;
+    return ts.isConstructorDeclaration(owner) && ts.getModifiers(declaration) !== undefined ? owner.parent : undefined;
+  }
+  const isMember = ts.isPropertyDeclaration(declaration) || ts.isMethodDeclaration(declaration)
+    || ts.isGetAccessorDeclaration(declaration) || ts.isSetAccessorDeclaration(declaration);
+  return isMember && ts.isClassLike(declaration.parent) ? declaration.parent : undefined;
+}
+
+/**
+ * 선언이 비공개·보호·`#` 클래스 멤버인지 본다.
+ *
+ * @param declaration 멤버 선언
+ * @returns 공개 멤버가 아니면 true
+ */
+function isNonPublicMember(declaration: ts.Declaration): boolean {
+  const name = (declaration as { name?: ts.Node }).name;
+  if (name !== undefined && ts.isPrivateIdentifier(name)) return true;
+  return ts.canHaveModifiers(declaration) && (ts.getModifiers(declaration) ?? []).some((modifier) =>
+    modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword);
 }
 
 /**

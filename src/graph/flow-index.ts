@@ -51,7 +51,7 @@ export interface FlowIndex {
   readonly subclasses: ReadonlyMap<ts.ClassLikeDeclaration, readonly ts.ClassLikeDeclaration[]>;
   /**
    * 멤버 이름 → 호출 대상이 아닌 자리에서 그 이름을 읽는 위치(`h.run.bind(x)`, `const f = h.run`,
-   * `const { run } = h`). 메서드를 떼어 내 다른 `this`로 부를 수 있는지 판정하는 데 쓴다.
+   * `const { run } = h`, `({ run } = h)`). 메서드를 떼어 내 다른 `this`로 부를 수 있는지 판정하는 데 쓴다.
    */
   readonly memberReads: ReadonlyMap<string, readonly ts.Node[]>;
 }
@@ -290,6 +290,11 @@ class IndexCollector {
   private visitDestructuringTargets(pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression): void {
     const elements: ts.Node[] = ts.isArrayLiteralExpression(pattern) ? [...pattern.elements] : [...pattern.properties];
     for (const element of elements) {
+      if ((ts.isPropertyAssignment(element) || ts.isShorthandPropertyAssignment(element)) && !ts.isComputedPropertyName(element.name)) {
+        // `({ run } = h)`는 멤버를 떼어 내 읽는다.
+        const name = ts.isIdentifier(element.name) || ts.isStringLiteral(element.name) ? element.name.text : undefined;
+        if (name !== undefined) appendTo(this.index.memberReads, name, element);
+      }
       let target: ts.Node | undefined = element;
       if (ts.isSpreadElement(element) || ts.isSpreadAssignment(element)) target = element.expression;
       else if (ts.isPropertyAssignment(element)) target = element.initializer;
