@@ -18,7 +18,8 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | 그 밖의 Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa) | 계획 |
 | `tsograph schema`: Prisma 스키마·Prisma Client·원시 SQL → persistence `relation-use` 사실 | 구현됨 |
 | TypeORM·Sequelize·Drizzle·Knex·raw 드라이버·D1 relation-use | 계획(현재는 limitation으로 센다) |
-| 웹/React Native 클라이언트 route-call, 호출 그래프, 영향 | 계획 |
+| `tsograph graph`·`reach`·`impact`: TypeScript/JavaScript 호출 그래프 → isthmus `language-traversal` v1 | 구현됨 |
+| 웹/React Native 클라이언트 route-call | 계획 |
 
 isthmus의 `http` target은 아직 isthmus `docs/GRAPH-EXCHANGE.md`의 **초안**("개발 중: HTTP 경계
 합의 초안")이다. 초안이 발행되기 전의 isthmus는 `target: "http"` 문서를 거부한다.
@@ -417,6 +418,147 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app`은 자체 마이그레이션을 가진 합성 프로젝트다. 이렇게 조인하면 오류가 없다
 (`@@ignore` 모델에 대한 예상된 `relation-decl-without-use-unverified` 경고 하나).
+
+## `tsograph graph`, `tsograph reach`, `tsograph impact`
+
+```sh
+tsograph graph  --project <root> [--generated-at <timestamp>] [--format json]
+tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+```
+
+TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
+없으면 `jsconfig.json`, 둘 다 없으면 번들러식 기본값 위의 `Program`·`TypeChecker`, `allowJs`는 항상 켠다).
+분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다.
+
+- `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
+  `location`·선택 `entries`), `edges`(`from`·`to`·`kinds`), `statistics`, `limitations`, `graphRevision`,
+  읽을 수 있으면 `revision`.
+- `reach`는 root id에서 닿는 심볼(`direction: "dependencies"`), `impact`는 root에 닿는 심볼
+  (`direction: "dependents"`)을 isthmus
+  [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md)로 낸다.
+- id는 [심볼 id](#심볼-id)다. `tsograph routes`·`tsograph schema` 출력의 `symbol.usr`와 같은 문자열이다.
+  모르는 id는 사용법 오류(종료 코드 `64`)이고 목록을 알린다. 중복 id는 처음 나온 순서로 한 번만 둔다(그 순서가
+  `reached[].roots` 인덱스의 뜻이다).
+- 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음, `64` 사용법 오류.
+
+### 노드와 간선
+
+노드는 프로젝트 자체 소스 파일에서만 만든다(`tsograph schema`와 같은 걷기 규칙, Prisma generator 출력 제외,
+모든 라우트 파일 포함). `node_modules`·TypeScript lib·생성 클라이언트의 선언은 노드가 아니고, 그리로 가는
+호출은 외부로 센다.
+
+| 노드 종류 | 뜻 |
+|---|---|
+| `module` | `<경로>#<module>`: 최상위 문장과 이름 있는 선언 밖의 코드 |
+| `function`·`method`·`constructor`·`accessor`·`class`·`field`·`variable` | 심볼 id 규칙이 이름 붙이는 선언(함수 값 변수·객체 속성은 `function`) |
+| `export` | 그 자체가 선언이 아닌 내보내기(별칭·재내보내기·구조 분해) |
+
+| 간선 종류 | 뜻 |
+|---|---|
+| `call` | 직접 호출(태그 템플릿·데코레이터·`super(...)` 포함) |
+| `new` | `new C()` → 본문 있는 생성자, 없으면 클래스 노드 |
+| `callback` | 함수 값을 인자로 넘김(`items.map(format)`, `withAuth(handler)`) |
+| `reference` | 그 밖의 함수 값 참조(`export default handler`, `{ onClick: h }`, `action={fn}`) |
+| `jsx` | JSX 컴포넌트(`<JobList />`) |
+| `alias` | export 노드 → 해석한 선언 |
+| `initializer` | 생성자·클래스 → 인스턴스 필드 초기값, 생성자 없는 파생 클래스 → 기반 생성, 모듈 스코프 → 최상위 변수 초기값·static 필드 |
+
+호출은 checker 심볼로 모듈을 넘어 잇는다: named/default/namespace import, 재내보내기(`export *` 포함),
+경로 별칭, 값 별칭(`const h = g`), 구조 분해(`const { GET } = handlers`, `const { f } = await import('./m')`),
+객체 리터럴 멤버. 추측하지 않는다.
+
+- 인터페이스·타입 리터럴 시그니처로 부른 메서드는 수신자가 `new C()`·객체 리터럴로 초기화된 `const` 변수나
+  `readonly` 필드일 때만 잇는다(그때 구현이 증명된다). union 수신자는 본문 있는 멤버를 모두 잇고, 증명하지
+  못한 부분은 `partial-dispatch:`로 센다.
+- 하위 클래스가 재정의한 메서드 호출은 정적으로 해석한 선언에만 잇고 `overridden-methods:`로 센다.
+- 매개변수·`any`·계산된 호출 대상·함수가 아닌 값·풀리지 않는 프로젝트 import를 거친 호출은 간선 없이
+  `unresolved-calls:`에 이유별로 센다.
+- 타입 선언을 찾지 못한 패키지(의존성 미설치, 타입 없는 패키지)를 거친 호출은 외부이고
+  `missing-dependencies:`로 센다.
+- 모듈 스코프는 import하는 쪽에서 잇지 않는다(import 시점 부수 효과는 `<module>` 노드에 남는다).
+
+### 진입점
+
+| `entries` | 근거 |
+|---|---|
+| `route-handler` | 프로젝트 `tsograph routes` route-decl 사실의 `symbol.usr`(테스트 소스 제외) |
+| `scheduled` | 템플릿이 `vercel.json` `crons[].path`와 맞는 GET/ANY route 핸들러(Vercel은 cron을 GET으로 부른다) |
+| `server-action` | `'use server'` 모듈의 내보내기, 본문이 `'use server'`로 시작하는 함수 |
+| `page` | App Router 특수 파일(`page`·`layout`·`template`·`default`·`error`·`not-found`·`loading` …)의 기본 내보내기와 `generateMetadata`·`generateStaticParams` 등, Pages Router 페이지(기본 내보내기, `getServerSideProps`·`getStaticProps` 등) |
+| `metadata-route` | `sitemap`·`robots`·`manifest`·아이콘·Open Graph 이미지 파일의 기본 내보내기 |
+| `middleware` | `proxy.<ext>`·`middleware.<ext>`의 `proxy`·`middleware`·기본 내보내기 |
+| `instrumentation` | `instrumentation.<ext>`의 `register`·`onRequestError` |
+
+isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impact` 문서는 root·도달 심볼 중 그 밖의
+진입점을 `non-http-entries:`로 세어, isthmus `trace`가 route 누락 대신 `non-http-entry` gap으로 보고할 수
+있게 한다.
+
+### language-traversal 출력
+
+- `roots[]`: 입력 순서의 `{ id, symbol: { usr, qualifiedName } }`.
+- `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
+  (`depth`, `usr`) 순. `depth`는 가장 가까운 root까지의 거리, `via`는 그 경로의 직전 심볼(깊이 1이면
+  root id), `roots`는 그 심볼에 닿는 모든 root 인덱스, `relationships`는 `via`와 심볼 사이 간선 종류다.
+- root는 `reached`에 다시 싣지 않는다(v1은 root끼리의 도달을 표현하지 않는다). 경로는 다른 root를 지날 수
+  있고, 그 너머 심볼은 두 root 인덱스를 모두 싣는다.
+- 예산: `--max-depth` 1–128(기본 128), `--max-reached` 최대 100,000(기본 100,000). 예산이 순회를 자르면
+  `truncated: true`와 `truncationReasons`(`depth`·`max-reached`)를 싣는다. 한 심볼의 root 인덱스가 64개를
+  넘으면 작은 64개만 싣고 `rootsTruncated: true`를 단다.
+- `graphRevision`은 노드 id·종류·진입점과 간선의 `sha256:` 해시다(위치 제외). 같은 그래프의 `graph`·
+  `reach`·`impact`가 같은 값을 싣는다. `revision`은 `.git`에서 읽은 프로젝트 루트의 git `HEAD` 커밋이다
+  (작업 트리 변경은 반영하지 않는다).
+- `limitations`는 그래프 limitation과 이 문서 범위의 `non-http-entries:`다.
+- `--generated-at`은 `generatedAt`을 고정해 바이트 단위로 같은 출력을 만든다.
+
+예시(합성 `fixtures/graph/next-prisma`, 줄임):
+
+```sh
+tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00:00:00.000Z 'src/app/api/jobs/route.ts#POST'
+```
+
+```json
+{
+  "direction": "dependencies",
+  "format": "language-traversal",
+  "generatedAt": "2026-09-27T00:00:00.000Z",
+  "graphRevision": "sha256:929a5ac7…",
+  "limitations": ["unresolved-calls: 6 call(s) could not be linked to a project declaration and were not guessed (parameter: 1, interface: 1, untyped: 1, computed: 1, indirect: 1, unresolved-import: 1)", "…"],
+  "platform": "js",
+  "project": "/work/example",
+  "reached": [
+    { "depth": 1, "relationships": ["call"], "roots": [0],
+      "symbol": { "kind": "function", "location": { "column": 23, "line": 8, "path": "src/lib/jobs.ts" },
+                  "qualifiedName": "src/lib/jobs.ts#createJob", "usr": "src/lib/jobs.ts#createJob" },
+      "via": "src/app/api/jobs/route.ts#POST" },
+    { "depth": 2, "relationships": ["call"], "roots": [0],
+      "symbol": { "kind": "function", "location": { "column": 23, "line": 3, "path": "src/lib/audit.ts" },
+                  "qualifiedName": "src/lib/audit.ts#audit", "usr": "src/lib/audit.ts#audit" },
+      "via": "src/lib/jobs.ts#createJob" },
+    { "depth": 2, "relationships": ["new"], "roots": [0],
+      "symbol": { "kind": "constructor", "location": { "column": 3, "line": 14, "path": "src/lib/repository.ts" },
+                  "qualifiedName": "src/lib/repository.ts#JobStore.constructor", "usr": "src/lib/repository.ts#JobStore.constructor" },
+      "via": "src/lib/repository.ts#saveProven" }
+  ],
+  "roots": [{ "id": "src/app/api/jobs/route.ts#POST",
+              "symbol": { "qualifiedName": "src/app/api/jobs/route.ts#POST", "usr": "src/app/api/jobs/route.ts#POST" } }],
+  "tool": { "name": "tsograph", "version": "0.1.0" },
+  "truncated": false,
+  "version": 1
+}
+```
+
+`tsograph schema`의 relation-use 사실(`symbol.usr` ∈ 도달 집합 ∪ {핸들러})과 이으면 `POST /api/jobs`는
+`jobs`와 `AuditLog`에 닿는다. 같은 문서가 isthmus `feature/trace-language-traversal` 소비자의
+`language-traversal` 파서와 `isthmus trace`(`forward` 분석의 route 선택, `reverse` 분석의 심볼 선택)를
+통과한다.
+
+### 그래프 limitation 접두사
+
+`unresolved-calls:`, `partial-dispatch:`, `overridden-methods:`, `missing-dependencies:`,
+`unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
+`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`.
+개수만 싣고 소스 원문·절대 경로는 싣지 않는다.
 
 ## 심볼 id
 

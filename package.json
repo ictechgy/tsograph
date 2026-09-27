@@ -1,7 +1,7 @@
 {
   "name": "tsograph",
   "version": "0.1.0",
-  "description": "Static facts for TypeScript/JavaScript (Node) services for the isthmus bridge-facts exchange: OpenAPI route contracts, Next.js route declarations, and Prisma/SQL relation uses.",
+  "description": "Static facts for TypeScript/JavaScript (Node) services for the isthmus bridge-facts exchange: OpenAPI route contracts, Next.js route declarations, Prisma/SQL relation uses, and call-graph traversals.",
   "keywords": [
     "openapi",
     "static-analysis",
@@ -10,6 +10,7 @@
     "nextjs",
     "prisma",
     "sql",
+    "call-graph",
     "isthmus"
   ],
   "type": "module",

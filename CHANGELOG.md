@@ -11,6 +11,19 @@
 
 ### Added
 
+- `tsograph graph --project <root>`, `tsograph reach --project <root> <id>...`, `tsograph impact --project <root> <id>...`:
+  TypeScript 컴파일러 API(Program + TypeChecker, 프로젝트 tsconfig/jsconfig, JS 허용)로 호출 그래프를 만들고,
+  스냅샷(`tsograph-graph` v1, `graphRevision` = 노드·간선 해시)과 isthmus `language-traversal` v1
+  (`dependencies`·`dependents`, root 출처 보존, depth 1~128, `--max-depth`·`--max-reached`·`truncationReasons`,
+  `rootsTruncated`, `--generated-at`, git HEAD `revision`)을 낸다. 모르는 id는 목록과 함께 종료 코드 64다.
+- 간선 `call`·`new`·`callback`·`reference`·`jsx`·`alias`·`initializer`. import 별칭·재내보내기·기본 내보내기·
+  동적 import 구조 분해·객체 리터럴 멤버를 checker로 잇고, 인터페이스 메서드는 수신자 초기값으로 증명한
+  구현만 잇는다. 매개변수·`any`·계산된 호출·풀리지 않는 import는 `unresolved-calls:`, 재정의 메서드는
+  `overridden-methods:`, 타입 없는 패키지는 `missing-dependencies:`로 센다(추측하지 않는다).
+- 진입점 표식(`route-handler`·`scheduled`(vercel.json crons)·`server-action`·`page`·`metadata-route`·
+  `middleware`·`instrumentation`)과 HTTP 밖 진입점의 `non-http-entries:` limitation.
+- 합성 fixture `fixtures/graph/next-prisma`(모든 간선 종류, 모듈 사이 해석, 순환, 다중 root, route → 테이블)와
+  isthmus `language-traversal` 파서·`trace`로 왕복 검증했다.
 - 안정 심볼 id 형식 `<프로젝트 기준 POSIX 경로>#<선언 경로>`(모듈 스코프 `#<module>`, 이름 없는 기본 내보내기
   `#default`, 별칭·재내보내기·구조 분해 내보내기는 `#<내보낸 이름>` export 노드)를 정하고, 이 값을 routes
   route-decl과 schema relation-use(소스 사실만)의 `symbol.usr`로 싣는다. `qualifiedName`은 그대로다.
