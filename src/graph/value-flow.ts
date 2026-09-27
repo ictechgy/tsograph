@@ -46,6 +46,12 @@ export interface FlowPolicy {
 /** 질의 하나의 최대 단계 수다. 넘으면 모름이다. */
 const MAX_STEPS = 20_000;
 
+/** 함수 값 별칭을 따라가는 최대 깊이다. */
+const MAX_ALIAS_DEPTH = 8;
+
+/** 한 단위의 순환 고정점 되풀이 상한이다. */
+const MAX_ROUNDS = 64;
+
 /** 질의 하나의 최대 재귀 깊이다(스택 보호). */
 const MAX_DEPTH = 256;
 
@@ -75,6 +81,18 @@ export function unionFlows(left: Flow, right: Flow): Flow {
   return new Set([...left, ...right]);
 }
 
+/**
+ * 두 흐름이 같은지 본다(둘 다 알려진 집합일 때).
+ *
+ * @param left 흐름
+ * @param right 흐름
+ * @returns 같으면 true
+ */
+function sameFlow(left: Flow, right: Flow): boolean {
+  if (left === null || right === null) return left === right;
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
 /** 값 흐름 분석기다. 결과는 분석기 수명 동안 메모한다. */
 export class ValueFlow {
   private readonly checker: ts.TypeChecker;
@@ -84,6 +102,10 @@ export class ValueFlow {
   private readonly memo = new Map<UnitKey, Flow>();
   /** 계산 중인 메모 단위 → 스택 위치 */
   private readonly active = new Map<UnitKey, number>();
+  /** 계산 중인 단위의 잠정 결과(자기 순환 고정점 되풀이용) */
+  private readonly provisional = new Map<UnitKey, Flow>();
+  /** 계산 중 다시 만난 단위 */
+  private readonly reentered = new Set<UnitKey>();
   /** 현재 계산이 기댄 가장 낮은 계산 중 단위의 스택 위치 */
   private lowestOpen = Number.POSITIVE_INFINITY;
   private steps = 0;
@@ -125,9 +147,7 @@ export class ValueFlow {
    */
   memberSymbol(value: AbstractValue, name: string): ts.Symbol | undefined {
     this.ensureReflective();
-    if (this.isReflectivelyWritten(value)) return undefined;
-    const owner = ts.isClassLike(value) ? value : undefined;
-    if ((this.index.propertyWrites.get(name) ?? []).some((write) => !this.isUnrelatedClassWrite(write, owner))) return undefined;
+    if (this.memberBody(value, name) === undefined) return undefined;
     return this.checker.getPropertyOfType(this.valueType(value), name);
   }
 
@@ -162,6 +182,8 @@ export class ValueFlow {
       if (!(error instanceof BudgetExceeded)) throw error;
       // 예산 초과는 증명 실패다(모름). 메모에는 완결된 단위만 남아 있다.
       this.active.clear();
+      this.provisional.clear();
+      this.reentered.clear();
       this.lowestOpen = Number.POSITIVE_INFINITY;
       return null;
     }
@@ -254,8 +276,42 @@ export class ValueFlow {
    */
   private thisValues(node: ts.Node): Flow {
     const owner = thisOwner(node);
-    if (owner === undefined || this.policy.isOpenCallable(owner)) return null;
-    return new Set(this.withSubclasses(owner));
+    if (owner === undefined || this.policy.isOpenCallable(owner.declaration)) return null;
+    const classes = this.withSubclasses(owner.declaration);
+    if (classes.some((declaration) => this.isEscapedClass(declaration))) return null;
+    if (owner.method !== undefined && this.isDetachable(owner.method, owner.declaration)) return null;
+    return new Set(classes);
+  }
+
+  /**
+   * 클래스가 `new`·`extends 식별자`·static 접근·`instanceof`·`typeof` 밖의 자리에서 값으로 쓰였는지 본다
+   * (`Mixin(Holder)`·인자로 넘김). 그러면 색인에 없는 하위 클래스가 생길 수 있어 `this`의 값을 다 알 수 없다.
+   *
+   * @param declaration 클래스
+   * @returns 새어 나갔으면 true
+   */
+  private isEscapedClass(declaration: ts.ClassLikeDeclaration): boolean {
+    const symbol = this.classSymbol(declaration);
+    if (symbol === undefined) return true;
+    return (this.index.references.get(symbol) ?? []).some((reference) => !isHarmlessClassUse(climbWrappers(reference)));
+  }
+
+  /**
+   * 메서드를 떼어 내 다른 `this`로 부를 수 있는지 본다: 이름이 같은 멤버를 호출 대상이 아닌 자리에서 읽는 위치
+   * (`h.run.bind(x)`, `const f = h.run`, `const { run } = h`)가 있고, 그 읽기의 원본 객체가 이 클래스의 인스턴스일
+   * 수 있다(타입이 대입 가능하다).
+   *
+   * @param method 메서드
+   * @param owner 소유 클래스
+   * @returns 떼어 낼 수 있으면 true
+   */
+  private isDetachable(method: ts.MethodDeclaration, owner: ts.ClassLikeDeclaration): boolean {
+    const name = memberName(method.name);
+    if (name === undefined) return true;
+    return (this.index.memberReads.get(name) ?? []).some((read) => {
+      if (ts.isBindingElement(read)) return this.mayReachType(this.checker.getTypeAtLocation(read.parent), owner);
+      return this.mayReach((read as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression, owner);
+    });
   }
 
   /**
@@ -328,7 +384,7 @@ export class ValueFlow {
       }
       if (result === null) return null;
     }
-    return unionFlows(result, this.foreignWrites(name, undefined));
+    return unionFlows(result, this.foreignWrites(name, literal));
   }
 
   /**
@@ -605,7 +661,7 @@ export class ValueFlow {
    * @param owner 값의 클래스(객체 리터럴이면 undefined)
    * @returns 값 집합
    */
-  private foreignWrites(name: string, owner: ts.ClassLikeDeclaration | undefined): Flow {
+  private foreignWrites(name: string, owner: AbstractValue): Flow {
     let result: Flow = EMPTY;
     for (const write of this.index.propertyWrites.get(name) ?? []) {
       if (this.isUnrelatedClassWrite(write, owner)) continue;
@@ -616,19 +672,46 @@ export class ValueFlow {
   }
 
   /**
-   * 쓰기 대상이 값의 클래스와 상속 관계가 없는 클래스의 멤버인지 본다.
+   * 속성 쓰기가 값에 닿을 수 없는지 본다: 쓰기 수신자 식의 타입에 값의 타입이 대입될 수 없다(구조적 타이핑 —
+   * `const o: Other = holder`처럼 다른 클래스 타입을 거쳐도 대입 가능하면 닿을 수 있다). `any`·`unknown` 수신자는
+   * 무엇에든 닿을 수 있다. 형변환(`as`)으로 타입을 속인 쓰기는 모델링하지 않는다(README).
    *
    * @param write 속성 쓰기
-   * @param owner 값의 클래스(객체 리터럴이면 undefined)
-   * @returns 관계없는 클래스 멤버면 true
+   * @param owner 값(클래스·객체 리터럴)
+   * @returns 닿을 수 없으면 true
    */
-  private isUnrelatedClassWrite(write: PropertyWrite, owner: ts.ClassLikeDeclaration | undefined): boolean {
-    const member = ts.isPropertyAccessExpression(write.target) ? write.target.name : write.target.argumentExpression;
-    const declaration = this.checker.getSymbolAtLocation(member)?.valueDeclaration;
-    const memberClass = declaration === undefined ? undefined : classOfMember(declaration);
-    if (memberClass === undefined) return false;
-    if (owner === undefined) return true;
-    return !this.withSubclasses(memberClass).includes(owner) && !this.withSubclasses(owner).includes(memberClass);
+  private isUnrelatedClassWrite(write: PropertyWrite, owner: AbstractValue): boolean {
+    return !this.mayReach(write.target.expression, owner);
+  }
+
+  /**
+   * 수신자 식이 가리키는 객체가 이 값일 수 있는지 타입으로 본다.
+   *
+   * @param receiver 수신자 식
+   * @param value 추상 값
+   * @returns 그럴 수 있으면 true
+   */
+  private mayReach(receiver: ts.Expression, value: AbstractValue): boolean {
+    return this.mayReachType(this.checker.getTypeAtLocation(receiver), value);
+  }
+
+  /**
+   * 타입의 자리에 이 값이 올 수 있는지 본다(`any`·`unknown`·제약 없는 타입 매개변수면 언제나).
+   *
+   * @param type 자리의 타입
+   * @param value 추상 값
+   * @returns 올 수 있으면 true
+   */
+  private mayReachType(type: ts.Type, value: AbstractValue): boolean {
+    let target = type;
+    if ((target.flags & ts.TypeFlags.TypeParameter) !== 0) {
+      // 다형 `this` 타입·제네릭 매개변수는 제약 타입으로 본다. 제약이 없으면 무엇이든 올 수 있다.
+      const constraint = this.checker.getBaseConstraintOfType(target);
+      if (constraint === undefined) return true;
+      target = constraint;
+    }
+    if ((target.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
+    return this.checker.isTypeAssignableTo(this.valueType(value), target);
   }
 
   /**
@@ -679,7 +762,26 @@ export class ValueFlow {
     }
     const bodies = declarations.map((declaration) => this.functionBody(declaration, symbol.name)).filter((body) => body !== undefined);
     if (bodies.includes(null) || bodies.length === 0) return null;
+    if (declarations.some(isMemberDeclaration) && !this.isSafeFromReflection(callee)) return null;
     return bodies as ts.FunctionLikeDeclaration[];
+  }
+
+  /**
+   * 멤버 호출의 수신자가 반사적 쓰기(`Object.assign(x, { m })`)로 멤버가 바뀌었을 수 없는지 본다. 반사적 대상이
+   * 없으면 안전하고, 대상을 모르면 안전하지 않다. 대상 집합이 알려져 있으면 수신자 값이 겹치지 않음을 증명해야
+   * 한다(클래스·모듈 자체를 부르는 static 호출은 대상 집합에 들 수 없다 — 대상 집합은 인스턴스·리터럴뿐이다).
+   *
+   * @param callee 호출 대상 식
+   * @returns 안전하면 true
+   */
+  private isSafeFromReflection(callee: ts.Expression): boolean {
+    if (this.reflective !== null && this.reflective !== undefined && this.reflective.size === 0) return true;
+    if (this.reflective === null || (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee))) return false;
+    const owner = skipWrappers(callee.expression);
+    const ownerSymbol = ts.isIdentifier(owner) ? this.dealias(this.checker.getSymbolAtLocation(owner)) : undefined;
+    if (ownerSymbol !== undefined && (ownerSymbol.flags & (ts.SymbolFlags.ValueModule | ts.SymbolFlags.Class)) !== 0) return true;
+    const receivers = this.expressionValues(owner);
+    return receivers !== null && ![...receivers].some((value) => this.isReflectivelyWritten(value));
   }
 
   /**
@@ -694,13 +796,26 @@ export class ValueFlow {
     if (receivers === null) return null;
     const result: ts.FunctionLikeDeclaration[] = [];
     for (const value of receivers) {
-      const member = this.checker.getPropertyOfType(this.valueType(value), name!);
-      const body = member?.valueDeclaration === undefined ? null : this.functionBody(member.valueDeclaration, name!, true);
-      if (body === null || body === undefined) return null;
-      if (!ts.isObjectLiteralExpression(value) && this.isReflectivelyWritten(value)) return null;
+      const body = this.memberBody(value, name!);
+      if (body === undefined) return null;
       result.push(body);
     }
     return result;
+  }
+
+  /**
+   * 정확한 추상 값에서 이름 있는 멤버를 부를 때 실행되는 본문이다. 반사적 쓰기 대상이거나, 멤버를 바꿀 수 있는
+   * 같은 이름 속성 쓰기가 있거나, 데코레이터·`let` 별칭처럼 본문을 증명하지 못하면 undefined다.
+   *
+   * @param value 추상 값
+   * @param name 멤버 이름
+   * @returns 함수 계열 또는 undefined
+   */
+  private memberBody(value: AbstractValue, name: string): ts.FunctionLikeDeclaration | undefined {
+    if (this.isReflectivelyWritten(value)) return undefined;
+    const member = this.checker.getPropertyOfType(this.valueType(value), name);
+    const body = member?.valueDeclaration === undefined ? null : this.functionBody(member.valueDeclaration, name, true);
+    return body ?? undefined;
   }
 
   /**
@@ -712,18 +827,38 @@ export class ValueFlow {
    * @param exact 수신자가 정확한 클래스 값이라 재정의를 따질 필요가 없으면 true
    * @returns 함수 계열, 건너뛸 시그니처면 undefined, 증명 실패면 null
    */
-  private functionBody(declaration: ts.Declaration, name: string, exact = false): ts.FunctionLikeDeclaration | undefined | null {
-    if (!this.policy.isProjectFile(declaration.getSourceFile()) || isAmbient(declaration)) return null;
+  private functionBody(declaration: ts.Declaration, name: string, exact = false, depth = 0): ts.FunctionLikeDeclaration | undefined | null {
+    if (!this.policy.isProjectFile(declaration.getSourceFile()) || isAmbient(declaration) || depth > MAX_ALIAS_DEPTH) return null;
+    if ((ts.isMethodDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && (ts.getDecorators(declaration) ?? []).length > 0) return null;
     if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) {
       if (declaration.body === undefined) return undefined;
       if (!exact && ts.isMethodDeclaration(declaration) && ts.isClassLike(declaration.parent) && this.policy.isOverridden(declaration)) return null;
       return ts.isMethodDeclaration(declaration) && this.hasForeignMemberWrites(declaration, name) ? null : declaration;
     }
+    const isMember = !ts.isVariableDeclaration(declaration);
+    if (ts.isVariableDeclaration(declaration) ? !isConstDeclaration(declaration) : this.hasForeignMemberWrites(declaration, name)) return null;
+    if (ts.isShorthandPropertyAssignment(declaration)) return this.aliasBody(this.checker.getShorthandAssignmentValueSymbol(declaration), depth);
     const initializer = ts.isVariableDeclaration(declaration) || ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)
       ? declaration.initializer : undefined;
-    if (initializer === undefined || !isFunctionValued(initializer)) return null;
-    const isReassignable = ts.isVariableDeclaration(declaration) ? !isConstDeclaration(declaration) : this.hasForeignMemberWrites(declaration, name);
-    return isReassignable ? null : skipWrappers(initializer) as ts.ArrowFunction | ts.FunctionExpression;
+    if (initializer === undefined || (!isMember && !ts.isVariableDeclaration(declaration))) return null;
+    const inner = skipWrappers(initializer);
+    if (isFunctionValued(inner)) return inner as ts.ArrowFunction | ts.FunctionExpression;
+    return ts.isIdentifier(inner) || ts.isPropertyAccessExpression(inner) ? this.aliasBody(this.calleeSymbol(inner), depth) : null;
+  }
+
+  /**
+   * 값 별칭(`{ find: findItem }`, `{ findItem }`, `const h = g`)이 가리키는 함수 본문이다. 본문이 정확히 하나여야 한다.
+   *
+   * @param symbol 별칭이 가리키는 심볼
+   * @param depth 별칭 추적 깊이
+   * @returns 함수 계열 또는 null
+   */
+  private aliasBody(symbol: ts.Symbol | undefined, depth: number): ts.FunctionLikeDeclaration | null {
+    const target = this.dealias(symbol);
+    if (target === undefined) return null;
+    const bodies = (target.declarations ?? []).map((declaration) => this.functionBody(declaration, target.name, false, depth + 1))
+      .filter((body) => body !== undefined);
+    return bodies.length === 1 ? bodies[0]! : null;
   }
 
   /**
@@ -734,7 +869,8 @@ export class ValueFlow {
    * @returns 바꿀 수 있는 쓰기가 있으면 true
    */
   private hasForeignMemberWrites(declaration: ts.Declaration, name: string): boolean {
-    const owner = ts.isClassLike(declaration.parent) ? declaration.parent : undefined;
+    const owner = declaration.parent;
+    if (!ts.isClassLike(owner) && !ts.isObjectLiteralExpression(owner)) return (this.index.propertyWrites.get(name) ?? []).length > 0;
     return (this.index.propertyWrites.get(name) ?? []).some((write) => !this.isUnrelatedClassWrite(write, owner));
   }
 
@@ -834,20 +970,42 @@ export class ValueFlow {
     const open = this.active.get(key);
     if (open !== undefined) {
       this.lowestOpen = Math.min(this.lowestOpen, open);
-      return EMPTY;
+      this.reentered.add(key);
+      return this.provisional.get(key) ?? EMPTY;
     }
     const position = this.active.size;
     const outerLowest = this.lowestOpen;
-    this.lowestOpen = Number.POSITIVE_INFINITY;
     this.active.set(key, position);
     if (++this.depth > MAX_DEPTH) throw new BudgetExceeded();
-    const result = compute();
+    const result = this.iterateUnit(key, compute);
     this.depth--;
     this.active.delete(key);
+    this.provisional.delete(key);
     const complete = result === null || this.lowestOpen >= position;
     if (complete) this.memo.set(key, result);
     this.lowestOpen = Math.min(outerLowest, complete ? Number.POSITIVE_INFINITY : this.lowestOpen);
     return result;
+  }
+
+  /**
+   * 메모 단위를 자기 순환의 고정점까지 되풀이 계산한다. 계산 중 자기 자신을 다시 만나면 직전 결과(처음엔 빈
+   * 집합)를 잠정값으로 돌려주고, 결과가 잠정값과 같아질 때까지 다시 계산한다. 속성·호출처럼 값에 따라 결과가
+   * 달라지는 단계가 순환 안에 있어도(`this.store = this.store.withCache()`) 값이 빠지지 않게 하기 위해서다.
+   * 모든 단계가 단조이고 추상 값이 유한하므로 끝나며, 되풀이 상한을 넘으면 모름이다.
+   *
+   * @param key 단위 키
+   * @param compute 계산
+   * @returns 고정점 결과(모름이면 null)
+   */
+  private iterateUnit(key: UnitKey, compute: () => Flow): Flow {
+    for (let round = 0; ; round++) {
+      this.lowestOpen = Number.POSITIVE_INFINITY;
+      this.reentered.delete(key);
+      const result = compute();
+      if (result === null || !this.reentered.has(key) || sameFlow(result, this.provisional.get(key) ?? EMPTY)) return result;
+      if (round >= MAX_ROUNDS) throw new BudgetExceeded();
+      this.provisional.set(key, result);
+    }
   }
 
   /**
@@ -890,15 +1048,45 @@ export function instanceTypeOf(checker: ts.TypeChecker, declaration: ts.ClassLik
  * @param node this 키워드
  * @returns 클래스 또는 undefined
  */
-function thisOwner(node: ts.Node): ts.ClassLikeDeclaration | undefined {
+function thisOwner(node: ts.Node): { declaration: ts.ClassLikeDeclaration; method: ts.MethodDeclaration | undefined } | undefined {
   for (let current: ts.Node | undefined = node.parent; current !== undefined; current = current.parent) {
     if (ts.isArrowFunction(current)) continue;
     const isMember = ts.isMethodDeclaration(current) || ts.isConstructorDeclaration(current) || ts.isGetAccessorDeclaration(current)
       || ts.isSetAccessorDeclaration(current) || ts.isPropertyDeclaration(current);
-    if (isMember) return ts.isClassLike(current.parent) && !isStatic(current as ts.ClassElement) ? current.parent : undefined;
+    if (isMember) {
+      if (!ts.isClassLike(current.parent) || isStatic(current as ts.ClassElement)) return undefined;
+      return { declaration: current.parent, method: ts.isMethodDeclaration(current) ? current : undefined };
+    }
     if (ts.isFunctionLike(current) || ts.isClassStaticBlockDeclaration(current) || ts.isSourceFile(current)) return undefined;
   }
   return undefined;
+}
+
+/**
+ * 클래스 참조가 하위 클래스를 몰래 만들 수 없는 자리인지 본다: `new C`, `class D extends C`, `C.x`, `instanceof C`,
+ * `typeof C`, `implements C`.
+ *
+ * @param outer 래퍼까지 올라간 참조 식
+ * @returns 무해한 사용이면 true
+ */
+function isHarmlessClassUse(outer: ts.Node): boolean {
+  const parent = outer.parent;
+  if (ts.isNewExpression(parent) && parent.expression === outer) return true;
+  if (ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent)) return true;
+  if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer) return true;
+  if (ts.isBinaryExpression(parent) && parent.right === outer && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) return true;
+  return ts.isTypeOfExpression(parent);
+}
+
+/**
+ * 수신자가 있는 멤버 선언(메서드·객체 리터럴 속성·클래스 필드)인지 본다.
+ *
+ * @param declaration 선언
+ * @returns 멤버면 true
+ */
+function isMemberDeclaration(declaration: ts.Declaration): boolean {
+  return ts.isMethodDeclaration(declaration) || ts.isPropertyAssignment(declaration) || ts.isShorthandPropertyAssignment(declaration)
+    || ts.isPropertyDeclaration(declaration);
 }
 
 /**
@@ -926,22 +1114,6 @@ function returnExpressions(body: ts.Block): ts.Expression[] {
   };
   ts.forEachChild(body, visit);
   return result;
-}
-
-/**
- * 멤버 선언이 속한 클래스다(필드·매개변수 속성·메서드·접근자).
- *
- * @param declaration 멤버 선언
- * @returns 클래스 또는 undefined
- */
-function classOfMember(declaration: ts.Declaration): ts.ClassLikeDeclaration | undefined {
-  if (ts.isParameter(declaration)) {
-    const owner = declaration.parent;
-    return ts.isConstructorDeclaration(owner) && ts.getModifiers(declaration) !== undefined ? owner.parent : undefined;
-  }
-  const isMember = ts.isPropertyDeclaration(declaration) || ts.isMethodDeclaration(declaration)
-    || ts.isGetAccessorDeclaration(declaration) || ts.isSetAccessorDeclaration(declaration);
-  return isMember && ts.isClassLike(declaration.parent) ? declaration.parent : undefined;
 }
 
 /**

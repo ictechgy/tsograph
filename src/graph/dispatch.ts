@@ -28,7 +28,7 @@ import { compareStrings } from '../exchange/sorted-json.ts';
 import { isTestSourcePath } from '../routes/next-routes.ts';
 import { CandidateFinder } from './dispatch-candidates.ts';
 import type { PendingDispatch } from './edge-collector.ts';
-import { buildFlowIndex, climbWrappers, type FlowIndex } from './flow-index.ts';
+import { buildFlowIndex, climbWrappers, type FlowIndex, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
 import { scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
@@ -100,7 +100,7 @@ function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.Source
 }
 
 /**
- * 테스트 소스가 아닌 파일이 테스트 소스를 불러오는지 본다(정적 import·재내보내기·문자열 동적 import·require).
+ * 테스트 소스가 아닌 파일이 테스트 소스를 불러오는지 본다(Program과 같은 옵션으로 지정자를 푼다).
  *
  * @param context 디스패치 입력
  * @param testPaths 테스트 소스 경로
@@ -108,30 +108,35 @@ function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.Source
  */
 function importsTestSources(context: DispatchContext, testPaths: ReadonlySet<string>): boolean {
   const pathByFile = new Map([...context.files].map(([path, sourceFile]) => [sourceFile, path]));
-  const isTestModule = (specifier: ts.Expression): boolean => {
-    const declaration = context.checker.getSymbolAtLocation(specifier)?.valueDeclaration;
-    const path = declaration !== undefined && ts.isSourceFile(declaration) ? pathByFile.get(declaration) : undefined;
-    return path !== undefined && testPaths.has(path);
-  };
+  const resolve = moduleResolver(context.program, context.checker);
   for (const [path, sourceFile] of context.files) {
-    if (!testPaths.has(path) && moduleSpecifiers(sourceFile).some(isTestModule)) return true;
+    if (testPaths.has(path)) continue;
+    const loadsTest = moduleSpecifiers(sourceFile).some((specifier) => {
+      const declaration = resolve(specifier.text, sourceFile)?.valueDeclaration;
+      const target = declaration !== undefined && ts.isSourceFile(declaration) ? pathByFile.get(declaration) : undefined;
+      return target !== undefined && testPaths.has(target);
+    });
+    if (loadsTest) return true;
   }
   return false;
 }
 
 /**
- * 파일이 불러오는 모듈 지정자 식이다(정적 import·재내보내기·`import("…")`·`require("…")`).
+ * 파일이 불러오는 문자열 모듈 지정자다(정적 import·재내보내기·`import x = require("…")`, 그리고 `import(…)`·
+ * `require(…)`의 문자열 또는 문자열만 고르는 조건식).
  *
  * @param sourceFile 파일
  * @returns 문자열 지정자 식
  */
-function moduleSpecifiers(sourceFile: ts.SourceFile): ts.Expression[] {
-  const result: ts.Expression[] = [];
+function moduleSpecifiers(sourceFile: ts.SourceFile): ts.StringLiteralLike[] {
+  const result: ts.StringLiteralLike[] = [];
   const visit = (node: ts.Node): void => {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) result.push(node.moduleSpecifier);
+    const declared = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier
+      : ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) ? node.moduleReference.expression : undefined;
+    if (declared !== undefined && ts.isStringLiteralLike(declared)) result.push(declared);
     const isLoad = ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
       || (ts.isIdentifier(node.expression) && node.expression.text === 'require'));
-    if (isLoad && node.arguments[0] !== undefined && ts.isStringLiteralLike(node.arguments[0])) result.push(node.arguments[0]);
+    if (isLoad && node.arguments[0] !== undefined) result.push(...(stringLeaves(node.arguments[0]) ?? []));
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(sourceFile, visit);
@@ -207,6 +212,8 @@ class OpenCallablePolicy implements FlowPolicy {
   private readonly entryTargets: ReadonlySet<string>;
   /** 진입점 노드가 있는 파일 경로 */
   private readonly entryPaths: ReadonlySet<string>;
+  /** 열린 모듈(동적 import·값으로 쓰인 네임스페이스)이 내보내는 선언 심볼(재내보내기·배럴을 따라간다) */
+  private readonly openExports: ReadonlySet<ts.Symbol>;
 
   /**
    * @param context 디스패치 입력(진입점 표식이 끝난 저장소)
@@ -221,6 +228,7 @@ class OpenCallablePolicy implements FlowPolicy {
     const entries = context.store.entryRecords();
     this.entryPaths = new Set(entries.map((entry) => entry.path));
     this.entryTargets = entryClosure(context.store, entries.map((entry) => entry.id));
+    this.openExports = moduleExportClosure(context.checker, index.openModules);
   }
 
   /**
@@ -245,9 +253,9 @@ class OpenCallablePolicy implements FlowPolicy {
     if (path === undefined) return true;
     if (declarationIds(declaration, path).some((id) => this.entryTargets.has(id))) return true;
     if (!this.isExported(declaration)) return false;
-    const module = this.context.checker.getSymbolAtLocation(sourceFile);
+    const symbol = declarationSymbol(this.context.checker, declaration);
     return this.context.openProgram || this.index.hasOpaqueImport || this.entryPaths.has(path)
-      || (module !== undefined && this.index.openModules.has(module));
+      || (symbol !== undefined && this.openExports.has(symbol));
   }
 
   /**
@@ -313,6 +321,47 @@ function entryClosure(store: GraphStore, entryIds: readonly string[]): Set<strin
     }
   }
   return result;
+}
+
+/**
+ * 열린 모듈들이 내보내는 선언 심볼 전부다. `export *`·`export { x } from`·`export * as ns` 배럴을 거친 내보내기도
+ * 별칭을 풀어 넣고, 모듈 값 내보내기는 그 모듈까지 따라간다 — 받은 모듈 객체로 부르는 호출(`m.handle(...)`)은
+ * 참조로 잡히지 않기 때문이다.
+ *
+ * @param checker TypeChecker
+ * @param modules 열린 모듈 심볼
+ * @returns 선언 심볼 집합
+ */
+function moduleExportClosure(checker: ts.TypeChecker, modules: ReadonlySet<ts.Symbol>): Set<ts.Symbol> {
+  const result = new Set<ts.Symbol>();
+  const visited = new Set<ts.Symbol>();
+  const queue = [...modules];
+  while (queue.length > 0) {
+    const module = queue.pop()!;
+    if (visited.has(module)) continue;
+    visited.add(module);
+    for (const exported of checker.getExportsOfModule(module)) {
+      const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported;
+      if ((target.flags & ts.SymbolFlags.ValueModule) !== 0) queue.push(target);
+      else result.add(target);
+    }
+  }
+  return result;
+}
+
+/**
+ * 함수·클래스 선언의 값 심볼이다(`const f = () => …`·`const C = class …`는 변수 심볼, 생성자는 클래스 심볼).
+ *
+ * @param checker TypeChecker
+ * @param declaration 함수 계열·클래스
+ * @returns 심볼 또는 undefined
+ */
+function declarationSymbol(checker: ts.TypeChecker, declaration: ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration): ts.Symbol | undefined {
+  if (ts.isConstructorDeclaration(declaration)) return declarationSymbol(checker, declaration.parent);
+  const holder = ts.isArrowFunction(declaration) || ts.isFunctionExpression(declaration) || ts.isClassExpression(declaration)
+    ? climbWrappers(declaration).parent : declaration;
+  const name = (holder as { name?: ts.Node }).name;
+  return name !== undefined && ts.isIdentifier(name) ? checker.getSymbolAtLocation(name) : undefined;
 }
 
 /**

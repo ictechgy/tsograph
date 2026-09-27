@@ -128,6 +128,10 @@ test('fixture: reach는 모드별로 간선을 따르고 evidence·unresolvedCal
   assert.ok(!documents.bound.limitations.some((line: string) => line.startsWith('candidate-dispatch:')));
   assert.ok(documents.candidates.limitations.some((line: string) => line.startsWith('candidate-dispatch: 4 call(s)')));
   assert.equal(new Set(Object.values(documents).map((document) => document.graphRevision)).size, 1);
+  // 다른 root에서 닿은 root는 roots[]와 reached[]에 같은 unresolvedCalls를 싣는다(계약 검사 항목).
+  const overlap = JSON.parse((await runReachCommand(['--project', fixture, '--dispatch', 'direct', roots[0]!, 'src/lib/handler.ts#ItemHandler.get'], environment)).standardOutput);
+  const reachedRoot = overlap.reached.find((row: Row) => row.symbol.usr === 'src/lib/handler.ts#ItemHandler.get');
+  assert.deepEqual([overlap.roots[1].unresolvedCalls, reachedRoot.unresolvedCalls, reachedRoot.roots], [1, 1, [0]]);
 });
 
 test('fixture: 같은 입력은 같은 그래프이고 graphRevision은 간선 근거를 덮는다', async () => {

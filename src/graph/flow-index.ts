@@ -49,6 +49,11 @@ export interface FlowIndex {
   readonly hasOpaqueImport: boolean;
   /** 클래스 선언 → 프로젝트 안 직접 하위 클래스 */
   readonly subclasses: ReadonlyMap<ts.ClassLikeDeclaration, readonly ts.ClassLikeDeclaration[]>;
+  /**
+   * 멤버 이름 → 호출 대상이 아닌 자리에서 그 이름을 읽는 위치(`h.run.bind(x)`, `const f = h.run`,
+   * `const { run } = h`). 메서드를 떼어 내 다른 `this`로 부를 수 있는지 판정하는 데 쓴다.
+   */
+  readonly memberReads: ReadonlyMap<string, readonly ts.Node[]>;
 }
 
 /** 참조를 모으는 심볼 종류다. */
@@ -76,6 +81,7 @@ interface MutableIndex {
   openModules: Set<ts.Symbol>;
   hasOpaqueImport: boolean;
   subclasses: Map<ts.ClassLikeDeclaration, ts.ClassLikeDeclaration[]>;
+  memberReads: Map<string, ts.Node[]>;
 }
 
 /** 모듈 지정자를 모듈 심볼로 푸는 함수다(인자 자리가 아닌 문자열 지정자용). */
@@ -93,6 +99,7 @@ export function buildFlowIndex(checker: ts.TypeChecker, files: Iterable<ts.Sourc
   const index: MutableIndex = {
     references: new Map(), identifierWrites: new Map(), propertyWrites: new Map(), newThisClasses: new Set(),
     reflectiveTargets: [], exportedSymbols: new Set(), openModules: new Set(), hasOpaqueImport: false, subclasses: new Map(),
+    memberReads: new Map(),
   };
   const collector = new IndexCollector(checker, index, resolveModule);
   for (const sourceFile of files) collector.visitFile(sourceFile);
@@ -136,6 +143,8 @@ class IndexCollector {
    * @param node 노드
    */
   private visitNode(node: ts.Node): void {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) this.visitMemberRead(node);
+    else if (ts.isBindingElement(node)) this.visitBindingRead(node);
     if (ts.isIdentifier(node)) this.visitIdentifier(node);
     else if (ts.isShorthandPropertyAssignment(node)) this.addReference(node.name, this.checker.getShorthandAssignmentValueSymbol(node));
     else if (ts.isBinaryExpression(node)) this.visitBinary(node);
@@ -146,6 +155,35 @@ class IndexCollector {
     else if (ts.isExportSpecifier(node)) this.visitExportSpecifier(node);
     else if (ts.isExportAssignment(node)) this.addExported(this.expressionSymbol(node.expression));
     else if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) this.visitClass(node);
+  }
+
+  /**
+   * 호출 대상·대입 대상이 아닌 속성 읽기를 멤버 이름별로 기록한다.
+   *
+   * @param access 속성·원소 접근
+   */
+  private visitMemberRead(access: ts.PropertyAccessExpression | ts.ElementAccessExpression): void {
+    const name = ts.isPropertyAccessExpression(access) ? access.name.text
+      : ts.isStringLiteralLike(access.argumentExpression) ? access.argumentExpression.text : undefined;
+    if (name === undefined) return;
+    const outer = climbWrappers(access);
+    const parent = outer.parent;
+    // `h.run(...)`·`h.run\`…\``은 `this`가 h인 호출이다. `new h.run()`·데코레이터·그 밖의 읽기는 떼어 낸다.
+    if (ts.isCallExpression(parent) && parent.expression === outer) return;
+    if (ts.isTaggedTemplateExpression(parent) && parent.tag === outer) return;
+    if (ts.isBinaryExpression(parent) && parent.left === outer && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) return;
+    appendTo(this.index.memberReads, name, access);
+  }
+
+  /**
+   * 객체 구조 분해(`const { run } = h`)는 멤버를 떼어 내 읽는다.
+   *
+   * @param element 바인딩 요소
+   */
+  private visitBindingRead(element: ts.BindingElement): void {
+    if (!ts.isObjectBindingPattern(element.parent)) return;
+    const name = element.propertyName ?? element.name;
+    if (ts.isIdentifier(name) || ts.isStringLiteral(name)) appendTo(this.index.memberReads, name.text, element);
   }
 
   /**
@@ -278,7 +316,12 @@ class IndexCollector {
     }
     const name = ts.isPropertyAccessExpression(target) ? target.name.text
       : ts.isElementAccessExpression(target) && ts.isStringLiteralLike(target.argumentExpression) ? target.argumentExpression.text : undefined;
-    if (name !== undefined) appendTo(this.index.propertyWrites, name, { target: target as PropertyWrite['target'], value });
+    if (name === undefined) return;
+    appendTo(this.index.propertyWrites, name, { target: target as PropertyWrite['target'], value });
+    // TS `namespace N { export let x }`의 `N.x = e`는 변수 쓰기다.
+    const member = ts.isPropertyAccessExpression(target) ? target.name : (target as ts.ElementAccessExpression).argumentExpression;
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(member));
+    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Variable) !== 0) appendTo(this.index.identifierWrites, symbol, value);
   }
 
   /**
@@ -437,7 +480,7 @@ function isPatternModuleLoader(callee: ts.Expression): boolean {
  * @param expression 식
  * @returns 문자열 리터럴 목록, 문자열이 아닌 값이 섞이면 undefined
  */
-function stringLeaves(expression: ts.Expression): ts.StringLiteralLike[] | undefined {
+export function stringLeaves(expression: ts.Expression): ts.StringLiteralLike[] | undefined {
   const inner = skipWrappers(expression);
   if (ts.isStringLiteralLike(inner)) return [inner];
   const branches = ts.isConditionalExpression(inner) ? [inner.whenTrue, inner.whenFalse]

@@ -68,7 +68,8 @@ const probes: readonly (readonly [from: string, expected: readonly string[] | 'n
   ['p29', [LOCAL], 'interface Factory29 { make(): Store }\nconst factory29: Factory29 = { make: () => new LocalStore() };\nexport function p29() { return factory29.make().find("x"); }'],
   ['p30', [REMOTE], 'function wrap30<T>(value: T): T { return value; }\nconst s30: Store = wrap30(new RemoteStore());\nexport function p30() { return s30.find("x"); }'],
   ['p31', [LOCAL, REMOTE], 'const deps31: { store: Store } = { store: new RemoteStore() };\nexport function swap31() { deps31.store = new LocalStore(); }\nexport function p31() { return deps31.store.find("x"); }'],
-  ['p32', [LOCAL], 'class Other32 { store: Store = new RemoteStore(); }\nconst o32 = new Other32();\nexport function write32() { o32.store = new RemoteStore(); }\nconst d32: { store: Store } = { store: new LocalStore() };\nexport function p32() { return d32.store.find("x"); }'],
+  // 명목 클래스(비공개 멤버)의 필드 쓰기는 리터럴 값에 닿을 수 없어 뺀다.
+  ['p32', [LOCAL], 'class Other32 { private readonly tag32 = 1; store: Store = new RemoteStore(); }\nconst o32 = new Other32();\nexport function write32() { o32.store = new RemoteStore(); }\nconst d32: { store: Store } = { store: new LocalStore() };\nexport function p32() { return d32.store.find("x"); }'],
   ['take33', 'none', 'function take33(store: Store) { return store.find("x"); }\nexport const p33 = () => take33.call(null, new RemoteStore());'],
   ['p35', [REMOTE], 'let s35: Store | undefined;\nexport function init35() { s35 ||= new RemoteStore(); }\nexport function p35() { return s35!.find("x"); }'],
   ['p36', 'none', 'let s36: Store = new RemoteStore();\nexport function set36(o: { s: Store }) { ({ s: s36 } = o); }\nexport function p36() { return s36.find("x"); }'],
@@ -128,8 +129,13 @@ test('테스트 소스의 목은 운영 호출의 bound를 막지 않고, 테스
     `src/service.ts#lookup -> ${REMOTE} bound`,
   ]);
   // 테스트가 아닌 파일이 테스트 소스를 불러오면 둘을 나눌 수 없어 전체 흐름으로 구한다(목 때문에 bound 없음).
-  const mixed = await graphOf({ ...files, 'src/wire.ts': 'import { check } from "./service.test";\nexport const wired = check;\n' });
-  assert.deepEqual(mixed.edges.filter((edge) => edge.evidence === 'bound'), []);
+  for (const wire of [
+    'import { check } from "./service.test";\nexport const wired = check;\n',
+    'declare const flag: boolean;\nexport const wired = () => import(flag ? "./service.test" : "./main");\n',
+  ]) {
+    const mixed = await graphOf({ ...files, 'src/wire.ts': wire });
+    assert.deepEqual(mixed.edges.filter((edge) => edge.evidence === 'bound'), [], wire);
+  }
 });
 
 test('동적 import는 고를 수 있는 문자열 모듈만 열고, 문자열이 아니면 모든 내보내기를 연다', async () => {
@@ -152,4 +158,95 @@ test('동적 import는 고를 수 있는 문자열 모듈만 열고, 문자열�
   assert.deepEqual(bound(opaque), []);
   const globbed = await graphOf({ ...files, 'src/load.ts': 'declare global { interface ImportMeta { glob(pattern: string): unknown } }\nexport const load = () => import.meta.glob("./*.ts");\n' });
   assert.deepEqual(bound(globbed), []);
+});
+
+/** 리뷰 반례 프로젝트: `withCache()`가 다른 구현을 돌려주는 인터페이스다. */
+const cachingStore = [
+  'export interface Store { find(id: string): string; withCache(): Store; }',
+  'export class LocalStore implements Store { find(id: string) { return id; } withCache(): Store { return new CachedStore(); } }',
+  'export class RemoteStore implements Store { find(id: string) { return id; } withCache(): Store { return this; } }',
+  'export class CachedStore implements Store { find(id: string) { return id; } withCache(): Store { return this; } }',
+].join('\n');
+
+const CACHED = 'src/store.ts#CachedStore.find';
+
+test('리뷰 반례: 순환·구조적 쓰기·반사적 쓰기·배럴·mixin·데코레이터·bind·let 별칭·namespace 변수', async () => {
+  const main = [
+    'import { LocalStore, RemoteStore, type Store } from "./store";',
+    'import { handle7 } from "./impl";',
+    'interface Node1 { s1: Store; next?: Node1 }',
+    'const n1: Node1 = { s1: new LocalStore() };',
+    'const n2: Node1 = { s1: new RemoteStore(), next: n1 };',
+    'let cur1: Node1 = n2;',
+    'export function advance1() { cur1 = cur1.next!; }',
+    'export function p1() { return cur1.s1.find("x"); }',
+    'class Holder2 { s2: Store = new LocalStore(); upgrade() { this.s2 = this.s2.withCache(); } run() { return this.s2.find("x"); } }',
+    'export const h2 = new Holder2();',
+    'function wrap3(s: Store, n: number): Store { return n > 0 ? wrap3(s.withCache(), n - 1) : s; }',
+    'const w3: Store = wrap3(new LocalStore(), 2);',
+    'export function p3() { return w3.find("x"); }',
+    'class Box4 { s4: Store = new LocalStore(); run() { return this.s4.find("x"); } }',
+    'class Other4 { s4: Store = new LocalStore(); }',
+    'export const b4 = new Box4();',
+    'export function swap4() { const o: Other4 = b4; o.s4 = new RemoteStore(); }',
+    'interface Factory5 { make(): Store }',
+    'const f5: Factory5 = { make: () => new LocalStore() };',
+    'Object.assign(f5, { make: () => new RemoteStore() });',
+    'const s5: Store = f5.make();',
+    'export function p5() { return s5.find("x"); }',
+    'class F6 { make(): Store { return new LocalStore(); } }',
+    'const f6 = new F6();',
+    'Object.assign(f6, { make: () => new RemoteStore() });',
+    'const s6: Store = f6.make();',
+    'export function p6() { return s6.find("x"); }',
+    'export const r7 = () => handle7(new LocalStore());',
+    'export const later7 = async () => { const m = await import("./index7"); return m.handle7(new RemoteStore()); };',
+    'function Mixin8<T extends new (...args: any[]) => object>(Base: T) { return class extends Base {}; }',
+    'class H8 { s8: Store = new LocalStore(); run() { return this.s8.find("x"); } }',
+    'class Sub8 extends Mixin8(H8) { s8: Store = new RemoteStore(); }',
+    'export const x8 = [new H8(), new Sub8()];',
+    'function swap9(value: unknown, _context: ClassMethodDecoratorContext) { return value as () => Store; }',
+    'class F9 { @swap9 make(): Store { return new LocalStore(); } }',
+    'const s9: Store = new F9().make();',
+    'export function p9() { return s9.find("x"); }',
+    'class H10 { s10: Store = new LocalStore(); run() { return this.s10.find("x"); } }',
+    'const h10 = new H10();',
+    'export const bound10 = h10.run.bind({ s10: new RemoteStore() });',
+    'let impl11 = (id: string) => id;',
+    'export function reset11() { impl11 = (id: string) => `${id}!`; }',
+    'function make11(): Store { return { find: impl11, withCache: () => new LocalStore() }; }',
+    'const s11 = make11();',
+    'export function p11() { return s11.find("x"); }',
+    'const impl12 = (id: string) => id;',
+    'function make12(): Store { return { find: impl12, withCache: () => new LocalStore() }; }',
+    'const s12 = make12();',
+    'export function p12() { return s12.find("x"); }',
+    'namespace N13 { export let s13: Store = new LocalStore(); }',
+    'export function set13() { N13.s13 = new RemoteStore(); }',
+    'export function p13() { return N13.s13.find("x"); }',
+  ].join('\n');
+  const graph = await graphOf({
+    'src/store.ts': cachingStore,
+    'src/impl.ts': 'import type { Store } from "./store";\nexport function handle7(s: Store) { return s.find("x"); }\n',
+    'src/index7.ts': 'export * from "./impl";\n',
+    'src/main.ts': main,
+  });
+  const bound = (from: string): string[] => graph.edges.filter((edge) => edge.from === from && edge.evidence === 'bound').map((edge) => edge.to);
+  const expectations: [string, string[]][] = [
+    ['src/main.ts#p1', [LOCAL, REMOTE]],
+    ['src/main.ts#Holder2.run', [CACHED, LOCAL]],
+    ['src/main.ts#p3', [CACHED, LOCAL]],
+    ['src/main.ts#Box4.run', [LOCAL, REMOTE]],
+    ['src/main.ts#p5', []],
+    ['src/main.ts#p6', []],
+    ['src/impl.ts#handle7', []],
+    ['src/main.ts#H8.run', []],
+    ['src/main.ts#p9', []],
+    ['src/main.ts#H10.run', []],
+    ['src/main.ts#p11', []],
+    ['src/main.ts#p12', ['src/main.ts#impl12']],
+    ['src/main.ts#p13', [LOCAL, REMOTE]],
+  ];
+  assert.deepEqual(expectations.map(([from]) => [from, bound(from)]), expectations);
+  assert.deepEqual(bound('src/main.ts#Holder2.upgrade'), ['src/store.ts#CachedStore.withCache', 'src/store.ts#LocalStore.withCache']);
 });
