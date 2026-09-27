@@ -5,9 +5,11 @@
  * `depth`는 모든 root에 걸친 최단 거리, `via`는 그 최단 경로의 직전 노드(깊이 1이면 root)다. 같은 깊이면
  * 먼저 온 root, 같은 root 안에서는 정렬된 이웃 순서로 먼저 발견한 부모가 이긴다 — 출력이 결정적이다.
  *
- * isthmus `language-traversal` v1 규칙(`docs/LANGUAGE-TRAVERSAL.md`)을 따른다: root는 깊이 0이며 `reached`에
- * 다시 싣지 않는다(root끼리의 도달은 v1에서 표현하지 않는다). 경로는 다른 root를 지나갈 수 있고, 그 너머의
- * 정점은 두 root 인덱스를 모두 싣는다. 깊이는 1~128이다.
+ * isthmus `language-traversal` v1 규칙(2026-09-27 개정)을 따른다: `reached`는 자기 자신이 아닌 root에서
+ * 한 개 이상의 간선으로 닿은 정점 전부이고, root이기도 한 정점도 포함한다. 그런 정점의 `roots`는 그에 닿는
+ * **다른** root만 싣고(자기 인덱스는 넣지 않는다), depth·via도 그 root들 기준의 최단 경로다(via는 다른
+ * root id일 수 있다). 자기 자신에게서만(순환으로) 닿는 root는 싣지 않는다 — root 하나의 탐색은 자기
+ * 자신을 기록하지 않기 때문에 이 규칙이 저절로 성립한다. 깊이는 1~128이다.
  */
 
 import { compareStrings } from '../exchange/sorted-json.ts';
@@ -78,10 +80,9 @@ interface Record {
 export function traverse(graph: CallGraph, request: TraversalRequest): TraversalResult {
   const adjacency = buildAdjacency(graph, request.direction);
   const records = new Map<string, Record>();
-  const roots = new Set(request.rootIds);
   let depthCut = false;
   request.rootIds.forEach((root, index) => {
-    depthCut = searchFromRoot(adjacency, { root, index, roots }, request.maxDepth, records) || depthCut;
+    depthCut = searchFromRoot(adjacency, { root, index }, request.maxDepth, records) || depthCut;
   });
   const ordered = [...records].sort(([leftId, left], [rightId, right]) => left.depth - right.depth || compareStrings(leftId, rightId));
   const kept = ordered.slice(0, request.maxReached);
@@ -123,12 +124,11 @@ function buildAdjacency(graph: CallGraph, direction: TraversalDirection): Adjace
 interface SearchRoot {
   readonly root: string;
   readonly index: number;
-  /** 모든 root id(기록에서 뺀다) */
-  readonly roots: ReadonlySet<string>;
 }
 
 /**
- * root 하나에서 너비 우선으로 훑어 전역 기록을 갱신한다. 다른 root도 지나가지만 기록하지 않는다.
+ * root 하나에서 너비 우선으로 훑어 전역 기록을 갱신한다. 다른 root도 지나가며 기록하고, 자기 자신은
+ * (순환으로 돌아와도) 기록하지 않는다.
  *
  * @param adjacency 인접 목록
  * @param search 탐색 중인 root
@@ -151,7 +151,7 @@ function searchFromRoot(adjacency: Adjacency, search: SearchRoot, maxDepth: numb
     for (const neighbor of next.filter((candidate) => !depths.has(candidate))) {
       depths.set(neighbor, depth + 1);
       queue.push(neighbor);
-      if (!search.roots.has(neighbor)) record(records, neighbor, depth + 1, node, search.index);
+      record(records, neighbor, depth + 1, node, search.index);
     }
   }
   return depthCut;

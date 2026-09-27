@@ -438,7 +438,8 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   (`direction: "dependents"`)을 isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md)로 낸다.
 - id는 [심볼 id](#심볼-id)다. `tsograph routes`·`tsograph schema` 출력의 `symbol.usr`와 같은 문자열이다.
-  모르는 id는 사용법 오류(종료 코드 `64`)이고 목록을 알린다. 중복 id는 처음 나온 순서로 한 번만 둔다(그 순서가
+  모르는 id는 사용법 오류(종료 코드 `64`)이고 목록을 알린다. 계약의 문서 안 `root-not-found` root는 내지 않는다 —
+  root id 오타는 조용히 부분 순회를 내기보다 파이프라인을 멈추는 편이 안전하기 때문이다. 중복 id는 처음 나온 순서로 한 번만 둔다(그 순서가
   `reached[].roots` 인덱스의 뜻이다).
 - 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음, `64` 사용법 오류.
 
@@ -500,8 +501,10 @@ isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impa
 - `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
   (`depth`, `usr`) 순. `depth`는 가장 가까운 root까지의 거리, `via`는 그 경로의 직전 심볼(깊이 1이면
   root id), `roots`는 그 심볼에 닿는 모든 root 인덱스, `relationships`는 `via`와 심볼 사이 간선 종류다.
-- root는 `reached`에 다시 싣지 않는다(v1은 root끼리의 도달을 표현하지 않는다). 경로는 다른 root를 지날 수
-  있고, 그 너머 심볼은 두 root 인덱스를 모두 싣는다.
+- **다른** root에서 닿는 root도 `reached`에 싣는다(핸들러 A가 부르는 도우미 H도 root면 H는
+  `roots: [A의 인덱스]`). 그 `roots`에는 자기 인덱스를 넣지 않고, `depth`·`via`도 그 다른 root들 기준이다
+  (`via`는 다른 root id일 수 있다). 자기 자신에게서만(순환으로) 닿는 root는 싣지 않는다. 경로는 다른 root를
+  지날 수 있고, 그 너머 심볼은 두 root 인덱스를 모두 싣는다.
 - 예산: `--max-depth` 1–128(기본 128), `--max-reached` 최대 100,000(기본 100,000). 예산이 순회를 자르면
   `truncated: true`와 `truncationReasons`(`depth`·`max-reached`)를 싣는다. 한 심볼의 root 인덱스가 64개를
   넘으면 작은 64개만 싣고 `rootsTruncated: true`를 단다.

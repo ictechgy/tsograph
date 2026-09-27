@@ -44,14 +44,39 @@ function run(graph: CallGraph, request: Partial<TraversalRequest> & { rootIds: s
 test('여러 root의 출처를 보존하고 최단 깊이·결정적 via를 고른다', () => {
   const graph = graphOf(['r1>a', 'r1>b', 'a>c', 'b>c', 'r2>c:callback', 'c>d', 'r2>r1:alias']);
   const { lines, reasons } = run(graph, { rootIds: ['r1', 'r2'] });
-  // root(r1)는 다른 root(r2)에서 닿아도 reached에 싣지 않고, 그 너머 정점은 두 인덱스를 모두 싣는다.
+  // root(r1)도 다른 root(r2)에서 닿으면 싣되 자기 인덱스는 빼고, 그 너머 정점은 두 인덱스를 모두 싣는다.
   assert.deepEqual(lines, [
     'a 1 r1 [0,1] call',
     'b 1 r1 [0,1] call',
     'c 1 r2 [0,1] callback',
+    'r1 1 r2 [1] alias',
     'd 2 c [0,1] call',
   ]);
   assert.deepEqual(reasons, []);
+});
+
+test('다른 root가 부르는 root는 그 root 인덱스만 싣는다(핸들러 A → 도우미 H, H도 root)', () => {
+  const graph = graphOf(['A>H', 'H>db', 'A>other']);
+  assert.deepEqual(run(graph, { rootIds: ['A', 'H'] }).lines, [
+    'H 1 A [0] call',
+    'db 1 H [0,1] call',
+    'other 1 A [0] call',
+  ]);
+  // 역방향도 같다: 테이블을 모두 root로 주면 서로 닿는 root가 사라지지 않는다.
+  assert.deepEqual(run(graph, { rootIds: ['db', 'H'], direction: 'dependents' }).lines, [
+    'A 1 H [0,1] call',
+    'H 1 db [0] call',
+  ]);
+});
+
+test('자기 자신에게서만 닿는 root(순환)는 싣지 않고, 자기 순환 경로는 깊이에 쓰지 않는다', () => {
+  const graph = graphOf(['A>q', 'q>p', 'p>H', 'H>p']);
+  // H의 depth·via는 다른 root(A) 기준이다. p는 H에서도 닿으므로 더 얕다(계약 보고 사항).
+  assert.deepEqual(run(graph, { rootIds: ['A', 'H'] }).lines, [
+    'p 1 H [0,1] call',
+    'q 1 A [0] call',
+    'H 3 p [0] call',
+  ]);
 });
 
 test('순환은 한 번만 돌고 root 자신은 싣지 않는다', () => {

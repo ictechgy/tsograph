@@ -105,6 +105,19 @@ test('impact는 dependents 방향이고 비HTTP 진입점을 이 문서 범위�
   assert.deepEqual(cut.truncationReasons, ['depth', 'max-reached']);
 });
 
+test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 나온다', async () => {
+  const result = await runReachCommand(['--project', fixture, 'src/app/api/jobs/route.ts#POST', 'src/lib/jobs.ts#createJob'], environment());
+  const document = JSON.parse(result.standardOutput);
+  const byUsr = new Map(document.reached.map((entry: { symbol: { usr: string } }) => [entry.symbol.usr, entry]));
+  assert.deepEqual(byUsr.get('src/lib/jobs.ts#createJob'), {
+    symbol: { usr: 'src/lib/jobs.ts#createJob', qualifiedName: 'src/lib/jobs.ts#createJob', kind: 'function', location: { path: 'src/lib/jobs.ts', line: 8, column: 23 } },
+    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'],
+  });
+  const audit = byUsr.get('src/lib/audit.ts#audit') as { via: string; depth: number; roots: number[] };
+  assert.deepEqual([audit.via, audit.depth, audit.roots], ['src/lib/jobs.ts#createJob', 1, [0, 1]]);
+  assert.ok(!byUsr.has('src/app/api/jobs/route.ts#POST'));
+});
+
 test('모르는 id는 64이고 목록을 알린다', async () => {
   const ids = Array.from({ length: 22 }, (_, index) => `x.ts#missing${index}`);
   const result = await runReachCommand(['--project', '.', ...ids, 'a.ts#a'], environment({ buildGraph: async () => tinyGraph }));

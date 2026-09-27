@@ -11,6 +11,9 @@
 
 ### Added
 
+- language-traversal v1 개정 반영: 다른 root에서 닿는 root도 `reached`에 싣고(`roots`는 자기 인덱스를 뺀
+  다른 root만, depth·via도 그 기준), 자기 자신에게서만 닿는 root는 싣지 않는다. 모든 테이블을 root로 준
+  다중 root 순회에서 서로 닿는 root가 사라지던 정보 손실을 막는다.
 - `tsograph graph --project <root>`, `tsograph reach --project <root> <id>...`, `tsograph impact --project <root> <id>...`:
   TypeScript 컴파일러 API(Program + TypeChecker, 프로젝트 tsconfig/jsconfig, JS 허용)로 호출 그래프를 만들고,
   스냅샷(`tsograph-graph` v1, `graphRevision` = 노드·간선 해시)과 isthmus `language-traversal` v1

@@ -547,7 +547,9 @@ computed.
   `impact` the symbols that reach them (`direction: "dependents"`), as isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md).
 - Ids are [symbol ids](#symbol-ids): the same strings as `symbol.usr` in `tsograph routes` and
-  `tsograph schema` output. An unknown id is a usage error (exit `64`) that lists the ids. Duplicate
+  `tsograph schema` output. An unknown id is a usage error (exit `64`) that lists the ids; tsograph
+  does not emit the contract's in-document `root-not-found` roots, because a typo in a root id should
+  stop the pipeline rather than produce a silently partial traversal. Duplicate
   ids are kept once, in first-seen order (that order defines `reached[].roots` indices).
 - Exit codes: `0` success, `2` unreadable project or output over 16 Mi characters, `64` usage error.
 
@@ -614,8 +616,11 @@ missing routes.
   sorted by (`depth`, `usr`). `depth` is the shortest distance to any root, `via` the previous
   symbol on that path (a root id at depth 1), `roots` every root index that reaches the symbol,
   `relationships` the edge kinds between `via` and the symbol.
-- Roots are not repeated in `reached` (v1 does not express root-to-root reachability); paths may
-  pass through another root, and symbols beyond it carry both root indices.
+- A root that is reached from **another** root is listed in `reached` too (a handler A calling a
+  helper H that is also a root lists H with `roots: [indexA]`). Its `roots` never contains its own
+  index, and its `depth`/`via` are measured from those other roots (`via` may be another root id).
+  A root reached only from itself (through a cycle) is not listed. Paths may pass through another
+  root, and symbols beyond it carry both root indices.
 - Budgets: `--max-depth` 1–128 (default 128), `--max-reached` up to 100,000 (default 100,000). When a
   budget cuts the traversal, `truncated: true` with `truncationReasons` (`depth`, `max-reached`).
   More than 64 root indices on one symbol keep the smallest 64 and set `rootsTruncated: true`.
