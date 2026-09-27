@@ -144,6 +144,23 @@ function markFileEntries(store: GraphStore, path: string, sourceFile: ts.SourceF
   }
 }
 
+/**
+ * 프레임워크가 불러와 내보내기를 부르는 파일인지 본다: app 아래 `route`·특수 파일·메타데이터 파일, pages 아래 모든 파일
+ * (API route 포함), app·pages 옆의 `proxy`·`middleware`·`instrumentation`. 내보낸 이름을 확정하지 못한 파일(`export *`)도
+ * 포함한다 — 디스패치가 그 파일의 내보내기·재내보내기를 열린 자리로 보기 위해서다.
+ *
+ * @param path 프로젝트 기준 경로
+ * @param input 표식 입력
+ * @returns 프레임워크 파일이면 true
+ */
+export function isFrameworkFile(path: string, input: EntryInput): boolean {
+  if (fileRole(path, input) !== undefined) return true;
+  const key = pageKey(path.slice(path.lastIndexOf('/') + 1), input.pageExtensions);
+  if (key === undefined) return false;
+  if (input.appDirectory !== undefined && isWithin(path, input.appDirectory)) return key === 'route';
+  return input.pagesDirectory !== undefined && isWithin(path, input.pagesDirectory);
+}
+
 /** 특수 파일의 진입점 종류와 진입 내보내기 이름이다. */
 interface FileRole {
   readonly entry: EntryKind;

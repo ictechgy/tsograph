@@ -1,0 +1,10 @@
+{
+  // 합성 fixture — 인터페이스로 주입한 의존성의 bound·candidate 디스패치를 검증한다.
+  "compilerOptions": {
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "paths": { "@/*": ["./src/*"] }
+  }
+}

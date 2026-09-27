@@ -3,7 +3,8 @@
  *
  * 출발 노드는 코드 위치의 스코프 id(`scopeIdOf`)다. 호출·`new`·태그 템플릿·데코레이터·JSX 태그는
  * `TargetResolver.resolveCallee`로, 함수 값 참조(콜백·일반 참조)는 `referenceTargets`로 잇는다.
- * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다.
+ * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다. 인터페이스 공백 메서드 호출(`recv.m()`)은
+ * 디스패치 단계(`dispatch.ts`)로 넘기고, 노드별 미해석 계수는 그 단계가 모드별로 센다.
  */
 
 import ts from 'typescript';
@@ -11,7 +12,7 @@ import ts from 'typescript';
 import type { CallStatistics, EdgeKind, GraphStore, UnresolvedReason } from './graph-model.ts';
 import { isFunctionValued, isTypeOnly, skipWrappers } from './node-collector.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
-import type { Resolution, TargetResolver } from './target-resolver.ts';
+import { isInterfaceGap, type Resolution, type TargetResolver } from './target-resolver.ts';
 
 /** 간선 수집 중 센 공백이다. */
 export interface EdgeGaps {
@@ -19,6 +20,24 @@ export interface EdgeGaps {
   readonly partial: Partial<Record<UnresolvedReason, number>>;
   /** 하위 클래스가 재정의한 메서드를 기반 타입으로 부른 호출 수 */
   overriddenCalls: number;
+}
+
+/**
+ * 디스패치 단계로 넘기는 인터페이스 공백 메서드 호출이다.
+ */
+export interface PendingDispatch {
+  /** 호출이 있는 파일의 프로젝트 기준 경로 */
+  readonly path: string;
+  /** 호출을 감싸는 스코프 노드 id */
+  readonly from: string;
+  /** 호출식 */
+  readonly call: ts.CallExpression;
+  /** 수신자 식(래퍼를 벗기지 않은 원래 식) */
+  readonly receiver: ts.Expression;
+  /** 메서드 이름 */
+  readonly method: string;
+  /** direct로 이미 이은 대상(union의 구현 부분), 없으면 빈 목록 */
+  readonly direct: readonly string[];
 }
 
 /** 간선 수집 문맥이다. */
@@ -30,6 +49,8 @@ export interface EdgeContext {
   readonly overrides: ReadonlyMap<string, readonly string[]>;
   readonly calls: CallStatistics;
   readonly gaps: EdgeGaps;
+  /** 디스패치 단계로 넘긴 호출(갱신) */
+  readonly pending: PendingDispatch[];
 }
 
 /**
@@ -108,8 +129,30 @@ function visitCall(context: EdgeContext, path: string, call: ts.CallExpression):
     return;
   }
   const resolution = context.resolver.resolveCallee(call.expression);
-  recordCall(context, path, call, resolution, 'call');
+  const pending = isInterfaceGap(resolution) ? dispatchSite(context.store, path, call, resolution) : undefined;
+  if (pending !== undefined) context.pending.push(pending);
+  recordCall(context, path, call, resolution, 'call', pending !== undefined);
   countOverriddenCall(context, call.expression, resolution);
+}
+
+/**
+ * 인터페이스 공백 호출이 수신자 있는 메서드 호출(`recv.m()`, `recv["m"]()`)이면 디스패치 대기 항목을 만든다.
+ *
+ * @param store 그래프 저장소
+ * @param path 프로젝트 기준 경로
+ * @param call 호출식
+ * @param resolution direct 해석 결과
+ * @returns 대기 항목, 메서드 호출이 아니면 undefined
+ */
+function dispatchSite(store: GraphStore, path: string, call: ts.CallExpression, resolution: Resolution): PendingDispatch | undefined {
+  const callee = skipWrappers(call.expression);
+  if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return undefined;
+  const method = ts.isPropertyAccessExpression(callee) ? callee.name.text
+    : ts.isStringLiteralLike(callee.argumentExpression) ? callee.argumentExpression.text : undefined;
+  if (method === undefined || callee.expression.kind === ts.SyntaxKind.SuperKeyword) return undefined;
+  const receiver = callee.expression;
+  const direct = resolution.kind === 'nodes' ? resolution.ids : [];
+  return { path, from: ensureScope(store, path, call), call, receiver, method, direct };
 }
 
 /**
@@ -158,8 +201,11 @@ function visitReference(context: EdgeContext, path: string, node: ts.Node): void
  * @param site 호출 위치
  * @param resolution 해석 결과
  * @param kind 간선 종류
+ * @param deferred 디스패치 단계가 노드별 미해석 계수를 셀 호출이면 true
  */
-function recordCall(context: EdgeContext, path: string, site: ts.Node, resolution: Resolution, kind: EdgeKind): void {
+function recordCall(context: EdgeContext, path: string, site: ts.Node, resolution: Resolution, kind: EdgeKind, deferred = false): void {
+  const isGap = resolution.kind === 'unresolved' || (resolution.kind === 'nodes' && resolution.partial !== undefined);
+  if (isGap && !deferred) context.store.countUnresolved(ensureScope(context.store, path, site), undefined);
   if (resolution.kind === 'external') {
     context.calls.external++;
     if (resolution.missing === true) context.calls.missingDependencies++;

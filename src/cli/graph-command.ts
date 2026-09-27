@@ -1,9 +1,11 @@
 /**
  * `tsograph graph`·`reach`·`impact` — TypeScript/JavaScript 호출 그래프와 그 순회다.
  *
- * - `graph`: 그래프 스냅샷(`tsograph-graph` v1, `graphRevision` = 내용 해시)을 낸다.
+ * - `graph`: 그래프 스냅샷(`tsograph-graph` v1, `graphRevision` = 내용 해시)을 낸다. 간선마다 근거
+ *   (`direct`·`bound`·`candidate`)를 싣는다.
  * - `reach <id>...`: root에서 정방향(`dependencies`)으로 닿는 심볼을 isthmus `language-traversal` v1로 낸다.
  * - `impact <id>...`: root에 닿는 심볼(역방향 `dependents`)을 같은 형식으로 낸다.
+ * - reach·impact의 `--dispatch direct|bound|candidates`(기본 bound)는 따라갈 간선 근거 범위다.
  *
  * 모르는 id는 사용법 오류(64)이고 목록을 알린다. 프로젝트를 읽지 못하거나 출력이 상한을 넘으면 2다.
  * 분석 대상 코드는 실행하지 않는다(TypeScript 컴파일러 API로 읽기만 한다).
@@ -14,7 +16,7 @@ import { encodeSortedJson } from '../exchange/sorted-json.ts';
 import { buildCallGraph } from '../graph/build-graph.ts';
 import { readGitRevision } from '../graph/git-revision.ts';
 import { computeGraphRevision, createGraphSnapshot, type DocumentHeader } from '../graph/graph-document.ts';
-import type { CallGraph } from '../graph/graph-model.ts';
+import { DISPATCH_MODES, type CallGraph, type DispatchMode } from '../graph/graph-model.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
 import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection } from '../graph/traversal.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
@@ -28,6 +30,9 @@ export const DEFAULT_MAX_REACHED = 100_000;
 /** 한 번에 받는 최대 root 수다. */
 export const MAX_ROOT_IDS = 10_000;
 
+/** reach·impact의 기본 디스패치 모드다. */
+export const DEFAULT_DISPATCH: DispatchMode = 'bound';
+
 /** 모르는 id를 오류 문구에 싣는 최대 개수다. */
 const MAX_LISTED_UNKNOWN_IDS = 20;
 
@@ -36,8 +41,9 @@ export const graphUsage = `Usage: tsograph graph --project <root> [--generated-a
 
 Build the TypeScript/JavaScript call graph of the project (TypeScript compiler API over the
 project's tsconfig/jsconfig) and write a tsograph-graph v1 snapshot: nodes (functions, methods,
-constructors, classes, module scopes, export aliases) with entry-point marks, edges (call, new,
-callback, reference, jsx, alias, initializer), statistics, and graphRevision (content hash).
+constructors, classes, module scopes, export aliases) with entry-point marks and per-mode unresolved
+call counts, edges (call, new, callback, reference, jsx, alias, initializer) with their evidence
+(direct, bound, candidate), statistics, and graphRevision (content hash).
 
 Options:
   --project <root>            Project root; node ids are relative to it (required)
@@ -52,6 +58,10 @@ const traversalOptions = `Options:
   --project <root>            Project root (required)
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
   --max-reached <n>           Emit at most n reached symbols (default and maximum: ${DEFAULT_MAX_REACHED})
+  --dispatch <mode>           Edges to follow: direct (proven by the checker), bound (direct plus
+                              interface calls whose every observed receiver flow is a project
+                              implementation), candidates (bound plus every assignable implementation).
+                              Default: ${DEFAULT_DISPATCH}
   --generated-at <timestamp>  Fixed generatedAt (YYYY-MM-DDTHH:mm:ss.sssZ) for byte-identical output
   --format json               Output format (json is the only format)
 
@@ -62,7 +72,7 @@ Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error.
 `;
 
 /** reach 명령 사용법이다. */
-export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols reachable from the given roots (direction "dependencies") as an isthmus
 language-traversal v1 document.
@@ -70,7 +80,7 @@ language-traversal v1 document.
 ${traversalOptions}`;
 
 /** impact 명령 사용법이다. */
-export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols that reach the given roots (direction "dependents") as an isthmus
 language-traversal v1 document.
@@ -135,6 +145,7 @@ interface TraversalArguments {
   readonly rootIds: readonly string[];
   readonly maxDepth: number;
   readonly maxReached: number;
+  readonly dispatch: DispatchMode;
   readonly generatedAt: Date | undefined;
 }
 
@@ -161,13 +172,15 @@ async function runTraversalCommand(
   const known = new Set(loaded.graph.nodes.map((node) => node.id));
   const unknown = parsed.rootIds.filter((id) => !known.has(id));
   if (unknown.length > 0) return usageFailure(unknownIdsMessage(unknown));
-  const result = traverse(loaded.graph, { rootIds: parsed.rootIds, direction, maxDepth: parsed.maxDepth, maxReached: parsed.maxReached });
+  const { rootIds, maxDepth, maxReached, dispatch } = parsed;
+  const result = traverse(loaded.graph, { rootIds, direction, maxDepth, maxReached, dispatch });
   return render(createTraversalDocument({
     graph: loaded.graph,
     graphRevision: computeGraphRevision(loaded.graph),
     header: loaded.header,
     direction,
-    rootIds: parsed.rootIds,
+    dispatch,
+    rootIds,
     result,
   }));
 }
@@ -179,7 +192,7 @@ async function runTraversalCommand(
  * @returns 검증한 인자, 'help', 또는 사용법 오류 이유
  */
 function parseTraversalArguments(arguments_: readonly string[]): TraversalArguments | 'help' | string {
-  const parsed = parseArguments(arguments_, ['--project', '--format', '--max-depth', '--max-reached', '--generated-at'], ['--help']);
+  const parsed = parseArguments(arguments_, ['--project', '--format', '--max-depth', '--max-reached', '--dispatch', '--generated-at'], ['--help']);
   if (parsed === undefined) return 'unknown, repeated, or empty option.';
   if (parsed.booleanFlags.has('--help')) return 'help';
   const format = formatProblem(parsed.valueFlags.get('--format'));
@@ -195,9 +208,14 @@ function parseTraversalArguments(arguments_: readonly string[]): TraversalArgume
   if (maxDepth === null || maxReached === null) {
     return `--max-depth takes 1-${MAX_TRAVERSAL_DEPTH} and --max-reached takes 1-${DEFAULT_MAX_REACHED}.`;
   }
+  const dispatch = parsed.valueFlags.get('--dispatch') ?? DEFAULT_DISPATCH;
+  if (!(DISPATCH_MODES as readonly string[]).includes(dispatch)) return '--dispatch takes direct, bound, or candidates.';
   const generatedAt = parseTimestamp(parsed.valueFlags.get('--generated-at'));
   if (generatedAt === null) return '--generated-at takes a UTC timestamp such as 2026-09-27T00:00:00.000Z.';
-  return { project, rootIds, maxDepth: maxDepth ?? MAX_TRAVERSAL_DEPTH, maxReached: maxReached ?? DEFAULT_MAX_REACHED, generatedAt };
+  return {
+    project, rootIds, maxDepth: maxDepth ?? MAX_TRAVERSAL_DEPTH, maxReached: maxReached ?? DEFAULT_MAX_REACHED,
+    dispatch: dispatch as DispatchMode, generatedAt,
+  };
 }
 
 /**

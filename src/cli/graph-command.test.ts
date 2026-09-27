@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import type { CallGraph } from '../graph/graph-model.ts';
+import { createTraversalDocument } from '../graph/traversal-document.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { type GraphEnvironment, graphUsage, impactUsage, reachUsage, render, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { runCli } from './run-cli.ts';
@@ -26,9 +27,13 @@ const tinyGraph: CallGraph = {
   nodes: ['a.ts#a', 'a.ts#b', 'a.ts#page'].map((id) => ({
     id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 }, ...(id === 'a.ts#page' ? { entries: ['page' as const] } : {}),
   })),
-  edges: [{ from: 'a.ts#a', to: 'a.ts#b', kinds: ['call'] }, { from: 'a.ts#page', to: 'a.ts#b', kinds: ['jsx'] }],
+  edges: [{ from: 'a.ts#a', to: 'a.ts#b', kinds: ['call'], evidence: 'direct' }, { from: 'a.ts#page', to: 'a.ts#b', kinds: ['jsx'], evidence: 'direct' }],
   limitations: ['unresolved-calls: 1 call(s) could not be linked to a project declaration and were not guessed (parameter: 1)', 'non-http-entries: 1 symbol(s) are entry points without a route-decl fact (page: 1); isthmus cannot reach them through the http join'],
-  statistics: { files: 1, calls: { resolved: 2, external: 0, missingDependencies: 0, unresolved: { parameter: 1, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 } } },
+  limitationsByMode: Object.fromEntries(['direct', 'bound', 'candidates'].map((mode) => [mode, [
+    'unresolved-calls: 1 call(s) could not be linked to a project declaration and were not guessed (parameter: 1)',
+    'non-http-entries: 1 symbol(s) are entry points without a route-decl fact (page: 1); isthmus cannot reach them through the http join',
+  ]])) as unknown as CallGraph['limitationsByMode'],
+  statistics: { files: 1, calls: { resolved: 2, external: 0, missingDependencies: 0, unresolved: { parameter: 1, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 } } },
 };
 
 test('--generated-at은 시각을 고정하고 잘못된 값은 64다', async () => {
@@ -79,8 +84,9 @@ test('reach는 language-traversal v1(dependencies)을 낸다', async () => {
       usr: 'src/lib/audit.ts#audit', qualifiedName: 'src/lib/audit.ts#audit', kind: 'function',
       location: { path: 'src/lib/audit.ts', line: 3, column: 23 },
     },
-    via: 'src/lib/jobs.ts#createJob', depth: 2, roots: [0], relationships: ['call'],
+    via: 'src/lib/jobs.ts#createJob', depth: 2, roots: [0], relationships: ['call'], evidence: 'direct',
   });
+  assert.equal(document.dispatch, 'bound');
   assert.ok(document.limitations.some((line: string) => line.startsWith('unresolved-calls:')));
   assert.ok(!document.limitations.some((line: string) => line.startsWith('non-http-entries:')));
 });
@@ -111,7 +117,7 @@ test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 
   const byUsr = new Map(document.reached.map((entry: { symbol: { usr: string } }) => [entry.symbol.usr, entry]));
   assert.deepEqual(byUsr.get('src/lib/jobs.ts#createJob'), {
     symbol: { usr: 'src/lib/jobs.ts#createJob', qualifiedName: 'src/lib/jobs.ts#createJob', kind: 'function', location: { path: 'src/lib/jobs.ts', line: 8, column: 23 } },
-    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'],
+    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'], evidence: 'direct',
   });
   const audit = byUsr.get('src/lib/audit.ts#audit') as { via: string; depth: number; roots: number[] };
   assert.deepEqual([audit.via, audit.depth, audit.roots], ['src/lib/jobs.ts#createJob', 1, [0, 1]]);
@@ -138,7 +144,7 @@ test('주입 그래프: root 밖 진입점은 세지 않고 그래프 limitation
 test('잘못된 호출은 64, 읽을 수 없는 프로젝트·과대 출력은 2다', async () => {
   const env = environment({ buildGraph: async () => tinyGraph });
   const reachCases = [[], ['a.ts#a'], ['--project', '.'], ['--project', '.', '--format', 'yaml', 'a'], ['--project', '.', '--max-depth', '0', 'a'],
-    ['--project', '.', '--max-reached', 'x', 'a'], ['--project', '.', 'bad\u0001id'], ['--bogus'],
+    ['--project', '.', '--max-reached', 'x', 'a'], ['--project', '.', 'bad\u0001id'], ['--bogus'], ['--project', '.', '--dispatch', 'all', 'a.ts#a'],
     ['--project', '.', ...Array.from({ length: 10_001 }, (_, index) => `i${index}`)]];
   for (const args of reachCases) assert.equal((await runReachCommand(args, env)).exitCode, 64, JSON.stringify(args).slice(0, 80));
   for (const args of [[], ['x'], ['--project', '.', '--format', 'yaml'], ['--nope']]) {
@@ -167,4 +173,29 @@ test('분배기가 graph·reach·impact와 도움말을 안다', async () => {
   assert.equal((await runCli(['graph', '--project', '.'], env)).exitCode, 0);
   assert.equal((await runCli(['reach', '--project', '.', 'a.ts#a'], env)).exitCode, 0);
   assert.equal((await runCli(['impact', '--project', '.', 'a.ts#b'], env)).exitCode, 0);
+});
+
+test('unresolvedCalls 상한(1,000,000)을 넘으면 상한으로 싣고 limitation으로 알린다(스냅샷은 정확한 수)', async () => {
+  const heavy: CallGraph = {
+    ...tinyGraph,
+    nodes: tinyGraph.nodes.map((node) => (node.id === 'a.ts#b' ? { ...node, unresolvedCalls: { direct: 2_000_000, bound: 2_000_000 } } : node)),
+  };
+  const env = environment({ buildGraph: async () => heavy });
+  const document = JSON.parse((await runReachCommand(['--project', '.', 'a.ts#a'], env)).standardOutput);
+  assert.equal(document.reached[0].unresolvedCalls, 1_000_000);
+  assert.ok(document.limitations.includes('unresolved-calls-capped: 1 symbol(s) have more than 1000000 unresolved call sites; unresolvedCalls reports 1000000 for them (the graph snapshot keeps the exact counts)'));
+  const snapshot = JSON.parse((await runGraphCommand(['--project', '.'], env)).standardOutput);
+  assert.equal(snapshot.nodes.find((node: { id: string }) => node.id === 'a.ts#b').unresolvedCalls.bound, 2_000_000);
+  const direct = JSON.parse((await runReachCommand(['--project', '.', '--dispatch', 'candidates', 'a.ts#a'], env)).standardOutput);
+  assert.equal(direct.reached[0].unresolvedCalls, undefined);
+  assert.ok(!direct.limitations.some((line: string) => line.startsWith('unresolved-calls-capped:')));
+});
+
+test('근거 등급을 근사한 문서는 evidence-approximated limitation을 싣는다', () => {
+  const document = createTraversalDocument({
+    graph: tinyGraph, graphRevision: 'sha256:0', direction: 'dependencies', dispatch: 'candidates', rootIds: ['a.ts#a'],
+    header: { toolVersion: '0', generatedAt: fixedNow, project: '/work/x', revision: undefined },
+    result: { reached: [], truncationReasons: [], rootsTruncated: false, evidenceApproximated: true },
+  });
+  assert.ok(document.limitations.some((line) => line.startsWith('evidence-approximated: ')));
 });
