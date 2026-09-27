@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { rootHelp, runCli } from './run-cli.ts';
+import { createNodeFileSystem } from './file-system.ts';
+import { fileURLToPath } from 'node:url';
+
+import { rootHelp, runCli, runCliSafely } from './run-cli.ts';
 
 /** 테스트용 고정 실행 환경이다. */
-const environment = { toolVersion: '9.9.9' };
+const environment = {
+  toolVersion: '9.9.9',
+  fileSystem: createNodeFileSystem(),
+  now: () => new Date('2026-09-27T00:00:00.000Z'),
+};
 
 test('인자가 없으면 사용법 오류 64와 도움말을 낸다', async () => {
   const result = await runCli([], environment);
@@ -31,4 +38,25 @@ test('모르는 명령과 모르는 help 대상은 사용법 오류다', async (
   assert.match(unknown.standardError, /unknown command/);
   const unknownHelp = await runCli(['help', 'nope'], environment);
   assert.equal(unknownHelp.exitCode, 64);
+});
+
+test('help openapi는 명령 사용법을 내고 openapi는 명령으로 분배된다', async () => {
+  const help = await runCli(['help', 'openapi'], environment);
+  assert.equal(help.exitCode, 0);
+  assert.match(help.standardOutput, /^Usage: tsograph openapi/);
+  const tooMany = await runCli(['help', 'openapi', 'extra'], environment);
+  assert.equal(tooMany.exitCode, 64);
+  const missingService = await runCli(['openapi', 'spec.yaml'], environment);
+  assert.equal(missingService.exitCode, 64);
+});
+
+test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없는 문구로 바꾼다', async () => {
+  const throwing = { ...environment, now: (): Date => { throw new Error('secret /abs/path detail'); } };
+  const result = await runCliSafely(['openapi', fileURLToPath(new URL('../../fixtures/openapi/swagger-2.0.json', import.meta.url)), '--service', 'x'], throwing);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.standardError, /^tsograph: internal error/);
+  assert.equal(result.standardOutput, '');
+  assert.doesNotMatch(result.standardError, /secret|abs\/path/);
+  const ok = await runCliSafely(['--version'], environment);
+  assert.equal(ok.exitCode, 0);
 });

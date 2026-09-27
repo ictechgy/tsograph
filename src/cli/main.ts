@@ -6,10 +6,15 @@
  * 로직은 run-cli.ts에 두고 이 파일은 프로세스 경계만 다룬다.
  */
 
-import { runCli } from './run-cli.ts';
+import { createNodeFileSystem } from './file-system.ts';
+import { runCliSafely } from './run-cli.ts';
 import { readToolVersion } from './tool-version.ts';
 
-const result = await runCli(process.argv.slice(2), { toolVersion: readToolVersion() });
+const result = await runCliSafely(process.argv.slice(2), {
+  toolVersion: readToolVersion(),
+  fileSystem: createNodeFileSystem(),
+  now: () => new Date(),
+});
 process.stdout.write(result.standardOutput);
 process.stderr.write(result.standardError);
 process.exitCode = result.exitCode;

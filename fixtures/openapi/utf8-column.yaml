@@ -1,0 +1,6 @@
+# 합성 fixture: 비ASCII 경로 키가 같은 줄의 UTF-8 바이트 열을 바꾼다.
+openapi: 3.1.0
+info: { title: Synthetic Café, version: 1.0.0 }
+paths:
+  /café/menü: { get: { operationId: listMenu } }
+  /喫茶店: { post: { operationId: createOrder } }

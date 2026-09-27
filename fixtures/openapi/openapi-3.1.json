@@ -1,0 +1,37 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Synthetic Orders", "version": "1.0.0" },
+  "servers": [
+    {
+      "url": "{scheme}://{region}.orders.example.test/{version}",
+      "variables": {
+        "scheme": { "default": "https", "enum": ["https", "http"] },
+        "region": { "default": "eu" },
+        "version": { "default": "v1", "enum": ["v1", "v2"] }
+      }
+    }
+  ],
+  "paths": {
+    "/orders": { "$ref": "#/components/pathItems/Orders" },
+    "/orders/{orderId}": {
+      "get": { "operationId": "getOrder" },
+      "servers": [
+        {
+          "url": "https://orders.example.test/tenants/{tenant}/api",
+          "variables": { "tenant": { "default": "acme" } }
+        }
+      ]
+    }
+  },
+  "components": {
+    "pathItems": {
+      "Orders": {
+        "get": { "operationId": "listOrders" },
+        "post": { "operationId": "createOrder" }
+      }
+    }
+  },
+  "webhooks": {
+    "orderShipped": { "post": { "operationId": "onOrderShipped" } }
+  }
+}
