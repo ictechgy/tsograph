@@ -1,10 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runChild } from './run-child.mjs';
 
 // 빌드된 CLI(dist)가 종료 코드 계약(0/2/64, 1은 예약)을 지키는지 실제 프로세스로 확인한다.
 const binaryPath = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
+const fixtures = fileURLToPath(new URL('../fixtures/openapi/', import.meta.url));
 const packageDocument = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 );
@@ -12,6 +15,9 @@ const packageDocument = JSON.parse(
 verifyHelp();
 verifyVersion();
 verifyUsageErrors();
+verifyOpenApiSuccess();
+verifyOpenApiInputErrors();
+verifyOpenApiUsageErrors();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -30,6 +36,48 @@ function verifyVersion() {
 function verifyUsageErrors() {
   verify(run([]).status === 64, 'missing command');
   verify(run(['no-such-command']).status === 64, 'unknown command');
+}
+
+/** 합성 스펙이 결정적인 route-contract 문서로 변환되는지 확인한다. */
+function verifyOpenApiSuccess() {
+  for (const name of ['petstore-3.0.yaml', 'swagger-2.0.json', 'openapi-3.1.json', 'utf8-column.yaml']) {
+    const args = ['openapi', join(fixtures, name), '--service', 'contract-check', '--format', 'json'];
+    const first = run(args);
+    verify(first.status === 0, `openapi ${name} exit code`);
+    const document = JSON.parse(first.stdout);
+    verify(document.format === 'bridge-facts' && document.version === 1, `openapi ${name} envelope`);
+    verify(document.platform === 'openapi' && document.target === 'http', `openapi ${name} platform`);
+    verify(document.facts.length > 0 && document.facts.every((fact) => fact.kind === 'route-contract'), `openapi ${name} facts`);
+    const second = run(args);
+    verify(withoutGeneratedAt(first.stdout) === withoutGeneratedAt(second.stdout), `openapi ${name} determinism`);
+  }
+  verify(run(['help', 'openapi']).stdout.startsWith('Usage: tsograph openapi'), 'openapi help');
+}
+
+/** 읽을 수 없거나 잘못된 스펙이 2로 끝나는지 확인한다. */
+function verifyOpenApiInputErrors() {
+  const directory = mkdtempSync(join(tmpdir(), 'tsograph-cli-contract-'));
+  try {
+    const duplicate = join(directory, 'duplicate.yaml');
+    writeFileSync(duplicate, 'openapi: 3.0.0\npaths:\n  /a: {}\n  /a: {}\n');
+    verify(run(['openapi', duplicate, '--service', 'x']).status === 2, 'openapi duplicate key');
+    verify(run(['openapi', join(directory, 'missing.yaml'), '--service', 'x']).status === 2, 'openapi missing file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** openapi의 잘못된 호출이 64로 끝나는지 확인한다. */
+function verifyOpenApiUsageErrors() {
+  const spec = join(fixtures, 'swagger-2.0.json');
+  verify(run(['openapi', spec]).status === 64, 'openapi missing service');
+  verify(run(['openapi', spec, '--service', 'x', '--format', 'yaml']).status === 64, 'openapi format');
+  verify(run(['openapi', '--service', 'x']).status === 64, 'openapi missing spec');
+}
+
+/** 추출 시각만 다른 두 출력을 비교할 수 있게 generatedAt 줄을 지운다. */
+function withoutGeneratedAt(text) {
+  return text.replace(/"generatedAt": "[^"]*"/u, '');
 }
 
 /** 빌드된 CLI를 실행한다. */

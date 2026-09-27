@@ -1,0 +1,21 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Synthetic Inventory", "version": "1.0.0" },
+  "host": "inventory.example.test",
+  "schemes": ["https"],
+  "basePath": "/v2/",
+  "paths": {
+    "/items": {
+      "get": { "operationId": "listItems" },
+      "post": { "operationId": "createItem" }
+    },
+    "/items/{itemId}": {
+      "put": { "operationId": "replaceItem" },
+      "patch": {},
+      "trace": { "operationId": "notAnOperationIn20" }
+    },
+    "/": {
+      "head": { "operationId": "ping" }
+    }
+  }
+}

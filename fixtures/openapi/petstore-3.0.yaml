@@ -1,0 +1,44 @@
+# 합성 fixture: OpenAPI 3.0 YAML. 실제 서비스 스펙이 아니다.
+openapi: 3.0.3
+info:
+  title: Synthetic Pet Store
+  version: 1.0.0
+servers:
+  - url: https://api.example.test/api/v1
+  - url: https://staging.example.test/api/v1/
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+    post:
+      operationId: createPet
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: showPetById
+    delete:
+      operationId: deletePet
+  /files/{name}.json:
+    get:
+      operationId: downloadFile
+  /reports/{year}-{month}:
+    get:
+      operationId: monthlyReport
+  /health:
+    get:
+      responses:
+        '200': { description: ok }
+  /admin/stats:
+    servers:
+      - url: https://admin.example.test/internal
+    get:
+      operationId: adminStats
+  x-internal-note: ignored
