@@ -52,8 +52,9 @@ operation마다 `route-contract` 사실이 하나다.
   query 파라미터와 헤더는 키에 들어가지 않는다.
 - **method**: operation 키의 대문자. 키는 대소문자를 구분한다(`GET:`은 operation이 아니다).
   `trace`는 3.x에서만 operation이다.
-- **location**: operation의 method 키 위치. 1부터 시작하는 줄과 1부터 시작하는 UTF-8 바이트 열이며
-  앞의 BOM은 세지 않는다.
+- **location**: operation의 method 키 위치. 소스 파일 기준 1부터 시작하는 줄과 1부터 시작하는
+  UTF-8 바이트 열이다. 열은 소스 오프셋에서 구하므로 같은 줄 앞의 이스케이프(JSON·YAML 큰따옴표
+  문자열의 `\u0041`·`\"`·`\n`)는 디코드한 값이 아니라 쓰인 바이트 그대로 센다. 앞의 BOM은 세지 않는다.
 - **symbol.qualifiedName**·**operationId**: operationId가 있으면 싣는다(`usr` 없음).
 - 서버 우선순위: operation `servers` > path item `servers` > 루트 `servers` > 기본값 `/`.
   빈 `servers` 배열은 없는 것과 같다.
@@ -66,8 +67,14 @@ limitation 접두사를 써서 isthmus가 거짓 error 대신 판정을 낮추�
 - **경로의 서버 변수**: `enum`이 있으면 값마다 사실을 낸다(조합 256개 상한). `default`만 있는
   변수는 클라이언트가 바꿀 수 있는 열린 값이라 접두사를 **확정하지 않는다** — 변수 뒤 리터럴
   꼬리와 `pathAnchor: "base"`를 쓰고 문서에 `unresolved-contract-servers:`를 싣는다. 리터럴
-  `scheme://host` authority 안의 변수는 버려지므로 무관하다. 리터럴 authority 없이 앞에 오는
-  변수(`{base}/v1`)는 경로를 바꿀 수 있어 역시 확정하지 않는다.
+  authority 없이 앞에 오는 변수(`{base}/v1`)는 경로를 바꿀 수 있어 역시 확정하지 않는다.
+- **host의 열린 변수**는 host 라벨 안쪽에 있을 때만 경로와 무관하다고 본다. 조건은 모두다:
+  URL에 리터럴 `scheme://` 또는 `//`가 있고, authority에 userinfo(`@`)가 없고, 변수가 host 끝보다
+  앞에서 끝나고(authority/경로 경계나 port에 닿지 않음), 기본값에 `/`·`@`·`:`·`[`·`]`가 없다.
+  그래서 `https://{tenant}.example.com/api`는 `root`다(테넌트 서브도메인이 흔하고, OpenAPI 변수는
+  URL 템플릿의 치환 값이다). 나머지는 `base`다: `https://api{env}/x`(경계에 붙은 빈·미선언 변수),
+  `https://{host}/api`(host 전체를 차지해 경계에 닿음), `https://h:{port}/api`,
+  `https://{user}@h/api`, `enum` 없는 scheme 변수(`{scheme}://h/api`).
 - **상대 서버 URL**(`v1`, `./v1`)은 문서를 제공하는 위치 기준이라 역시 `base`다. `/v1`은 절대
   경로라 `root`다.
 - **여러 서버**의 경로 접두사가 다르면 확정한 접두사마다 사실을 낸다. 일부만 확정되면 `root`와
@@ -105,6 +112,9 @@ limitation 접두사를 써서 isthmus가 거짓 error 대신 판정을 낮추�
 - YAML merge key(`<<`)는 무시하지 않고 거부한다. 다른 도구는 펼치므로 조용히 버리면 `servers`가
   사라질 수 있다. alias는 미리 만든 색인으로 따라가고 역참조는 100,000회로 제한한다. 사용자
   태그는 실행하지 않고, 트리를 JS 객체로 바꾸지 않는다.
+- 사전 검사는 block(들여쓰기) 중첩을 세지 않는다. 파서가 이를 자원 오류로 알리고, 파서가 던지는
+  스택 초과도 코드 2로 바꾼다. 그 밖의 예상하지 못한 내부 예외도 스택 트레이스나 스펙 원문 없이
+  `internal error (<kind>)`와 코드 2로 끝난다.
 - 사실은 최대 100,000개(사실을 만들기 전에 센다)이고, 출력은 isthmus 파일당 입력 상한인
   16 Mi 문자 안이어야 한다. 넘으면 부분 문서 대신 실패한다.
 

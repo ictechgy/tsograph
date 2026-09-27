@@ -15,6 +15,10 @@
 - fail-closed 규칙: 열린 서버 변수·상대 서버 URL·잘못된 basePath는 `pathAnchor: "base"`와
   `unresolved-contract-servers:`, 다중 파라미터 세그먼트·읽지 못한 path item·모르는 필드는
   `contract-coverage:`로 알린다.
+- 서버 URL의 열린 변수는 리터럴 host 라벨 안쪽일 때만 경로와 무관하다고 본다.
+  `https://api{env}/x`처럼 authority/경로 경계에 붙은 빈·미선언 변수가 root로 확정되던 문제를
+  고치고, 경계·port·userinfo·scheme에 닿는 변수는 base로 낸다.
+- 파서가 던지는 스택 초과와 예상하지 못한 내부 예외도 종료 코드 2로 끝낸다.
 - 중복 매핑 키 처리를 위치별로 나눈다: 루트·`paths`·path item(`$ref`로 따라간 것 포함)·
   읽는 operation 키·서버 객체와 변수·따라간 포인터 키의 중복은 코드 2로 거부하고, 그 밖
   (`components.schemas` 등)의 중복은 첫 값을 쓰고 `duplicate-mapping-keys:` limitation으로 알린다.

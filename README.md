@@ -112,7 +112,9 @@ The real output is key-sorted JSON with two-space indentation (the example is co
 - **method**: the uppercase operation key. Keys are case-sensitive (`GET:` is not an
   operation). `trace` is an operation in 3.x only.
 - **location**: the operation's method key, as a 1-based line and a 1-based UTF-8 byte
-  column. A leading BOM is not counted.
+  column of the source file. Columns come from source offsets, so escape sequences earlier on
+  the line (`\u0041`, `\"`, `\n` in JSON or YAML double-quoted strings) count as their
+  written bytes, not their decoded values. A leading BOM is not counted.
 - **symbol.qualifiedName** and **operationId**: the operationId when present (no `usr`).
 - Server precedence: operation `servers` > path-item `servers` > root `servers` > default
   `/`. An empty `servers` array counts as absent.
@@ -127,9 +129,17 @@ downgrades errors instead of reporting false ones.
   value (at most 256 combinations). A variable with only a `default` is an open value that
   clients may replace, so the prefix is **not** resolved: the fact uses `pathAnchor: "base"`
   with the literal tail after the variable, and the document gets
-  `unresolved-contract-servers:`. Variables inside a literal `scheme://host` authority are
-  harmless and ignored. A leading variable with no literal authority (`{base}/v1`) can change
-  the path, so it is not resolved either.
+  `unresolved-contract-servers:`. A leading variable with no literal authority (`{base}/v1`)
+  can change the path, so it is not resolved either.
+- **Open variables in the host** are treated as path-neutral only when they sit strictly
+  inside a host label: the URL has a literal `scheme://` or `//`, the authority has no userinfo
+  (`@`), the variable ends before the host ends (it does not touch the authority/path boundary
+  or the port), and its default contains no `/`, `@`, `:`, `[`, or `]`. So
+  `https://{tenant}.example.com/api` stays `root` (tenant subdomains are common, and OpenAPI
+  variables are substitution values for the URL template). Everything else is `base`:
+  `https://api{env}/x` (empty or undeclared variable at the boundary), `https://{host}/api`
+  (spans the whole host up to the boundary), `https://h:{port}/api`, `https://{user}@h/api`,
+  and a free variable in the scheme (`{scheme}://h/api` without an `enum`).
 - **Relative server URLs** (`v1`, `./v1`) are relative to wherever the document is served,
   so they are `base` as well. `/v1` is an absolute path and is `root`.
 - **Multiple servers** with different path prefixes: one fact per distinct resolved prefix.
@@ -177,6 +187,10 @@ downgrades errors instead of reporting false ones.
   and silently dropping them could hide `servers`. YAML aliases are followed through a
   precomputed index with a budget of 100,000 dereferences. Custom tags are never executed, and
   the tree is never converted to JavaScript objects.
+- Deep block (indentation) nesting is not counted by the pre-scan. The parser reports it as a
+  resource error, and a stack overflow thrown from the parser is also mapped to exit 2. Any
+  other unexpected internal error exits 2 with `internal error (<kind>)`, never a stack trace
+  or the spec text.
 - At most 100,000 facts are emitted (counted before any fact is built), and the output must
   fit the isthmus per-file input cap of 16 Mi characters. Beyond either limit the command
   fails instead of writing a partial document.
