@@ -17,7 +17,8 @@ own language; isthmus joins the documents.
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` facts | Implemented |
 | `tsograph routes --role server`: Next.js App Router route handlers and Pages Router API routes → `route-decl` facts | Implemented |
 | Other Node backend route declarations (Hono, Express, Fastify, NestJS, Koa) | Planned |
-| ORM/SQL relation-use facts (Prisma, TypeORM, Sequelize, Drizzle, Knex, raw SQL, D1) | Planned |
+| `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
+| TypeORM, Sequelize, Drizzle, Knex, raw drivers, D1 relation-use facts | Planned (counted as limitations today) |
 | Web/React Native client route-calls, call graph, impact | Planned |
 
 The isthmus `http` target is still a **draft** in isthmus `docs/GRAPH-EXCHANGE.md`
@@ -333,6 +334,185 @@ The check exits 0 and reports the intended drift (`route-contract-without-decl` 
 `GET /api/health` and `PUT /api/items/{}`, `route-decl-without-contract` for handlers the spec
 does not list).
 
+## `tsograph schema`
+
+```sh
+tsograph schema --project <root> [--format json]
+```
+
+Scans the project for Prisma schemas, Prisma Client usage, and SQL text, and writes a
+bridge-facts v1 document to stdout: `platform: "js"`, `target: "persistence"` (or `null` when
+there are no facts), one `relation-use` fact per observed relation or column reference. isthmus
+joins it with a `platform: "sql"` document (schemagraph `facts --document <catalog>`) under the
+persistence rules of `docs/GRAPH-EXCHANGE.md`.
+
+- `--project` (required): the join root. `project` is its POSIX realpath and every
+  `location.path` is relative to it. Symbolic links are never followed.
+- Exit codes: `0` success (zero facts is still success, not proof of completeness),
+  `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
+  `64` usage error. `1` is reserved.
+- Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
+  Prisma generator output directories, `*.d.ts`, and files over 4 MiB (counted).
+
+### Facts
+
+| Source | `channel` | `method` | `location` | `symbol.qualifiedName` |
+|---|---|---|---|---|
+| Prisma `model`/`view` | resolved table name | — | model name | `Model` |
+| Prisma scalar field | resolved table name | resolved column | field name | `Model.field` |
+| Implicit many-to-many | `_<RelationName>` | — and `A`, `B` | first relation field | `Model.field` |
+| `client.<delegate>` access | the model's table | — | delegate name | enclosing declaration |
+| Delegate call arguments | the model's table | column | object key or string | enclosing declaration |
+| Raw SQL (`$queryRaw`, `$executeRaw`, `Prisma.sql`, `…Unsafe`, TypedSQL, uppercase literals) | relation as written | — | the SQL literal (TypedSQL: the keyword) | enclosing declaration |
+
+Channels are written as the code or mapping names them: `schema.table` when qualified
+(`@@schema`, `FROM s.t`), otherwise unqualified — tsograph never guesses a default schema such as
+`public`, because PostgreSQL resolves it from the connection. A name that itself contains `.`
+(`@@map("a.b")`, `"a.b"` in SQL) is one segment escaped as `a%2Eb`; `%` is escaped as `%25`.
+
+**Symbol format.** Source facts use `<project-relative POSIX path>#<Name>(.<Name>)*`, outermost
+declaration first: function declarations, named classes and class expressions, methods,
+accessors, class fields, `constructor`, `default` for anonymous default exports, variables at
+module level or whose function-valued initializer contains the fact (`src/lib/jobs.ts#listJobs`,
+`src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Anonymous callbacks are transparent. A
+computed name stops the symbol, and module-level statements have none; those facts are counted
+under `missing-relation-symbols:`. Schema facts use the model name (`Job`, `Job.title`), and
+TypedSQL facts use `<path>#<file name>`.
+
+### Prisma schema location (Prisma 7.8.0 CLI rules)
+
+For the project root, every directory with a `prisma.config.*` file, and every package whose
+`package.json` depends on `prisma` or `@prisma/client`:
+
+1. The first config file among `prisma.config.{js,ts,mjs,cjs,mts,cts}`, `.config/prisma.*`, and
+   `.config/prisma.config.*`. Its `schema` is read only when it is a string literal in the default
+   export (`defineConfig({...})`, an object literal, or a same-file `const`); a directory means a
+   multi-file schema and every `.prisma` file below it is read recursively.
+2. Without `schema`: `<base>/schema.prisma`, then `<base>/prisma/schema.prisma` (one file).
+3. `package.json` `"prisma": { "schema" }` is honored only when the installed Prisma is 6.x or
+   older; Prisma 7 no longer reads it.
+
+A non-literal config value (`path.join(...)`, environment variables) is not guessed:
+`unresolved-prisma-config:`. A configured path that does not exist: `missing-prisma-schemas:`.
+
+### Prisma naming rules
+
+Verified against Prisma's source for the pinned versions (prisma-engines at the commit pinned by
+`@prisma/internals@7.8.0`, `@prisma/client-generator-ts@7.8.0`, `@prisma/client-common@7.8.0`,
+`@prisma/orm-family-sql@8.0.0-rc.1`–`rc.12`):
+
+- **Table**: the `@@map` value, else the model name unchanged
+  (`psl/parser-database/src/walkers/model.rs` `database_name()`). `@prisma/orm-family-sql`
+  8.0.0-rc.1–rc.11 lowercases the first letter (`lowerFirst(model.name)`); rc.12 restores the
+  model name (`defaultTableName`, release note "A PSL model without `@@map` names its table
+  exactly as written").
+- **Column**: the `@map` value, else the field name (`walkers/scalar_field.rs`; unchanged in 8.x).
+- **Schema**: `@@schema("s")` qualifies the table (GA since 6.13; PostgreSQL, CockroachDB, SQL
+  Server). Without it the name stays unqualified.
+- **Implicit many-to-many**: table `_` + relation name; the default relation name is
+  `<A>To<B>` with the two model names in code point order (uppercase sorts before lowercase), an
+  explicit `@relation("Name")` gives `_Name`, columns are `A` and `B`, and the table lives in the
+  schema of model `A`. Names longer than 63 characters are emitted as dynamic (identifier
+  truncation is not guessed). Native Prisma 8 PSL has no implicit many-to-many.
+- **Not emitted**: relation fields, `@ignore` fields, `@@ignore` models (absent from the client),
+  composite `type` blocks, and every model when the datasource provider is `mongodb`
+  (`non-relational-stores:`). `Unsupported("…")` fields are columns and are emitted.
+- **Client delegate**: the model name with its first character lowercased (`uncapitalize`);
+  the exact model name is accepted too, as the runtime also exposes it.
+
+**Version selection.** Versions come from lockfiles (`pnpm-lock.yaml`, `package-lock.json`,
+`npm-shrinkwrap.json`, `yarn.lock`, `bun.lock`), or from exact or `^`/`~` specifiers in
+`package.json` when no lockfile names Prisma. `prisma`/`@prisma/client` 2.x–7.x select the Prisma
+7 rule; `@prisma/orm-family-sql` selects the 8.x rules (the 8.x `prisma` package is a different
+CLI and is ignored). When the version is unknown, unverified (for example rc.13+ or 8.0.0), or
+several rules are installed, every candidate rule is evaluated: names that agree are emitted,
+names that differ become dynamic facts without columns, and the document carries
+`prisma-naming-unverified:`. Prisma 8 contract files and its client API are not scanned
+(`prisma-8-surface-unscanned:`).
+
+### Prisma Client usage
+
+A receiver is a client only when its provenance is proven syntactically; no type checker runs
+and nothing is executed:
+
+- `new PrismaClient(...)` where `PrismaClient` comes from `@prisma/client` (also `/edge`,
+  `/wasm`, …), `.prisma/client`, or a generator `output` directory (resolved relative to the
+  schema file, matched through relative paths or tsconfig/jsconfig `paths`, even when the
+  generated files are not committed);
+- declarations annotated `PrismaClient`, `Prisma.TransactionClient`, local aliases of them,
+  `Omit/Pick/Readonly/NonNullable/Required<…>`, intersections, `typeof client`, and interfaces
+  extending them; functions whose declared return type (or `Promise<…>`) is one of them;
+- `a ?? b` / `a || b` with a client side (`globalThis.prisma ?? new PrismaClient()`),
+  `client.$extends(...)`, the first parameter of a `client.$transaction(async (tx) => …)`
+  callback, class fields and constructor parameter properties (`this.db`);
+- bindings imported across files: named, default, namespace, re-exports, `export *`,
+  CommonJS `require`/`module.exports`, and `await import(...)`, resolved with the TypeScript
+  module resolver and the nearest `tsconfig.json`/`jsconfig.json` (restricted to the project),
+  iterated to a fixed point.
+
+Local variables and parameters shadow outer clients. A call shaped like
+`x.<delegate>.<operation>(...)` on an untraced receiver is not emitted and is counted under
+`unresolved-client-receivers:`. An unknown or computed delegate on a proven client
+(`prisma[name]`) is a dynamic fact.
+
+Column facts come from the top-level keys of `select`, `omit`, `where`, `data`, `cursor`,
+`create`, `update`, and `orderBy`, and the strings in `distinct` and `by`, of a delegate call's
+object literal, only when the key is a scalar field of that model.
+
+### SQL text
+
+SQL is read with the family's shared lexical extractor (a line-by-line port of dartograph
+`sql_relations.dart` / cartograph `SqlRelations.swift`, checked against the same vectors), so the
+same SQL yields the same relations in every producer.
+
+- `$queryRaw`/`$executeRaw` tagged templates and `Prisma.sql` fragments: interpolations are bind
+  parameters, so each becomes a `?` placeholder. Nested `Prisma.sql`, `Prisma.raw('literal')`, and
+  `Prisma.empty` are inlined. A placeholder in a relation position (`FROM ${table}`) is an
+  unresolved operand and adds one dynamic fact.
+- `$queryRawUnsafe`/`$executeRawUnsafe`: a string literal or a same-file `const` is read; a
+  template with substitutions or any other expression is a dynamic fact (family rule).
+- TypedSQL: when a generator enables the `typedSql` preview feature, the top-level `.sql` files in
+  config `typedSql.path` or `<schema root>/sql` are read.
+- Other string literals are read only when their SQL verb and relation keywords are uppercase
+  (strict mode); lowercase SQL-looking literals are counted under `skipped-sql-literals:`.
+
+### Outside the supported surface
+
+TypeORM, Sequelize, Drizzle, Knex, Kysely, Objection, MikroORM, `pg`, `postgres`, `mysql`,
+`mysql2`, SQLite drivers, libSQL, Neon, Vercel Postgres, PlanetScale, MSSQL, Oracle, slonik, and
+Cloudflare D1 (`D1Database`) queries are not interpreted. Files using them are counted under
+`unsupported-db-packages:`, and Mongoose, MongoDB, DynamoDB, Firebase, and Redis under
+`non-relational-stores:`. Uppercase SQL literals in those files are still read as SQL text.
+
+### Limitation prefixes
+
+`prisma-schema-not-found:`, `unresolved-prisma-config:`, `missing-prisma-schemas:`,
+`schema-outside-project:`, `non-relational-stores:`, `prisma-naming-unverified:`,
+`prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
+`ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
+`unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
+`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-symbols:`,
+`invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
+`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
+limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
+itself (`unjoined-dynamic-relations`).
+
+### Joining with a catalog
+
+schemagraph does not read DDL files directly, so a catalog for a Prisma migrations folder is
+collected from a scratch database: apply `prisma/migrations/*/migration.sql` in order to a
+throwaway PostgreSQL, then
+
+```sh
+schemagraph scan "postgres://…/scratch" --source-id prisma-migrations --emit-document catalog.json -o graph.json
+schemagraph facts --document catalog.json --project <root> -o sql-facts.json
+tsograph schema --project <root> > js-facts.json
+isthmus check --pairs js-facts.json sql-facts.json
+```
+
+`fixtures/schema/prisma-app` is a synthetic project with its own migration; joined this way it
+reports no errors (one expected `relation-decl-without-use-unverified` warning for its `@@ignore` model).
+
 ## Development
 
 ```sh
@@ -345,6 +525,9 @@ node --test src/openapi/path-template.test.ts   # focused run
 the grammar cases of the vendored `conformance/http-template.json`, and keeps the verified
 Next.js conversion table (with `next/dist` sources) in the isthmus vector shape so it can be
 upstreamed as `producer:nextjs` cases.
+
+`src/schema/sql-relations.test.ts` holds the family's shared SQL relation vectors (the same
+expectations as cartograph `SqlRelationsTests` and dartograph `sql_relations_test`).
 
 `src/openapi/conformance.test.ts` runs the template canonicalizer against the isthmus shared
 vector `conformance/http-template.json` when one is available (`TSOGRAPH_CONFORMANCE_DIR`,
