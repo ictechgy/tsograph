@@ -438,8 +438,10 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,
-  `limitations`, `graphRevision`, 읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급의 간선을 싣는다
-  ([인터페이스 디스패치](#인터페이스-디스패치boundcandidate-간선) 참고).
+  `limitations`, `graphRevision`, 읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급을 나타낸다
+  ([인터페이스 디스패치](#인터페이스-디스패치boundcandidate-간선) 참고): 심볼 쌍마다 근거 등급별 간선은 많아야 하나이고,
+  같은 쌍의 더 강한 간선들이 종류를 모두 덮는 약한 간선은 어느 모드의 순회도 바꾸지 못하므로 뺀다. 노드
+  `unresolvedCalls`는 상한 없는 정확한 수다.
 - `reach`는 root id에서 닿는 심볼(`direction: "dependencies"`), `impact`는 root에 닿는 심볼
   (`direction: "dependents"`)을 isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md)로 낸다.
@@ -493,7 +495,7 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 | `evidence` | 뜻 |
 |---|---|
 | `direct` | checker 심볼(또는 위의 수신자 고정 초기값)로 대상을 증명했다. |
-| `bound` | 인터페이스·구조 타입 수신자로 부른 호출(`this.deps.store.findItem()`, `repository.save()`)이고, 스캔한 프로젝트 안에서 **수신자로 흘러드는 것으로 관찰된 값이 모두** 프로젝트 클래스 인스턴스나 프로젝트 객체 리터럴이며, 각 값에서 메서드가 본문 있는 프로젝트 선언으로 해석된다. 구현마다 간선 하나. |
+| `bound` | 인터페이스·구조 타입 수신자로 부른 호출(`this.deps.store.findItem()`, `repository.save()`)이고, 스캔한 프로젝트 안에서 **수신자로 흘러드는 것으로 관찰된 값이 모두** 프로젝트 클래스 인스턴스나 프로젝트 객체 리터럴이며, 각 값에서 메서드가 본문 있는 프로젝트 선언으로 해석된다. 구현마다 `bound` 간선 하나(같은 쌍의 더 강한 간선이 이미 덮으면 뺀다 — 스냅샷 규칙). |
 | `candidate` | 흐름을 다 증명하지 못해, 구현할 수 있는 프로젝트 클래스·객체 전부로 잇는다: 수신자 인터페이스를 `implements`로 선언한 클래스(직접, 기반 클래스, 확장 인터페이스를 거쳐), 그리고 타입이 수신자 타입에 대입 가능한 클래스·객체 리터럴(`TypeChecker.isTypeAssignableTo`, 고정한 TypeScript 5.9.3의 공개 API, 타입 매개변수 수신자는 제약 타입). 과대 근사다. |
 
 `bound` 값을 구하는 방법(전체 프로그램, 문맥·경로 비민감): `new C(...)`, 객체 리터럴, `this`(감싼 클래스와
@@ -528,7 +530,15 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   JSON 객체로 읽지 못하는 `package.json`)이거나 스캔이
   불완전하면(건너뛴·너무 큰·읽지 못한·symlink 파일, 구문 오류) 모든 내보낸 함수·클래스와 비공개가 아닌 속성도
   열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
-  프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다.
+  프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다. 닫힌 쪽으로 실패한다: 색인된 호출
+  위치가 없는 함수·생성자는 모름이다(기본 매개변수 값만으로 흐름 전체라고 보지 않는다). 단 문법적으로 다시 훑어 그
+  심볼에 대한 색인이 완전함을 증명하면 — 이름이나 별칭 지역 이름과 같은 텍스트이면서 그 심볼로 풀리는 모든 식별자·
+  `#이름`·문자열 리터럴이 선언 이름·import/export 바인딩·타입 자리·색인된 참조이면 — "호출 없음"으로 본다. 참조 색인은 값 자리의 모든
+  식별자, 모든 속성 접근 이름(파일 안 `namespace App`의 `new App.Repo(…)`, `globalThis.f` 포함), 모든 문자열 리터럴
+  원소 접근(`App["load"](…)`)을 checker로 푼다. 값으로 쓰이거나 계산된 키로 읽힌(`App[key]`) 모듈·값 네임스페이스는
+  멤버 전부를 연다. 프레임워크 파일(App Router `route`·특수 파일, `pages/` 아래 전부, `proxy`·`middleware`·
+  `instrumentation` — `export * from`만 있어도)의 내보내기와 그것이 재내보내는 선언 전부, 그리고 ES 모듈이 아닌 파일
+  (스크립트·CommonJS)의 최상위 선언도 열린 자리다. 여러 번 선언한 변수(`var x = a; var x = b;`)는 모든 초기값을 합친다.
 - **모델링하지 않음**(문서화한 공백): 계산된 키 쓰기(`obj[key] = v`), 프로토타입 조작, `eval`, 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
   않으면 그 타입은 오류 타입이라 `any`로 센다. 그 API를 거친 값은 모름이라, 그런 값 위의 같은 이름 쓰기·메서드
   읽기가 관계없는 클래스의 bound를 막을 수 있다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
@@ -539,7 +549,9 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   같은 규칙)가 아닌 파일의 호출은 테스트 소스를 뺀 프로그램으로 흐름·후보를 구한다. 그래서 단위 테스트가 주입한
   목(mock)이 운영 간선을 막지 않는다. 테스트 소스 안의 호출은 프로젝트 전체로 구한다. 테스트가 아닌 파일이 테스트
   소스를 import하면 모든 호출을 전체로 구한다.
-- 흐름 질의마다 예산이 있다(20,000단계, 중첩 자리 256개). 넘으면 모름이다.
+- 흐름 질의마다 예산이 있다(20,000단계, 중첩 자리 256개, 중첩 식 400개). 넘거나 JavaScript 스택이 넘치면 모름이고
+  그 수를 `dispatch-budget:`으로 알린다. 이름으로 찾는 속성 쓰기·멤버 읽기·수신자 흐름은 질의 사이에 메모해, 흔한 멤버
+  이름이 예산을 태우지 않는다(같은 이름 쓰기·떼어 낸 읽기가 1,500개인 합성 모듈 1,500개에서 21.7초 → 2.5초).
 
 `unresolvedCalls`는 노드·모드마다, 노드 자신의 호출 위치(호출·`new`·태그 템플릿·데코레이터·JSX) 중 그 모드에서
 간선이 없거나 대상의 일부만 이은 수다: `direct`는 그런 위치 전부, `bound`는 `bound` 간선으로 이은 인터페이스
@@ -578,7 +590,11 @@ isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impa
   최단 경로는 `via` 사슬과 다를 수 있다. 깊이 예산 안에서 `direct`가 아닌 간선의 출발점에 닿지 못하는 root는
   모든 등급에서 똑같이 닿으므로, 나머지 root만 root당 비트 하나로 정확히 비교한다.
 - `unresolvedCalls`(1~1,000,000, 0이면 생략)는 [위](#인터페이스-디스패치boundcandidate-간선)의 노드별 모드 계수다.
-  다른 root에서 닿은 root는 `roots[]`와 `reached[]`에 같은 값을 싣는다.
+  다른 root에서 닿은 root는 `roots[]`와 `reached[]`에 같은 값을 싣는다. 1,000,000을 넘으면 1,000,000으로 싣고 문서에
+  `unresolved-calls-capped:`를 더한다. 그래프 스냅샷은 정확한 수를 싣는다.
+- 정확한 등급 비교는 심볼·등급마다 비교 대상 root당 비트 하나가 든다. 이것이 64 MiB를 넘으면 `evidence`는 root에서 닿는
+  출발점을 가진 `direct`가 아닌 간선 중 심볼의 위쪽에 있는 것의 가장 약한 등급으로 근사한다(없으면 `direct`). root별
+  하한보다 약하게 적을 수는 있어도 부풀리지 않으며, 문서에 `evidence-approximated:`를 더한다.
 - **다른** root에서 닿는 root도 `reached`에 싣는다(핸들러 A가 부르는 도우미 H도 root면 H는
   `roots: [A의 인덱스]`). 그 `roots`에는 자기 인덱스를 넣지 않고, `depth`·`via`도 그 다른 root들 기준이다
   (`via`는 다른 root id일 수 있다). 자기 자신에게서만(순환으로) 닿는 root는 싣지 않는다. 경로는 다른 root를
@@ -673,10 +689,11 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 
 ### 그래프 limitation 접두사
 
-`unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`,
+`unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
-`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`.
+`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고
+`reach`·`impact` 문서에만 `evidence-approximated:`·`unresolved-calls-capped:`.
 개수만 싣고 소스 원문·절대 경로는 싣지 않는다.
 
 ## 심볼 id

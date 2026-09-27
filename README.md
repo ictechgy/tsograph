@@ -550,7 +550,10 @@ computed.
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`
   (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `graphRevision`, and `revision`
-  when readable. The snapshot holds every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)).
+  when readable. The snapshot represents every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)):
+  a pair of symbols has at most one edge per evidence tier, and a weaker edge is omitted when stronger
+  edges between the same pair already carry all of its kinds, because it cannot change any traversal
+  in any mode. Node `unresolvedCalls` holds exact counts (not capped).
 - `reach` writes the symbols reachable from the root ids (`direction: "dependencies"`), and
   `impact` the symbols that reach them (`direction: "dependents"`), as isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md).
@@ -610,7 +613,7 @@ Every edge carries an `evidence` tier. The tiers nest: the `direct` graph ⊂ th
 | `evidence` | Meaning |
 |---|---|
 | `direct` | The target is proven by checker symbols (or by the receiver's fixed initializer, above). |
-| `bound` | A call through an interface-typed or structurally typed receiver (`this.deps.store.findItem()`, `repository.save()`) where **every value observed flowing into the receiver** within the scanned project is an instance of a project class or a project object literal, and the method resolves on each of them to a project declaration with a body. One edge per distinct implementation. |
+| `bound` | A call through an interface-typed or structurally typed receiver (`this.deps.store.findItem()`, `repository.save()`) where **every value observed flowing into the receiver** within the scanned project is an instance of a project class or a project object literal, and the method resolves on each of them to a project declaration with a body. One `bound` edge per distinct implementation, unless a stronger edge between the same pair already covers it (see the snapshot rule). |
 | `candidate` | The flows could not all be proven, so the call is linked to every project class or object that could implement it: classes that declare `implements` for the receiver's interface (directly, through a base class, or through an extending interface), and classes and object literals whose type is assignable to the receiver type (`TypeChecker.isTypeAssignableTo`, public in the pinned TypeScript 5.9.3; a type-parameter receiver uses its constraint). An over-approximation. |
 
 How `bound` values are found (whole program, context- and path-insensitive): `new C(...)`, object
@@ -657,7 +660,19 @@ What `bound` guarantees, and what it does not:
   symlinked files, or parse errors), additionally opens every exported function and class and every
   non-private property; the document then says so under `bound-dispatch:`. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
-  bound.
+  bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
+  parameter value alone is never taken as the whole flow) unless a syntactic re-scan proves the index
+  complete for it — every identifier, `#name`, or string literal with its name or an alias's local name
+  that resolves to it is a declaration name, an import/export binding, a type position, or an indexed
+  reference. The reference index resolves every value
+  identifier, every property-access name (including file-local `namespace App` members such as
+  `new App.Repo(…)` and `globalThis.f`), and every string-literal element access (`App["load"](…)`); a
+  module or value namespace used as a value or read with a computed key (`App[key]`) opens all its
+  members. Exports of framework files — App Router `route` and special files, everything under
+  `pages/`, `proxy`/`middleware`/`instrumentation`, even when they only `export * from` — and every
+  declaration they re-export are open, as are top-level declarations of files that are not ES
+  modules (scripts and CommonJS files). A variable declared more than once (`var x = a; var x = b;`)
+  unions every initializer.
 - **Not modeled** (documented gaps): writes through computed keys (`obj[key] = v`), prototype mutation,
   `eval`, values that leave the
   project through library code and come back, and properties that library code mutates. When
@@ -674,7 +689,11 @@ What `bound` guarantees, and what it does not:
   program without test sources, so mocks injected by unit tests do not block production edges. Call
   sites inside test sources use the whole project. If a non-test file imports a test source, the whole
   project is used everywhere.
-- Each flow query has a budget (20,000 steps, 256 nested slots); a query over budget is unknown.
+- Each flow query has a budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
+  budget, or one that overflows the JavaScript stack, is unknown, and the count appears under
+  `dispatch-budget:`. Property writes, member reads, and receiver flows looked up by name are memoized
+  across queries, so common member names do not exhaust the budget (a synthetic 1,500-module fixture
+  with 1,500 same-named writes and detached reads went from 21.7 s to 2.5 s).
 
 `unresolvedCalls` counts, per node and per mode, the node's own call sites (calls, `new`, tagged
 templates, decorators, JSX) that have no edge or only a partial set of targets under that mode:
@@ -723,7 +742,12 @@ missing routes.
   all tiers; the others are compared exactly with one bit per root.
 - `unresolvedCalls` (1–1,000,000, omitted when 0) is the node's per-mode count described
   [above](#interface-dispatch-bound-and-candidate-edges). A root that is also reached carries the same
-  value in `roots[]` and `reached[]`.
+  value in `roots[]` and `reached[]`. Counts above 1,000,000 are reported as 1,000,000 and the document
+  adds `unresolved-calls-capped:`; the graph snapshot keeps the exact count.
+- Exact evidence needs one bit per compared root per symbol per tier. When that would exceed 64 MiB,
+  `evidence` falls back to the weakest tier of any non-`direct` edge whose tail is reached from a root
+  and which lies upstream of the symbol (`direct` when there is none). This may understate but never
+  overstates the per-root lower bound, and the document adds `evidence-approximated:`.
 - A root that is reached from **another** root is listed in `reached` too (a handler A calling a
   helper H that is also a root lists H with `roots: [indexA]`). Its `roots` never contains its own
   index, and its `depth`/`via` are measured from those other roots (`via` may be another root id).
@@ -824,10 +848,11 @@ candidate edge).
 
 ### Graph limitation prefixes
 
-`unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`,
+`unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
-`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`.
+`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
+`reach`/`impact` documents only, `evidence-approximated:` and `unresolved-calls-capped:`.
 Counts only; no source text or absolute paths.
 
 ## Symbol ids
