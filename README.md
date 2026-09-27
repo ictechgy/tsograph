@@ -127,21 +127,28 @@ downgrades errors instead of reporting false ones.
   value (at most 256 combinations). A variable with only a `default` is an open value that
   clients may replace, so the prefix is **not** resolved: the fact uses `pathAnchor: "base"`
   with the literal tail after the variable, and the document gets
-  `unresolved-contract-servers:`. Variables in the scheme, host, or port are harmless and
-  ignored.
+  `unresolved-contract-servers:`. Variables inside a literal `scheme://host` authority are
+  harmless and ignored. A leading variable with no literal authority (`{base}/v1`) can change
+  the path, so it is not resolved either.
 - **Relative server URLs** (`v1`, `./v1`) are relative to wherever the document is served,
   so they are `base` as well. `/v1` is an absolute path and is `root`.
 - **Multiple servers** with different path prefixes: one fact per distinct resolved prefix.
   If some servers resolve and others do not, both `root` and `base` facts are emitted.
+- **Ambiguous URL spellings**: `.`/`..` segments (including `%2E`), backslashes, tabs, and
+  line breaks in a server URL or `basePath` are interpreted differently by WHATWG and RFC 3986
+  parsers, so they are `base`. An open variable whose value contains `?` or `#` is also `base`.
 - **Swagger 2.0 `basePath`** that does not start with `/`, or contains braces, `?`, or `#`,
   is `base`.
+- **Dot segments in a path key** (`/a/../b`, `/a/%2E/b`) are emitted as `dynamic`, because
+  client URL normalization removes them.
 - **`$ref`**: only local JSON pointers (`#/...`) are followed, for path items (including 3.1
   `components.pathItems`), with at most 16 hops. Non-local, broken, or cyclic references are
   counted under `contract-coverage:`. The network is never used.
 - **Skipped input is counted, never dropped silently**: paths keys not starting with `/`,
   non-object path items or operations, unknown path-item fields, and dynamic templates all
   appear as `contract-coverage:` limitations. operationIds containing forbidden characters
-  are omitted and counted under `unsafe-operation-ids:` (informational).
+  or longer than 1,024 characters are omitted and counted under `unsafe-operation-ids:`
+  (informational).
 - **3.1 `webhooks`** are requests the service sends, not routes it serves, so they are not
   emitted.
 - **Templates longer than 2,048 characters** become `dynamic`, because the consumer rejects
@@ -150,13 +157,18 @@ downgrades errors instead of reporting false ones.
 ### Input safety
 
 - The spec is at most 16 MiB and must be valid UTF-8, with a single YAML document.
+- Before parsing, a linear pre-scan caps the estimated value count (commas + colons + line
+  breaks) at 1,500,000 and flow nesting depth at 1,000. The YAML parser uses about 1 KB per
+  node, so larger inputs could exhaust memory. Split very large specs.
 - Duplicate mapping keys are rejected, found by a linear-time scan (the parser's built-in
-  check is quadratic in map size).
-- YAML aliases are followed through a precomputed index with a budget of 100,000
-  dereferences. Merge keys (`<<`) are not applied. Custom tags are never executed, and the
-  tree is never converted to JavaScript objects.
-- Excessive nesting is rejected by the parser. At most 100,000 facts are emitted; beyond
-  that the command fails instead of writing a partial document.
+  check is quadratic in map size). Alias and collection mapping keys are rejected.
+- YAML merge keys (`<<`) are rejected rather than ignored, because other tools expand them
+  and silently dropping them could hide `servers`. YAML aliases are followed through a
+  precomputed index with a budget of 100,000 dereferences. Custom tags are never executed, and
+  the tree is never converted to JavaScript objects.
+- At most 100,000 facts are emitted (counted before any fact is built), and the output must
+  fit the isthmus per-file input cap of 16 Mi characters. Beyond either limit the command
+  fails instead of writing a partial document.
 
 ## Development
 
