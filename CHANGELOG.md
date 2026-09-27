@@ -23,6 +23,11 @@
   `usr` 추가). isthmus가 `catchAllPrefix` decl에 `symbol.usr`를 요구하므로 optional catch-all 접두사 decl은
   표식 없이 일반 decl로 낸다. 감싼 설정(`withX(config)`)은 안쪽 리터럴을 쓰고 `unresolved-route-prefix:`로
   알린다.
+- symlink 규칙을 최상위 후보까지 넓힌다: `app`·`pages`·`src`·`src/app`·`src/pages`·`public`·`next.config.*`·
+  `package.json`이 symlink면 `stat` 대신 부모 목록으로 판별해 따라가지 않는다(프로젝트 밖 트리·설정을 읽던
+  문제 수정). 최상위 라우터 위치는 `route-coverage:`에 이름을 적고, symlink 설정은 `unresolved-route-prefix:`와
+  base 앵커, 끊어진 symlink는 없는 파일로 본다. Pages Router optional catch-all API route 지원을 Next 문서와
+  matcher 소스로 확인해 테스트로 고정한다.
 - `CommandFileSystem.listDirectory`(symlink를 따라가지 않는 디렉터리 읽기)와 `RouteDeclFact`·
   `RouteDeclDocument` 교환 타입을 더한다. 구문 트리를 읽기 위해 `typescript`를 런타임 의존성으로 옮긴다.
 - `tsograph openapi <spec> --service <name> [--project <root>] [--format json]`:

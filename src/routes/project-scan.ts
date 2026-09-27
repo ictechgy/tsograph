@@ -7,7 +7,8 @@
  *   둔다(`build/index.js`의 탐지 정규식, ext는 `pageExtensions`).
  * - `public/`은 루트에 둔다(`src` 폴더 문서).
  *
- * Next의 디렉터리 스캔은 symlink를 따라가지만, 여기서는 따라가지 않고 개수만 센다 — 저장소 밖을
+ * Next의 디렉터리 스캔은 symlink를 따라가지만, 여기서는 트리 안이든 최상위 후보(`app`·`src`·
+ * `pages`·`public`·`next.config.*`·`package.json`)든 symlink를 따라가지 않고 세기만 한다 — 저장소 밖을
  * 읽거나 순환하지 않기 위해서다. 항목 수·깊이에 상한을 두고 넘으면 잘랐다고 알린다.
  */
 
@@ -39,6 +40,8 @@ export interface ScanGaps {
 export interface RouterDirectories {
   readonly appDirectory: string | undefined;
   readonly pagesDirectory: string | undefined;
+  /** Next가 골랐을 최상위 위치 중 symlink라 따라가지 않은 경로(정렬, 중복 없음) */
+  readonly symlinkedLocations: readonly string[];
 }
 
 /** 디렉터리 걷기 선택이다. */
@@ -46,6 +49,16 @@ export interface WalkOptions {
   /** true를 돌려주는 이름의 파일·디렉터리는 건너뛴다(App Router의 `_` 규칙). */
   readonly skipName?: (name: string) => boolean;
 }
+
+/**
+ * 프로젝트 기준 경로 하나의 종류다. 어느 구성 요소도 symlink를 따라가지 않는다.
+ *
+ * - `symlink`: 어떤 구성 요소가 풀리는 symlink다(`symlinkPath`가 그 구성 요소까지의 경로).
+ * - `dangling`: 끊어진 symlink다. Next의 `existsSync`처럼 없는 것으로 본다.
+ */
+export type EntryLookup =
+  | { readonly kind: 'file' | 'directory' | 'other' | 'dangling' | 'absent' }
+  | { readonly kind: 'symlink'; readonly symlinkPath: string };
 
 /**
  * 새 공백 계수기를 만든다.
@@ -59,45 +72,103 @@ export function createScanGaps(): ScanGaps {
 /**
  * `app`·`pages` 디렉터리를 찾는다. 루트가 `src/`보다 우선한다.
  *
+ * 최상위 후보(`app`, `src`, `src/app` …)가 symlink면 내부 symlink와 같은 규칙으로 따라가지 않는다.
+ * `stat`은 마지막 symlink를 따라가므로 부모 디렉터리 목록(`lstat` 의미)으로 종류를 본다. Next는
+ * symlink 후보도 존재하는 것으로 골라 `src/`로 내려가지 않으므로, 여기서도 그 자리에서 멈추고
+ * 경로를 limitation용으로 남긴다.
+ *
  * @param fileSystem 파일 시스템
  * @param project 프로젝트 realpath
- * @returns 찾은 디렉터리
+ * @returns 찾은 디렉터리와 따라가지 않은 symlink 위치
  */
 export async function locateRouterDirectories(fileSystem: CommandFileSystem, project: string): Promise<RouterDirectories> {
-  return {
-    appDirectory: await firstDirectory(fileSystem, project, ['app', 'src/app']),
-    pagesDirectory: await firstDirectory(fileSystem, project, ['pages', 'src/pages']),
-  };
+  const symlinked = new Set<string>();
+  const appDirectory = await firstDirectory(fileSystem, project, ['app', 'src/app'], symlinked);
+  const pagesDirectory = await firstDirectory(fileSystem, project, ['pages', 'src/pages'], symlinked);
+  return { appDirectory, pagesDirectory, symlinkedLocations: [...symlinked].sort(compareStrings) };
 }
 
 /**
- * 후보 중 처음 존재하는 디렉터리를 돌려준다.
+ * 후보 중 Next가 고를 첫 디렉터리를 돌려준다. symlink 후보에서는 따라가지 않고 멈춘다.
  *
  * @param fileSystem 파일 시스템
  * @param project 프로젝트 realpath
  * @param candidates 프로젝트 기준 후보 경로
+ * @param symlinked 따라가지 않은 symlink 경로(갱신)
  * @returns 찾은 후보 또는 undefined
  */
-async function firstDirectory(fileSystem: CommandFileSystem, project: string, candidates: readonly string[]): Promise<string | undefined> {
+async function firstDirectory(
+  fileSystem: CommandFileSystem,
+  project: string,
+  candidates: readonly string[],
+  symlinked: Set<string>,
+): Promise<string | undefined> {
   for (const candidate of candidates) {
-    if (await pathKind(fileSystem, `${project}/${candidate}`) === 'directory') return candidate;
+    const entry = await lookupEntry(fileSystem, project, candidate);
+    if (entry.kind === 'directory') return candidate;
+    if (entry.kind === 'symlink') {
+      symlinked.add(entry.symlinkPath);
+      return undefined;
+    }
   }
   return undefined;
 }
 
 /**
- * 경로 종류를 구한다. 없거나 읽을 수 없으면 undefined다.
+ * 프로젝트 기준 경로의 종류를 부모 디렉터리 목록으로 구한다(symlink를 따라가지 않는다).
+ *
+ * symlink가 풀리는지만 realpath로 확인하고 그 대상은 읽지 않는다.
+ *
+ * @param fileSystem 파일 시스템
+ * @param project 프로젝트 realpath
+ * @param relativePath 프로젝트 기준 POSIX 경로
+ * @returns 경로 종류
+ */
+export async function lookupEntry(fileSystem: CommandFileSystem, project: string, relativePath: string): Promise<EntryLookup> {
+  const parts = relativePath.split('/');
+  for (let index = 0; index < parts.length; index++) {
+    const parent = [project, ...parts.slice(0, index)].join('/');
+    const kind = await childKind(fileSystem, parent, parts[index]!);
+    const path = parts.slice(0, index + 1).join('/');
+    if (kind === 'symlink') return await isResolvable(fileSystem, `${project}/${path}`) ? { kind: 'symlink', symlinkPath: path } : { kind: 'dangling' };
+    if (kind === undefined || (index < parts.length - 1 && kind !== 'directory')) return { kind: 'absent' };
+    if (index === parts.length - 1) return { kind };
+  }
+  /* node:coverage ignore next */
+  return { kind: 'absent' };
+}
+
+/**
+ * 디렉터리 목록에서 이름 하나의 종류를 찾는다.
+ *
+ * @param fileSystem 파일 시스템
+ * @param directory 절대 경로
+ * @param name 찾을 이름
+ * @returns 항목 종류, 없거나 목록을 읽지 못하면 undefined
+ */
+async function childKind(fileSystem: CommandFileSystem, directory: string, name: string) {
+  try {
+    return (await fileSystem.listDirectory(directory)).find((entry) => entry.name === name)?.kind;
+  } catch {
+    // 목록을 읽지 못한 부모는 "없음"으로 본다(후보 탐색). 라우터 트리 안의 실패는 walk가 센다.
+    return undefined;
+  }
+}
+
+/**
+ * symlink가 존재하는 대상으로 풀리는지 확인한다(대상 내용은 읽지 않는다).
  *
  * @param fileSystem 파일 시스템
  * @param path 절대 경로
- * @returns 종류 또는 undefined
+ * @returns 풀리면 true
  */
-export async function pathKind(fileSystem: CommandFileSystem, path: string): Promise<'file' | 'directory' | 'other' | undefined> {
+async function isResolvable(fileSystem: CommandFileSystem, path: string): Promise<boolean> {
   try {
-    return (await fileSystem.status(path)).kind;
+    await fileSystem.realPath(path);
+    return true;
   } catch {
-    // 없는 경로는 정상 신호다(후보 탐색). 권한 문제도 "없음"으로 보고 호출자가 공백을 센다.
-    return undefined;
+    // 끊어진 symlink는 Next의 existsSync처럼 없는 것으로 본다.
+    return false;
   }
 }
 

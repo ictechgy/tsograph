@@ -152,7 +152,7 @@ test('라우터 디렉터리가 없으면 0건과 route-coverage, 버전 판정�
     assert.deepEqual(document.facts, []);
     assert.deepEqual(document.limitations, [
       'route-coverage: no app or pages directory was found at the project root or under src/; no Next.js routes were scanned',
-      'route-framework-version-unknown: package.json at the project root does not declare a next dependency; tsograph models Next.js 16 routing semantics',
+      'route-framework-version-unknown: package.json at the project root is missing, unreadable, a symbolic link, or does not declare a next dependency; tsograph models Next.js 16 routing semantics',
     ]);
   });
   const versions: [string, boolean][] = [
@@ -282,5 +282,83 @@ test('App Router: test 폴더는 실제 세그먼트이고 route.test.ts는 rout
   }, async (project) => {
     const document = await scan(project);
     assert.deepEqual(lines(document), ['GET root /.well-known/security strict', 'GET root /api/test strict']);
+  });
+});
+
+/** 프로젝트 밖에 파일을 둔 디렉터리를 만든다. */
+function writeOutside(files: Record<string, string>): string {
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-outside-')));
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(outside, path)), { recursive: true });
+    writeFileSync(join(outside, path), content);
+  }
+  return outside;
+}
+
+test('최상위 app·src·pages symlink는 따라가지 않고 이름을 limitation으로 알린다', async () => {
+  const outside = writeOutside({ 'real-app/api/secret/route.ts': getRoute, 'real-src/app/api/secret/route.ts': getRoute, 'real-pages/api/x.ts': 'export default function x() {}\n' });
+  try {
+    await withProject({ 'package.json': nextPackage, 'src/app/api/fallback/route.ts': getRoute }, async (project) => {
+      symlinkSync(join(outside, 'real-app'), join(project, 'app'));
+      symlinkSync(join(outside, 'real-pages'), join(project, 'pages'));
+      const document = await scan(project);
+      // Next는 루트 app(symlink)을 고르므로 src/app으로 내려가지도 않는다.
+      assert.deepEqual(document.facts, []);
+      assert.ok(document.limitations.includes('route-coverage: top-level route locations are symbolic links and were not followed (app, pages); routes behind them were not scanned'));
+    });
+    await withProject({ 'package.json': nextPackage }, async (project) => {
+      symlinkSync(join(outside, 'real-src'), join(project, 'src'));
+      const document = await scan(project);
+      assert.deepEqual(document.facts, []);
+      assert.ok(document.limitations.includes('route-coverage: top-level route locations are symbolic links and were not followed (src); routes behind them were not scanned'));
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('밖을 가리키는 next.config·package.json symlink는 읽지 않고, 끊어진 symlink는 없는 파일로 본다', async () => {
+  const outside = writeOutside({ 'next.config.js': "module.exports = { basePath: '/outside' };", 'package.json': nextPackage });
+  try {
+    await withProject({ 'app/api/items/route.ts': getRoute, 'next.config.ts': "export default { basePath: '/inside' };" }, async (project) => {
+      symlinkSync(join(project, 'missing.js'), join(project, 'next.config.js'));
+      symlinkSync(join(outside, 'package.json'), join(project, 'package.json'));
+      const document = await scan(project);
+      assert.deepEqual(lines(document), ['GET root /inside/api/items strict']);
+      assert.equal(limitationsWith(document, 'route-framework-version-unknown:').length, 1);
+    });
+    await withProject({ 'package.json': nextPackage, 'app/api/items/route.ts': getRoute }, async (project) => {
+      symlinkSync(join(outside, 'next.config.js'), join(project, 'next.config.js'));
+      const document = await scan(project);
+      assert.deepEqual(lines(document), ['GET base /api/items -']);
+      assert.match(document.limitations.join('\n'), /next\.config\.js could not be resolved statically \(it is a symbolic link, which tsograph does not follow\)/);
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('public·proxy·pages/api symlink는 내용을 읽지 않고 근거·공백으로만 센다', async () => {
+  const outside = writeOutside({ 'public/logo.txt': 'x', 'proxy.ts': 'export function proxy() {}\n', 'api/y.ts': 'export default function y() {}\n' });
+  try {
+    await withProject({ 'package.json': nextPackage, 'pages/api/ok.ts': 'export default function ok() {}\n' }, async (project) => {
+      symlinkSync(join(outside, 'public'), join(project, 'public'));
+      symlinkSync(join(outside, 'proxy.ts'), join(project, 'proxy.ts'));
+      symlinkSync(join(outside, 'api/y.ts'), join(project, 'pages/api.ts'));
+      const document = await scan(project);
+      assert.deepEqual(lines(document), ['ANY root /api/ok strict']);
+      const text = document.limitations.join('\n');
+      assert.match(text, /framework-provided-routes: the public\/ directory serves static files/);
+      assert.match(text, /framework-provided-routes: proxy\.ts can answer or rewrite requests/);
+      assert.match(text, /route-coverage: 1 symbolic link\(s\) under the app or pages directories were not followed/);
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('Pages Router optional catch-all API route는 {**}와 접두사 decl을 낸다', async () => {
+  await withProject({ 'package.json': nextPackage, 'pages/api/[[...slug]].ts': 'export default function all() {}\n' }, async (project) => {
+    assert.deepEqual(lines(await scan(project)), ['ANY root /api strict', 'ANY root /api/{**} strict']);
   });
 });

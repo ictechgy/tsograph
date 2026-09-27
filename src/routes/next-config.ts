@@ -55,7 +55,7 @@ export interface NextRouteConfig {
 }
 
 /** 설정 객체를 확정하지 못한 이유다. */
-export type UnresolvedConfigReason = 'no-export' | 'function-export' | 'non-literal-export' | 'syntax-error' | 'unreadable';
+export type UnresolvedConfigReason = 'no-export' | 'function-export' | 'non-literal-export' | 'syntax-error' | 'unreadable' | 'symlink';
 
 /** 설정 파일이 없을 때의 값(Next 기본값)이다. */
 export const DEFAULT_NEXT_ROUTE_CONFIG: NextRouteConfig = {

@@ -202,6 +202,7 @@ function configLimitations(config: NextRouteConfig, decision: BasePathDecision):
     'non-literal-export': 'its export does not resolve to an object literal',
     'syntax-error': 'it has syntax errors',
     unreadable: 'it could not be read as UTF-8 text within the size limit',
+    symlink: 'it is a symbolic link, which tsograph does not follow',
   };
   const lines: string[] = [];
   if (config.unresolvedReason !== undefined) {
@@ -266,14 +267,17 @@ function gapLimitations(gaps: RouteGaps): string[] {
 }
 
 /**
- * 라우터 디렉터리가 없을 때의 limitation이다.
+ * 라우터 디렉터리가 없거나 최상위 위치가 symlink일 때의 limitation이다.
  *
  * @param extraction 추출 결과
  * @returns limitation 목록
  */
 function directoryLimitations(extraction: NextRoutesResult): string[] {
-  const { appDirectory, pagesDirectory } = extraction.routerDirectories;
-  if (appDirectory !== undefined || pagesDirectory !== undefined) return [];
+  const { appDirectory, pagesDirectory, symlinkedLocations } = extraction.routerDirectories;
+  const lines = symlinkedLocations.length === 0 ? [] : [
+    `route-coverage: top-level route locations are symbolic links and were not followed (${symlinkedLocations.join(', ')}); routes behind them were not scanned`,
+  ];
+  if (appDirectory !== undefined || pagesDirectory !== undefined || symlinkedLocations.length > 0) return lines;
   return ['route-coverage: no app or pages directory was found at the project root or under src/; no Next.js routes were scanned'];
 }
 
@@ -286,7 +290,7 @@ function directoryLimitations(extraction: NextRoutesResult): string[] {
 function versionLimitations(status: NextVersionStatus): string[] {
   if (status.kind === 'verified') return [];
   const reason = status.kind === 'undeclared'
-    ? 'package.json at the project root does not declare a next dependency'
+    ? 'package.json at the project root is missing, unreadable, a symbolic link, or does not declare a next dependency'
     : 'the declared next version range is not limited to major version 16';
   return [`route-framework-version-unknown: ${reason}; tsograph models Next.js 16 routing semantics`];
 }

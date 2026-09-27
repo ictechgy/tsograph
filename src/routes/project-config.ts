@@ -8,7 +8,7 @@
 
 import type { CommandFileSystem } from '../cli/file-system.ts';
 import { DEFAULT_NEXT_ROUTE_CONFIG, NEXT_CONFIG_FILE_NAMES, type NextRouteConfig, readNextRouteConfig, unresolvedConfig } from './next-config.ts';
-import { pathKind } from './project-scan.ts';
+import { lookupEntry } from './project-scan.ts';
 import { parseSource, scriptKindOf } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
 
@@ -21,7 +21,7 @@ export const VERIFIED_NEXT_MAJOR = 16;
 /** 선언된 Next 버전 판정이다. */
 export type NextVersionStatus =
   | { readonly kind: 'verified' }
-  /** package.json이 없거나 읽을 수 없거나 next 의존성이 없다. */
+  /** package.json이 없거나 symlink이거나 읽을 수 없거나 next 의존성이 없다. */
   | { readonly kind: 'undeclared' }
   /** 확인한 주 버전과 다르거나 범위를 해석하지 못했다. 값은 싣지 않는다(임의 문자열). */
   | { readonly kind: 'unverified' };
@@ -35,7 +35,11 @@ export type NextVersionStatus =
  */
 export async function loadNextRouteConfig(fileSystem: CommandFileSystem, project: string): Promise<NextRouteConfig> {
   for (const fileName of NEXT_CONFIG_FILE_NAMES) {
-    if (await pathKind(fileSystem, `${project}/${fileName}`) !== 'file') continue;
+    // stat은 마지막 symlink를 따라가므로 목록으로 본다. 밖을 가리킬 수 있는 symlink 설정은 읽지 않고,
+    // 끊어진 symlink는 Next의 existsSync처럼 없는 파일로 보고 다음 후보로 간다.
+    const entry = await lookupEntry(fileSystem, project, fileName);
+    if (entry.kind === 'symlink') return unresolvedConfig(fileName, 'symlink', 0);
+    if (entry.kind !== 'file') continue;
     const read = await readTextFile(fileSystem, `${project}/${fileName}`, MAX_CONFIG_FILE_BYTES);
     if (read.kind === 'failure') return unresolvedConfig(fileName, 'unreadable', 0);
     const parsed = parseSource(fileName, read.text, scriptKindOf(fileName)!);
@@ -52,6 +56,7 @@ export async function loadNextRouteConfig(fileSystem: CommandFileSystem, project
  * @returns 판정
  */
 export async function readNextVersionStatus(fileSystem: CommandFileSystem, project: string): Promise<NextVersionStatus> {
+  if ((await lookupEntry(fileSystem, project, 'package.json')).kind !== 'file') return { kind: 'undeclared' };
   const read = await readTextFile(fileSystem, `${project}/package.json`, MAX_CONFIG_FILE_BYTES);
   if (read.kind === 'failure') return { kind: 'undeclared' };
   const range = declaredNextRange(read.text);

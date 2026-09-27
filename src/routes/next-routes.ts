@@ -24,7 +24,7 @@ import {
   createScanGaps,
   listEntries,
   locateRouterDirectories,
-  pathKind,
+  lookupEntry,
   type RouterDirectories,
   type ScanGaps,
   walkFiles,
@@ -188,6 +188,9 @@ async function pagesApiFiles(context: RouteFileContext, pagesDirectory: string |
   if (pagesDirectory === undefined) return [];
   const { fileSystem, project } = context.input;
   const rootEntries = await listEntries(fileSystem, `${project}/${pagesDirectory}`, context.gaps);
+  // `api` 디렉터리나 `api.<ext>`가 symlink면 트리 안 symlink와 같이 따라가지 않고 센다.
+  context.gaps.symlinks += rootEntries.filter((entry) => entry.kind === 'symlink'
+    && (entry.name === 'api' || pageKeyOf(entry.name, context.pageExtensions) === 'api')).length;
   const candidates = rootEntries
     .filter((entry) => entry.kind === 'file' && pageKeyOf(entry.name, context.pageExtensions) === 'api')
     .map((entry) => `${pagesDirectory}/${entry.name}`);
@@ -319,12 +322,24 @@ async function collectFrameworkSources(
   const proxyFiles: string[] = [];
   for (const parent of parents) {
     const entries = await listEntries(fileSystem, parent === '' ? project : `${project}/${parent}`, context.gaps);
-    proxyFiles.push(...entries.filter((entry) => entry.kind === 'file' && isProxyFile(entry.name, context.pageExtensions))
+    // symlink인 proxy도 이름만 근거로 남긴다(대상은 읽지 않는다). limitation은 안전한 쪽이다.
+    proxyFiles.push(...entries.filter((entry) => (entry.kind === 'file' || entry.kind === 'symlink') && isProxyFile(entry.name, context.pageExtensions))
       .map((entry) => (parent === '' ? entry.name : `${parent}/${entry.name}`)));
   }
-  const hasPublicFiles = await pathKind(fileSystem, `${project}/public`) === 'directory'
-    && (await listEntries(fileSystem, `${project}/public`, context.gaps)).length > 0;
-  return { metadataFiles, proxyFiles: proxyFiles.sort(compareStrings), hasPublicFiles };
+  return { metadataFiles, proxyFiles: proxyFiles.sort(compareStrings), hasPublicFiles: await hasPublicFiles(context) };
+}
+
+/**
+ * `public/`이 정적 파일을 내놓을 수 있는지 본다. symlink면 따라가지 않고 있는 것으로 본다.
+ *
+ * @param context 처리 문맥
+ * @returns 비어 있지 않은 디렉터리이거나 풀리는 symlink면 true
+ */
+async function hasPublicFiles(context: RouteFileContext): Promise<boolean> {
+  const { fileSystem, project } = context.input;
+  const entry = await lookupEntry(fileSystem, project, 'public');
+  if (entry.kind === 'symlink') return true;
+  return entry.kind === 'directory' && (await listEntries(fileSystem, `${project}/public`, context.gaps)).length > 0;
 }
 
 /** 정적 메타데이터 이미지 파일 이름과 확장자다(`lib/metadata/is-metadata-route.js`). */

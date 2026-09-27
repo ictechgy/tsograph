@@ -156,6 +156,7 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 | `_`로 시작하는 파일·폴더는 App Router 스캔에서 빠지고, `%5F`는 리터럴 밑줄이다 | `build/route-discovery.js`(`ignorePartFilter`), project-structure 문서 |
 | 동적 세그먼트는 세그먼트 전체일 때만이다: `[x]` → `{}`, `[...x]` → `{**}`(1개 이상), `[[...x]]` → 0개 이상. `[[x]]`, 끝이 아닌 catch-all, `.`로 시작하는 이름, 반복된 이름은 빌드 오류다 | `shared/lib/router/utils/sorted-routes.js`, `route-regex.js` |
 | `pages/api` 아래(와 `pages/api.<ext>`)의 페이지 확장자 파일은 `.d.ts`를 빼고 모두 API route다. 여기서는 `_`에 특별한 뜻이 없고, 핸들러가 모든 method를 받는다 | `lib/is-api-route.js`, `build/route-discovery.js`, API Routes 문서 |
+| Pages Router API route도 `[...x]`와 optional `[[...x]]`를 지원한다(`pages/api/post/[[...slug]].js`는 `/api/post`와 그 아래 경로에 맞는다) | API Routes 문서("Optional catch all API routes"), `server/route-matchers/pages-api-route-matcher.js`(`RouteMatcher` + `getRouteRegex`) |
 | 설정 파일은 `next.config.js`, `.mjs`, `.ts` 순서로 찾는다(`.mts`는 런타임이 TypeScript를 지원할 때만) | `shared/lib/constants.js`(`CONFIG_FILES`) |
 | `basePath`는 빈 문자열이거나 `/`로 시작하고 `/`로 끝나지 않아야 한다 | `server/config.js` |
 | 끝 슬래시: `trailingSlash: false`(기본)면 `/x/`를 `/x`로 308 redirect하고, `true`면 마지막 세그먼트가 `name.ext` 모양이거나 `.well-known` 아래가 아닌 한 `/x`를 `/x/`로 보낸다. `skipTrailingSlashRedirect: true`면 redirect가 없고 매칭은 끝 슬래시를 무시한다 | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
@@ -203,6 +204,10 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 | `rewrites`·`redirects`·`i18n`, 또는 열거할 수 없는 키 | `framework-provided-routes:` |
 | `proxy`/`middleware` 파일, 메타데이터 파일, 비어 있지 않은 `public/` | `framework-provided-routes:`(합성 decl 없음) |
 | route 파일 위에 `@slot`·intercepting route(`(.)x`) 폴더 | 모델링하지 않음(Next 문서가 페이지에 대해서만 설명), `route-coverage:` |
+| `app`·`pages`·`src`·`src/app`·`src/pages`가 symlink | 따라가지 않음(Next는 그 후보를 고르므로 `src/`로 내려가지도 않는다), 위치를 적은 `route-coverage:` |
+| `next.config.*`가 symlink | 읽지 않고 `pathAnchor: "base"` + `unresolved-route-prefix:`. 끊어진 symlink는 Next의 `existsSync`처럼 없는 파일로 본다 |
+| `package.json`이 symlink | 읽지 않고 `route-framework-version-unknown:` |
+| `public/`이나 proxy/middleware 파일이 symlink | 읽지 않되 `framework-provided-routes:` 근거로는 남긴다 |
 | Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
 | `package.json`에 `next`가 없거나 범위가 주 버전 16에 한정되지 않음 | `route-framework-version-unknown:` |
 | `app/`·`pages/` 디렉터리가 없음 | 사실 0건 + `route-coverage:` |

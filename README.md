@@ -237,6 +237,7 @@ bundled docs under `dist/docs/`), not guessed.
 | Files and folders starting with `_` are excluded from the App Router scan; `%5F` spells a literal underscore | `build/route-discovery.js` (`ignorePartFilter`), project-structure docs |
 | Dynamic segments are whole segments only: `[x]` → `{}`, `[...x]` → `{**}` (one or more segments), `[[...x]]` → zero or more; `[[x]]`, a non-final catch-all, names starting with `.`, and repeated names are build errors | `shared/lib/router/utils/sorted-routes.js`, `route-regex.js` |
 | Every file under `pages/api` (and `pages/api.<ext>`) with a page extension is an API route, except `.d.ts`; `_` has no special meaning there; the handler receives every method | `lib/is-api-route.js`, `build/route-discovery.js`, API Routes docs |
+| Pages Router API routes support `[...x]` and optional `[[...x]]` (`pages/api/post/[[...slug]].js` matches `/api/post` and deeper paths) | API Routes docs ("Optional catch all API routes"), `server/route-matchers/pages-api-route-matcher.js` (`RouteMatcher` + `getRouteRegex`) |
 | Config files are tried in the order `next.config.js`, `.mjs`, `.ts` (`.mts` only when the runtime supports TypeScript) | `shared/lib/constants.js` (`CONFIG_FILES`) |
 | `basePath` must be empty, or start with `/` without a trailing `/` | `server/config.js` |
 | Trailing slash: with `trailingSlash: false` (default) `/x/` is 308-redirected to `/x`; with `true`, `/x` is redirected to `/x/` unless the last segment looks like `name.ext` or the path is under `.well-known`; `skipTrailingSlashRedirect: true` disables the redirect, and matching ignores the trailing slash | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
@@ -288,6 +289,10 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | `rewrites`, `redirects`, `i18n`, or keys tsograph cannot enumerate | `framework-provided-routes:` |
 | `proxy`/`middleware` file, metadata files, non-empty `public/` | `framework-provided-routes:` (no synthetic decls) |
 | `@slot` or intercepting-route (`(.)x`) folders above a route file | not modeled (Next documents them for pages), `route-coverage:` |
+| `app`, `pages`, `src`, `src/app`, or `src/pages` is a symbolic link | not followed (Next.js would pick it, so tsograph does not fall back to `src/`), `route-coverage:` naming the location |
+| `next.config.*` is a symbolic link | not read, `pathAnchor: "base"` + `unresolved-route-prefix:`; a dangling link is treated as absent, like Next's `existsSync` |
+| `package.json` is a symbolic link | not read, `route-framework-version-unknown:` |
+| `public/` or a proxy/middleware file is a symbolic link | not read; still reported under `framework-provided-routes:` |
 | Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
 | `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
 | No `app/` or `pages/` directory | zero facts + `route-coverage:` |
