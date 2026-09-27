@@ -49,13 +49,52 @@ test('계층 없는 scheme과 짝 없는 중괄호·서러게이트는 미확정
   assert.deepEqual(resolvePlain('https://h.test/\uD800'), UNRESOLVED_SERVER_PREFIXES);
 });
 
-test('host·scheme·port의 열린 변수는 경로에 영향이 없어 root다', () => {
+test('리터럴 host 안쪽 라벨의 열린 변수는 경로에 영향이 없어 root다', () => {
   const declared = variables({
-    scheme: { values: undefined, defaultValue: 'https' },
+    tenant: { values: undefined, defaultValue: 'acme' },
     region: { values: undefined, defaultValue: 'eu' },
-    port: { values: undefined, defaultValue: undefined },
+    empty: { values: undefined, defaultValue: '' },
   });
-  assert.deepEqual(resolveServerUrl('{scheme}://{region}.h.test:{port}/api', declared), { roots: ['/api'], baseTails: [] });
+  assert.deepEqual(resolveServerUrl('https://{tenant}.example.com/api', declared), { roots: ['/api'], baseTails: [] });
+  assert.deepEqual(resolveServerUrl('https://api.{region}.example.com:8443/api', declared), { roots: ['/api'], baseTails: [] });
+  assert.deepEqual(resolveServerUrl('https://api{empty}.example.com/api', declared), { roots: ['/api'], baseTails: [] });
+  assert.deepEqual(resolveServerUrl('//{tenant}.cdn.test/v1', declared), { roots: ['/v1'], baseTails: [] });
+});
+
+test('authority/경로 경계·port·userinfo·scheme에 닿는 열린 변수는 base다', () => {
+  const declared = variables({
+    env: { values: undefined, defaultValue: undefined },
+    blank: { values: undefined, defaultValue: '' },
+    host: { values: undefined, defaultValue: 'api.example.com' },
+    port: { values: undefined, defaultValue: '8443' },
+    user: { values: undefined, defaultValue: 'me' },
+    scheme: { values: undefined, defaultValue: 'https' },
+    colon: { values: undefined, defaultValue: 'a:1' },
+    at: { values: undefined, defaultValue: 'u@h' },
+  });
+  const cases: [string, string][] = [
+    ['https://api{env}/x', '/x'],
+    ['https://api.test{blank}/x', '/x'],
+    ['https://{host}/api', '/api'],
+    ['https://{host}:8443/api', '/api'],
+    ['https://h.test:{port}/api', '/api'],
+    ['https://h.test:8{port}/api', '/api'],
+    ['https://{user}@h.test/api', '/api'],
+    ['https://u@{env}.h.test/api', '/api'],
+    ['{scheme}://h.test/api', '/api'],
+    ['https://{colon}.h.test/api', '/api'],
+    ['https://{at}.h.test/api', '/api'],
+    ['https://[::1]{env}/api', '/api'],
+  ];
+  for (const [url, tail] of cases) {
+    assert.deepEqual(resolveServerUrl(url, declared), { roots: [], baseTails: [tail] }, url);
+  }
+});
+
+test('IPv6 리터럴 host 뒤의 port는 host 라벨과 구분한다', () => {
+  const declared = variables({ port: { values: undefined, defaultValue: '8443' } });
+  assert.deepEqual(resolvePlain('https://[::1]:8443/api'), { roots: ['/api'], baseTails: [] });
+  assert.deepEqual(resolveServerUrl('https://[::1]:{port}/api', declared), { roots: [], baseTails: ['/api'] });
 });
 
 test('경로의 enum 변수는 값마다 펼친다', () => {

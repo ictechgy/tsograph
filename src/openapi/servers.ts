@@ -8,9 +8,10 @@
  * 서버 변수 규칙(fail-closed, README 결정 목록):
  * - `enum`이 있으면 값 집합이 닫혀 있으므로 값마다 펼친다(조합 상한 있음).
  * - `enum` 없이 `default`만 있으면 클라이언트가 임의 값으로 바꿀 수 있는 열린 값이라
- *   경로 부분에 있을 때 확정하지 않는다. 리터럴 `scheme://` 또는 `//` 뒤의 authority
- *   안에 있으면 버려지므로 무관하다. authority가 리터럴로 확정되지 않은 URL(`{base}/v1`)의
- *   열린 변수는 경로를 바꿀 수 있어 확정하지 않는다.
+ *   경로 부분에 있을 때 확정하지 않는다. 리터럴 authority의 host 라벨 안쪽(경계·port·
+ *   userinfo에 닿지 않음)에 있으면 host와 함께 버려지므로 무관하다(`isHostLabelSpan`).
+ *   authority가 리터럴로 확정되지 않은 URL(`{base}/v1`)의 열린 변수는 경로를 바꿀 수 있어
+ *   확정하지 않는다.
  * - URL 해석기가 경로를 바꾸는 표기(`.`·`..` 세그먼트, `%2E`, 백슬래시, 탭·줄바꿈)는 WHATWG와
  *   RFC 3986 해석기의 결과가 갈릴 수 있어 확정하지 않는다.
  */
@@ -231,7 +232,7 @@ function classifyConcreteUrl(rawText: string, rawSpans: readonly FreeSpan[]): Co
   const pathStart = authorityStart === undefined ? 0 : findPathStart(text, authorityStart);
   const pathSpans = authorityStart === undefined
     ? spans
-    : spans.filter((span) => !isHarmlessAuthoritySpan(text, span, pathStart));
+    : spans.filter((span) => !isHostLabelSpan(text, span, authorityStart, pathStart));
   const resolution: ConcreteResolution = pathSpans.length > 0
     ? { kind: 'base', tail: literalTail(text, pathStart, pathSpans, false) }
     : { kind: 'root', prefix: canonicalizeLiteralPath(text.slice(pathStart)) };
@@ -291,21 +292,42 @@ function findPathStart(text: string, authorityStart: number): number {
 }
 
 /**
- * 열린 변수 구간이 경로에 영향을 주지 않는 scheme·authority 안쪽인지 판단한다.
+ * 열린 변수 구간이 경로와 무관한 **host 라벨 안쪽**인지 판단한다(README 결정 목록).
  *
- * 구간이 경로 시작 전에 끝나고 값에 `/`가 없어야 한다. 값에 `/`가
- * 있으면 다른 값으로 바뀔 때 경로 시작점이 달라질 수 있다.
+ * OpenAPI 서버 변수는 URL 템플릿의 치환 값이고, `https://{tenant}.example.com/api` 같은
+ * 테넌트 서브도메인은 흔하다. 그래서 다음을 모두 만족하는 열린 변수만 경로와 무관하다고 본다.
+ * - authority가 리터럴 `scheme://` 또는 `//` 뒤에서 시작하고, 구간이 그 authority 안에 있다
+ *   (scheme 자리의 열린 변수는 무관하지 않다).
+ * - authority에 userinfo(`@`)가 없다.
+ * - 구간이 host 끝(port의 `:` 또는 경로 시작)보다 **앞에서** 끝난다. 즉 authority/경로 경계나
+ *   port 자리에 닿지 않는다. `https://api{env}/x`처럼 경계에 붙은 빈 변수, `https://{host}/api`
+ *   처럼 host 전체를 차지해 경계에 닿는 변수, port 변수는 모두 base다.
+ * - 치환한 기본값에 `/`·`@`·`:`·`[`·`]`가 없다(값이 URL 구조를 바꾸지 않는다).
  *
  * @param text URL
  * @param span 열린 변수 구간
+ * @param authorityStart authority 시작 오프셋
  * @param pathStart 경로 시작 오프셋
- * @returns 경로와 무관하면 true
+ * @returns host 라벨 안쪽이면 true
  */
-function isHarmlessAuthoritySpan(text: string, span: FreeSpan, pathStart: number): boolean {
-  // 빈 값 구간이 경로 시작점에 붙어 있으면, 뒤에 리터럴 `/`가 있을 때만 authority 쪽이다.
-  // 경로가 없는 URL 끝의 빈 변수는 경로 자리일 수 있다.
-  const isBeforePath = span.start < pathStart || pathStart < text.length;
-  return span.end <= pathStart && isBeforePath && !text.slice(span.start, span.end).includes('/');
+function isHostLabelSpan(text: string, span: FreeSpan, authorityStart: number, pathStart: number): boolean {
+  const authority = text.slice(authorityStart, pathStart);
+  if (authority.includes('@')) return false;
+  const hostEnd = authorityStart + hostLength(authority);
+  const value = text.slice(span.start, span.end);
+  return span.start >= authorityStart && span.end < hostEnd && !/[/@:[\]]/u.test(value);
+}
+
+/**
+ * authority에서 host 부분(port 제외)의 길이를 구한다. IPv6 리터럴(`[…]`) 안의 `:`는 port가 아니다.
+ *
+ * @param authority userinfo 없는 authority
+ * @returns host 길이
+ */
+function hostLength(authority: string): number {
+  const searchFrom = authority.startsWith('[') ? Math.max(authority.indexOf(']'), 0) : 0;
+  const colon = authority.indexOf(':', searchFrom);
+  return colon === -1 ? authority.length : colon;
 }
 
 /**
