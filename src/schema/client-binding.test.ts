@@ -52,6 +52,19 @@ test('조건 식·typeof·인터페이스 상속·교차·Promise 반환 팩토�
   ]);
 });
 
+test('합 타입 반환 표기의 Promise·null·undefined 멤버를 벗겨 팩토리로 본다', () => {
+  const lines = factsOf(header + [
+    'async function getDb(): Promise<PrismaClient> | undefined { return prisma; }',
+    'function maybe(): PrismaClient | null { return prisma; }',
+    'function wide(): Promise<PrismaClient> | Map<string, number> { return prisma as never; }',
+    'export async function f() {',
+    '  (await getDb()!).user.findMany(); maybe()!.post.count(); (await wide()).user;',
+    '}',
+    '',
+  ].join('\n'));
+  assert.deepEqual(lines.map((line) => line.replace(/ @.*/u, '')), ['src/a.ts:7:20 users', 'src/a.ts:7:46 Post']);
+});
+
 test('블록·반복문·catch·enum·namespace·구조 분해 선언은 이름을 가린다', () => {
   const lines = factsOf(header + [
     'export function g(list: string[]) {',

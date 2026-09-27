@@ -349,11 +349,26 @@ export class BindingEvaluator {
    * @returns 클라이언트를 돌려주면 true
    */
   returnsClient(node: ts.SignatureDeclaration, context: EvaluationContext): boolean {
-    if (node.type !== undefined) return this.isClientType(unwrapPromiseType(node.type), context);
+    if (node.type !== undefined) return this.isClientReturnType(node.type, context);
     if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
       return this.expression(node.body, context).kind === 'client';
     }
     return false;
+  }
+
+  /**
+   * 반환 타입 표기가 클라이언트(또는 그 Promise)인지 본다. 합 타입은 null·undefined를 뺀 모든
+   * 멤버를 각각 Promise에서 벗겨 판정한다(`Promise<PrismaClient> | undefined`).
+   *
+   * @param type 반환 타입 노드
+   * @param context 평가 문맥
+   * @returns 클라이언트를 돌려주면 true
+   */
+  private isClientReturnType(type: ts.TypeNode, context: EvaluationContext): boolean {
+    const inner = ts.isParenthesizedTypeNode(type) ? type.type : type;
+    if (!ts.isUnionTypeNode(inner)) return this.isClientType(unwrapPromiseType(inner), context);
+    const members = inner.types.filter((member) => !isNullishType(member));
+    return members.length > 0 && members.every((member) => this.isClientType(unwrapPromiseType(member), context));
   }
 
   /**
