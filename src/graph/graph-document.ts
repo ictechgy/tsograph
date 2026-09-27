@@ -2,8 +2,8 @@
  * `tsograph graph` 스냅샷 문서와 그래프 내용 해시(`graphRevision`)다.
  *
  * 스냅샷은 isthmus 입력이 아니라 tsograph 자체 형식(`tsograph-graph` v1)이다. `graphRevision`은 노드
- * (id·종류·진입점)와 간선(from·to·종류)만 해시한다 — 위치(줄 이동)는 그래프의 도달 관계를 바꾸지 않으므로
- * 넣지 않는다. 같은 그래프에서 낸 reach·impact 문서는 같은 값을 싣는다.
+ * (id·종류·진입점·모드별 미해석 호출 수)와 간선(from·to·종류·근거)만 해시한다 — 위치(줄 이동)는 그래프의 도달
+ * 관계를 바꾸지 않으므로 넣지 않는다. 같은 그래프에서 낸 reach·impact 문서는 모드와 관계없이 같은 값을 싣는다.
  */
 
 import { createHash } from 'node:crypto';
@@ -43,8 +43,8 @@ export interface GraphSnapshotDocument {
  */
 export function computeGraphRevision(graph: CallGraph): string {
   const content = JSON.stringify([
-    graph.nodes.map((node) => [node.id, node.kind, node.entries ?? []]),
-    graph.edges.map((edge) => [edge.from, edge.to, edge.kinds]),
+    graph.nodes.map((node) => [node.id, node.kind, node.entries ?? [], node.unresolvedCalls ?? {}]),
+    graph.edges.map((edge) => [edge.from, edge.to, edge.kinds, edge.evidence]),
   ]);
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }

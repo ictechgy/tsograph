@@ -421,7 +421,7 @@ function importSpecifierOf(declaration: ts.Declaration | undefined): string | un
  * @param resolution 해석 결과
  * @returns 인터페이스 이유가 있으면 true
  */
-function isInterfaceGap(resolution: Resolution): boolean {
+export function isInterfaceGap(resolution: Resolution): boolean {
   return (resolution.kind === 'unresolved' && resolution.reason === 'interface')
     || (resolution.kind === 'nodes' && resolution.partial === 'interface');
 }

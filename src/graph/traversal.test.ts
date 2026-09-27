@@ -1,27 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { CallGraph, EdgeKind } from './graph-model.ts';
+import type { CallGraph, EdgeEvidence, EdgeKind } from './graph-model.ts';
 import { MAX_ROOTS_PER_NODE, traverse, type TraversalRequest } from './traversal.ts';
 
 /**
  * `a>b` 형식의 간선 목록으로 그래프를 만든다.
  *
- * @param edges `from>to` 목록(종류는 call, `from>to:kind`로 바꾼다)
+ * @param edges `from>to` 목록(종류는 call·근거는 direct, `from>to:kind`·`from>to:kind:evidence`로 바꾼다)
  * @returns 그래프
  */
 function graphOf(edges: readonly string[]): CallGraph {
   const parsed = edges.map((edge) => {
-    const [pair, kind] = edge.split(':');
+    const [pair, kind, evidence] = edge.split(':');
     const [from, to] = pair!.split('>');
-    return { from: from!, to: to!, kinds: [(kind ?? 'call') as EdgeKind] };
+    return { from: from!, to: to!, kinds: [(kind ?? 'call') as EdgeKind], evidence: (evidence ?? 'direct') as EdgeEvidence };
   });
   const ids = [...new Set(parsed.flatMap((edge) => [edge.from, edge.to]))].sort();
   return {
     nodes: ids.map((id) => ({ id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 } })),
     edges: parsed,
     limitations: [],
-    statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 } } },
+    statistics: { files: 1, calls: { resolved: 0, external: 0, missingDependencies: 0, unresolved: { parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 } } },
   };
 }
 
@@ -33,9 +33,10 @@ function graphOf(edges: readonly string[]): CallGraph {
  * @returns 결과 문자열과 잘림 정보
  */
 function run(graph: CallGraph, request: Partial<TraversalRequest> & { rootIds: string[] }) {
-  const result = traverse(graph, { direction: 'dependencies', maxDepth: 128, maxReached: 1000, ...request });
+  const result = traverse(graph, { direction: 'dependencies', maxDepth: 128, maxReached: 1000, dispatch: 'bound', ...request });
   return {
     lines: result.reached.map((entry) => `${entry.id} ${entry.depth} ${entry.via} [${entry.roots.join(',')}] ${entry.relationships.join(',')}`),
+    evidence: result.reached.map((entry) => `${entry.id} ${entry.evidence}`),
     reasons: result.truncationReasons,
     rootsTruncated: result.rootsTruncated,
   };
@@ -111,8 +112,55 @@ test('깊이·개수 예산을 넘으면 자르고 이유를 싣는다', () => {
 test('노드 하나의 root 인덱스는 64개까지만 싣는다', () => {
   const roots = Array.from({ length: MAX_ROOTS_PER_NODE + 1 }, (_, index) => `r${String(index).padStart(2, '0')}`);
   const graph = graphOf(roots.map((root) => `${root}>shared`));
-  const result = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 10 });
+  const result = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 10, dispatch: 'bound' });
   assert.equal(result.rootsTruncated, true);
   assert.equal(result.reached[0]?.roots.length, MAX_ROOTS_PER_NODE);
   assert.equal(result.reached[0]?.via, 'r00');
+});
+
+test('디스패치 모드는 따라갈 간선 근거를 정하고, 같은 쌍의 근거별 간선은 합친다', () => {
+  const graph = graphOf(['h>svc', 'svc>impl:call:bound', 'svc>impl:reference', 'svc>other:call:candidate', 'other>db']);
+  assert.deepEqual(run(graph, { rootIds: ['h'], dispatch: 'direct' }).lines, ['svc 1 h [0] call', 'impl 2 svc [0] reference']);
+  assert.deepEqual(run(graph, { rootIds: ['h'], dispatch: 'bound' }).lines, ['svc 1 h [0] call', 'impl 2 svc [0] call,reference']);
+  const all = run(graph, { rootIds: ['h'], dispatch: 'candidates' });
+  assert.deepEqual(all.lines, ['svc 1 h [0] call', 'impl 2 svc [0] call,reference', 'other 2 svc [0] call', 'db 3 other [0] call']);
+  // impl은 direct reference 간선으로도 닿으므로 direct다.
+  assert.deepEqual(all.evidence, ['svc direct', 'impl direct', 'other candidate', 'db candidate']);
+});
+
+test('evidence는 root별 하한이다: 한 root라도 약한 등급으로만 닿으면 그 등급이다', () => {
+  // A는 x에 direct로, B는 bound로만 닿는다. y는 A가 candidate로만, B가 direct로 닿는다.
+  const graph = graphOf(['A>x', 'B>m:call:bound', 'm>x', 'A>y:call:candidate', 'B>y']);
+  const bound = run(graph, { rootIds: ['A', 'B'] });
+  assert.deepEqual(bound.lines, ['m 1 B [1] call', 'x 1 A [0,1] call', 'y 1 B [1] call']);
+  assert.deepEqual(bound.evidence, ['m bound', 'x bound', 'y direct']);
+  const all = run(graph, { rootIds: ['A', 'B'], dispatch: 'candidates' });
+  assert.deepEqual(all.evidence, ['m bound', 'x bound', 'y candidate']);
+  // 깊이 상한 안에서만 닿음을 따진다: direct 경로가 상한보다 길면 약한 등급이다.
+  const long = graphOf(['r>a', 'a>b', 'b>t', 'r>t:call:bound']);
+  assert.deepEqual(run(long, { rootIds: ['r'], maxDepth: 2 }).evidence, ['a direct', 't bound', 'b direct']);
+  assert.deepEqual(run(long, { rootIds: ['r'], maxDepth: 3 }).evidence, ['a direct', 't direct', 'b direct']);
+});
+
+test('등급 비교(root 3,000개·정점 6,000개)는 direct 순회 대비 작은 추가 비용이다', () => {
+  const size = 6_000;
+  const edges: string[] = [];
+  for (let index = 0; index < size; index++) {
+    edges.push(`n${index}>n${(index * 7 + 1) % size}`, `n${index}>n${(index * 13 + 5) % size}`);
+    if (index % 50 === 0) edges.push(`n${index}>n${(index * 31 + 3) % size}:call:bound`);
+    if (index % 97 === 0) edges.push(`n${index}>n${(index * 17 + 11) % size}:call:candidate`, `n${index}>w${index}:call:candidate`, `w${index}>x${index}`);
+  }
+  const graph = graphOf(edges);
+  const rootIds = Array.from({ length: 3_000 }, (_, index) => `n${index * 2}`);
+  const timed = (dispatch: 'direct' | 'candidates'): { elapsed: number; evidence: Set<string> } => {
+    const started = performance.now();
+    const result = traverse(graph, { rootIds, direction: 'dependencies', maxDepth: 128, maxReached: 100_000, dispatch });
+    return { elapsed: performance.now() - started, evidence: new Set(result.reached.map((row) => row.evidence)) };
+  };
+  const direct = timed('direct');
+  const candidates = timed('candidates');
+  assert.deepEqual([...direct.evidence], ['direct']);
+  assert.ok(candidates.evidence.has('candidate'));
+  // 등급 비교는 비교 대상 root의 비트 집합 전파 두세 번이다. 기준 순회의 3배 + 2초를 넘으면 회귀다.
+  assert.ok(candidates.elapsed < direct.elapsed * 3 + 2_000, `direct ${Math.round(direct.elapsed)} ms, candidates ${Math.round(candidates.elapsed)} ms`);
 });

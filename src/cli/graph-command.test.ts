@@ -26,9 +26,9 @@ const tinyGraph: CallGraph = {
   nodes: ['a.ts#a', 'a.ts#b', 'a.ts#page'].map((id) => ({
     id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 }, ...(id === 'a.ts#page' ? { entries: ['page' as const] } : {}),
   })),
-  edges: [{ from: 'a.ts#a', to: 'a.ts#b', kinds: ['call'] }, { from: 'a.ts#page', to: 'a.ts#b', kinds: ['jsx'] }],
+  edges: [{ from: 'a.ts#a', to: 'a.ts#b', kinds: ['call'], evidence: 'direct' }, { from: 'a.ts#page', to: 'a.ts#b', kinds: ['jsx'], evidence: 'direct' }],
   limitations: ['unresolved-calls: 1 call(s) could not be linked to a project declaration and were not guessed (parameter: 1)', 'non-http-entries: 1 symbol(s) are entry points without a route-decl fact (page: 1); isthmus cannot reach them through the http join'],
-  statistics: { files: 1, calls: { resolved: 2, external: 0, missingDependencies: 0, unresolved: { parameter: 1, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 } } },
+  statistics: { files: 1, calls: { resolved: 2, external: 0, missingDependencies: 0, unresolved: { parameter: 1, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 } } },
 };
 
 test('--generated-at은 시각을 고정하고 잘못된 값은 64다', async () => {
@@ -79,8 +79,9 @@ test('reach는 language-traversal v1(dependencies)을 낸다', async () => {
       usr: 'src/lib/audit.ts#audit', qualifiedName: 'src/lib/audit.ts#audit', kind: 'function',
       location: { path: 'src/lib/audit.ts', line: 3, column: 23 },
     },
-    via: 'src/lib/jobs.ts#createJob', depth: 2, roots: [0], relationships: ['call'],
+    via: 'src/lib/jobs.ts#createJob', depth: 2, roots: [0], relationships: ['call'], evidence: 'direct',
   });
+  assert.equal(document.dispatch, 'bound');
   assert.ok(document.limitations.some((line: string) => line.startsWith('unresolved-calls:')));
   assert.ok(!document.limitations.some((line: string) => line.startsWith('non-http-entries:')));
 });
@@ -111,7 +112,7 @@ test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 
   const byUsr = new Map(document.reached.map((entry: { symbol: { usr: string } }) => [entry.symbol.usr, entry]));
   assert.deepEqual(byUsr.get('src/lib/jobs.ts#createJob'), {
     symbol: { usr: 'src/lib/jobs.ts#createJob', qualifiedName: 'src/lib/jobs.ts#createJob', kind: 'function', location: { path: 'src/lib/jobs.ts', line: 8, column: 23 } },
-    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'],
+    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'], evidence: 'direct',
   });
   const audit = byUsr.get('src/lib/audit.ts#audit') as { via: string; depth: number; roots: number[] };
   assert.deepEqual([audit.via, audit.depth, audit.roots], ['src/lib/jobs.ts#createJob', 1, [0, 1]]);
@@ -138,7 +139,7 @@ test('주입 그래프: root 밖 진입점은 세지 않고 그래프 limitation
 test('잘못된 호출은 64, 읽을 수 없는 프로젝트·과대 출력은 2다', async () => {
   const env = environment({ buildGraph: async () => tinyGraph });
   const reachCases = [[], ['a.ts#a'], ['--project', '.'], ['--project', '.', '--format', 'yaml', 'a'], ['--project', '.', '--max-depth', '0', 'a'],
-    ['--project', '.', '--max-reached', 'x', 'a'], ['--project', '.', 'bad\u0001id'], ['--bogus'],
+    ['--project', '.', '--max-reached', 'x', 'a'], ['--project', '.', 'bad\u0001id'], ['--bogus'], ['--project', '.', '--dispatch', 'all', 'a.ts#a'],
     ['--project', '.', ...Array.from({ length: 10_001 }, (_, index) => `i${index}`)]];
   for (const args of reachCases) assert.equal((await runReachCommand(args, env)).exitCode, 64, JSON.stringify(args).slice(0, 80));
   for (const args of [[], ['x'], ['--project', '.', '--format', 'yaml'], ['--nope']]) {

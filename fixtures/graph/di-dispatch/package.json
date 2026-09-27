@@ -1,0 +1,7 @@
+{
+  "name": "di-dispatch-fixture",
+  "private": true,
+  "dependencies": {
+    "next": "16.2.7"
+  }
+}

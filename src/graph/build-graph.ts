@@ -3,7 +3,7 @@
  *
  * 단계: 라우트 추출(진입점·라우트 파일) → 소스 파일 모으기(schema와 같은 걷기 규칙, Prisma 생성 클라이언트
  * 제외, 라우트 파일 추가) → Program/TypeChecker → 1단계 노드(선언·export 노드) → 재정의 표 → 2단계 간선
- * (호출·참조·클래스 암묵 간선·export 별칭) → 진입점 표식 → limitation 조립.
+ * (호출·참조·클래스 암묵 간선·export 별칭) → 진입점 표식 → 디스패치(bound·candidate 간선) → limitation 조립.
  *
  * 노드 파일은 프로젝트 안 소스뿐이다. `node_modules`·lib·생성 코드의 선언은 노드가 되지 않고 그리로
  * 가는 호출은 외부로 센다.
@@ -26,12 +26,15 @@ import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
 import { isSourceFileName } from '../schema/source-module.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
-import { collectFileEdges, type EdgeGaps } from './edge-collector.ts';
+import { resolveDispatch } from './dispatch.ts';
+import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
 import { markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
 import {
   type CallGraph,
   type CallStatistics,
+  DISPATCH_MODES,
+  type DispatchMode,
   type GraphNode,
   GraphStore,
   UNRESOLVED_REASONS,
@@ -42,6 +45,12 @@ import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
 const MAX_VERCEL_CONFIG_BYTES = 1024 * 1024;
+
+/** `package.json` 최대 크기(바이트)다. */
+const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+
+/** 패키지를 스캔 밖 코드가 가져다 쓰는 공개 패키지로 보게 하는 `package.json` 필드다. */
+const PUBLIC_ENTRY_FIELDS: readonly string[] = ['main', 'module', 'exports', 'bin', 'types', 'typings', 'browser'];
 
 /** 선언 파일 이름 패턴이다(루트 파일로만 넣고 노드는 만들지 않는다). */
 const declarationFileName = /\.d\.[cm]?ts$/u;
@@ -74,7 +83,12 @@ interface GraphCounts {
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
   readonly routeFactsTruncated: boolean;
+  /** bound의 열린 프로그램 판정 이유(없으면 닫힌 프로그램) */
+  readonly openProgram: OpenProgramReason | undefined;
 }
+
+/** bound 디스패치가 내보낸 선언을 스캔 밖에서 부를 수 있다고 보는 이유다. */
+type OpenProgramReason = 'public-package' | 'unreadable-manifest' | 'incomplete-scan';
 
 /**
  * 호출 그래프를 만든다.
@@ -97,17 +111,70 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     pagesDirectory: routes.extraction.routerDirectories.pagesDirectory,
     pageExtensions: routes.pageExtensions,
   });
+  const parseErrors = countParseErrors(files);
+  const openProgram = openProgramReason(project, inputs, parseErrors);
+  resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined });
   const nodes = analysis.store.nodes();
-  const limitations = buildLimitations(nodes, {
-    ...analysis, config: status, inputs, parseErrors: countParseErrors(files), unmatchedCrons,
+  const counts: GraphCounts = {
+    ...analysis, config: status, inputs, parseErrors, unmatchedCrons, openProgram,
     cronConfigUnreadable: crons.unreadable, routeFactsTruncated: routes.facts.length === 0 && routes.extraction.routes.length > 0,
-  });
-  return { nodes, edges: analysis.store.edges(), limitations, statistics: { files: files.size, calls: analysis.calls } };
+  };
+  const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, buildLimitations(nodes, counts, mode)])) as Record<DispatchMode, string[]>;
+  const limitations = buildLimitations(nodes, counts, 'snapshot');
+  return { nodes, edges: analysis.store.edges(), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } };
+}
+
+/**
+ * bound 디스패치가 프로그램을 열린 것으로 봐야 하는 이유다: 공개 패키지(스캔 밖 코드가 내보낸 선언을
+ * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink, 구문 오류) 보지 못한 호출자가 있을 수 있다.
+ *
+ * @param project 프로젝트 realpath
+ * @param inputs 입력 파일
+ * @param parseErrors 구문 오류 파일 수
+ * @returns 이유, 닫힌 프로그램이면 undefined
+ */
+function openProgramReason(project: string, inputs: GraphInputs, parseErrors: number): OpenProgramReason | undefined {
+  const manifest = readManifestEntry(project);
+  if (manifest !== 'private') return manifest;
+  const walk = inputs.walk;
+  const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0 || parseErrors > 0;
+  return incomplete ? 'incomplete-scan' : undefined;
+}
+
+/**
+ * 프로젝트 루트 `package.json`이 공개 진입점 필드(main·module·exports·bin·types·typings·browser)를 선언했는지
+ * 본다. 파일이 없으면 공개 표식도 없다. 있는데 1 MiB를 넘거나 JSON 객체로 읽지 못하면 판단할 수 없으므로
+ * 열린 쪽으로 본다(추측하지 않는다).
+ *
+ * @param project 프로젝트 realpath
+ * @returns 공개 패키지·판단 불가·비공개
+ */
+function readManifestEntry(project: string): 'public-package' | 'unreadable-manifest' | 'private' {
+  const path = join(project, 'package.json');
+  let text: string;
+  try {
+    if (statSync(path).size > MAX_PACKAGE_JSON_BYTES) return 'unreadable-manifest';
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한 등)는 판단할 수 없다.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'private' : 'unreadable-manifest';
+  }
+  try {
+    const manifest: unknown = JSON.parse(text);
+    if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return 'unreadable-manifest';
+    return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
+  } catch {
+    // JSON이 아니면 공개 진입점을 알 수 없다 — 열린 쪽으로 본다.
+    return 'unreadable-manifest';
+  }
 }
 
 /** 노드·간선 분석 결과다. */
 interface FileAnalysis {
   readonly store: GraphStore;
+  readonly resolver: TargetResolver;
+  readonly overrides: ReadonlyMap<string, readonly string[]>;
+  readonly pending: readonly PendingDispatch[];
   readonly calls: CallStatistics;
   readonly gaps: EdgeGaps;
   readonly unresolvedExports: number;
@@ -131,11 +198,12 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   for (const [path, declarations] of classes) declarations.forEach((declaration) => addOverrides(overrides, checker, resolver, path, declaration));
   const calls = createCallStatistics();
   const gaps: EdgeGaps = { partial: {}, overriddenCalls: 0 };
+  const pending: PendingDispatch[] = [];
   for (const [path, sourceFile] of files) {
-    collectFileEdges({ checker, store, resolver, overrides, calls, gaps }, path, sourceFile);
+    collectFileEdges({ checker, store, resolver, overrides, calls, gaps, pending }, path, sourceFile);
     classes.get(path)!.forEach((declaration) => addClassEdges(store, resolver, path, declaration));
   }
-  return { store, calls, gaps, unresolvedExports: linkExportNodes(store, checker, resolver, pendingExports) };
+  return { store, resolver, overrides, pending, calls, gaps, unresolvedExports: linkExportNodes(store, checker, resolver, pendingExports) };
 }
 
 /**
@@ -250,6 +318,7 @@ function createCallStatistics(): CallStatistics {
     external: 0,
     missingDependencies: 0,
     unresolved: Object.fromEntries(UNRESOLVED_REASONS.map((reason) => [reason, 0])) as CallStatistics['unresolved'],
+    dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0 },
   };
 }
 
@@ -298,34 +367,63 @@ function readCronPaths(project: string): CronPaths {
 }
 
 /**
+ * limitation을 만드는 관점이다: reach·impact 문서의 디스패치 모드, 또는 모든 간선을 싣는 스냅샷
+ * (호출 계수는 direct 기준이고 bound·candidate 계수 줄을 함께 싣는다).
+ */
+type LimitationView = DispatchMode | 'snapshot';
+
+/**
  * 그래프 limitation을 만든다.
  *
  * @param nodes 출력 노드
  * @param counts 계수
+ * @param view 관점
  * @returns limitation 목록(고정 순서)
  */
-function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts): string[] {
-  return [...callLimitations(counts), ...inputLimitations(counts), ...entryLimitations(nodes, counts)];
+function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts, view: LimitationView): string[] {
+  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts)];
 }
 
 /**
- * 호출 해석 limitation이다.
+ * 관점에서 아직 잇지 못한 인터페이스 공백 수다(전체 공백, 일부 공백).
+ *
+ * @param calls 호출 통계
+ * @param gaps 부분 해석 계수
+ * @param view 관점
+ * @returns 남은 전체·부분 인터페이스 공백
+ */
+function remainingInterfaceGaps(calls: CallStatistics, gaps: EdgeGaps, view: LimitationView): { full: number; partial: number } {
+  const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
+  const linkedFull = view === 'bound' ? bound : view === 'candidates' ? bound + candidate : 0;
+  const linkedPartial = view === 'bound' ? boundPartial : view === 'candidates' ? boundPartial + candidatePartial : 0;
+  return { full: calls.unresolved.interface - linkedFull, partial: (gaps.partial.interface ?? 0) - linkedPartial };
+}
+
+/**
+ * 호출 해석 limitation이다. `unresolved-calls:`·`partial-dispatch:`의 인터페이스 계수는 관점의 모드가 이은
+ * 호출을 뺀 값이다.
  *
  * @param counts 계수
+ * @param view 관점
  * @returns limitation 목록
  */
-function callLimitations({ calls, gaps, unresolvedExports }: GraphCounts): string[] {
+function callLimitations(counts: GraphCounts, view: LimitationView): string[] {
+  const { calls, gaps, unresolvedExports } = counts;
   const result: string[] = [];
-  const unresolvedTotal = UNRESOLVED_REASONS.reduce((sum, reason) => sum + calls.unresolved[reason], 0);
+  const remaining = remainingInterfaceGaps(calls, gaps, view);
+  const unresolved = { ...calls.unresolved, interface: remaining.full };
+  const unresolvedTotal = UNRESOLVED_REASONS.reduce((sum, reason) => sum + unresolved[reason], 0);
   if (unresolvedTotal > 0) {
-    const breakdown = UNRESOLVED_REASONS.filter((reason) => calls.unresolved[reason] > 0).map((reason) => `${reason}: ${calls.unresolved[reason]}`);
+    const breakdown = UNRESOLVED_REASONS.filter((reason) => unresolved[reason] > 0).map((reason) => `${reason}: ${unresolved[reason]}`);
     result.push(`unresolved-calls: ${unresolvedTotal} call(s) could not be linked to a project declaration and were not guessed (${breakdown.join(', ')})`);
   }
-  const partial = Object.entries(gaps.partial);
+  const partial = Object.entries({ ...gaps.partial, ...(gaps.partial.interface === undefined ? {} : { interface: remaining.partial }) })
+    .filter(([, count]) => count > 0);
   if (partial.length > 0) {
     const total = partial.reduce((sum, [, count]) => sum + count, 0);
     result.push(`partial-dispatch: ${total} call(s) through union or interface types were linked only to the implementations tsograph could prove (${partial.map(([reason, count]) => `${reason}: ${count}`).join(', ')})`);
   }
+  result.push(...dispatchLimitations(counts, view));
   if (calls.missingDependencies > 0) {
     result.push(`missing-dependencies: ${calls.missingDependencies} call(s) go through packages whose type declarations could not be resolved (dependencies not installed or untyped); they are treated as external`);
   }
@@ -334,6 +432,34 @@ function callLimitations({ calls, gaps, unresolvedExports }: GraphCounts): strin
   }
   if (unresolvedExports > 0) {
     result.push(`unresolved-export-aliases: ${unresolvedExports} export node(s) could not be linked to the declaration they re-export`);
+  }
+  return result;
+}
+
+/**
+ * bound·candidate 디스패치 limitation이다. direct 모드 문서에는 싣지 않는다.
+ *
+ * @param counts 계수
+ * @param view 관점
+ * @returns limitation 목록
+ */
+function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: LimitationView): string[] {
+  if (view === 'direct') return [];
+  const result: string[] = [];
+  const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
+  const scope = view === 'snapshot' ? ' (followed by reach/impact with --dispatch bound, the default)' : '';
+  if (bound + boundPartial > 0) {
+    result.push(`bound-dispatch: ${bound + boundPartial} call(s) through interface-typed receivers are linked by bound edges${scope}: every value observed flowing into the receiver within the scanned project is a project implementation; reflection, computed-key writes, and code outside the scan are not modeled`);
+  }
+  const hasInterfaceGaps = calls.unresolved.interface + (gaps.partial.interface ?? 0) > 0;
+  if (openProgram !== undefined && hasInterfaceGaps) {
+    const reason = openProgram === 'public-package' ? 'package.json declares public entry points'
+      : openProgram === 'unreadable-manifest' ? 'package.json could not be read as a JSON object within 1 MiB' : 'the scan is incomplete';
+    result.push(`bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`);
+  }
+  if (view !== 'bound' && candidate + candidatePartial > 0) {
+    const candidateScope = view === 'snapshot' ? ' (followed only with --dispatch candidates)' : '';
+    result.push(`candidate-dispatch: ${candidate + candidatePartial} call(s) whose receiver flows could not all be proven are linked to every project class or object that implements or is assignable to the receiver type${candidateScope}; these edges over-approximate`);
   }
   return result;
 }
