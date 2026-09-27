@@ -24,8 +24,8 @@
   진입점·진입점 파일의 내보내기·동적 import 대상·메서드와 콜백의 매개변수·값으로 새어 나간 함수·데코레이터 클래스는
   열린 자리로 보고, 공개 패키지(`package.json` main·exports 등)나 불완전한 스캔에서는 모든 내보내기와 비공개가 아닌
   속성도 연다. 테스트 소스는 별개 프로그램으로 보아 목이 운영 호출의 bound를 막지 않게 한다. 자기 순환 자리
-  (`this.store = this.store.withCache()`)는 고정점까지 되풀이하고, 속성 쓰기·메서드 떼어 내기는 구조적 대입 가능성으로
-  판정하며, 반사적 쓰기·메서드 데코레이터·mixin·`bind`·재내보내기 배럴을 거친 동적 import도 열린 자리로 본다.
+  (`this.store = this.store.withCache()`)는 고정점까지 되풀이하고, 속성 쓰기·메서드 떼어 내기는 두 클래스가 모두 명목
+  (비공개·보호·`#` 멤버)이고 서로 대입될 수 없을 때만 제외하며, 반사적 쓰기·메서드 데코레이터·mixin·`bind`·재내보내기 배럴을 거친 동적 import도 열린 자리로 본다.
 - 간선 근거 `evidence`(`direct`·`bound`·`candidate`)를 스냅샷에 싣고, 노드별 모드별 미해석 호출 수
   `unresolvedCalls`를 더한다. `graphRevision`이 둘을 덮는다.
 - reach·impact `--dispatch direct|bound|candidates`(기본 `bound`)와 language-traversal v1 선택 필드: 문서 `dispatch`,

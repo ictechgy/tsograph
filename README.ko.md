@@ -500,8 +500,9 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 프로젝트 하위 클래스), 변수 초기값과 모든 대입, 매개변수(기본값과, 함수 선언·`const`에 담긴 함수·생성자의 모든
 호출 위치의 같은 자리 인자 — `super(...)`와 생성자 없는 하위 클래스의 암묵 `super` 포함), 객체 구조 분해, 객체
 리터럴·클래스 인스턴스의 속성(초기값·매개변수 속성·getter 반환값, 그리고 쓰기 수신자 타입에 그 값이 올 수 없는 경우를
-뺀 모든 같은 이름 속성 쓰기 — `isTypeAssignableTo`로 본 구조적 대입 가능성이라, 구조가 맞는 다른 클래스 타입을 거친
-쓰기도 세고 `any`·`unknown`·제약 없는 타입 매개변수도 센다), 호출한 함수의 반환 값(인터페이스 타입 팩터리는 수신자
+뺀 모든 같은 이름 속성 쓰기 — 쓰기가 값의 클래스처럼 `private`·`protected`·`#` 멤버를 가진 클래스의 멤버로 해석되고 두
+클래스가 서로 어느 쪽으로도 대입될 수 없을 때만 뺀다. 구조적 대입·배열 공변성·메서드 매개변수 이변성 때문에 그 밖의
+타입은 값에 닿을 수 있다), 호출한 함수의 반환 값(인터페이스 타입 팩터리는 수신자
 값으로 푼다), `await`·`?:`·`??`·`||`·`&&`·쉼표 연산자. 호출·속성을 거쳐 자기 자신에게 흘러드는 자리
 (`this.store = this.store.withCache()`, 재귀 래퍼)는 고정점까지 되풀이한다. `new ItemHandler({ store: new SqlItemStore(client) })`,
 `createLookup({ store })`, `new ItemService(sql)`, 기본 매개변수 DI(`store: ItemStore = new MemoryItemStore()`),
@@ -519,8 +520,9 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   `import()`/`require()`로 불리거나 네임스페이스가 값으로 쓰인 모듈의 내보내기, 메서드·객체 리터럴 멤버·콜백의
   매개변수(호출자를 다 셀 수 없다), 호출 대상 밖에서 참조된 함수·클래스(값으로 넘김, `.call`/`.bind`, JSX, 태그
   템플릿), 데코레이터가 붙은 클래스(DI 컨테이너가 만든다)와 데코레이터가 붙은 메서드·필드·접근자, `new this()`를 쓰는
-  클래스, `new`·`extends`·static 접근 밖에서 값으로 쓰인 클래스(mixin이 하위 클래스를 만들 수 있다)의 `this`, 그 클래스를
-  담을 수 있는 타입으로 호출 대상 밖에서 읽힌 메서드(`h.run.bind(x)`, `const { run } = h`)의 `this`, 불러온 모듈에서
+  클래스, `new`·`extends`·static 접근 밖에서 값으로 쓰인 클래스(mixin이 하위 클래스를 만들 수 있다)의 `this`, 이름이 같은
+  멤버가 호출 대상 밖에서 읽히는(`h.run.bind(x)`, `const { run } = h`, `({ run } = h)`) 메서드의 `this`(같은 명목 규칙으로
+  그 읽기가 클래스에 닿지 않음을 증명하지 못하면), 불러온 모듈에서
   재내보내기 배럴(`export *`·`export { x } from`·`export * as ns`)로 닿는 내보내기, `declare`한 값.
   `package.json`이 `main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`를 선언한 패키지(또는 1 MiB 안에서
   JSON 객체로 읽지 못하는 `package.json`)이거나 스캔이
@@ -529,7 +531,8 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다.
 - **모델링하지 않음**(문서화한 공백): 계산된 키 쓰기(`obj[key] = v`), 프로토타입 조작, `eval`, 값의 타입을 속이는
   형변환(`x as unknown as Other`), 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
-  않으면 그 타입은 오류 타입이라 `any`로 세어, 더 많은 쓰기·멤버 읽기가 모든 값에 닿는다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
+  않으면 그 타입은 오류 타입이라 `any`로 센다. 그래서 프로젝트 다른 곳의 같은 이름 쓰기·메서드 읽기가 관계없는 클래스의
+  bound를 막을 수 있다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
   로더(`import.meta.glob`·`require.context`)는 모든 내보내기를 연다. `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·`Reflect.defineProperty`의
   대상은 보수적으로 다룬다(그 속성·멤버는 모름, 정적으로 해석한 멤버 호출도 포함). 메서드를 바꾸는 같은 이름 속성 쓰기(몽키 패치)가 있으면 그 메서드는
   bound하지 않는다.
