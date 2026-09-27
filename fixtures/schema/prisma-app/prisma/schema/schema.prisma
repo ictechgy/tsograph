@@ -1,0 +1,10 @@
+// 합성 fixture 스키마 — 다중 파일 스키마의 generator·datasource 파일이다.
+generator client {
+  provider        = "prisma-client"
+  output          = "../../src/generated/prisma"
+  previewFeatures = ["typedSql"]
+}
+
+datasource db {
+  provider = "postgresql"
+}

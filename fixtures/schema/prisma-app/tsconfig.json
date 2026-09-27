@@ -1,0 +1,8 @@
+{
+  // 합성 fixture — 경로 별칭 해석을 검증한다.
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "paths": { "@/*": ["./src/*"] },
+  },
+}
