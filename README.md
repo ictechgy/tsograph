@@ -20,6 +20,7 @@ own language; isthmus joins the documents.
 | `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
 | TypeORM, Sequelize, Drizzle, Knex, raw drivers, D1 relation-use facts | Planned (counted as limitations today) |
 | `tsograph graph` / `reach` / `impact`: TypeScript/JavaScript call graph → isthmus `language-traversal` v1 | Implemented |
+| Interface / dependency-injection dispatch: `bound` and `candidate` edges, `--dispatch`, per-root `evidence`, `unresolvedCalls` | Implemented |
 | Web/React Native client route-calls | Planned |
 
 The isthmus `http` target is still a **draft** in isthmus `docs/GRAPH-EXCHANGE.md`
@@ -537,8 +538,8 @@ reports no errors (one expected `relation-decl-without-use-unverified` warning f
 
 ```sh
 tsograph graph  --project <root> [--generated-at <timestamp>] [--format json]
-tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
-tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--generated-at <timestamp>] [--format json] <id>...
+tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
 ```
 
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
@@ -547,8 +548,9 @@ defaults; `allowJs` is always on). The analyzed code is never executed and no di
 computed.
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
-  `nodes` (`id`, `kind`, `location`, optional `entries`), `edges` (`from`, `to`, `kinds`),
-  `statistics`, `limitations`, `graphRevision`, and `revision` when readable.
+  `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`
+  (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `graphRevision`, and `revision`
+  when readable. The snapshot holds every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)).
 - `reach` writes the symbols reachable from the root ids (`direction: "dependencies"`), and
   `impact` the symbols that reach them (`direction: "dependents"`), as isthmus
   [`language-traversal` v1](https://github.com/ictechgy/isthmus/blob/main/docs/LANGUAGE-TRAVERSAL.md).
@@ -586,10 +588,12 @@ re-exports (including `export *`), path aliases, value aliases (`const h = g`), 
 (`const { GET } = handlers`, `const { f } = await import('./m')`), and object-literal members.
 Nothing is guessed:
 
-- A method called through an interface or type-literal signature is linked only when the receiver is
-  a `const` variable or `readonly` field initialized with `new C()` or an object literal (the
-  implementation is then proven). A union receiver links every member that has a body; unproven
-  parts are counted under `partial-dispatch:`.
+- A method called through an interface or type-literal signature is linked `direct` only when the
+  receiver is a `const` variable or `readonly` field initialized with `new C()` or an object literal
+  (the implementation is then proven). A union receiver links every member that has a body; unproven
+  parts are counted under `partial-dispatch:`. The remaining interface calls go to
+  [interface dispatch](#interface-dispatch-bound-and-candidate-edges), which adds `bound` or
+  `candidate` edges instead of guessing.
 - A call to a method that subclasses override is linked to the statically resolved declaration
   only and counted under `overridden-methods:`.
 - Calls through parameters, `any`, computed callees, non-function values, and unresolvable
@@ -597,6 +601,74 @@ Nothing is guessed:
 - Calls through packages whose type declarations cannot be resolved (dependencies not installed,
   untyped packages) are external and counted under `missing-dependencies:`.
 - Module scopes are not linked from importers (import-time side effects stay on the `<module>` node).
+
+### Interface dispatch (bound and candidate edges)
+
+Every edge carries an `evidence` tier. The tiers nest: the `direct` graph ⊂ the `bound` graph ⊂ the
+`candidate` graph.
+
+| `evidence` | Meaning |
+|---|---|
+| `direct` | The target is proven by checker symbols (or by the receiver's fixed initializer, above). |
+| `bound` | A call through an interface-typed or structurally typed receiver (`this.deps.store.findItem()`, `repository.save()`) where **every value observed flowing into the receiver** within the scanned project is an instance of a project class or a project object literal, and the method resolves on each of them to a project declaration with a body. One edge per distinct implementation. |
+| `candidate` | The flows could not all be proven, so the call is linked to every project class or object that could implement it: classes that declare `implements` for the receiver's interface (directly, through a base class, or through an extending interface), and classes and object literals whose type is assignable to the receiver type (`TypeChecker.isTypeAssignableTo`, public in the pinned TypeScript 5.9.3; a type-parameter receiver uses its constraint). An over-approximation. |
+
+How `bound` values are found (whole program, context- and path-insensitive): `new C(...)`, object
+literals, `this` (the enclosing class and its project subclasses), variable initializers plus every
+assignment, parameters (default value plus the same-position argument at every call site of a
+function declaration, a `const`-bound function, or a constructor, including `super(...)` and the
+implicit `super` of subclasses without a constructor), object destructuring, properties of object
+literals and class instances (initializer, parameter property, getter return, plus every same-named
+property write anywhere unless its target resolves to a member of an unrelated project class), return
+values of called functions (interface-typed factories are resolved through their receiver's values),
+`await`, `?:`, `??`, `||`, `&&`, and the comma operator. Composition roots such as
+`new ItemHandler({ store: new SqlItemStore(client) })`, `createLookup({ store })`, `new ItemService(sql)`,
+default-parameter DI (`store: ItemStore = new MemoryItemStore()`), and module singletons created by a
+factory are followed across modules.
+
+What `bound` guarantees, and what it does not:
+
+- **Guarantees**, under the assumptions below: no implementation that can run at the call site is
+  missing, and every linked implementation is observed flowing into the receiver somewhere in the
+  project.
+- **Does not guarantee** that each linked implementation runs on every path or from every caller: the
+  flow is context-insensitive, so a shared handler assembled at two composition roots with two stores is
+  bound to both stores (`fixtures/graph/di-dispatch`: `ItemHandler.get` → `SqlItemStore.findItem` and
+  `MemoryItemStore.findItem`). Dead composition roots count.
+- **Assumption: the scanned project is the whole program.** Where code outside the scan can inject
+  values, the flow is treated as unknown and no `bound` edge is emitted: parameters of entry points
+  (and of the functions an entry export aliases or references), exports of entry files, exports of
+  modules loaded with a dynamic `import()`/`require()` or used as a namespace value, parameters of
+  methods, object-literal members, and callbacks (their callers cannot be enumerated), functions and
+  classes referenced other than as a callee (passed as a value, `.call`/`.bind`, JSX, tagged templates),
+  classes with decorators (DI containers construct them), classes that call `new this()`, and
+  `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
+  `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
+  1 MiB), or an incomplete scan (skipped, oversized, unreadable, or
+  symlinked files, or parse errors), additionally opens every exported function and class and every
+  non-private property; the document then says so under `bound-dispatch:`. An exported function whose
+  callers are all in the project is closed; one with no project caller has no observed flow and is not
+  bound.
+- **Not modeled** (documented gaps): writes through computed keys (`obj[key] = v`), prototype mutation,
+  `eval`, values that leave the project through library code and come back, and properties that
+  library code mutates. Dynamic `import()`/`require()` with a non-string specifier and file-pattern
+  loaders (`import.meta.glob`, `require.context`) open every export. `Object.assign`,
+  `Object.defineProperty(ies)`, `Reflect.set`, and `Reflect.defineProperty` targets are handled
+  conservatively (their properties become unknown). A same-named property write that replaces a
+  method (monkey patching) blocks `bound` for that method.
+- **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
+  `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the
+  program without test sources, so mocks injected by unit tests do not block production edges. Call
+  sites inside test sources use the whole project. If a non-test file imports a test source, the whole
+  project is used everywhere.
+- Each flow query has a budget (20,000 steps, 256 nested slots); a query over budget is unknown.
+
+`unresolvedCalls` counts, per node and per mode, the node's own call sites (calls, `new`, tagged
+templates, decorators, JSX) that have no edge or only a partial set of targets under that mode:
+`direct` counts every such site, `bound` drops the interface calls linked by `bound` edges, and
+`candidates` also drops those linked by `candidate` edges. Calls into dependencies are external, not
+unresolved. Callback invocations through parameters are counted even though the caller's `callback`
+edge covers the reach.
 
 ### Entry points
 
@@ -617,12 +689,28 @@ missing routes.
 
 ### language-traversal output
 
-- `roots[]`: `{ id, symbol: { usr, qualifiedName } }` in input order.
-- `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships }`,
-  sorted by (`depth`, `usr`). `depth` is the shortest distance to any root, `via` the previous
+- `dispatch`: the mode used (`--dispatch`, default `bound`). `direct` follows `direct` edges only (the
+  behavior before dispatch), `bound` follows `direct` and `bound`, `candidates` follows all edges.
+  Emitting `dispatch` declares, per the contract, that every reached symbol carries `evidence` and that
+  every root and reached symbol with at least one unresolved call carries `unresolvedCalls`.
+- `roots[]`: `{ id, symbol: { usr, qualifiedName }, unresolvedCalls? }` in input order.
+- `reached[]`: `{ symbol: { usr, qualifiedName, kind, location }, via, depth, roots, relationships,
+  evidence, unresolvedCalls? }`, sorted by (`depth`, `usr`). `depth` is the shortest distance to any root, `via` the previous
   symbol on a shortest path from the nearest root (ties: the smallest root index, then the smallest
   predecessor id; a root id at depth 1), `roots` every root index that reaches the symbol,
-  `relationships` the edge kinds between `via` and the symbol.
+  `relationships` the edge kinds between `via` and the symbol (merged across evidence tiers allowed
+  by the mode). `depth`, `via`, `roots`, and `relationships` are measured over the full graph the mode
+  allows.
+- `evidence` is a **per-root lower bound**: for each root that reaches the symbol within `--max-depth`
+  (every such root, including roots elided by the 64-index cap, never the symbol itself), take the
+  strongest tier whose graph alone reaches the symbol from that root within `--max-depth`; `evidence`
+  is the weakest of those. `"direct"` therefore means every root reaching the symbol does so through
+  `direct` edges only. The shortest path of a tier can differ from the `via` chain. Roots that cannot
+  reach the source of any non-`direct` edge within the depth budget reach every symbol identically in
+  all tiers; the others are compared exactly with one bit per root.
+- `unresolvedCalls` (1–1,000,000, omitted when 0) is the node's per-mode count described
+  [above](#interface-dispatch-bound-and-candidate-edges). A root that is also reached carries the same
+  value in `roots[]` and `reached[]`.
 - A root that is reached from **another** root is listed in `reached` too (a handler A calling a
   helper H that is also a root lists H with `roots: [indexA]`). Its `roots` never contains its own
   index, and its `depth`/`via` are measured from those other roots (`via` may be another root id).
@@ -638,10 +726,15 @@ missing routes.
   indices overflow (`rootsTruncated: true`), the `depth` reason is reported when a symbol is missing
   because of the depth limit, not when only one root's provenance was cut; in a document also cut by
   `max-reached`, overflow on dropped symbols still sets `rootsTruncated`.
-- `graphRevision` is `sha256:` over node ids, kinds, entries, and edges (locations excluded), so
-  `graph`, `reach`, and `impact` over the same graph agree. `revision` is the project root's git
+- `graphRevision` is `sha256:` over node ids, kinds, entries, per-mode unresolved-call counts, and edges
+  with their evidence (locations excluded), so `graph`, `reach`, and `impact` over the same graph agree
+  whatever the `--dispatch` mode. `revision` is the project root's git
   `HEAD` commit read from `.git` (working-tree changes are not reflected).
-- `limitations` carries the graph's limitations plus the document-scoped `non-http-entries:`.
+- `limitations` carries the graph's limitations for the mode plus the document-scoped
+  `non-http-entries:`. The `unresolved-calls:` and `partial-dispatch:` counts exclude the interface
+  calls the mode links, and `bound-dispatch:`/`candidate-dispatch:` report how many calls the mode's
+  dispatch edges link. The snapshot counts `unresolved-calls:` in the `direct` sense and lists both
+  dispatch lines.
 - `--generated-at` fixes `generatedAt` for byte-identical output.
 
 Example (synthetic `fixtures/graph/next-prisma`, trimmed):
@@ -655,23 +748,24 @@ tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00
   "direction": "dependencies",
   "format": "language-traversal",
   "generatedAt": "2026-09-27T00:00:00.000Z",
-  "graphRevision": "sha256:929a5ac7…",
+  "dispatch": "bound",
+  "graphRevision": "sha256:8af7fab5…",
   "limitations": ["unresolved-calls: 6 call(s) could not be linked to a project declaration and were not guessed (parameter: 1, interface: 1, untyped: 1, computed: 1, indirect: 1, unresolved-import: 1)", "…"],
   "platform": "js",
   "project": "/work/example",
   "reached": [
-    { "depth": 1, "relationships": ["call"], "roots": [0],
+    { "depth": 1, "evidence": "direct", "relationships": ["call"], "roots": [0],
+      "symbol": { "kind": "function", "location": { "column": 17, "line": 3, "path": "src/lib/hof.ts" },
+                  "qualifiedName": "src/lib/hof.ts#withAuth", "usr": "src/lib/hof.ts#withAuth" },
+      "unresolvedCalls": 1, "via": "src/app/api/jobs/route.ts#POST" },
+    { "depth": 1, "evidence": "direct", "relationships": ["call"], "roots": [0],
       "symbol": { "kind": "function", "location": { "column": 23, "line": 8, "path": "src/lib/jobs.ts" },
                   "qualifiedName": "src/lib/jobs.ts#createJob", "usr": "src/lib/jobs.ts#createJob" },
       "via": "src/app/api/jobs/route.ts#POST" },
-    { "depth": 2, "relationships": ["call"], "roots": [0],
+    { "depth": 2, "evidence": "direct", "relationships": ["call"], "roots": [0],
       "symbol": { "kind": "function", "location": { "column": 23, "line": 3, "path": "src/lib/audit.ts" },
                   "qualifiedName": "src/lib/audit.ts#audit", "usr": "src/lib/audit.ts#audit" },
-      "via": "src/lib/jobs.ts#createJob" },
-    { "depth": 2, "relationships": ["new"], "roots": [0],
-      "symbol": { "kind": "constructor", "location": { "column": 3, "line": 14, "path": "src/lib/repository.ts" },
-                  "qualifiedName": "src/lib/repository.ts#JobStore.constructor", "usr": "src/lib/repository.ts#JobStore.constructor" },
-      "via": "src/lib/repository.ts#saveProven" }
+      "via": "src/lib/jobs.ts#createJob" }
   ],
   "roots": [{ "id": "src/app/api/jobs/route.ts#POST",
               "symbol": { "qualifiedName": "src/app/api/jobs/route.ts#POST", "usr": "src/app/api/jobs/route.ts#POST" } }],
@@ -684,11 +778,41 @@ tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00
 Joined with the relation-use facts of `tsograph schema` (`symbol.usr` ∈ reach set ∪ {handler}),
 `POST /api/jobs` touches `jobs` and `AuditLog`. The same documents pass the isthmus
 `language-traversal` parser and `isthmus trace` (route selection with a `forward` analysis, symbol
-selection with a `reverse` analysis) on the `feature/trace-language-traversal` consumer.
+selection with a `reverse` analysis) on the `feature/trace-language-traversal` consumer; documents
+with `dispatch`, `evidence`, and `unresolvedCalls` pass the parser on the `feature/trace-evidence-tiers`
+consumer.
+
+Dispatch example (synthetic `fixtures/graph/di-dispatch`, trimmed): `GET /api/items` calls
+`primaryHandler.get()`, whose `this.deps.store.findItem()` goes through the `ItemStore` interface.
+`PATCH` takes its store as a parameter that Next.js fills, so its flow is unknown.
+
+```sh
+tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#GET' 'src/app/api/items/route.ts#PATCH'
+```
+
+```json
+{
+  "dispatch": "bound",
+  "reached": [
+    { "depth": 1, "evidence": "direct", "roots": [0], "symbol": { "usr": "src/lib/handler.ts#ItemHandler.get", "…": "…" }, "via": "src/app/api/items/route.ts#GET" },
+    { "depth": 2, "evidence": "bound", "roots": [0], "symbol": { "usr": "src/lib/store.ts#SqlItemStore.findItem", "…": "…" }, "via": "src/lib/handler.ts#ItemHandler.get" },
+    { "depth": 3, "evidence": "bound", "roots": [0], "symbol": { "usr": "src/lib/store.ts#SqlClient.query", "…": "…" }, "via": "src/lib/store.ts#SqlItemStore.findItem" }
+  ],
+  "roots": [
+    { "id": "src/app/api/items/route.ts#GET", "symbol": { "…": "…" } },
+    { "id": "src/app/api/items/route.ts#PATCH", "symbol": { "…": "…" }, "unresolvedCalls": 1 }
+  ]
+}
+```
+
+With `--dispatch direct` the store methods are not reached; with `--dispatch candidates` `PATCH` also
+reaches both stores and `SqlClient.query` becomes `"candidate"` (PATCH reaches it only through a
+candidate edge).
 
 ### Graph limitation prefixes
 
-`unresolved-calls:`, `partial-dispatch:`, `overridden-methods:`, `missing-dependencies:`,
+`unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`,
+`overridden-methods:`, `missing-dependencies:`,
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`.
 Counts only; no source text or absolute paths.

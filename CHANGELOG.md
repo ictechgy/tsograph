@@ -16,6 +16,24 @@
 
 ### Added
 
+- 인터페이스·의존성 주입 디스패치: 인터페이스·구조 타입 수신자로 부른 메서드 호출(`this.deps.store.findX()`,
+  `deps.repository.save()`)을 요구 기반 전체 프로그램 값 흐름으로 잇는다. 수신자로 흘러드는 관찰된 값이 모두
+  프로젝트 클래스 인스턴스·객체 리터럴이면 구현마다 `bound` 간선을, 하나라도 모르면(`any`·외부 값·스캔 밖 호출자)
+  bound 없이 `implements`하거나 수신자 타입에 대입 가능한(`TypeChecker.isTypeAssignableTo`) 프로젝트 구현 전부로
+  `candidate` 간선을 낸다. deps 객체·생성자 매개변수·팩터리·기본 매개변수·모듈 싱글턴·`super` 인자를 따라간다.
+  진입점·진입점 파일의 내보내기·동적 import 대상·메서드와 콜백의 매개변수·값으로 새어 나간 함수·데코레이터 클래스는
+  열린 자리로 보고, 공개 패키지(`package.json` main·exports 등)나 불완전한 스캔에서는 모든 내보내기와 비공개가 아닌
+  속성도 연다. 테스트 소스는 별개 프로그램으로 보아 목이 운영 호출의 bound를 막지 않게 한다.
+- 간선 근거 `evidence`(`direct`·`bound`·`candidate`)를 스냅샷에 싣고, 노드별 모드별 미해석 호출 수
+  `unresolvedCalls`를 더한다. `graphRevision`이 둘을 덮는다.
+- reach·impact `--dispatch direct|bound|candidates`(기본 `bound`)와 language-traversal v1 선택 필드: 문서 `dispatch`,
+  `reached[].evidence`(깊이 상한 안에서 닿는 모든 root — 64개 상한으로 빠진 root 포함 — 각각의 가장 강한 등급 중
+  가장 약한 것, root별 하한), `reached[].unresolvedCalls`·`roots[].unresolvedCalls`(1~1,000,000, 0이면 생략, root가
+  도달 정점이기도 하면 같은 값). 등급 비교는 약한 간선 출발점에 닿는 root만 비트 집합으로 정확히 구한다. 단일 패스
+  오라클 테스트를 등급까지 넓혔다. isthmus `feature/trace-evidence-tiers` 파서로 검증했다.
+- limitation `bound-dispatch:`·`candidate-dispatch:`. reach·impact 문서의 `unresolved-calls:`·`partial-dispatch:`
+  인터페이스 계수는 모드가 이은 호출을 뺀다(스냅샷은 direct 기준).
+- 합성 fixture `fixtures/graph/di-dispatch`(주입 방식별 bound, 여러 조립 지점의 여러 구현, 증명하지 못하는 자리).
 - reach·impact 순회를 root별 탐색에서 다중 출발 단계 동기 단일 패스로 바꾼다(root 10,000개 × 정점 2만 개
   합성 그래프에서 37.2초 → 4.4초). 더 작은 root 65개를 가진 심볼에서 큰 root 전파를 멈추고, via 동률은
   작은 root 인덱스 → 작은 선행 id로 정한다. 옛 알고리즘을 오라클로 둔 무작위 비교 테스트를 더한다.
