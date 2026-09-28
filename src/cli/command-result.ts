@@ -11,7 +11,7 @@
  * - 0: 성공(사실이 0건이어도 성공이다 — 완전성의 증거가 아니다)
  * - 1: 예약(발견 사항으로 실패시키는 명령이 생길 때 쓴다. 현재 명령은 내지 않는다)
  * - 2: 입력·도구 실패(읽을 수 없거나 잘못된 입력)
- * - 64: 사용법 오류(잘못된 호출)
+ * - 64: 사용법 오류(잘못된 호출). reach·impact의 root-not-found는 문서를 표준 출력에 낸 뒤 64다
  */
 export type ExitCode = 0 | 1 | 2 | 64;
 
@@ -40,6 +40,21 @@ export function success(standardOutput: string): CommandResult {
  */
 export function usageFailure(usage: string): CommandResult {
   return { standardOutput: '', standardError: usage, exitCode: 64 };
+}
+
+/**
+ * 문서를 내면서도 사용법 오류(종료 코드 64)로 끝나는 결과를 만든다.
+ *
+ * reach·impact가 그래프 노드가 아닌 root id를 받았을 때 쓴다. 계약(isthmus `language-traversal` v1)은 그런 root를
+ * 문서 안 `root-not-found`로 기록하게 하고, 형제 생산자(cartograph·kartograph)는 문서를 낸 뒤 64로 끝난다. 호출자는
+ * 표준 출력이 비었는지로 순수 사용법 오류와 구별한다.
+ *
+ * @param standardOutput 표준 출력에 쓸 문서
+ * @param message 표준 오류에 쓸 안내. 끝 개행을 포함한다.
+ * @returns 종료 코드 64 결과
+ */
+export function usageFailureWithOutput(standardOutput: string, message: string): CommandResult {
+  return { standardOutput, standardError: message, exitCode: 64 };
 }
 
 /**

@@ -128,7 +128,7 @@ function verifySchema() {
   }
 }
 
-/** graph·reach·impact가 결정적인 문서를 내고 0/2/64 계약(모르는 id는 64)을 지키는지 확인한다. */
+/** graph·reach·impact가 결정적인 문서를 내고 0/2/64 계약(모르는 id는 문서를 낸 뒤 64)을 지키는지 확인한다. */
 function verifyGraph() {
   const graphArgs = ['graph', '--project', graphFixture, '--format', 'json'];
   const first = run(graphArgs);
@@ -145,8 +145,13 @@ function verifyGraph() {
     verify(document.format === 'language-traversal' && document.version === 1 && document.direction === direction, `${command} envelope`);
     verify(document.graphRevision === snapshot.graphRevision, `${command} graphRevision`);
     verify(withoutGeneratedAt(result.stdout) === withoutGeneratedAt(run(args).stdout), `${command} determinism`);
-    verify(run([command, '--project', graphFixture, 'src/nope.ts#missing']).status === 64, `${command} unknown id`);
-    verify(run([command, '--project', graphFixture]).status === 64, `${command} missing id`);
+    const unknown = run([command, '--project', graphFixture, 'src/nope.ts#missing', root]);
+    verify(unknown.status === 64, `${command} unknown id exit code`);
+    const partial = JSON.parse(unknown.stdout);
+    verify(partial.roots[0].id === 'src/nope.ts#missing' && partial.roots[0].symbol === undefined
+      && partial.roots[1].symbol?.usr === root && partial.truncationReasons.includes('root-not-found'), `${command} root-not-found document`);
+    const missing = run([command, '--project', graphFixture]);
+    verify(missing.status === 64 && missing.stdout === '', `${command} missing id`);
     verify(run(['help', command]).stdout.startsWith(`Usage: tsograph ${command}`), `${command} help`);
   }
   verify(run(['graph']).status === 64, 'graph missing project');
