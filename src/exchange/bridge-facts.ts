@@ -132,4 +132,25 @@ export interface RouteDeclDocument {
   readonly project: string;
   readonly facts: readonly RouteDeclFact[];
   readonly limitations: readonly string[];
+  /** 한계 하나가 가릴 수 있는 요청의 보수적 상한. 증명한 항목이 있을 때만 싣는다. */
+  readonly limitationScopes?: readonly HttpLimitationScope[];
+}
+
+/**
+ * http 문서의 limitation 스코프 항목이다(isthmus GRAPH-EXCHANGE "http limitation 스코프").
+ *
+ * 스코프는 그 한계가 가릴 수 있는 **모든** 요청을 포함하는 상한이어야 한다. 소비자는 스코프 밖의 호출에
+ * 그 한계를 적용하지 않으므로, 상한을 증명하지 못한 한계는 항목을 생략해 문서 전체 효과로 둔다.
+ */
+export interface HttpLimitationScope {
+  /** 같은 문서 `limitations` 배열의 0부터 시작하는 인덱스다. */
+  readonly limitationIndex: number;
+  /** 정확한 정규 템플릿 집합이다. */
+  readonly templates?: readonly string[];
+  /** 세그먼트 경계의 root 접두사다(`/`는 모든 경로). */
+  readonly templatePrefixes?: readonly string[];
+  /** 알 수 없는 앞부분 뒤의 세그먼트 경계 접미사다. */
+  readonly templateSuffixes?: readonly string[];
+  /** 생략하면 모든 method다. */
+  readonly methods?: readonly HttpMethod[];
 }
