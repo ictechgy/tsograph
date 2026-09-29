@@ -20,7 +20,9 @@
   Sequelize·Drizzle·Knex·raw 드라이버·D1), 웹/RN 클라이언트 route-call.
   구현된 것과 계획을 구분해 적는다.
 - 정규 경로 템플릿 규칙은 isthmus 공유 벡터(`conformance/http-template.json`)와 맞춘다.
-  벡터가 생기면 `src/openapi/conformance.test.ts`가 검증한다.
+  벡터가 생기면 `src/openapi/conformance.test.ts`가 검증한다. http limitation 스코프는
+  `conformance/http-limitation-scope.json`의 `scope.validate` 사례로 `src/exchange/http-limitation-scope.test.ts`가
+  검증한다. 스코프는 한계가 가릴 수 있는 모든 요청의 상한일 때만 싣고, 증명하지 못하면 생략한다.
 - MIT·영구 무료·텔레메트리 없음. 네트워크를 쓰지 않고, 분석 대상 코드를 실행하지 않는다.
 - 관찰 근거와 `limitations`를 보존한다. 빈 결과·코드 0을 완전성의 증거로 삼지 않는다.
   확정하지 못한 값은 추측해 정적 사실로 내지 않고 `dynamic`·`pathAnchor: "base"`·limitation으로 낸다.

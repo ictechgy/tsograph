@@ -37,6 +37,7 @@ interface RoutesDocumentView {
     symbol: { qualifiedName: string; usr?: string };
   }[];
   readonly limitations: string[];
+  readonly limitationScopes?: { limitationIndex: number; templatePrefixes?: string[]; methods?: string[] }[];
 }
 
 /** 명령을 실행한다. */
@@ -95,12 +96,18 @@ test('App Router fixture: 내보내기 형태·group·catch-all·비ASCII·미�
   assert.deepEqual(document.facts.filter((fact) => fact.catchAllPrefix === true).map((fact) => fact.channel), ['/api/docs']);
   assert.deepEqual(document.limitations, [
     'framework-provided-routes: 2 metadata file(s) under the app directory (sitemap, robots, manifest, icons, Open Graph or Twitter images) serve framework-generated routes that are not modeled',
+    'framework-provided-routes: Next.js serves build assets and internal endpoints under /_next after basePath (static files, image optimization, data routes); they are not modeled',
     'framework-provided-routes: src/proxy.ts can answer or rewrite requests before file routing (Next.js proxy/middleware); those paths are not modeled',
     'framework-provided-routes: the public/ directory serves static files at the site root; they are not modeled',
     'route-coverage: 1 route file(s) have a segment that mixes brackets with other text, which Next.js does not document; their facts are dynamic',
     'route-coverage: 1 route file(s) have syntax errors; their exported handlers may be incomplete',
     'route-coverage: 1 route file(s) use export * or CommonJS exports whose names cannot be enumerated statically; their HTTP method handlers may be incomplete',
     'route-coverage: 2 route file(s) are under parallel-route slots (@name) or intercepting-route segments ((.)name), which Next.js documents for pages only; they were not modeled',
+  ]);
+  // proxy·메타데이터는 상한을 증명하지 못해 문서 전체 효과로 남고, /_next와 public만 좁힌다.
+  assert.deepEqual(document.limitationScopes, [
+    { limitationIndex: 1, templatePrefixes: ['/_next'] },
+    { limitationIndex: 3, templatePrefixes: ['/'], methods: ['GET', 'HEAD'] },
   ]);
 });
 
@@ -122,9 +129,11 @@ test('Pages Router fixture: ANY, basePath, trailingSlash true, CommonJS 기본 �
   ]);
   assert.deepEqual(document.facts.filter((fact) => fact.catchAllPrefix === true).map((fact) => fact.channel), ['/docs/api/files/']);
   assert.deepEqual(document.limitations, [
+    'framework-provided-routes: Next.js serves build assets and internal endpoints under /_next after basePath (static files, image optimization, data routes); they are not modeled',
     'missing-route-usrs: 1 route declaration(s) come from CommonJS exports and carry no symbol.usr; tsograph graph has no named node for them',
     'route-coverage: 1 pages/api file(s) have no statically visible default export or module.exports assignment; no declaration was emitted for them',
   ]);
+  assert.deepEqual(document.limitationScopes, [{ limitationIndex: 0, templatePrefixes: ['/docs/_next'] }]);
   const withTests = await convertFixture('pages-api', ['--include-tests']);
   assert.deepEqual(withTests.sourceSets, { tests: 'included' });
   assert.ok(routeLines(withTests).includes('ANY root /docs/api/hello.test strict test @ pages/api/hello.test.ts:1:8'));

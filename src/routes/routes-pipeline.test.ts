@@ -16,6 +16,7 @@ import { MAX_SCANNED_ENTRIES } from './project-scan.ts';
 interface DocumentView {
   readonly facts: { method: string; channel: string; dynamic: boolean; pathAnchor: string; trailingSlash?: string; testSource?: boolean; location: { path: string } }[];
   readonly limitations: string[];
+  readonly limitationScopes?: { limitationIndex: number; templatePrefixes?: string[]; methods?: string[] }[];
 }
 
 /** 기본 package.json이다(확인한 Next 주 버전). */
@@ -55,6 +56,9 @@ function lines(document: DocumentView): string[] {
 function limitationsWith(document: DocumentView, prefix: string): string[] {
   return document.limitations.filter((line) => line.startsWith(prefix));
 }
+
+/** 앱이 있으면 항상 내는 `/_next` 제공 경로 limitation이다. */
+const NEXT_ASSETS = 'framework-provided-routes: Next.js serves build assets and internal endpoints under /_next after basePath (static files, image optimization, data routes); they are not modeled';
 
 /** 간단한 GET route 파일 본문이다. */
 const getRoute = 'export async function GET() {\n  return new Response(null);\n}\n';
@@ -98,6 +102,7 @@ test('설정 우선순위는 .js > .mjs > .ts이고 rewrites·i18n은 framework 
     const document = await scan(project);
     assert.deepEqual(lines(document), ['GET root /first strict']);
     assert.deepEqual(limitationsWith(document, 'framework-provided-routes:'), [
+      NEXT_ASSETS,
       'framework-provided-routes: next.config.js declares i18n, rewrites; paths they add, localize, or redirect are not modeled',
     ]);
   });
@@ -189,15 +194,49 @@ test('proxy·middleware·메타데이터·public 근거를 framework-provided-ro
     const document = await scan(project);
     assert.deepEqual(limitationsWith(document, 'framework-provided-routes:'), [
       'framework-provided-routes: 5 metadata file(s) under the app directory (sitemap, robots, manifest, icons, Open Graph or Twitter images) serve framework-generated routes that are not modeled',
+      NEXT_ASSETS,
       'framework-provided-routes: middleware.js can answer or rewrite requests before file routing (Next.js proxy/middleware); those paths are not modeled',
       'framework-provided-routes: the public/ directory serves static files at the site root; they are not modeled',
     ]);
   });
   await withProject({ 'package.json': nextPackage, 'app/route.ts': getRoute }, async (project) => {
     mkdirSync(join(project, 'public'));
+    mkdirSync(join(project, 'static'));
     const document = await scan(project);
-    assert.deepEqual(limitationsWith(document, 'framework-provided-routes:'), []);
+    assert.deepEqual(limitationsWith(document, 'framework-provided-routes:'), [NEXT_ASSETS]);
   });
+});
+
+/** 문서의 스코프를 `한계 접두사 뒤 첫 단어 → 범위` 문자열로 줄인다. */
+function scopeLines(document: DocumentView): string[] {
+  return (document.limitationScopes ?? []).map((scope) => {
+    const subject = document.limitations[scope.limitationIndex]!.split(' ').slice(1, 3).join(' ');
+    return `${subject}: ${scope.templatePrefixes!.join(',')}${scope.methods === undefined ? '' : ` ${scope.methods.join(',')}`}`;
+  });
+}
+
+test('public·static·/_next는 basePath 접두사와 method로 좁히고, 증명하지 못하면 스코프를 생략한다', async () => {
+  const assets = { 'package.json': nextPackage, 'app/api/items/route.ts': getRoute, 'public/logo.png': '', 'static/old.css': '' };
+  const cases: [string | undefined, string[]][] = [
+    [undefined, ['Next.js serves: /_next', 'the public/: / GET,HEAD', 'the static/: /static GET,HEAD']],
+    ["module.exports = { basePath: '/b' };", ['Next.js serves: /b/_next', 'the public/: /b GET,HEAD', 'the static/: /b/static GET,HEAD']],
+    // i18n은 정적 자산을 기본 locale 접두사 아래로도 찾는다. public은 여전히 basePath 아래라 좁힐 수 있다.
+    ["module.exports = { basePath: '/b', i18n: { locales: ['en'], defaultLocale: 'en' } };", ['the public/: /b GET,HEAD']],
+    // assetPrefix는 그 경로 아래 /_next/:path+를 rewrite한다.
+    ["module.exports = { assetPrefix: '/cdn' };", ['the public/: / GET,HEAD', 'the static/: /static GET,HEAD']],
+    // basePath를 확정하지 못하면(감싼 호출·모르는 키·비리터럴·함수 설정) 어떤 스코프도 증명할 수 없다.
+    ["const withX = (c) => c;\nmodule.exports = withX({ basePath: '/w' });", []],
+    ["const extra = require('./extra');\nmodule.exports = { basePath: '/b', ...extra };", []],
+    ['module.exports = { basePath: process.env.BASE };', []],
+    ['module.exports = () => ({});', []],
+  ];
+  for (const [config, expected] of cases) {
+    await withProject(config === undefined ? assets : { ...assets, 'next.config.js': config }, async (project) => {
+      const document = await scan(project);
+      assert.deepEqual(scopeLines(document), expected, config);
+      if (expected.length === 0) assert.equal(document.limitationScopes, undefined, config);
+    });
+  }
 });
 
 test('symlink·읽지 못한 파일·큰 파일·비UTF-8·안전하지 않은 이름을 센다', async () => {

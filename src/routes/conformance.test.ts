@@ -1,8 +1,9 @@
 /**
  * Next.js 경로 변환의 적합성 검사다.
  *
- * 1. 벤더링한 isthmus `conformance/http-template.json`의 `template.grammar` 사례로 테스트용 문법
- *    검사기를 먼저 검증한 뒤, 합성 fixture가 내는 모든 정적 channel이 그 문법을 지키는지 본다.
+ * 1. 벤더링한 isthmus `conformance/http-template.json`의 `template.grammar` 사례로 제품 문법 검사기
+ *    (`src/exchange/route-template-grammar.ts`)를 먼저 검증한 뒤, 합성 fixture가 내는 모든 정적 channel이
+ *    그 문법을 지키는지 본다.
  *    같은 파일의 `template.normalize` 사례(리터럴 정규화)는 정적 세그먼트 변환에 적용한다.
  * 2. Next.js 변환표는 아직 isthmus 벡터에 없다. 확인한 출처(next@16.2.7 패키지의 소스·번들 문서)를
  *    적은 사례를 isthmus 벡터와 같은 모양으로 두어, 나중에 `producer:nextjs` 사례로 올릴 수 있게 한다.
@@ -16,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
+import { isCanonicalTemplate } from '../exchange/route-template-grammar.ts';
 import { classifySegment, toRoutePath } from './next-path.ts';
 
 /** 저장소 루트다. */
@@ -33,57 +35,7 @@ interface VectorCase {
 /** 벤더링한 http-template 사례다. */
 const vectorCases = (JSON.parse(readFileSync(join(repositoryRoot, 'conformance/http-template.json'), 'utf8')) as { cases: VectorCase[] }).cases;
 
-/** pchar 리터럴 문자(퍼센트 제외)다. */
-const literalCharacter = /^[A-Za-z0-9\-._~!$&'()*+,;=:@]$/u;
-
-/**
- * 계약의 정규 템플릿 문법을 검사한다(테스트 전용 참조 구현).
- *
- * @param template 템플릿
- * @returns 유효하면 true
- */
-function isCanonicalTemplate(template: string): boolean {
-  if (!template.startsWith('/') || template.length > 2048) return false;
-  const segments = template.slice(1).split('/');
-  return segments.every((segment, index) => isCanonicalSegment(segment, index === segments.length - 1));
-}
-
-/**
- * 세그먼트 하나의 문법을 검사한다.
- *
- * @param segment 세그먼트
- * @param isLast 마지막 세그먼트인지
- * @returns 유효하면 true
- */
-function isCanonicalSegment(segment: string, isLast: boolean): boolean {
-  if (segment === '{**}') return isLast;
-  const parts = segment.split('{}');
-  if (parts.length > 2) return false;
-  return parts.every(isCanonicalLiteral);
-}
-
-/**
- * 리터럴 조각의 문법(pchar, 대문자 `%XX`, unreserved 비인코딩)을 검사한다.
- *
- * @param literal 리터럴 조각
- * @returns 유효하면 true
- */
-function isCanonicalLiteral(literal: string): boolean {
-  for (let index = 0; index < literal.length; index++) {
-    const character = literal[index]!;
-    if (character !== '%') {
-      if (!literalCharacter.test(character)) return false;
-      continue;
-    }
-    const pair = literal.slice(index + 1, index + 3);
-    if (!/^[0-9A-F]{2}$/u.test(pair)) return false;
-    if (/^[A-Za-z0-9\-._~]$/u.test(String.fromCharCode(Number.parseInt(pair, 16)))) return false;
-    index += 2;
-  }
-  return true;
-}
-
-test('테스트용 문법 검사기는 isthmus template.grammar 사례를 모두 통과한다', () => {
+test('문법 검사기는 isthmus template.grammar 사례를 모두 통과한다', () => {
   const grammar = vectorCases.filter((entry) => entry.ruleId === 'template.grammar');
   assert.ok(grammar.length > 0);
   const failures = grammar.filter((entry) => isCanonicalTemplate(entry.input.template!) !== entry.expect.valid);
