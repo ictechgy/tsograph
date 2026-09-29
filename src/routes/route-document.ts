@@ -9,14 +9,18 @@
  * - `[[...x]]`는 `{**}` decl과 catch-all을 뗀 접두사 decl을 함께 낸다. 접두사 decl은 계약대로
  *   `catchAllPrefix: true`를 단다. isthmus가 이 표식에 `symbol.usr`를 요구하므로 usr가 없으면 표식 없이
  *   일반 decl로 낸다(Next는 같은 자리의 명시 라우트를 빌드 오류 E458로 막아 충돌하지 않는다).
+ * - framework 제공 경로(`public/`, 구 규칙 `static/`, `/_next`)는 경로 접두사와 method로 상한을 증명할 수
+ *   있을 때만 `limitationScopes`로 좁힌다(아래 `frameworkLimitations`).
  */
 
 import {
   type BridgeLocation,
   formatBridgeTimestamp,
+  type HttpLimitationScope,
   type RouteDeclDocument,
   type RouteDeclFact,
 } from '../exchange/bridge-facts.ts';
+import { httpLimitationScopeProblem } from '../exchange/http-limitation-scope.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import type { NextRouteConfig } from './next-config.ts';
 import type { DeclaredRoute, FrameworkSources, NextRoutesResult, RouteGaps } from './next-routes.ts';
@@ -56,6 +60,25 @@ interface BasePathDecision {
   readonly problem: 'unknown' | 'invalid' | undefined;
 }
 
+/** 스코프 항목에서 인덱스를 뺀 요청 상한이다. */
+type LimitationRange = Omit<HttpLimitationScope, 'limitationIndex'>;
+
+/** limitation 문장 하나와, 상한을 증명했으면 그 범위다. */
+interface LimitationEntry {
+  readonly text: string;
+  readonly range?: LimitationRange;
+}
+
+/** framework 제공 경로의 스코프를 만들 때 쓰는 설정 판정이다. */
+interface FrameworkScoping {
+  /** 제공 경로 앞에 붙는 basePath. 설정을 끝까지 확정하지 못했으면 undefined(스코프 생략)다. */
+  readonly basePath: string | undefined;
+  /** i18n이 있어 정적 자산이 기본 locale 접두사 아래로도 제공될 수 있으면 true */
+  readonly hasLocalePrefix: boolean;
+  /** `assetPrefix`가 있어 `/_next` 자산이 다른 접두사로도 제공되면 true */
+  readonly hasAssetPrefix: boolean;
+}
+
 /**
  * route-decl 문서를 조립한다.
  *
@@ -82,7 +105,7 @@ export function createRouteDocument(input: RouteDocumentInput): RouteDeclDocumen
     ...(input.service === undefined ? {} : { service: input.service }),
     project: input.project,
     facts,
-    limitations: buildLimitations(input, decision),
+    ...buildLimitations(input, decision),
   };
 }
 
@@ -178,21 +201,72 @@ function compareFacts(left: RouteDeclFact, right: RouteDeclFact): number {
 }
 
 /**
- * limitation 문장을 모은다. 서버 측 접두사는 계약의 닫힌 목록에서만 쓴다.
+ * limitation 문장과 스코프를 모은다. 서버 측 접두사는 계약의 닫힌 목록에서만 쓴다.
+ *
+ * 스코프의 `limitationIndex`는 정렬한 `limitations`의 위치다. 스코프가 하나도 없으면 필드를 싣지 않는다.
  *
  * @param input 조립 입력
  * @param decision basePath 판정
- * @returns 정렬한 limitation 목록
+ * @returns 정렬한 limitation 목록과 스코프
  */
-function buildLimitations(input: RouteDocumentInput, decision: BasePathDecision): string[] {
-  return [
-    ...configLimitations(input.config, decision),
-    ...frameworkLimitations(input.extraction.frameworkSources),
-    ...gapLimitations(input.extraction.gaps),
-    ...directoryLimitations(input.extraction),
-    ...versionLimitations(input.versionStatus),
-    ...usrLimitations(input.extraction.routes),
-  ].sort(compareStrings);
+function buildLimitations(
+  input: RouteDocumentInput,
+  decision: BasePathDecision,
+): Pick<RouteDeclDocument, 'limitations' | 'limitationScopes'> {
+  const hasRouterDirectory = input.extraction.routerDirectories.appDirectory !== undefined
+    || input.extraction.routerDirectories.pagesDirectory !== undefined;
+  const entries: LimitationEntry[] = [
+    ...frameworkLimitations(input.extraction.frameworkSources, hasRouterDirectory, decideFrameworkScoping(input.config, decision)),
+    ...[
+      ...configLimitations(input.config, decision),
+      ...gapLimitations(input.extraction.gaps),
+      ...directoryLimitations(input.extraction),
+      ...versionLimitations(input.versionStatus),
+      ...usrLimitations(input.extraction.routes),
+    ].map((text) => ({ text })),
+  ].sort((left, right) => compareStrings(left.text, right.text));
+  const limitationScopes = entries.flatMap((entry, limitationIndex) => scopeOf(entry, limitationIndex));
+  return {
+    limitations: entries.map((entry) => entry.text),
+    ...(limitationScopes.length === 0 ? {} : { limitationScopes }),
+  };
+}
+
+/**
+ * 범위가 있는 limitation을 스코프 항목으로 만든다.
+ *
+ * 계약 모양을 어긴 항목은 isthmus가 문서 전체를 거부하므로 내지 않는다. 항목을 빼면 그 한계는 문서 전체에
+ * 적용되어(거짓 error 없음) 안전한 쪽이다. 지금 만드는 범위는 정규화한 basePath로만 이루어져 이 분기에
+ * 닿지 않는 것이 정상이다.
+ *
+ * @param entry limitation 항목
+ * @param limitationIndex 정렬한 limitations 안의 위치
+ * @returns 스코프 항목 0개 또는 1개
+ */
+function scopeOf(entry: LimitationEntry, limitationIndex: number): HttpLimitationScope[] {
+  if (entry.range === undefined) return [];
+  const scope: HttpLimitationScope = { limitationIndex, ...entry.range };
+  return httpLimitationScopeProblem({ ...scope }) === undefined ? [scope] : [];
+}
+
+/**
+ * framework 제공 경로 스코프에 쓸 설정 판정을 만든다.
+ *
+ * 설정 파일을 끝까지 따라가 basePath를 확정했고(감싼 호출·모르는 키 없음) 그 값이 유효할 때만 basePath를
+ * 돌려준다. 감싼 함수나 따라가지 못한 전개가 basePath를 바꿀 수 있으면 접두사 상한을 증명할 수 없다.
+ *
+ * @param config 라우트 설정
+ * @param decision basePath 판정
+ * @returns 스코프 판정
+ */
+function decideFrameworkScoping(config: NextRouteConfig, decision: BasePathDecision): FrameworkScoping {
+  const isConfigComplete = config.unresolvedReason === undefined && !config.hasUnknownKeys
+    && config.wrapperCalls === 0 && decision.problem === undefined;
+  return {
+    basePath: isConfigComplete ? decision.policy.basePath : undefined,
+    hasLocalePrefix: config.frameworkRouteKeys.includes('i18n'),
+    hasAssetPrefix: config.hasAssetPrefix,
+  };
 }
 
 /**
@@ -238,16 +312,38 @@ function configLimitations(config: NextRouteConfig, decision: BasePathDecision):
 /**
  * 파일 라우트 밖 경로 근거의 limitation이다.
  *
+ * 확인한 Next.js 16.2.7 동작(`server/lib/router-utils/filesystem.js`의 `getItem`, `server/lib/router-server.js`):
+ * - basePath가 있으면 그것으로 시작하지 않는 경로는 파일 시스템 항목이 아니고, 뗀 뒤의 경로로 찾는다.
+ * - `public/` 파일은 사이트 루트, 구 규칙 `static/`은 `/static`, 빌드 자산은 `/_next/static`, 이미지 최적화는
+ *   `/_next/image`, Pages Router 데이터 경로는 `/_next/data/<buildId>/`다.
+ * - 파일 시스템 항목(public·static·`/_next/static`)은 GET·HEAD가 아니면 405로 끝난다.
+ * - i18n이 있으면 정적 자산을 기본 locale 접두사 아래로도 찾고, `assetPrefix`가 있으면 그 경로 아래의
+ *   `/_next/:path+`가 rewrite된다(`lib/load-custom-routes.js`).
+ *
+ * 그래서 public은 `[basePath 또는 /]` 접두사 + GET·HEAD(locale 접두사도 basePath 아래다), static은
+ * `basePath/static` + GET·HEAD, `/_next`는 `basePath/_next`(method는 엔드포인트마다 달라 생략)로 좁힌다.
+ * public 파일 목록으로 더 좁히지 않는 이유: 빌드 단계가 `public/`에 파일을 만들 수 있어(서비스 워커·
+ * 사이트맵 생성기 등) 저장소의 목록이 제공 파일 전체라는 상한을 증명할 수 없다.
+ *
  * @param sources framework 경로 근거
- * @returns limitation 목록
+ * @param hasRouterDirectory app 또는 pages 디렉터리를 찾았는지(Next 앱일 때만 `/_next`를 알린다)
+ * @param scoping 스코프 판정
+ * @returns limitation 항목
  */
-function frameworkLimitations(sources: FrameworkSources): string[] {
-  const candidates: [boolean, string][] = [
-    [sources.proxyFiles.length > 0, `framework-provided-routes: ${sources.proxyFiles.join(', ')} can answer or rewrite requests before file routing (Next.js proxy/middleware); those paths are not modeled`],
-    [sources.metadataFiles > 0, `framework-provided-routes: ${sources.metadataFiles} metadata file(s) under the app directory (sitemap, robots, manifest, icons, Open Graph or Twitter images) serve framework-generated routes that are not modeled`],
-    [sources.hasPublicFiles, 'framework-provided-routes: the public/ directory serves static files at the site root; they are not modeled'],
+function frameworkLimitations(sources: FrameworkSources, hasRouterDirectory: boolean, scoping: FrameworkScoping): LimitationEntry[] {
+  const { basePath } = scoping;
+  const canScopeAssets = basePath !== undefined && !scoping.hasLocalePrefix;
+  const candidates: [boolean, string, LimitationRange | undefined][] = [
+    [sources.proxyFiles.length > 0, `framework-provided-routes: ${sources.proxyFiles.join(', ')} can answer or rewrite requests before file routing (Next.js proxy/middleware); those paths are not modeled`, undefined],
+    [sources.metadataFiles > 0, `framework-provided-routes: ${sources.metadataFiles} metadata file(s) under the app directory (sitemap, robots, manifest, icons, Open Graph or Twitter images) serve framework-generated routes that are not modeled`, undefined],
+    [sources.hasPublicFiles, 'framework-provided-routes: the public/ directory serves static files at the site root; they are not modeled',
+      basePath === undefined ? undefined : { templatePrefixes: [basePath === '' ? '/' : basePath], methods: ['GET', 'HEAD'] }],
+    [sources.hasLegacyStaticFiles, 'framework-provided-routes: the static/ directory serves files under /static after basePath (legacy Next.js convention); they are not modeled',
+      canScopeAssets ? { templatePrefixes: [`${basePath}/static`], methods: ['GET', 'HEAD'] } : undefined],
+    [hasRouterDirectory, 'framework-provided-routes: Next.js serves build assets and internal endpoints under /_next after basePath (static files, image optimization, data routes); they are not modeled',
+      canScopeAssets && !scoping.hasAssetPrefix ? { templatePrefixes: [`${basePath}/_next`] } : undefined],
   ];
-  return candidates.filter(([applies]) => applies).map(([, text]) => text);
+  return candidates.filter(([applies]) => applies).map(([, text, range]) => (range === undefined ? { text } : { text, range }));
 }
 
 /**

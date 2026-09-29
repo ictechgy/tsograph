@@ -246,6 +246,9 @@ bundled docs under `dist/docs/`), not guessed.
 | Trailing slash: with `trailingSlash: false` (default) `/x/` is 308-redirected to `/x`; with `true`, `/x` is redirected to `/x/` unless the last segment looks like `name.ext` or the path is under `.well-known`; `skipTrailingSlashRedirect: true` disables the redirect, and matching ignores the trailing slash | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
 | `proxy.<ext>` / `middleware.<ext>` sit next to `app`/`pages` (root or `src/`) | `build/index.js`, `lib/constants.js` |
 | Metadata files (`sitemap`, `robots`, `manifest`, `icon`, `apple-icon`, `opengraph-image`, `twitter-image`, `favicon.ico`) create framework routes | `lib/metadata/is-metadata-route.js` |
+| `public/` is served at the site root, the legacy root `static/` under `/static`, build assets under `/_next/static`, the image optimizer at `/_next/image`, Pages Router data under `/_next/data/<buildId>/`; all of them only after `basePath` | `server/lib/router-utils/filesystem.js` (`getItem`) |
+| Files served from `public/`, `static/`, and `/_next/static` answer only `GET` and `HEAD` (other methods get 405) | `server/lib/router-server.js` |
+| With `i18n`, static files are also looked up under the default-locale prefix; with `assetPrefix`, `<assetPrefix path>/_next/:path+` is rewritten to `/_next/:path+` | `server/lib/router-utils/filesystem.js`, `lib/load-custom-routes.js` |
 | Routing picks the most specific match (static > `[x]` > `[...x]` > `[[...x]]`), so documents declare `dispatch: "specificity"` | `shared/lib/router/utils/sorted-routes.js` |
 
 ### How facts are built
@@ -298,7 +301,8 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | Config passes through wrapper calls (`withX(config)`) | values read from the wrapped literal, `root`, plus `unresolved-route-prefix:` (a wrapper may change them or add routes) |
 | `pageExtensions` is not a literal string array | default extensions + `route-coverage:` |
 | `rewrites`, `redirects`, `i18n`, or keys tsograph cannot enumerate | `framework-provided-routes:` |
-| `proxy`/`middleware` file, metadata files, non-empty `public/` | `framework-provided-routes:` (no synthetic decls) |
+| `proxy`/`middleware` file, metadata files, non-empty `public/` or legacy `static/` | `framework-provided-routes:` (no synthetic decls) |
+| An `app/` or `pages/` directory exists | `framework-provided-routes:` for the `/_next` endpoints |
 | `@slot` or intercepting-route (`(.)x`) folders above a route file | not modeled (Next documents them for pages), `route-coverage:` |
 | `app`, `pages`, `src`, `src/app`, or `src/pages` is a symbolic link | not followed (Next.js would pick it, so tsograph does not fall back to `src/`), `route-coverage:` naming the location |
 | `next.config.*` is a symbolic link | not read, `pathAnchor: "base"` + `unresolved-route-prefix:`; a dangling link is treated as absent, like Next's `existsSync` |
@@ -312,6 +316,24 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 All server-side prefixes come from the contract's closed list, so isthmus reads each one as
 a server-side gap and downgrades `route-call-without-decl` to `-unverified` instead of
 reporting a false error. Limitations carry counts and project-relative names only.
+
+**Limitation scopes.** A limitation without a scope applies to every call in the document.
+When tsograph can prove an upper bound for what a framework-provided route can serve, it adds
+a `limitationScopes` entry (isthmus "http limitation scopes") so that only calls inside it
+become `-unverified`:
+
+| Limitation | Scope | Condition |
+|---|---|---|
+| `public/` | `templatePrefixes: [basePath or "/"]`, `methods: ["GET", "HEAD"]` | the config is fully resolved (no wrapper call, no keys tsograph cannot enumerate, a valid literal `basePath` or none) |
+| legacy `static/` | `templatePrefixes: [basePath + "/static"]`, `methods: ["GET", "HEAD"]` | as above, and no `i18n` |
+| `/_next` | `templatePrefixes: [basePath + "/_next"]` (methods differ per endpoint, so none) | as above, no `i18n`, and no `assetPrefix` |
+
+Other framework-provided routes (proxy/middleware, metadata files, `rewrites`/`redirects`/`i18n`)
+and every `route-coverage:`/`unresolved-route-prefix:` gap stay unscoped. `public/` is not
+narrowed to its file list because a build step can write files there (service workers, sitemap
+generators), so the files in the repository do not prove the served set; with no `basePath`,
+`GET`/`HEAD` calls therefore stay unverifiable while other methods can be judged. Scope entries
+are checked against the contract before they are written (`src/exchange/http-limitation-scope.ts`).
 
 ### Decisions (differences from the draft)
 
@@ -899,6 +921,10 @@ npm ci
 npm run verify   # typecheck, tests with a 90% line/branch/function gate, clean build, CLI contract
 node --test src/openapi/path-template.test.ts   # focused run
 ```
+
+`src/exchange/http-limitation-scope.test.ts` checks every vendored vector file against
+`conformance/SHA256SUMS`, runs the `scope.validate` cases of `conformance/http-limitation-scope.json`
+against the scope validator, and pins the `scope.applies` cases the `routes` scopes rely on.
 
 `src/routes/conformance.test.ts` checks every static channel from the Next fixtures against
 the grammar cases of the vendored `conformance/http-template.json`, and keeps the verified

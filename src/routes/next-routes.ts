@@ -73,7 +73,7 @@ export interface NextRoutesResult {
   readonly routes: readonly DeclaredRoute[];
   readonly gaps: RouteGaps;
   readonly routerDirectories: RouterDirectories;
-  /** framework가 만드는 경로의 근거(메타데이터 파일 수, proxy/middleware 파일, public 존재) */
+  /** framework가 만드는 경로의 근거(메타데이터 파일 수, proxy/middleware 파일, public·static 존재) */
   readonly frameworkSources: FrameworkSources;
 }
 
@@ -83,6 +83,8 @@ export interface FrameworkSources {
   /** 프로젝트 기준 proxy·middleware 파일 경로(정렬) */
   readonly proxyFiles: readonly string[];
   readonly hasPublicFiles: boolean;
+  /** 루트 `static/`(구 규칙, `/static` 아래로 제공)이 파일을 내놓을 수 있으면 true */
+  readonly hasLegacyStaticFiles: boolean;
 }
 
 /** 추출 입력이다. */
@@ -334,20 +336,30 @@ async function collectFrameworkSources(
     proxyFiles.push(...entries.filter((entry) => (entry.kind === 'file' || entry.kind === 'symlink') && isProxyFile(entry.name, context.pageExtensions))
       .map((entry) => (parent === '' ? entry.name : `${parent}/${entry.name}`)));
   }
-  return { metadataFiles, proxyFiles: proxyFiles.sort(compareStrings), hasPublicFiles: await hasPublicFiles(context) };
+  return {
+    metadataFiles,
+    proxyFiles: proxyFiles.sort(compareStrings),
+    hasPublicFiles: await hasStaticFiles(context, 'public'),
+    hasLegacyStaticFiles: await hasStaticFiles(context, 'static'),
+  };
 }
 
 /**
- * `public/`이 정적 파일을 내놓을 수 있는지 본다. symlink면 따라가지 않고 있는 것으로 본다.
+ * 루트의 정적 파일 디렉터리가 파일을 내놓을 수 있는지 본다. symlink면 따라가지 않고 있는 것으로 본다.
+ *
+ * Next.js 16.2.7은 `public/`을 사이트 루트에, 폐기 예정인 구 규칙 `static/`을 `/static` 아래에 제공한다
+ * (`server/lib/router-utils/filesystem.js`의 `publicFolderItems`·`legacyStaticFolderItems`, 둘 다 프로젝트
+ * 루트 기준).
  *
  * @param context 처리 문맥
+ * @param directory 프로젝트 루트 기준 디렉터리 이름
  * @returns 비어 있지 않은 디렉터리이거나 풀리는 symlink면 true
  */
-async function hasPublicFiles(context: RouteFileContext): Promise<boolean> {
+async function hasStaticFiles(context: RouteFileContext, directory: 'public' | 'static'): Promise<boolean> {
   const { fileSystem, project } = context.input;
-  const entry = await lookupEntry(fileSystem, project, 'public');
+  const entry = await lookupEntry(fileSystem, project, directory);
   if (entry.kind === 'symlink') return true;
-  return entry.kind === 'directory' && (await listEntries(fileSystem, `${project}/public`, context.gaps)).length > 0;
+  return entry.kind === 'directory' && (await listEntries(fileSystem, `${project}/${directory}`, context.gaps)).length > 0;
 }
 
 /** 정적 메타데이터 이미지 파일 이름과 확장자다(`lib/metadata/is-metadata-route.js`). */

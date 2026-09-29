@@ -6,6 +6,20 @@
 
 ### Changed
 
+- routes: framework 제공 경로 limitation에 isthmus http `limitationScopes`를 싣는다. `public/`은
+  `[basePath 또는 /]` 접두사 + `GET`·`HEAD`, 구 규칙 `static/`은 `basePath/static` + `GET`·`HEAD`, `/_next`는
+  `basePath/_next`로 좁힌다(Next.js 16.2.7 `server/lib/router-utils/filesystem.js`·`server/lib/router-server.js`로
+  확인). 전에는 `public/`이 하나만 있어도 문서의 모든 호출이 error를 증명할 수 없었다. 설정을 끝까지 확정하지
+  못했으면(감싼 호출·열거할 수 없는 키·비리터럴 `basePath`) 스코프를 생략하고, `static/`·`/_next`는 `i18n`(기본
+  locale 접두사)이, `/_next`는 `assetPrefix`(자동 rewrite)가 있으면 생략한다. `public/`을 파일 목록으로 좁히지 않는
+  이유는 빌드 단계가 그곳에 파일을 만들 수 있어 상한을 증명할 수 없기 때문이다.
+- routes: `app/`·`pages/`가 있으면 `/_next` 엔드포인트(빌드 자산·이미지 최적화·데이터 경로)를, 루트 `static/`이
+  비어 있지 않으면 구 규칙 정적 파일을 `framework-provided-routes:`로 알린다. 전에는 알리지 않아 이 경로의 호출이
+  거짓 error가 될 수 있었다.
+- conformance: isthmus `78d3dee`의 공유 벡터로 다시 벤더링한다(`http-template.json`의 Spring 사례는
+  `producer:kartograph` 대상이라 건너뛰고, 새 suite `http-limitation-scope.json`의 `scope.validate` 사례로 스코프
+  검증기를 검사한다). 벤더링한 모든 벡터 파일을 `SHA256SUMS`와 대조한다.
+
 - reach·impact: 그래프 노드가 아닌 root id가 하나라도 있으면 표준 출력 없이 64로 끝나던 동작을 계약(isthmus
   `language-traversal` v1)과 형제 생산자(cartograph·kartograph)에 맞춘다. 나머지 root로 문서를 내고, 그런 id는 요청한
   자리에 `symbol` 없는 `roots` 항목으로 남기며 `truncated: true`·`truncationReasons: ["root-not-found"]`·`root-not-found:`

@@ -7,6 +7,8 @@
  * - 기본값: `basePath: ''`, `trailingSlash: false`, `skipTrailingSlashRedirect` 없음,
  *   `pageExtensions: ['tsx', 'ts', 'jsx', 'js']` — `server/config-shared.js`.
  * - `rewrites`·`redirects`·`i18n`은 파일 라우트가 아닌 경로를 만든다(모델링하지 않는다).
+ * - `assetPrefix`가 있으면 `<assetPrefix의 경로>/_next/:path+`를 `/_next/:path+`로 보내는 rewrite가 자동으로
+ *   붙는다(`lib/load-custom-routes.js`). `/_next` 제공 경로의 스코프를 좁힐 때 쓴다.
  *
  * 설정은 객체 리터럴까지 정적으로 따라갈 수 있을 때만 값을 확정한다. 함수 내보내기·
  * 비리터럴 값은 `unknown`, 감싼 호출(`withX(config)`)은 안쪽 리터럴을 읽되 감쌌다는 사실을 남긴다.
@@ -48,6 +50,8 @@ export interface NextRouteConfig {
   readonly frameworkRouteKeys: readonly FrameworkRouteKey[];
   /** 따라가지 못한 전개·계산된 키가 있어 설정 키 목록이 완전하지 않으면 true */
   readonly hasUnknownKeys: boolean;
+  /** 설정에 `assetPrefix` 키가 있으면 true. `/_next` 자산이 다른 경로 접두사로도 제공된다. */
+  readonly hasAssetPrefix: boolean;
   /** 내보낸 설정을 감싼 함수 호출 수. 0보다 크면 감싼 함수가 값을 바꿨을 수 있다. */
   readonly wrapperCalls: number;
   /** 내보낸 값을 객체 리터럴로 따라가지 못했으면 이유, 아니면 undefined */
@@ -66,6 +70,7 @@ export const DEFAULT_NEXT_ROUTE_CONFIG: NextRouteConfig = {
   pageExtensions: { kind: 'known', value: DEFAULT_PAGE_EXTENSIONS },
   frameworkRouteKeys: [],
   hasUnknownKeys: false,
+  hasAssetPrefix: false,
   wrapperCalls: 0,
   unresolvedReason: undefined,
 };
@@ -106,6 +111,7 @@ export function readNextRouteConfig(fileName: string, sourceFile: ts.SourceFile,
     pageExtensions: readValue<readonly string[]>(properties, 'pageExtensions', DEFAULT_PAGE_EXTENSIONS, (value) => resolveStringArray(value, bindings)),
     frameworkRouteKeys: (['i18n', 'redirects', 'rewrites'] as const).filter((key) => properties.values.has(key)),
     hasUnknownKeys: properties.hasUnknownKeys,
+    hasAssetPrefix: properties.values.has('assetPrefix'),
     wrapperCalls: resolution.wrapperCalls,
     unresolvedReason: undefined,
   };
@@ -128,6 +134,7 @@ export function unresolvedConfig(fileName: string, reason: UnresolvedConfigReaso
     pageExtensions: { kind: 'unknown' },
     frameworkRouteKeys: [],
     hasUnknownKeys: true,
+    hasAssetPrefix: false,
     wrapperCalls,
     unresolvedReason: reason,
   };

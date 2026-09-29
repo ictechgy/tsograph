@@ -165,6 +165,9 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 | 끝 슬래시: `trailingSlash: false`(기본)면 `/x/`를 `/x`로 308 redirect하고, `true`면 마지막 세그먼트가 `name.ext` 모양이거나 `.well-known` 아래가 아닌 한 `/x`를 `/x/`로 보낸다. `skipTrailingSlashRedirect: true`면 redirect가 없고 매칭은 끝 슬래시를 무시한다 | `lib/load-custom-routes.js`, `server/lib/router-utils/filesystem.js` |
 | `proxy.<ext>`·`middleware.<ext>`는 `app`/`pages` 옆(루트 또는 `src/`)에 둔다 | `build/index.js`, `lib/constants.js` |
 | 메타데이터 파일(`sitemap`·`robots`·`manifest`·`icon`·`apple-icon`·`opengraph-image`·`twitter-image`·`favicon.ico`)은 framework 라우트를 만든다 | `lib/metadata/is-metadata-route.js` |
+| `public/`은 사이트 루트, 루트의 구 규칙 `static/`은 `/static`, 빌드 자산은 `/_next/static`, 이미지 최적화는 `/_next/image`, Pages Router 데이터는 `/_next/data/<buildId>/` 아래로 제공한다. 모두 `basePath` 뒤다 | `server/lib/router-utils/filesystem.js`(`getItem`) |
+| `public/`·`static/`·`/_next/static`에서 제공하는 파일은 `GET`·`HEAD`에만 답한다(그 밖은 405) | `server/lib/router-server.js` |
+| `i18n`이 있으면 정적 파일을 기본 locale 접두사 아래에서도 찾고, `assetPrefix`가 있으면 `<assetPrefix 경로>/_next/:path+`를 `/_next/:path+`로 rewrite한다 | `server/lib/router-utils/filesystem.js`, `lib/load-custom-routes.js` |
 | 라우팅은 가장 구체적인 후보를 고른다(정적 > `[x]` > `[...x]` > `[[...x]]`). 그래서 문서는 `dispatch: "specificity"`다 | `shared/lib/router/utils/sorted-routes.js` |
 
 ### 사실을 만드는 규칙
@@ -212,7 +215,8 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 | 설정을 감싼 호출(`withX(config)`) | 안쪽 리터럴 값을 쓰고 `root`, 그리고 `unresolved-route-prefix:`(감싼 함수가 값을 바꾸거나 라우트를 더할 수 있다) |
 | `pageExtensions`가 리터럴 문자열 배열이 아님 | 기본 확장자 + `route-coverage:` |
 | `rewrites`·`redirects`·`i18n`, 또는 열거할 수 없는 키 | `framework-provided-routes:` |
-| `proxy`/`middleware` 파일, 메타데이터 파일, 비어 있지 않은 `public/` | `framework-provided-routes:`(합성 decl 없음) |
+| `proxy`/`middleware` 파일, 메타데이터 파일, 비어 있지 않은 `public/`·구 규칙 `static/` | `framework-provided-routes:`(합성 decl 없음) |
+| `app/`이나 `pages/` 디렉터리가 있음 | `/_next` 엔드포인트의 `framework-provided-routes:` |
 | route 파일 위에 `@slot`·intercepting route(`(.)x`) 폴더 | 모델링하지 않음(Next 문서가 페이지에 대해서만 설명), `route-coverage:` |
 | `app`·`pages`·`src`·`src/app`·`src/pages`가 symlink | 따라가지 않음(Next는 그 후보를 고르므로 `src/`로 내려가지도 않는다), 위치를 적은 `route-coverage:` |
 | `next.config.*`가 symlink | 읽지 않고 `pathAnchor: "base"` + `unresolved-route-prefix:`. 끊어진 symlink는 Next의 `existsSync`처럼 없는 파일로 본다 |
@@ -226,6 +230,23 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 서버 측 접두사는 모두 계약의 닫힌 목록에서 쓴다. 그래서 isthmus는 각각을 서버 측 공백으로 읽고
 `route-call-without-decl`을 거짓 error 대신 `-unverified`로 내린다. limitation에는 개수와 프로젝트 기준
 이름만 싣는다.
+
+**limitation 스코프.** 스코프 없는 한계는 문서의 모든 호출에 적용된다. framework 제공 경로가 받을 수 있는
+요청의 상한을 증명할 수 있으면 `limitationScopes` 항목(isthmus "http limitation 스코프")을 더해, 그 안의
+호출만 `-unverified`가 되게 한다.
+
+| 한계 | 스코프 | 조건 |
+|---|---|---|
+| `public/` | `templatePrefixes: [basePath 또는 "/"]`, `methods: ["GET", "HEAD"]` | 설정을 끝까지 확정함(감싼 호출·열거할 수 없는 키 없음, 유효한 리터럴 `basePath`이거나 없음) |
+| 구 규칙 `static/` | `templatePrefixes: [basePath + "/static"]`, `methods: ["GET", "HEAD"]` | 위 조건과 `i18n` 없음 |
+| `/_next` | `templatePrefixes: [basePath + "/_next"]`(method는 엔드포인트마다 달라 생략) | 위 조건, `i18n` 없음, `assetPrefix` 없음 |
+
+그 밖의 framework 제공 경로(proxy/middleware, 메타데이터 파일, `rewrites`·`redirects`·`i18n`)와 모든
+`route-coverage:`·`unresolved-route-prefix:` 공백은 스코프 없이 남는다. `public/`을 파일 목록으로 좁히지
+않는 이유는 빌드 단계가 그곳에 파일을 만들 수 있어(서비스 워커, 사이트맵 생성기 등) 저장소의 파일이 제공
+파일 전체라는 상한을 증명하지 못하기 때문이다. 그래서 `basePath`가 없으면 `GET`·`HEAD` 호출은 여전히 판정할
+수 없고 다른 method는 판정할 수 있다. 스코프 항목은 내기 전에 계약 모양으로 검증한다
+(`src/exchange/http-limitation-scope.ts`).
 
 ### 결정 사항(초안과 다른 부분)
 
@@ -740,6 +761,10 @@ dartograph `sql_relations_test`와 같은 기대값)를 담는다.
 `src/openapi/conformance.test.ts`는 isthmus 공유 벡터 `conformance/http-template.json`이 있으면
 (`TSOGRAPH_CONFORMANCE_DIR`, `./conformance/`, 형제 `../isthmus/conformance/`) 템플릿 정규화기를
 그 벡터로 검증하고, 없으면 이유를 알리고 건너뛴다.
+
+`src/exchange/http-limitation-scope.test.ts`는 벤더링한 모든 벡터 파일을 `conformance/SHA256SUMS`와
+대조하고, `conformance/http-limitation-scope.json`의 `scope.validate` 사례로 스코프 검증기를 검사하며,
+`routes` 스코프가 기대는 `scope.applies` 사례를 고정한다.
 
 `src/routes/conformance.test.ts`는 Next fixture가 내는 모든 정적 channel을 벤더링한
 `conformance/http-template.json`의 문법 사례로 검사하고, 확인한 Next.js 변환표(`next/dist` 출처 포함)를
