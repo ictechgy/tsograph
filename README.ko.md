@@ -290,8 +290,10 @@ find-my-way 8.2.2·9.9.0, @koa/router 15.7.0·13.1.1, NestJS 12.1.2)에서 읽�
 - **표식**: `trailingSlash`·`caseInsensitive`는 라우터 옵션을 따른다(Express·Koa 기본은 대소문자 무시·끝 슬래시 선택, Hono·
   Fastify 기본은 strict·대소문자 구분). Fastify `constraints`, Koa `host`, NestJS host·버전 필터는 `narrowed`다.
 - **symbol.usr**: 핸들러 본문이 속한 그래프 노드다. 이름 있는 함수·메서드면 그 id(`src/lib/books.ts#listBooks`,
-  `src/users.controller.ts#UsersController.findOne`), 인라인 핸들러면 감싼 선언이나 `<path>#<module>`이다(그래프에 인라인
-  함수 노드가 없어서이며 `framework-dispatch-unmodeled:`로 알린다). `tsograph graph`가 이 핸들러를 `route-handler`
+  `src/users.controller.ts#UsersController.findOne`), 인라인 핸들러(감싼 `asyncHandler(async (req, res) => …)` 포함)면
+  [인라인 콜백 id](#인라인-콜백-id)(`src/app.ts#<module>.app.get("/users")`)다. 그 핸들러 안의 relation-use도 같은 id라
+  trace가 형제 핸들러를 끌어오지 않고 route → 핸들러 → 테이블로 잇는다. 자기 노드를 얻지 못한 인라인 핸들러(계산된 이름
+  멤버 안)만 감싼 id를 쓰고 `framework-dispatch-unmodeled:`로 알린다. `tsograph graph`가 이 핸들러를 `route-handler`
   진입점으로 표시한다.
 - **limitation**(상한을 증명하면 스코프를 단다): 조건부 등록·계약 밖 동사(`route-coverage:` + 템플릿), 모르는 mount 접두사·
   타입으로만 아는 라우터(`pathAnchor: "base"`와 `templateSuffixes`를 단 `unresolved-route-prefix:`), 정적 파일 미들웨어와
@@ -376,8 +378,10 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
 **심볼 형식.** 소스 사실은 `<프로젝트 기준 POSIX 경로>#<이름>(.<이름>)*`이고 바깥 선언부터 적는다.
 함수 선언, 이름 있는 클래스·클래스 식, 메서드, 접근자, 클래스 필드, `constructor`, 이름 없는 default
 export(`export default <식>`의 식 포함)의 `default`, 모듈 최상위 변수 또는 함수 값 초기값 안에 사실이 있는 변수
-(`src/lib/jobs.ts#listJobs`, `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). 이름 없는 콜백은
-투명하다. 계산된 이름이 끼면 심볼을 만들지 않고, 모듈 최상위 문장에는 심볼이 없다 — 이런 사실은
+(`src/lib/jobs.ts#listJobs`, `src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). 호출·`new` 인자로 바로 넘긴
+화살표·함수 식(인라인 콜백)은 콜백 식이 속한 스코프 id 뒤에 자기 조각을 붙인다(`src/app.ts#<module>.app.get("/users")`,
+`src/lib/jobs.ts#listJobs.items.map()`, [인라인 콜백 id](#인라인-콜백-id)). 그 밖의 이름 없는 함수(JSX 속성 값, 즉시
+실행 함수, 조건식 값)는 투명하다. 계산된 이름이 끼면 심볼을 만들지 않고, 모듈 최상위 문장에는 심볼이 없다 — 이런 사실은
 `missing-relation-usrs:`(isthmus 체인 전용 접두사, 정보용)로 센다. 스키마 사실은 모델 이름(`Job`, `Job.title`), TypedSQL 사실은
 `<경로>#<파일 이름>`이다.
 
@@ -589,7 +593,7 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 | 노드 종류 | 뜻 |
 |---|---|
 | `module` | `<경로>#<module>`: 최상위 문장과 이름 있는 선언 밖의 코드 |
-| `function`·`method`·`constructor`·`accessor`·`class`·`field`·`variable` | 심볼 id 규칙이 이름 붙이는 선언(함수 값 변수·객체 속성은 `function`) |
+| `function`·`method`·`constructor`·`accessor`·`class`·`field`·`variable` | 심볼 id 규칙이 이름 붙이는 선언(함수 값 변수·객체 속성·[인라인 콜백](#인라인-콜백-id)은 `function`) |
 | `export` | 그 자체가 선언이 아닌 내보내기(별칭·재내보내기·구조 분해) |
 
 | 간선 종류 | 뜻 |
@@ -601,6 +605,7 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 | `jsx` | JSX 컴포넌트(`<JobList />`) |
 | `alias` | export 노드 → 해석한 선언 |
 | `initializer` | 생성자·클래스 → 인스턴스 필드 초기값, 생성자 없는 파생 클래스 → 기반 생성, 모듈 스코프 → 최상위 변수 초기값·static 필드 |
+| `contains` | 인라인 콜백을 어휘적으로 담은 노드 → 콜백 노드(`<경로>#<module>` → `<경로>#<module>.app.get("/users")`). 콜백을 부르는 쪽(`app.get`, `items.map`)은 대개 외부라, 이 간선이 담은 노드에서의 도달과 콜백 안에서의 역방향 영향을 잇는다. 콜백이 실제로 실행되는지는 증명하지 않는다. 인라인 콜백에 노드가 없던 때는 그 코드가 담은 노드에 귀속했으므로 도달 집합은 같다 |
 
 호출은 checker 심볼로 모듈을 넘어 잇는다: named/default/namespace import, 재내보내기(`export *` 포함),
 경로 별칭, 값 별칭(`const h = g`), 구조 분해(`const { GET } = handlers`, `const { f } = await import('./m')`),
@@ -839,8 +844,8 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 - 선언 경로는 schema [심볼 형식](#사실)과 같다. 감싸는 선언 이름을 바깥부터 `.`으로 잇는다:
   `src/lib/jobs.ts#listJobs`, `src/lib/repo.ts#Repo.save`, `src/lib/repo.ts#Repo.constructor`,
   `src/auth.ts#handlers.GET`, `src/app/api/items/[id]/route.ts#GET`, `pages/api/hello.ts#handler`.
-- 이름 있는 선언 밖의 코드(최상위 문장, 모듈 최상위에서 넘긴 콜백, 계산된 이름 멤버)는 모듈 스코프
-  `<경로>#<module>`에 속한다.
+- 이름 있는 선언 밖의 코드(최상위 문장, 계산된 이름 멤버와 그 안의 콜백)는 모듈 스코프 `<경로>#<module>`에 속한다.
+- 인라인 콜백은 자기 id를 갖는다: [인라인 콜백 id](#인라인-콜백-id).
 - 이름 없는 기본 내보내기는 `<경로>#default`다(`export default <식>` 포함).
 - 그 자체가 이름 있는 선언이 아닌 내보내기(`export { a as GET }`, `export { GET } from './impl'`,
   `export const { GET } = handlers`, `export let x;`)는 `<경로>#<내보낸 이름>` export 노드가 되고, 해석한
@@ -848,6 +853,37 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 - 같은 id가 되는 선언(오버로드, getter/setter 쌍, 형제 블록의 같은 이름 함수)은 한 노드다.
 - 선언 측 relation-use 사실은 `#model:`·`#typedsql:` id를 쓴다([사실](#사실)). 이 id는 그래프 노드가 아니다.
   Node ORM 선언(Drizzle 테이블·TypeORM 엔터티·Sequelize 모델)도 `#model:`을 쓴다.
+
+### 인라인 콜백 id
+
+호출·`new`의 인자로 바로 넘긴 화살표·함수 식(괄호·`as`·`satisfies`·non-null 래퍼는 벗긴다)은 그래프 노드다. id는 다음과 같다.
+
+```text
+<콜백 식이 속한 스코프 id>.<호출 대상>(<키 인자>)[~<n>]
+```
+
+- **스코프.** 앞부분은 콜백 안의 코드가 아니라 콜백 식 자신의 위치가 정한다. 모듈 최상위 콜백은 `<경로>#<module>` 아래,
+  `listJobs` 안의 콜백은 `#listJobs` 아래, 다른 콜백 안의 콜백은 그 콜백 id 아래다(`#<module>.describe("suite").it("works")`).
+  호출 결과를 받는 지역 변수는 조각이 아니다(`load` 안의 `const rows = ids.map(cb)`는 `#load.ids.map()`). 그래서 앞부분은
+  언제나 콜백을 담은 노드이고, 그래프가 그 노드에서 `contains` 간선으로 잇는다.
+- **기준 호출.** 콜백을 받은 호출이 다시 다른 호출의 인자면 인자 사슬의 가장 바깥 호출이 이름을 준다.
+  `app.get('/x', asyncHandler(async (req, res) => …))`는 감싸지 않은 핸들러처럼 `app.get("/x")`다.
+- **호출 대상.** 식별자·`this`·`super`·속성 접근·문자열 키 원소 접근의 사슬을 쓴 그대로 옮긴다(`app.get`,
+  `this.router.post`, `db["run"]`). 사슬 안의 호출·`new`·그 밖의 식은 `…`로 줄인다(`new Hono().get('/a', …)` →
+  `….get("/a")`). 그래서 체인의 앞 등록이 뒤 핸들러 id에 스며들지 않는다. `new` 기준 호출은 `new <대상>`이다(`new Promise()`).
+- **키 인자.** 앞쪽의 정적 키 인자 최대 2개를 `,`로 잇는다: 문자열 리터럴(JSON 인용), 템플릿 리터럴(치환은 이름 사슬이면
+  `${이름}`, 아니면 `${…}`), 이름 사슬(`books.post(BOOKS)`, `authors.get(PATHS.authors)`), 그런 키만 담은 배열
+  (`books.on(["PUT","PATCH"],"/b")`). 다른 인자에서 멈추고, 없으면 빈 괄호다(`useEffect()`). 64 UTF-16 단위를 넘는 문자열은
+  서러게이트 쌍을 가르지 않고 자른 뒤 `…`를 붙이고, C1 제어 문자·U+2028/U+2029는 `\uXXXX`로 쓴다(계약이 심볼 이름에 제어
+  문자를 금지한다).
+- **겹침.** 앞부분과 조각이 같은 콜백(같은 경로 두 번 등록, 한 호출의 인라인 함수 여럿, 반복한 `useEffect`)은 소스 순서로
+  번호를 매겨 두 번째부터 `~2`, `~3`…을 붙인다.
+- **안정성.** 줄·열에 기대지 않으므로 무관한 수정(선언·다른 콜백 추가, 줄 이동, 다른 라우트 경로 수정, 다른 스코프의 콜백
+  추가)에 그대로다. 콜백 자신의 앞부분·호출 대상·키 인자가 바뀌거나, 앞부분과 조각이 같은 콜백이 앞에 끼면(뒤 콜백의
+  `~n`이 밀린다) 바뀐다.
+- **덮지 않는 것.** 계산된 이름 멤버 안의 콜백은 이름을 만들지 않고(추측하지 않는다) 모듈 스코프에 남는다. 호출 인자가
+  아닌 함수는 기존 규칙 그대로다: 객체 리터럴 속성(`{ handler: async () => … }`는 `…handler`), 변수 초기값, JSX 속성 값과
+  즉시 실행 함수(투명).
 
 ## 개발
 

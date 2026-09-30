@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### Changed — 인라인 콜백 id (graph·reach·impact·routes·schema)
+
+- 호출·`new` 인자로 바로 넘긴 화살표·함수 식(인라인 콜백)이 자기 그래프 노드와 id를 갖는다:
+  `<콜백 식이 속한 스코프 id>.<호출 대상>(<키 인자>)[~n]`(`src/app.ts#<module>.app.get("/users")`,
+  `src/lib/jobs.ts#listJobs.items.map()`). 감싼 콜백(`asyncHandler(async …)`)은 인자 사슬의 가장 바깥 호출이 이름을 주고,
+  호출 대상 사슬 안의 호출·`new`는 `…`로 줄이며, 키 인자는 앞쪽 정적 키(문자열·템플릿·이름 사슬·그 배열) 최대 2개다.
+  같은 스코프·같은 조각은 소스 순서로 `~2`…를 붙인다. 줄·열을 쓰지 않아 무관한 수정에 흔들리지 않는다. 규칙은 README
+  "Inline callback ids"에 있다.
+- graph: 담은 노드에서 콜백 노드로 새 간선 종류 `contains`를 잇는다(kartograph의 어휘적 포함 선례). 콜백을 부르는 쪽이
+  대개 외부라, 이 간선이 담은 노드에서의 도달과 콜백 안에서의 역방향 영향을 잇는다. 콜백 안의 호출은 콜백 노드에서 나간다.
+- routes: 인라인 핸들러의 `symbol.usr`가 감싼 선언·`<path>#<module>` 대신 핸들러 콜백 id다. 자기 노드를 얻지 못한 인라인
+  핸들러(계산된 이름 멤버 안)만 `framework-dispatch-unmodeled:`로 알린다.
+- schema: 인라인 콜백 안의 relation-use가 콜백 id를 `symbol.usr`로 싣는다. 모듈 최상위 콜백(`describe`·`it` 테스트 포함)
+  안의 사실도 usr가 생겨 `missing-relation-usrs:`가 줄어든다.
+- 이름 있는 선언의 id는 그대로다. 인라인 콜백이 없는 프로젝트의 출력은 바이트 단위로 같다. 인라인 콜백이 있으면
+  `graphRevision`·그 안의 사실 usr·reach/impact의 depth(콜백 한 단계)가 바뀐다. 함수 안에서 콜백을 품은 초기값을 받은
+  지역 변수는 더는 이름 조각이 아니다(예: `const handler = wrap(async () => …)`의 콜백은 `#f.handler`가 아니라 `#f.wrap()`).
+  그래서 그 지역 변수를 부른 `handler()`는 `unresolved-calls:`의 `indirect`로 셀 수 있지만, 담은 함수가 `contains`로 콜백을
+  이으므로 도달 집합은 같다. 전에는 `const rows = ids.map(async …)` 같은 지역 변수 노드에 들어오는 간선이 없어 담은 함수의
+  reach가 콜백 안 호출을 놓쳤는데, 이제 `contains`로 잇는다.
+- 합성 fixture `fixtures/graph/hono-d1-inline`·`fixtures/graph/express-pg-inline`(마이그레이션 SQL 포함)과 route → 인라인
+  핸들러 → relation-use 사슬 테스트를 더했다. Node 라우트 오라클 기록을 새 usr로 다시 기록했다(모든 탐침 통과).
+
 ### Added — schema: Node ORM·원시 SQL 드라이버·Cloudflare D1
 
 - schema: Drizzle·TypeORM·Sequelize 6·knex·원시 SQL 드라이버(`pg`·`mysql2`·`mysql`·`better-sqlite3`·`sqlite3`·

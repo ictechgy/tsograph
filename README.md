@@ -388,9 +388,12 @@ synthetic fixtures under `fixtures/node/`.
   default); Fastify `constraints`, Koa `host`, and NestJS host/version filters set `narrowed`.
 - **symbol.usr** is the graph node that owns the handler body: a named function or method id
   (`src/lib/books.ts#listBooks`, `src/users.controller.ts#UsersController.findOne`), or for an inline
-  handler the enclosing declaration or `<path>#<module>` (reported under `framework-dispatch-unmodeled:`,
-  since the graph has no separate node for inline functions). `tsograph graph` marks these handlers as
-  `route-handler` entry points.
+  handler (also when wrapped, `asyncHandler(async (req, res) => …)`) its
+  [inline callback id](#inline-callback-ids) (`src/app.ts#<module>.app.get("/users")`). Relation-use
+  facts inside that handler carry the same id, so a trace goes route → handler → table without pulling in
+  sibling handlers. An inline handler that gets no node of its own (inside a computed-name member) keeps
+  the enclosing id and is reported under `framework-dispatch-unmodeled:`. `tsograph graph` marks these
+  handlers as `route-handler` entry points.
 - **Limitations** (all with scopes when an upper bound is proven): conditional registrations and
   non-contract verbs (`route-coverage:` with their templates), unresolved mount prefixes and routers known
   only by a type annotation (`pathAnchor: "base"` and `unresolved-route-prefix:` with `templateSuffixes`),
@@ -485,8 +488,12 @@ declaration first: function declarations, named classes and class expressions, m
 accessors, class fields, `constructor`, `default` for anonymous default exports (including the
 expression of `export default <expr>`), variables at
 module level or whose function-valued initializer contains the fact (`src/lib/jobs.ts#listJobs`,
-`src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Anonymous callbacks are transparent. A
-computed name stops the symbol, and module-level statements have none; those facts are counted
+`src/repo.ts#Repo.save`, `src/api.ts#handlers.GET`). Inline callbacks (arrow functions and function
+expressions passed directly as call or `new` arguments) add their own segment after the id of the
+scope the callback expression sits in (`src/app.ts#<module>.app.get("/users")`,
+`src/lib/jobs.ts#listJobs.items.map()`; see [inline callback ids](#inline-callback-ids)); other
+anonymous functions (JSX attribute values, immediately invoked functions, conditional values) are
+transparent. A computed name stops the symbol, and module-level statements have none; those facts are counted
 under `missing-relation-usrs:` (the isthmus chain-only prefix; informational). Schema facts use the model name (`Job`, `Job.title`), and
 TypedSQL facts use `<path>#<file name>`.
 
@@ -733,7 +740,7 @@ generated clients are never nodes; calls into them are counted as external.
 | Node kind | What |
 |---|---|
 | `module` | `<path>#<module>`: top-level statements and code outside any named declaration |
-| `function`, `method`, `constructor`, `accessor`, `class`, `field`, `variable` | declarations named by the symbol id rules (function-valued variables and object properties are `function`) |
+| `function`, `method`, `constructor`, `accessor`, `class`, `field`, `variable` | declarations named by the symbol id rules (function-valued variables, object properties, and [inline callbacks](#inline-callback-ids) are `function`) |
 | `export` | an export that is not itself a declaration (alias, re-export, destructuring) |
 
 | Edge kind | Meaning |
@@ -745,6 +752,7 @@ generated clients are never nodes; calls into them are counted as external.
 | `jsx` | a JSX component (`<JobList />`) |
 | `alias` | export node → the declaration it resolves to |
 | `initializer` | constructor/class → instance field initializers, derived class without a constructor → base construction, module scope → top-level variable initializers and static fields |
+| `contains` | the node that lexically holds an inline callback → the callback node (`<path>#<module>` → `<path>#<module>.app.get("/users")`). The caller of a callback (`app.get`, `items.map`) is usually external, so this edge keeps reach from the holder and impact from code inside the callback connected. It does not prove the callback runs; before inline callbacks had nodes their code was attributed to the holder, so reach sets are unchanged |
 
 Calls are resolved through checker symbols across modules: named/default/namespace imports,
 re-exports (including `export *`), path aliases, value aliases (`const h = g`), destructuring
@@ -1031,8 +1039,9 @@ facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exac
   declarations, outermost first, joined with `.`:
   `src/lib/jobs.ts#listJobs`, `src/lib/repo.ts#Repo.save`, `src/lib/repo.ts#Repo.constructor`,
   `src/auth.ts#handlers.GET`, `src/app/api/items/[id]/route.ts#GET`, `pages/api/hello.ts#handler`.
-- Code outside every named declaration (top-level statements, callbacks passed at module level,
-  members with computed names) belongs to the module scope `<path>#<module>`.
+- Code outside every named declaration (top-level statements, members with computed names, and
+  callbacks inside them) belongs to the module scope `<path>#<module>`.
+- An inline callback has its own id: see [inline callback ids](#inline-callback-ids).
 - An anonymous default export is `<path>#default` (also for `export default <expr>`).
 - An export that is not itself a named declaration (`export { a as GET }`, `export { GET } from
   './impl'`, `export const { GET } = handlers`, `export let x;`) gets an export node
@@ -1042,6 +1051,48 @@ facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exac
 - Declaration-side relation-use facts use `#model:` and `#typedsql:` ids (see
   [Facts](#facts)); these are never graph nodes. Node ORM declarations (Drizzle tables, TypeORM
   entities, Sequelize models) reuse `#model:`.
+
+### Inline callback ids
+
+Arrow functions and function expressions passed directly as a call or `new` argument (parentheses,
+`as`, `satisfies`, and non-null wrappers are ignored) are graph nodes. Their id is
+
+```text
+<id of the scope the callback expression sits in>.<callee>(<keys>)[~<n>]
+```
+
+- **Scope.** The callback's own position decides the prefix, not the code inside it: a callback at
+  module level is under `<path>#<module>`, one inside `listJobs` under `#listJobs`, one inside another
+  callback under that callback's id (`#<module>.describe("suite").it("works")`). A local variable that
+  receives the call's result is not a segment (`const rows = ids.map(cb)` in `load` gives
+  `#load.ids.map()`), so the prefix is always the node that holds the callback, and the graph links it
+  with a `contains` edge.
+- **Anchor call.** If the call that receives the callback is itself an argument of another call, the
+  outermost call of that argument chain names it: `app.get('/x', asyncHandler(async (req, res) => …))`
+  is `app.get("/x")`, like an unwrapped handler.
+- **Callee.** The chain of identifiers, `this`, `super`, property accesses, and string-keyed element
+  accesses as written (`app.get`, `this.router.post`, `db["run"]`). A call, `new`, or any other
+  expression inside the chain is shortened to `…` (`new Hono().get('/a', …)` → `….get("/a")`), so an
+  earlier registration in a chain never leaks into a later handler's id. A `new` anchor is written
+  `new <callee>` (`new Promise()`).
+- **Keys.** Up to two leading static-key arguments, joined by `,`: string literals (JSON-quoted),
+  template literals (substitutions shown as `${name}` for a name chain, else `${…}`), name chains
+  (`books.post(BOOKS)`, `authors.get(PATHS.authors)`), and arrays of those
+  (`books.on(["PUT","PATCH"],"/b")`). The list stops at the first other argument; with none the key is
+  empty (`useEffect()`). Strings longer than 64 UTF-16 units are cut (never inside a surrogate pair) and
+  end with `…`; C1 controls and U+2028/U+2029 are written as `\uXXXX`, since the contract forbids control
+  characters in symbol names.
+- **Collisions.** Callbacks with the same prefix and segment (the same path registered twice, several
+  inline functions in one call, repeated `useEffect`) are numbered in source order; the second and later
+  get `~2`, `~3`, ….
+- **Stability.** The id does not depend on line or column, so it survives unrelated edits: adding
+  declarations or other callbacks, moving lines, changing another route's path, or adding a callback in
+  another scope. It changes when the callback's own prefix, callee, or keys change, or when a callback
+  with the same prefix and segment is inserted before it (the `~n` of the later ones shifts).
+- **Not covered.** Callbacks inside a computed-name member get no name (nothing is guessed) and stay in
+  the module scope. Functions that are not call arguments keep the existing rules: object-literal
+  properties (`{ handler: async () => … }` is `…handler`), variable initializers, JSX attribute values
+  and immediately invoked functions (transparent).
 
 ## Development
 

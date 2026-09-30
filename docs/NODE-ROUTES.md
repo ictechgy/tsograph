@@ -151,8 +151,10 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
   (`/api/{dynamic}`). 모든 어댑터가 같은 표기를 쓴다.
 - **dynamicScope**: dynamic 사실의 증명된 정적 접두사(세그먼트 경계). 루트 앵커에서만 싣고, `methods`는 싣지 않는다(ANY 전용).
 - **location**: 경로 인자(없으면 등록 호출, Nest는 메서드 데코레이터의 경로 인자 또는 데코레이터). **symbol**: `usr`는 핸들러 함수
-  본문이 속한 그래프 노드(`src/lib/h.ts#listBooks`, `src/app.ts#UsersController.findOne`, 인라인 함수는 감싼 선언 또는
-  `<path>#<module>`), `qualifiedName`은 같은 문자열이다. 감싼 핸들러(`asyncHandler(fn)`, `fn.bind(x)`)는 안쪽 함수를 쓴다.
+  본문이 속한 그래프 노드(`src/lib/h.ts#listBooks`, `src/app.ts#UsersController.findOne`, 인라인 함수는 인라인 콜백 id
+  `src/app.ts#<module>.app.get("/x")` — 규칙은 README의 "인라인 콜백 id"), `qualifiedName`은 같은 문자열이다. 감싼
+  핸들러(`asyncHandler(fn)`, `fn.bind(x)`)는 안쪽 함수를 쓰고, 안쪽이 인라인 함수면 id는 등록 호출에서 온다
+  (`app.get('/x', asyncHandler(async (req, res) => …))` → `app.get("/x")`).
 
 ## 한계와 스코프
 
@@ -167,7 +169,7 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 | 경로를 붙여 넘긴 값을 풀지 못함(`use('/x', require(dynamic))`), Hono `route()`의 풀지 못한 앱, `mount()` | `route-coverage:` + 그 접두사 |
 | 경로 없이 넘긴 값을 풀지 못했고 타입이 라우터일 수 있음(Express·Koa `use(x)`: 타입을 모르거나 `route`·`routes`·`router`·`stack` 속성이 있음) | `route-coverage:` + 붙인 라우터의 접두사. 라우터 표식이 없는 함수 타입은 넘기는 미들웨어 |
 | 핸들러가 프로젝트 밖·해석 불가, 마지막 핸들러가 펼침(`get('/x', ...handlers)`) | usr 없음·순서 없음, `missing-route-usrs:`(체인 전용) |
-| 인라인 핸들러, 요청을 넘긴다고 본 미들웨어 | `framework-dispatch-unmodeled:`(체인 전용) |
+| 자기 노드를 얻지 못한 인라인 핸들러(계산된 이름 멤버 안), 요청을 넘긴다고 본 미들웨어 | `framework-dispatch-unmodeled:`(체인 전용) |
 | 순서를 증명하지 못한 decl | `route-dispatch-order-unknown:` + 템플릿 스코프 |
 | 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
 
@@ -180,8 +182,12 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 - **`next`를 받지 않는 `use()` 함수는 끝이 열린 라우트다**(`/p`와 `/p/{**}`의 ANY). 다만 본문이 404를 만드는 "찾지 못함"
   처리기(`res.status(404)`, `ctx.status = 404`)와 넷 매개변수 오류 처리기는 라우트로 내지 않는다 — 선언 없는 모든 경로를 받는
   decl이 되어 누락 호출을 모두 가리기 때문이다.
-- **인라인 핸들러의 usr는 감싼 선언이다.** tsograph 그래프가 인라인 함수에 노드를 만들지 않으므로 별도 id를 지어내지 않는다.
-  reach는 형제 코드까지 포함하는 과대 근사이고, `framework-dispatch-unmodeled:`로 알린다.
+- **인라인 핸들러의 usr는 자기 그래프 노드다.** 호출 인자로 넘긴 화살표·함수 식은 그래프·schema·routes가 같은 규칙으로 id를
+  짓는다(`<콜백 식이 속한 스코프 id>.<호출 대상>(<키 인자>)[~n]`). 줄·열 대신 등록 호출의 대상과 경로 리터럴을 써서 무관한
+  수정에 흔들리지 않게 했고, 겹치면 소스 순서 번호로 가른다. 그래서 핸들러 안의 relation-use가 같은 id를 갖고, reach가 같은
+  파일의 형제 핸들러를 끌어오지 않는다. 담은 노드(모듈 스코프 등)에서 콜백으로 `contains` 간선을 이어 담은 노드에서의 도달과
+  콜백 안에서의 역방향 영향이 끊기지 않는다. 계산된 이름 멤버 안처럼 이름을 짓지 못하면(추측하지 않는다) 예전처럼 감싼 id를
+  쓰고 `framework-dispatch-unmodeled:`로 알린다.
 - **NestJS 순서는 컨트롤러 단위다.** 모듈 순서는 DI 스캔 순서라 정적으로 증명하지 않는다. 컨트롤러가 다르면 같은 템플릿이 겹칠 때
   isthmus가 모호함으로 본다(거짓 가림 없음).
 - **복사 mount의 시점**: Hono `route()`와 @koa/router 중첩 `use()`는 같은 타임라인 뿌리에서 mount 뒤에 등록한 라우트를 복사하지
