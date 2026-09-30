@@ -1,0 +1,524 @@
+{
+  "fixture": "fastify4-app",
+  "framework": "fastify",
+  "versions": {
+    "fastify": "4.29.1"
+  },
+  "dispatch": "specificity",
+  "facts": [
+    {
+      "caseInsensitive": true,
+      "channel": "/Status",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 8,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#build",
+        "usr": "src/app.js#build"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/admin",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 18,
+        "line": 13,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#build",
+        "usr": "src/app.js#build"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/admin/users",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 18,
+        "line": 14,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#build",
+        "usr": "src/app.js#build"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 10,
+        "path": "src/app.js"
+      },
+      "method": "POST",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#build",
+        "usr": "src/app.js#build"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/items/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 9,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#build",
+        "usr": "src/app.js#build"
+      },
+      "trailingSlash": "optional"
+    }
+  ],
+  "limitations": [
+    "framework-dispatch-unmodeled: 5 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/Status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/Status",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/Status/",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/STATUS",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/admin",
+      "expect": [
+        "h:admin-root"
+      ],
+      "actual": "h:admin-root",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/admin",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/admin/",
+      "expect": [
+        "h:admin-root"
+      ],
+      "actual": "h:admin-root",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ADMIN",
+      "expect": [
+        "h:admin-root"
+      ],
+      "actual": "h:admin-root",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/admin/users",
+      "expect": [
+        "h:admin-users"
+      ],
+      "actual": "h:admin-users",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/admin/users",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/admin/users/",
+      "expect": [
+        "h:admin-users"
+      ],
+      "actual": "h:admin-users",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ADMIN/USERS",
+      "expect": [
+        "h:admin-users"
+      ],
+      "actual": "h:admin-users",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/items",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/items/",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/ITEMS",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/items/p1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/items/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/items/p1/",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ITEMS/P1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/Status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/items/p1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/items",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "OPTIONS",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PATCH",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "TRACE",
+      "path": "/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "OPTIONS",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PATCH",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "TRACE",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin",
+      "expect": [
+        "h:admin-root"
+      ],
+      "actual": "h:admin-root",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin/users",
+      "expect": [
+        "h:admin-users"
+      ],
+      "actual": "h:admin-users",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 5,
+    "verifiedFacts": 5,
+    "dynamicFacts": 0,
+    "servedRoutes": 5,
+    "coveredRoutes": 5,
+    "probes": 39,
+    "failedProbes": 0
+  }
+}

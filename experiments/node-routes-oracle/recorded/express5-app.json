@@ -1,0 +1,1060 @@
+{
+  "fixture": "express5-app",
+  "framework": "express",
+  "versions": {
+    "express": "5.2.1"
+  },
+  "dispatch": "registration-order",
+  "facts": [
+    {
+      "caseInsensitive": true,
+      "channel": "/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 7,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/Mixed/Case",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 16,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 11
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/cors-check",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 15,
+        "path": "src/app.ts"
+      },
+      "method": "OPTIONS",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 10
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/export.{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 9,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 5
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/files/{**}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 7,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 3
+      },
+      "paramConstraints": [
+        {
+          "kind": "path",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/list",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 8,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 4
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/list/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 8,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 4
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/products",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 5,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/products/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 6,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 2
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/tags/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 15,
+        "line": 10,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "DELETE",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 6
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shop/tags/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 15,
+        "line": 10,
+        "path": "src/routes/catalog.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 6
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/catalog.ts#<module>",
+        "usr": "src/routes/catalog.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/strict/exact/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 18,
+        "line": 12,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 9
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/system/status",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 4,
+        "path": "src/routes/register.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 7
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/register.ts#registerStatus",
+        "usr": "src/routes/register.ts#registerStatus"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/system/status",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 5,
+        "path": "src/routes/register.ts"
+      },
+      "method": "HEAD",
+      "order": {
+        "group": "express:src/app.ts:5:13",
+        "index": 8
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/register.ts#registerStatus",
+        "usr": "src/routes/register.ts#registerStatus"
+      },
+      "trailingSlash": "optional"
+    }
+  ],
+  "limitations": [
+    "framework-dispatch-unmodeled: 13 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/Mixed/Case",
+      "expect": [
+        "h:mixed-case"
+      ],
+      "actual": "h:mixed-case",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/Mixed/Case",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/Mixed/Case/",
+      "expect": [
+        "h:mixed-case"
+      ],
+      "actual": "h:mixed-case",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/MIXED/CASE",
+      "expect": [
+        "h:mixed-case"
+      ],
+      "actual": "h:mixed-case",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "OPTIONS",
+      "path": "/cors-check",
+      "expect": [
+        "h:cors-check"
+      ],
+      "actual": "h:cors-check",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/cors-check",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "OPTIONS",
+      "path": "/cors-check/",
+      "expect": [
+        "h:cors-check"
+      ],
+      "actual": "h:cors-check",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "OPTIONS",
+      "path": "/CORS-CHECK",
+      "expect": [
+        "h:cors-check"
+      ],
+      "actual": "h:cors-check",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/export.p1",
+      "expect": [
+        "h:catalog-export"
+      ],
+      "actual": "h:catalog-export",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/export.p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/export.p1/",
+      "expect": [
+        "h:catalog-export"
+      ],
+      "actual": "h:catalog-export",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/EXPORT.P1",
+      "expect": [
+        "h:catalog-export"
+      ],
+      "actual": "h:catalog-export",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/files/a/b",
+      "expect": [
+        "h:catalog-files"
+      ],
+      "actual": "h:catalog-files",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/files/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/FILES/A/B",
+      "expect": [
+        "h:catalog-files"
+      ],
+      "actual": "h:catalog-files",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/list",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/list",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/list/",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/LIST",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/list/p1",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/list/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/list/p1/",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/LIST/P1",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/products",
+      "expect": [
+        "h:list-products"
+      ],
+      "actual": "h:list-products",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/products",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/products/",
+      "expect": [
+        "h:list-products"
+      ],
+      "actual": "h:list-products",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/PRODUCTS",
+      "expect": [
+        "h:list-products"
+      ],
+      "actual": "h:list-products",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/products/p1",
+      "expect": [
+        "h:get-product"
+      ],
+      "actual": "h:get-product",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/products/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/products/p1/",
+      "expect": [
+        "h:get-product"
+      ],
+      "actual": "h:get-product",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/PRODUCTS/P1",
+      "expect": [
+        "h:get-product"
+      ],
+      "actual": "h:get-product",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "h:delete-tag"
+      ],
+      "actual": "h:delete-tag",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "method",
+      "method": "PATCH",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "slash",
+      "method": "DELETE",
+      "path": "/shop/tags/p1/",
+      "expect": [
+        "h:delete-tag"
+      ],
+      "actual": "h:delete-tag",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "case",
+      "method": "DELETE",
+      "path": "/SHOP/TAGS/P1",
+      "expect": [
+        "h:delete-tag"
+      ],
+      "actual": "h:delete-tag",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "h:get-tag"
+      ],
+      "actual": "h:get-tag",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "h:delete-tag"
+      ],
+      "actual": "h:delete-tag",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shop/tags/p1/",
+      "expect": [
+        "h:get-tag"
+      ],
+      "actual": "h:get-tag",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHOP/TAGS/P1",
+      "expect": [
+        "h:get-tag"
+      ],
+      "actual": "h:get-tag",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/strict/exact/",
+      "expect": [
+        "h:exact-slash"
+      ],
+      "actual": "h:exact-slash",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/strict/exact/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/strict/exact",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/STRICT/EXACT/",
+      "expect": [
+        "h:exact-slash"
+      ],
+      "actual": "h:exact-slash",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/system/status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/system/status",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/system/status/",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SYSTEM/STATUS",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "fact",
+      "method": "HEAD",
+      "path": "/system/status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "status:200",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/system/status",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "slash",
+      "method": "HEAD",
+      "path": "/system/status/",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "status:200",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "case",
+      "method": "HEAD",
+      "path": "/SYSTEM/STATUS",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "status:200",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/products",
+      "expect": [
+        "h:list-products"
+      ],
+      "actual": "h:list-products",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/products/p1",
+      "expect": [
+        "h:get-product"
+      ],
+      "actual": "h:get-product",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/files/a/b",
+      "expect": [
+        "h:catalog-files"
+      ],
+      "actual": "h:catalog-files",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/list/p1",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/list",
+      "expect": [
+        "h:catalog-list"
+      ],
+      "actual": "h:catalog-list",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/export.p1",
+      "expect": [
+        "h:catalog-export"
+      ],
+      "actual": "h:catalog-export",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "h:get-tag"
+      ],
+      "actual": "h:get-tag",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/shop/tags/p1",
+      "expect": [
+        "h:delete-tag"
+      ],
+      "actual": "h:delete-tag",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/system/status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "h:status",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "HEAD",
+      "path": "/system/status",
+      "expect": [
+        "h:status"
+      ],
+      "actual": "status:200",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/strict/exact/",
+      "expect": [
+        "h:exact-slash"
+      ],
+      "actual": "h:exact-slash",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "OPTIONS",
+      "path": "/cors-check",
+      "expect": [
+        "h:cors-check"
+      ],
+      "actual": "h:cors-check",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/Mixed/Case",
+      "expect": [
+        "h:mixed-case"
+      ],
+      "actual": "h:mixed-case",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 14,
+    "verifiedFacts": 14,
+    "dynamicFacts": 0,
+    "servedRoutes": 13,
+    "coveredRoutes": 13,
+    "probes": 67,
+    "failedProbes": 0
+  }
+}

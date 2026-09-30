@@ -1,0 +1,1080 @@
+{
+  "fixture": "nest-app",
+  "framework": "nest",
+  "versions": {
+    "@nestjs/common": "12.1.2",
+    "@nestjs/core": "12.1.2",
+    "@nestjs/platform-express": "12.1.2",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "dispatch": "registration-order",
+  "facts": [
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/admin/reports",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 3,
+        "line": 18,
+        "path": "src/admin/admin.controller.ts"
+      },
+      "method": "GET",
+      "narrowed": true,
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/admin/admin.controller.ts#ReportsController.reports",
+        "usr": "src/admin/admin.controller.ts#ReportsController.reports"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/admin/stats",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 3,
+        "line": 5,
+        "path": "src/admin/admin.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/admin/admin.controller.ts:4:14",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/admin/admin.controller.ts#StatsController.stats",
+        "usr": "src/admin/admin.controller.ts#StatsController.stats"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/admin/stats/cache",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 10,
+        "path": "src/admin/admin.controller.ts"
+      },
+      "method": "DELETE",
+      "order": {
+        "group": "nest:src/admin/admin.controller.ts:4:14",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/admin/admin.controller.ts#StatsController.clearCache",
+        "usr": "src/admin/admin.controller.ts#StatsController.clearCache"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 3,
+        "line": 5,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.list",
+        "usr": "src/users/users.controller.ts#UsersController.list"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 3,
+        "line": 21,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "POST",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 3
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.create",
+        "usr": "src/users/users.controller.ts#UsersController.create"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/any",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 32,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "ANY",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 5
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.any",
+        "usr": "src/users/users.controller.ts#UsersController.any"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/delegate",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 42,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.delegate",
+        "usr": "src/users/users.controller.ts#UsersController.delegate"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/files/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 37,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 6
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.files",
+        "usr": "src/users/users.controller.ts#UsersController.files"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/files/{**}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 37,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 6
+      },
+      "paramConstraints": [
+        {
+          "kind": "path",
+          "segment": 4
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.files",
+        "usr": "src/users/users.controller.ts#UsersController.files"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/me",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 16,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 2
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.me",
+        "usr": "src/users/users.controller.ts#UsersController.me"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v1/users/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 10,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.findOne",
+        "usr": "src/users/users.controller.ts#UsersController.findOne"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/v2/users/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 8,
+        "line": 26,
+        "path": "src/users/users.controller.ts"
+      },
+      "method": "PUT",
+      "order": {
+        "group": "nest:src/users/users.controller.ts:4:14",
+        "index": 4
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/users/users.controller.ts#UsersController.replace",
+        "usr": "src/users/users.controller.ts#UsersController.replace"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/health",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 3,
+        "line": 8,
+        "path": "src/app.module.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "nest:src/app.module.ts:7:14",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.module.ts#HealthController.health",
+        "usr": "src/app.module.ts#HealthController.health"
+      },
+      "trailingSlash": "optional"
+    }
+  ],
+  "limitations": [
+    "route-dispatch-order-unknown: 2 route declaration(s) carry no order (a handler that may pass the request on with next(), a registration outside the app's own module or behind a condition, or a router that picks by specificity)"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/admin/reports",
+      "expect": [
+        "h:admin-reports"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/admin/reports",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/admin/reports/",
+      "expect": [
+        "h:admin-reports"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/ADMIN/REPORTS",
+      "expect": [
+        "h:admin-reports"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/admin/stats",
+      "expect": [
+        "h:admin-stats"
+      ],
+      "actual": "h:admin-stats",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/admin/stats",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/admin/stats/",
+      "expect": [
+        "h:admin-stats"
+      ],
+      "actual": "h:admin-stats",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/ADMIN/STATS",
+      "expect": [
+        "h:admin-stats"
+      ],
+      "actual": "h:admin-stats",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/api/v1/admin/stats/cache",
+      "expect": [
+        "h:admin-clear-cache"
+      ],
+      "actual": "h:admin-clear-cache",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "method",
+      "method": "PATCH",
+      "path": "/api/v1/admin/stats/cache",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "DELETE",
+      "path": "/api/v1/admin/stats/cache/",
+      "expect": [
+        "h:admin-clear-cache"
+      ],
+      "actual": "h:admin-clear-cache",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "DELETE",
+      "path": "/API/V1/ADMIN/STATS/CACHE",
+      "expect": [
+        "h:admin-clear-cache"
+      ],
+      "actual": "h:admin-clear-cache",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "expect": [
+        "h:list-users"
+      ],
+      "actual": "h:list-users",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/users/",
+      "expect": [
+        "h:list-users"
+      ],
+      "actual": "h:list-users",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS",
+      "expect": [
+        "h:list-users"
+      ],
+      "actual": "h:list-users",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "expect": [
+        "h:create-user"
+      ],
+      "actual": "h:create-user",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/api/v1/users/",
+      "expect": [
+        "h:create-user"
+      ],
+      "actual": "h:create-user",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/API/V1/USERS",
+      "expect": [
+        "h:create-user"
+      ],
+      "actual": "h:create-user",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/users/any/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/ANY",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/delegate",
+      "expect": [
+        "(unknown marker src/users/users.controller.ts:42)",
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users/delegate",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/users/delegate/",
+      "expect": [
+        "(unknown marker src/users/users.controller.ts:42)",
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/DELEGATE",
+      "expect": [
+        "(unknown marker src/users/users.controller.ts:42)",
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/files/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users/files/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/FILES/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/files/a/b",
+      "expect": [
+        "h:user-files"
+      ],
+      "actual": "h:user-files",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users/files/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/FILES/A/B",
+      "expect": [
+        "h:user-files"
+      ],
+      "actual": "h:user-files",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/me",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users/me",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/users/me/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/ME",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/v1/users/p1",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v1/users/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/v1/users/p1/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/V1/USERS/P1",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "fact",
+      "method": "PUT",
+      "path": "/api/v2/users/p1",
+      "expect": [
+        "h:replace-user-v2"
+      ],
+      "actual": "h:replace-user-v2",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/v2/users/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "slash",
+      "method": "PUT",
+      "path": "/api/v2/users/p1/",
+      "expect": [
+        "h:replace-user-v2"
+      ],
+      "actual": "h:replace-user-v2",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "case",
+      "method": "PUT",
+      "path": "/API/V2/USERS/P1",
+      "expect": [
+        "h:replace-user-v2"
+      ],
+      "actual": "h:replace-user-v2",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/health",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/health/",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/HEALTH",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "expect": [
+        "h:list-users"
+      ],
+      "actual": "h:list-users",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/p1",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/me",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "expect": [
+        "h:create-user"
+      ],
+      "actual": "h:create-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/api/v2/users/p1",
+      "expect": [
+        "h:replace-user-v2"
+      ],
+      "actual": "h:replace-user-v2",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "HEAD",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "status:200",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "OPTIONS",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PATCH",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "TRACE",
+      "path": "/api/v1/users/any",
+      "expect": [
+        "h:users-any"
+      ],
+      "actual": "h:users-any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/files/a/b",
+      "expect": [
+        "h:user-files"
+      ],
+      "actual": "h:user-files",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/files/",
+      "expect": [
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/users/delegate",
+      "expect": [
+        "(unknown marker src/users/users.controller.ts:42)",
+        "h:find-user"
+      ],
+      "actual": "h:find-user",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/admin/stats",
+      "expect": [
+        "h:admin-stats"
+      ],
+      "actual": "h:admin-stats",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/api/v1/admin/stats/cache",
+      "expect": [
+        "h:admin-clear-cache"
+      ],
+      "actual": "h:admin-clear-cache",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/v1/admin/reports",
+      "expect": [
+        "h:admin-reports"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 13,
+    "verifiedFacts": 13,
+    "dynamicFacts": 0,
+    "servedRoutes": 18,
+    "coveredRoutes": 18,
+    "probes": 71,
+    "failedProbes": 0
+  }
+}

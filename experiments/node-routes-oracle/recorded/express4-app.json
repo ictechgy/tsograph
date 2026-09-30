@@ -1,0 +1,2044 @@
+{
+  "fixture": "express4-app",
+  "framework": "express",
+  "versions": {
+    "cors": "2.8.5",
+    "express": "4.22.3"
+  },
+  "dispatch": "registration-order",
+  "facts": [
+    {
+      "caseInsensitive": true,
+      "channel": "/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 16,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/Case/Path",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 10,
+        "line": 30,
+        "path": "src/app.js"
+      },
+      "method": "POST",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 5
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/admin/panel",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 7,
+        "path": "src/admin.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 15
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/admin.js#<module>",
+        "usr": "src/admin.js#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/admin/panel/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 8,
+        "path": "src/admin.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 16
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/admin.js#<module>",
+        "usr": "src/admin.js#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/any",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 29,
+        "path": "src/app.js"
+      },
+      "method": "ANY",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 4
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/orders",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 8,
+        "path": "src/routes/orders.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 6
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/lib/handlers.js#listOrders",
+        "usr": "src/lib/handlers.js#listOrders"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/orders",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 13,
+        "line": 10,
+        "path": "src/routes/orders.js"
+      },
+      "method": "POST",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 8
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/orders.js#<module>",
+        "usr": "src/routes/orders.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/orders/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 9,
+        "path": "src/routes/orders.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 7
+      },
+      "paramConstraints": [
+        {
+          "kind": "int",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/lib/handlers.js#getOrder",
+        "usr": "src/lib/handlers.js#getOrder"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/orders/{}/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 14,
+        "line": 13,
+        "path": "src/routes/orders.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 9
+      },
+      "paramConstraints": [
+        {
+          "kind": "int",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/orders.js#<module>",
+        "usr": "src/routes/orders.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/orders/{}/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 14,
+        "line": 13,
+        "path": "src/routes/orders.js"
+      },
+      "method": "PUT",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 9
+      },
+      "paramConstraints": [
+        {
+          "kind": "int",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/orders.js#<module>",
+        "usr": "src/routes/orders.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/files/:name.:ext",
+      "dynamic": true,
+      "dynamicScope": {
+        "templatePrefixes": [
+          "/files"
+        ]
+      },
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 11,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 14
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      }
+    },
+    {
+      "channel": "/files/Docs/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 7,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 10
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/files/img-{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 10,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 13
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/files/pages",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 9,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 12
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/files/pages/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 9,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 12
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/files/raw/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 8,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 11
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "channel": "/files/raw/{**}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 11,
+        "line": 8,
+        "path": "src/routes/files.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 11
+      },
+      "paramConstraints": [
+        {
+          "kind": "path",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/files.js#<module>",
+        "usr": "src/routes/files.js#<module>"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "catchAllPrefix": true,
+      "channel": "/health",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 36,
+        "path": "src/app.js"
+      },
+      "method": "ANY",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 17
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/health/{**}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 36,
+        "path": "src/app.js"
+      },
+      "method": "ANY",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 17
+      },
+      "paramConstraints": [
+        {
+          "kind": "path",
+          "segment": 1
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shadow/fixed",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 27,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 3
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/shadow/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 26,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 2
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/users/me",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 23,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/users/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 19,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/v{dynamic}",
+      "dynamic": true,
+      "dynamicScope": {
+        "templatePrefixes": [
+          "/"
+        ]
+      },
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 43,
+        "path": "src/app.js"
+      },
+      "method": "GET",
+      "order": {
+        "group": "express:src/app.js:9:13",
+        "index": 18
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.js#<module>",
+        "usr": "src/app.js#<module>"
+      }
+    }
+  ],
+  "limitations": [
+    "framework-dispatch-unmodeled: 19 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code",
+    "framework-dispatch-unmodeled: 2 middleware registration(s) run before route handlers and are treated as passing every request on; their code is not attached to handler usrs",
+    "framework-provided-routes: 1 registration(s) of static files from express.static can answer requests that have no route declaration in the project",
+    "route-coverage: 1 route registration(s) run only under a condition (if, switch, loop, catch, or short-circuit expression); they are not emitted as declarations",
+    "route-coverage: 2 route declaration(s) have paths tsograph could not translate into a canonical template; their facts are dynamic",
+    "route-dispatch-order-unknown: 1 route declaration(s) carry no order (a handler that may pass the request on with next(), a registration outside the app's own module or behind a condition, or a router that picks by specificity)"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/Case/Path",
+      "expect": [
+        "h:case-path"
+      ],
+      "actual": "h:case-path",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/Case/Path",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/Case/Path/",
+      "expect": [
+        "h:case-path"
+      ],
+      "actual": "h:case-path",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/CASE/PATH",
+      "expect": [
+        "h:case-path"
+      ],
+      "actual": "h:case-path",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/admin/panel",
+      "expect": [
+        "h:admin-panel"
+      ],
+      "actual": "h:admin-panel",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/admin/panel",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/admin/panel/",
+      "expect": [
+        "h:admin-panel-slash"
+      ],
+      "actual": "h:admin-panel-slash",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ADMIN/PANEL",
+      "expect": [
+        "h:admin-panel"
+      ],
+      "actual": "h:admin-panel",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/admin/panel/",
+      "expect": [
+        "h:admin-panel-slash"
+      ],
+      "actual": "h:admin-panel-slash",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/admin/panel/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/admin/panel",
+      "expect": [
+        "h:admin-panel"
+      ],
+      "actual": "h:admin-panel",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ADMIN/PANEL/",
+      "expect": [
+        "h:admin-panel-slash"
+      ],
+      "actual": "h:admin-panel-slash",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/any/",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/ANY",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/orders",
+      "expect": [
+        "h:list-orders"
+      ],
+      "actual": "h:list-orders",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/orders",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/orders/",
+      "expect": [
+        "h:list-orders"
+      ],
+      "actual": "h:list-orders",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ORDERS",
+      "expect": [
+        "h:list-orders"
+      ],
+      "actual": "h:list-orders",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/orders",
+      "expect": [
+        "h:create-order"
+      ],
+      "actual": "h:create-order",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/orders",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/api/orders/",
+      "expect": [
+        "h:create-order"
+      ],
+      "actual": "h:create-order",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/API/ORDERS",
+      "expect": [
+        "h:create-order"
+      ],
+      "actual": "h:create-order",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/orders/12",
+      "expect": [
+        "h:get-order"
+      ],
+      "actual": "h:get-order",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/orders/12",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/orders/12/",
+      "expect": [
+        "h:get-order"
+      ],
+      "actual": "h:get-order",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ORDERS/12",
+      "expect": [
+        "h:get-order"
+      ],
+      "actual": "h:get-order",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "h:order-items"
+      ],
+      "actual": "h:order-items",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/orders/12/items/",
+      "expect": [
+        "h:order-items"
+      ],
+      "actual": "h:order-items",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ORDERS/12/ITEMS",
+      "expect": [
+        "h:order-items"
+      ],
+      "actual": "h:order-items",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "fact",
+      "method": "PUT",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "h:replace-items"
+      ],
+      "actual": "h:replace-items",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "slash",
+      "method": "PUT",
+      "path": "/api/orders/12/items/",
+      "expect": [
+        "h:replace-items"
+      ],
+      "actual": "h:replace-items",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "case",
+      "method": "PUT",
+      "path": "/API/ORDERS/12/ITEMS",
+      "expect": [
+        "h:replace-items"
+      ],
+      "actual": "h:replace-items",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/Docs/p1",
+      "expect": [
+        "h:doc"
+      ],
+      "actual": "h:doc",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/Docs/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/files/Docs/p1/",
+      "expect": [
+        "h:doc"
+      ],
+      "actual": "h:doc",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/DOCS/P1",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/img-p1",
+      "expect": [
+        "h:image"
+      ],
+      "actual": "h:image",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/img-p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/files/img-p1/",
+      "expect": [
+        "h:image"
+      ],
+      "actual": "h:image",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/IMG-P1",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 12
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/pages",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/pages",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/files/pages/",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/PAGES",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/pages/p1",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/pages/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/files/pages/p1/",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/PAGES/P1",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/raw/",
+      "expect": [
+        "h:raw"
+      ],
+      "actual": "h:raw",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/raw/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/files/raw",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/RAW/",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/files/raw/a/b",
+      "expect": [
+        "h:raw"
+      ],
+      "actual": "h:raw",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/files/raw/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/FILES/RAW/A/B",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/health/",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/HEALTH",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/health/a/b",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/health/a/b",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/health/a/b",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/HEALTH/A/B",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shadow/fixed",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 19
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shadow/fixed",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 19
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shadow/fixed/",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 19
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHADOW/FIXED",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 19
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/shadow/p1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 20
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/shadow/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 20
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/shadow/p1/",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 20
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/SHADOW/P1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 20
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/users/me",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true,
+      "fact": 21
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/users/me",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 21
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/users/me/",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true,
+      "fact": 21
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/USERS/ME",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 21
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/users/p1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 22
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/users/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 22
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/users/p1/",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 22
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/USERS/P1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 22
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/assets",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/assets/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/users/p1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/users/me",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shadow/p1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/shadow/fixed",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "DELETE",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "HEAD",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "status:200",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PATCH",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "TRACE",
+      "path": "/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/Case/Path",
+      "expect": [
+        "h:case-path"
+      ],
+      "actual": "h:case-path",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/orders",
+      "expect": [
+        "h:list-orders"
+      ],
+      "actual": "h:list-orders",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/orders/12",
+      "expect": [
+        "h:get-order"
+      ],
+      "actual": "h:get-order",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/api/orders",
+      "expect": [
+        "h:create-order"
+      ],
+      "actual": "h:create-order",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "h:order-items"
+      ],
+      "actual": "h:order-items",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/api/orders/12/items",
+      "expect": [
+        "h:replace-items"
+      ],
+      "actual": "h:replace-items",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/Docs/p1",
+      "expect": [
+        "h:doc"
+      ],
+      "actual": "h:doc",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/raw/a/b",
+      "expect": [
+        "h:raw"
+      ],
+      "actual": "h:raw",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/pages/p1",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/pages",
+      "expect": [
+        "h:pages"
+      ],
+      "actual": "h:pages",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/img-p1",
+      "expect": [
+        "h:image"
+      ],
+      "actual": "h:image",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/files/p1.p1",
+      "expect": [
+        "h:named-file",
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "h:named-file",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin/panel",
+      "expect": [
+        "h:admin-panel"
+      ],
+      "actual": "h:admin-panel",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/admin/panel/",
+      "expect": [
+        "h:admin-panel-slash"
+      ],
+      "actual": "h:admin-panel-slash",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/health",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/health/x",
+      "expect": [
+        "h:health"
+      ],
+      "actual": "h:health",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/vundefined/status",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "h:versioned-status",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/",
+      "expect": [
+        "h:home"
+      ],
+      "actual": "h:home",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/x",
+      "expect": [
+        "h:versioned-status"
+      ],
+      "dynamic": true,
+      "actual": "status:404",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 22,
+    "verifiedFacts": 22,
+    "dynamicFacts": 2,
+    "servedRoutes": 34,
+    "coveredRoutes": 34,
+    "probes": 134,
+    "failedProbes": 0
+  }
+}
