@@ -50,7 +50,7 @@ test('벤더링한 벡터 파일은 모두 SHA256SUMS와 같고 목록에 빠진
 test('스코프 suite는 생산자 대상이고 알고 있는 규칙만 담는다', () => {
   assert.equal(scopeCases.suite, 'http-limitation-scope');
   const rules = new Set(scopeCases.cases.map((entry) => entry.ruleId));
-  assert.deepEqual([...rules].sort(), ['scope.applies', 'scope.validate']);
+  assert.deepEqual([...rules].sort(), ['scope.applies', 'scope.dynamic-applies', 'scope.dynamic-validate', 'scope.validate']);
   assert.ok(scopeCases.cases.every((entry) => entry.appliesTo.includes('producer')));
 });
 

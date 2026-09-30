@@ -11,11 +11,11 @@
 import type { HttpMethod } from './bridge-facts.ts';
 import { isCanonicalTemplate } from './route-template-grammar.ts';
 
-/** 경로 필드 이름이다. 항목마다 하나 이상 있어야 한다. */
-const pathFields = ['templates', 'templatePrefixes', 'templateSuffixes'] as const;
+/** 경로 필드 이름이다. 항목마다 하나 이상 있어야 한다. dynamic 선언의 `dynamicScope`도 같은 필드를 쓴다. */
+export const pathFields = ['templates', 'templatePrefixes', 'templateSuffixes'] as const;
 
 /** 경로 필드 이름 하나다. */
-type PathField = (typeof pathFields)[number];
+export type PathField = (typeof pathFields)[number];
 
 /** 항목이 가질 수 있는 키다. 그 밖의 키(`channels` 포함)는 거부한다. */
 const allowedKeys = new Set<string>(['limitationIndex', ...pathFields, 'methods']);
@@ -50,7 +50,7 @@ export function httpLimitationScopeProblem(entry: Readonly<Record<string, unknow
  * @param value 필드 값
  * @returns 위반 사유 코드, 통과하면 undefined
  */
-function pathFieldProblem(field: PathField, value: unknown): string | undefined {
+export function pathFieldProblem(field: PathField, value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0) return `${field}-not-non-empty-array`;
   for (const element of value) {
@@ -69,7 +69,7 @@ function pathFieldProblem(field: PathField, value: unknown): string | undefined 
  * @param value 필드 값
  * @returns 위반 사유 코드, 통과하면 undefined
  */
-function methodsProblem(value: unknown): string | undefined {
+export function methodsProblem(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   const isValid = Array.isArray(value) && value.length > 0
     && value.every((method) => typeof method === 'string' && scopeMethods.has(method))
