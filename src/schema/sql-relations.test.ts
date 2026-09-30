@@ -142,3 +142,11 @@ test('닫히지 않은 괄호와 중복 피연산자를 처리한다', () => {
   assert.deepEqual(relations('SELECT * FROM ""'), []);
   assert.deepEqual(relations('SELECT * FROM "a" AS'), ['a']);
 });
+
+test('table-valued functions are unresolved operands, not table names', () => {
+  assert.deepEqual(relations("SELECT * FROM pragma_table_info('t')"), []);
+  assert.deepEqual(relations("SELECT * FROM users JOIN main.pragma_table_info('t') p ON true"), ['users']);
+  assert.deepEqual(relations("SELECT * FROM pragma_table_info('t') AS p, users"), ['users']);
+  assert.equal(sqlRelations("SELECT * FROM pragma_table_info('t')").unresolved, 1);
+  assert.deepEqual(relations('INSERT INTO users (id) VALUES (1)'), ['users']);
+});

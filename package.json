@@ -50,7 +50,10 @@
     "prepublishOnly": "npm run verify"
   },
   "devDependencies": {
-    "@types/node": "22.19.7"
+    "@types/node": "22.19.7",
+    "axios": "1.20.0",
+    "ky": "2.1.0",
+    "ky-v1": "npm:ky@1.10.0"
   },
   "dependencies": {
     "typescript": "5.9.3",

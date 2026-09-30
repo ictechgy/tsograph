@@ -102,7 +102,8 @@ function verifyRoutesSuccess() {
 function verifyRoutesErrors() {
   const project = join(nextFixtures, 'app-router');
   verify(run(['routes', '--project', project]).status === 64, 'routes missing role');
-  verify(run(['routes', '--role', 'client', '--project', project]).status === 64, 'routes client role');
+  const client = run(['routes', '--role', 'client', '--project', project]);
+  verify(client.status === 0 && JSON.parse(client.stdout).roles[0] === 'client', 'routes client role');
   verify(run(['routes', '--role', 'server']).status === 64, 'routes missing project');
   verify(run(['routes', '--role', 'server', '--project', join(project, 'missing')]).status === 2, 'routes missing project directory');
 }

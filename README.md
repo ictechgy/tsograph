@@ -22,13 +22,35 @@ own language; isthmus joins the documents.
 | Kysely, Objection, MikroORM, pg-promise, sequelize-typescript, MSSQL, Oracle, slonik relation-use facts | Planned (counted as limitations today) |
 | `tsograph graph` / `reach` / `impact`: TypeScript/JavaScript call graph → isthmus `language-traversal` v1 | Implemented |
 | Interface / dependency-injection dispatch: `bound` and `candidate` edges, `--dispatch`, per-root `evidence`, `unresolvedCalls` | Implemented |
-| Web/React Native client route-calls | Planned |
+| `tsograph routes --role client`: web/React Native fetch, axios and ky route-calls | Implemented |
 
-The isthmus `http` target is still marked as in development in isthmus `docs/GRAPH-EXCHANGE.md`
-("개발 중: HTTP 경계"). isthmus-cli **0.10.0** is the first release that consumes it: `check`
-(including `--pairs`), `query`, `trace`, and `diff --http` read `target: "http"` documents, and `trace`
-reads `language-traversal` v1 documents. isthmus-cli 0.9.0 and earlier reject `target: "http"`
-documents.
+The HTTP v1 contract is shipped in isthmus-cli **0.10.0**. `check` (including `--pairs`),
+`query`, `trace`, and `diff --http` read `target: "http"` documents; `trace` also reads
+`language-traversal` v1. Unimplemented extension fields remain explicit drafts and are rejected.
+isthmus-cli 0.9.0 and earlier reject `target: "http"` documents.
+
+## `tsograph routes --role client`
+
+```sh
+tsograph routes --role client --project ./web --service example-api > calls.json
+tsograph impact --project ./web --roots-from affected-call-symbols.json
+```
+
+Extracts global `fetch` (web and React Native), symbol-proven axios imports/`create` instances,
+and ky imports/`create`/`extend` instances as `platform: "js"`, `target: "http"`, `roles: ["client"]`.
+Calls keep their enclosing graph id in `symbol.usr`, including screen callbacks. Request locations
+use 1-based UTF-8 byte columns. Test sources are excluded unless `--include-tests` is passed.
+
+URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`baseUrl`), with shared
+isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
+major version. Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
+fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
+
+Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
+retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Custom wrappers, URL/Request
+objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
+fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
+The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
 
 ## Requirements
 

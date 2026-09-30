@@ -10,6 +10,7 @@
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJson } from '../exchange/sorted-json.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
+import { extractClientRoutes } from '../routes/client/client-routes.ts';
 import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -17,14 +18,15 @@ import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
 
 /** routes 명령 사용법이다. */
-export const routesUsage = `Usage: tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
+export const routesUsage = `Usage: tsograph routes --role server|client --project <root> [--service <name>] [--include-tests] [--format json]
 
 Scan a Next.js project (App Router route handlers and Pages Router API routes) or a Node
 backend (Hono, Express, Fastify, Koa with @koa/router, NestJS) and write an isthmus
 bridge-facts v1 document (platform "js", target "http", route-decl facts).
+Client role extracts web/React Native fetch, axios and ky route-call facts.
 
 Options:
-  --role server      Declaration side to extract (server is the only role implemented)
+  --role <role>      server declarations or client HTTP calls
   --project <root>   Project root (the directory with package.json, next.config.*, app/ or pages/)
   --service <name>   Service identity recorded on the document and every fact
   --include-tests    Also emit routes declared in test sources (*.test.*, *.spec.*, __tests__/;
@@ -43,6 +45,7 @@ export interface RoutesEnvironment {
 
 /** 검증을 통과한 인자다. */
 interface RoutesArguments {
+  readonly role: 'server' | 'client';
   readonly projectArgument: string;
   readonly service: string | undefined;
   readonly includeTests: boolean;
@@ -76,8 +79,8 @@ function parseRoutesArguments(arguments_: readonly string[]): RoutesArguments | 
   if (parsed.booleanFlags.has('--help')) return 'help';
   if (parsed.positionals.length > 0) return 'routes takes no positional arguments; pass the project with --project.';
   const role = parsed.valueFlags.get('--role');
-  if (role === undefined) return '--role server is required.';
-  if (role !== 'server') return '--role supports only server (client route-call extraction is not implemented yet).';
+  if (role === undefined) return '--role server|client is required.';
+  if (role !== 'server' && role !== 'client') return '--role supports only server or client.';
   const format = parsed.valueFlags.get('--format');
   if (format !== undefined && format !== 'json') return '--format supports only json.';
   const projectArgument = parsed.valueFlags.get('--project');
@@ -86,7 +89,7 @@ function parseRoutesArguments(arguments_: readonly string[]): RoutesArguments | 
   if (service !== undefined && (!isSafeIdentifier(service) || service.length > MAX_SERVICE_LENGTH)) {
     return `--service must be 1-${MAX_SERVICE_LENGTH} characters without control characters.`;
   }
-  return { projectArgument, service, includeTests: parsed.booleanFlags.has('--include-tests') };
+  return { role, projectArgument, service, includeTests: parsed.booleanFlags.has('--include-tests') };
 }
 
 /**
@@ -120,6 +123,7 @@ async function resolveProject(fileSystem: CommandFileSystem, projectArgument: st
  * @returns 성공 또는 실패 결과
  */
 async function extractDocument(project: string, parsed: RoutesArguments, environment: RoutesEnvironment): Promise<CommandResult> {
+  if (parsed.role === 'client') return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now()));
   const routes = await extractProjectRoutes(environment.fileSystem, project, parsed.includeTests);
   return renderDocument(() => createRouteDocument({
     next: routes.next,

@@ -159,7 +159,7 @@ test('잘못된 호출은 64다', async () => {
   const cases: string[][] = [
     [],
     ['--project', project],
-    ['--role', 'client', '--project', project],
+    ['--role', 'unknown', '--project', project],
     ['--role', 'server'],
     ['--role', 'server', '--project', project, 'extra'],
     ['--role', 'server', '--project', project, '--format', 'yaml'],

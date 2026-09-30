@@ -42,7 +42,7 @@ export const rootHelp = `Usage: tsograph <command> [options]
 
 Commands:
   openapi      Convert an OpenAPI 2.0/3.0/3.1 spec into isthmus route-contract facts
-  routes       Extract Next.js server route declarations as isthmus route-decl facts
+  routes       Extract server route-decl or web/React Native client route-call facts
   schema       Extract Prisma/SQL relation-use facts for the isthmus persistence join
   graph        Build the TypeScript/JavaScript call graph snapshot
   reach        Symbols reachable from ids (isthmus language-traversal, dependencies)

@@ -500,6 +500,12 @@ class RelationScan {
       if (!clauseNext) this.unresolved++;
       return undefined;
     }
+    // FROM/JOIN의 함수 피연산자는 테이블 신원이 아니다. INSERT t(cols)는 관계를 유지한다.
+    if (['from', 'join'].includes(keyword.text.toLowerCase()) && this.isSymbol(read.next, '(')) {
+      this.unresolved++;
+      for (let consumed = index; consumed < read.next; consumed++) this.consumed[consumed] = true;
+      return skipParens(this.tokens, read.next);
+    }
     if (buffer === undefined) this.emit(read.name, keyword);
     else buffer.push(read.name);
     for (let consumed = index; consumed < read.next; consumed++) this.consumed[consumed] = true;
