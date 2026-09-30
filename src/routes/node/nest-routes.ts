@@ -77,18 +77,21 @@ interface ControllerInfo {
  */
 export function extractNestRoutes(project: NodeProject, nest: NonNullable<DetectedFrameworks['nest']>, includeFile: (path: string) => boolean): FrameworkRoutes[] {
   const files = [...project.files].filter(([path]) => includeFile(path)).map(([, sourceFile]) => sourceFile);
-  const registered = registeredControllers(project, files);
+  const registration = registeredControllers(project, files);
   const modulePaths = routerModulePaths(project, files);
   const bootstrap = readBootstrap(project, files, nest.adapters);
   const routes: FlatRoute[] = [];
   for (const controller of controllers(project, files)) {
-    // 어느 모듈의 controllers에도 없는 컨트롤러는 Nest가 등록하지 않는다.
-    if (!registered.has(controller.node)) continue;
-    const module = registered.get(controller.node);
-    const modulePath = module !== undefined && modulePaths.has(module) ? modulePaths.get(module) ?? null : '';
-    routes.push(...controllerRoutes(project, controller, modulePath, bootstrap, nest));
+    // 어느 모듈의 controllers에도 없는 컨트롤러는 Nest가 등록하지 않는다. 여러 모듈에 있으면 모듈마다 등록한다.
+    for (const module of registration.registered.get(controller.node) ?? []) {
+      const modulePath = module !== undefined && modulePaths.has(module) ? modulePaths.get(module) ?? null : '';
+      routes.push(...controllerRoutes(project, controller, modulePath, bootstrap, nest));
+    }
   }
   const notes = bootstrap.found ? [] : ['unresolved-route-prefix: no NestFactory.create() bootstrap was found in the project; the global prefix and versioning are unknown, so NestJS routes use pathAnchor base'];
+  if (registration.unresolvedLists > 0) {
+    notes.push(`route-coverage: ${registration.unresolvedLists} NestJS module controllers list(s) could not be fully read statically; controllers registered only through the unread entries are missing`);
+  }
   return [{ framework: 'nest', dispatch: bootstrap.adapter === 'express' ? 'registration-order' : 'specificity', routes, provided: [], middlewareCount: 0, notes }];
 }
 
@@ -225,29 +228,113 @@ function versionList(project: NodeProject, expression: ts.Expression): readonly 
   return values.some((entry) => entry === undefined) ? 'unknown' : [...new Set(values as VersionValue[])];
 }
 
+/** 모듈 `controllers` 등록을 읽은 결과다. */
+interface ControllerRegistration {
+  /** 컨트롤러 클래스 → 등록한 모듈 클래스들(동적 모듈이면 그 식을 감싼 클래스, 없으면 undefined) */
+  readonly registered: Map<ts.ClassDeclaration, Set<ts.ClassDeclaration | undefined>>;
+  /** 정적으로 읽지 못한 `controllers` 목록 수 */
+  unresolvedLists: number;
+}
+
+/** `controllers` 목록에서 따라가는 상수 참조·펼침의 최대 깊이다(순환 참조 방지). */
+const MAX_CONTROLLER_LIST_DEPTH = 8;
+
 /**
- * 모듈 `controllers` 배열에 든 컨트롤러와 그 모듈을 모은다(`@Module({controllers})`와 동적 모듈 객체의 `controllers`).
+ * 모듈 `controllers` 목록에 든 컨트롤러와 그 모듈을 모은다(`@Module({controllers})`와 동적 모듈 객체의 `controllers`).
+ * 배열 리터럴, 상수 배열 참조, 펼침(`...shared`)을 따라간다. 읽지 못한 목록은 세어 limitation으로 알린다 — 그 목록으로만
+ * 등록한 컨트롤러를 조용히 빠뜨리지 않기 위해서다.
  *
  * @param project 프로젝트
  * @param files 분석할 소스
- * @returns 컨트롤러 클래스 → 모듈 클래스(동적 모듈이면 그 식을 감싼 클래스)
+ * @returns 등록 결과
  */
-function registeredControllers(project: NodeProject, files: readonly ts.SourceFile[]): Map<ts.ClassDeclaration, ts.ClassDeclaration | undefined> {
-  const registered = new Map<ts.ClassDeclaration, ts.ClassDeclaration | undefined>();
+function registeredControllers(project: NodeProject, files: readonly ts.SourceFile[]): ControllerRegistration {
+  const registration: ControllerRegistration = { registered: new Map(), unresolvedLists: 0 };
   for (const sourceFile of files) {
     const visit = (node: ts.Node): void => {
-      if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === 'controllers' && ts.isArrayLiteralExpression(unwrap(node.initializer))) {
+      if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === 'controllers') {
+        const list = controllerClasses(project, node.initializer, 0);
+        if (!list.complete) registration.unresolvedLists += 1;
         const owner = owningClass(node);
-        for (const element of (unwrap(node.initializer) as ts.ArrayLiteralExpression).elements) {
-          const declaration = ts.isIdentifier(element) ? declarationOf(project.checker, element) : undefined;
-          if (declaration !== undefined && ts.isClassDeclaration(declaration)) registered.set(declaration, owner);
-        }
+        for (const declaration of list.classes) addRegistration(registration.registered, declaration, owner);
       }
       ts.forEachChild(node, visit);
     };
     visit(sourceFile);
   }
-  return registered;
+  return registration;
+}
+
+/**
+ * 컨트롤러 등록 하나를 더한다.
+ *
+ * @param registered 등록 목록(갱신)
+ * @param controller 컨트롤러 클래스
+ * @param owner 등록한 모듈 클래스
+ */
+function addRegistration(registered: ControllerRegistration['registered'], controller: ts.ClassDeclaration, owner: ts.ClassDeclaration | undefined): void {
+  const modules = registered.get(controller) ?? new Set();
+  modules.add(owner);
+  registered.set(controller, modules);
+}
+
+/** `controllers` 목록을 읽은 결과다. */
+interface ControllerList {
+  /** 읽어 낸 컨트롤러 클래스 */
+  readonly classes: ts.ClassDeclaration[];
+  /** 목록 전체를 읽었는지(false면 빠진 원소가 있다) */
+  readonly complete: boolean;
+}
+
+/**
+ * `controllers` 식이 가리키는 클래스 목록을 읽는다. 읽지 못한 원소가 있어도 읽은 클래스는 돌려준다.
+ *
+ * @param project 프로젝트
+ * @param expression 목록 식
+ * @param depth 따라간 깊이
+ * @returns 읽은 클래스와 완전성
+ */
+function controllerClasses(project: NodeProject, expression: ts.Expression, depth: number): ControllerList {
+  const node = unwrap(expression);
+  if (depth > MAX_CONTROLLER_LIST_DEPTH) return { classes: [], complete: false };
+  if (ts.isIdentifier(node)) return constantArray(project, node, depth);
+  if (!ts.isArrayLiteralExpression(node)) return { classes: [], complete: false };
+  const classes: ts.ClassDeclaration[] = [];
+  let complete = true;
+  for (const element of node.elements) {
+    const resolved = ts.isSpreadElement(element) ? controllerClasses(project, element.expression, depth + 1) : controllerClass(project, element);
+    classes.push(...resolved.classes);
+    complete &&= resolved.complete;
+  }
+  return { classes, complete };
+}
+
+/**
+ * 배열 원소 하나를 클래스로 읽는다. Nest는 원소를 펼치지 않으므로(`scanner.js` `reflectControllers`) 클래스 식별자만 받는다.
+ *
+ * @param project 프로젝트
+ * @param element 원소 식
+ * @returns 읽은 클래스와 완전성
+ */
+function controllerClass(project: NodeProject, element: ts.Expression): ControllerList {
+  const node = unwrap(element);
+  const declaration = ts.isIdentifier(node) ? declarationOf(project.checker, node) : undefined;
+  return declaration !== undefined && ts.isClassDeclaration(declaration) ? { classes: [declaration], complete: true } : { classes: [], complete: false };
+}
+
+/**
+ * 식별자가 `const` 배열 선언을 가리키면 그 원소를 클래스 목록으로 읽는다.
+ *
+ * @param project 프로젝트
+ * @param identifier 식별자
+ * @param depth 따라간 깊이
+ * @returns 읽은 클래스와 완전성
+ */
+function constantArray(project: NodeProject, identifier: ts.Identifier, depth: number): ControllerList {
+  const declaration = declarationOf(project.checker, identifier);
+  if (declaration === undefined || !ts.isVariableDeclaration(declaration) || declaration.initializer === undefined) return { classes: [], complete: false };
+  const isConst = ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0;
+  return isConst ? controllerClasses(project, declaration.initializer, depth + 1) : { classes: [], complete: false };
 }
 
 /**
@@ -570,7 +657,9 @@ interface NestPath {
  */
 function fullPaths(bootstrap: NestBootstrap, modulePath: string | null, controllerPath: string, methodPath: string, version: readonly VersionValue[] | undefined | 'unknown', verb: string): NestPath[] {
   const versioning = bootstrap.versioning;
-  const unknownPrefix = bootstrap.globalPrefix === undefined || versioning === 'unknown' || version === 'unknown' || modulePath === null;
+  // 전역 접두사 제외 목록을 읽지 못했으면 어느 경로가 접두사를 받는지 모르므로 접두사를 모르는 것과 같다.
+  const unknownExclusion = bootstrap.globalPrefix !== undefined && bootstrap.globalPrefix !== '' && bootstrap.excluded === undefined;
+  const unknownPrefix = bootstrap.globalPrefix === undefined || unknownExclusion || versioning === 'unknown' || version === 'unknown' || modulePath === null;
   const effectiveVersion = version ?? (typeof versioning === 'object' ? versioning.defaultVersion : undefined);
   let paths = [''];
   const versionFiltered = typeof versioning === 'object' && versioning.type === 'other' && effectiveVersion !== undefined;
@@ -610,7 +699,9 @@ function truncateVersion(path: string, versionPrefixes: readonly string[]): stri
 }
 
 /**
- * 전역 접두사 제외 경로에 걸리는지 본다(리터럴만 받으므로 정확히 비교한다).
+ * 전역 접두사 제외 경로에 걸리는지 본다. 리터럴만 받으므로 문자열로 비교하되, Nest가 제외 경로를 `pathToRegexp(path)`
+ * 기본값(`sensitive: false`)으로 컴파일해 대소문자를 가리지 않으므로(`middleware/utils.js` `mapToExcludeRoute`,
+ * `router/utils/exclude-route.util.js` `isRouteExcluded`) 소문자로 맞춰 비교한다.
  *
  * @param bootstrap 부트스트랩 설정
  * @param path 접두사 전 경로
@@ -618,7 +709,8 @@ function truncateVersion(path: string, versionPrefixes: readonly string[]): stri
  * @returns 제외면 true
  */
 function isExcluded(bootstrap: NestBootstrap, path: string, verb: string): boolean {
-  return (bootstrap.excluded ?? []).some((entry) => (entry.method === undefined || entry.method === verb) && normalizeNestPath(path) === entry.path);
+  const target = normalizeNestPath(path).toLowerCase();
+  return (bootstrap.excluded ?? []).some((entry) => (entry.method === undefined || entry.method === verb) && target === entry.path.toLowerCase());
 }
 
 /**

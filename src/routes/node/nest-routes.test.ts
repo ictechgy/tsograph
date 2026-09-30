@@ -95,3 +95,47 @@ test('전역 접두사 제외(객체)·모르는 접두사·모르는 버전 설
   });
   assert.deepEqual(factLines(unknown), ['GET base /h optional #0 ci', 'POST base /h optional #1 ci']);
 });
+
+test('읽지 못한 전역 접두사 제외는 base 앵커로 낮추고, 리터럴 제외는 대소문자를 가리지 않는다', async () => {
+  const base = {
+    'package.json': packageJson({ '@nestjs/core': '11.1.0', '@nestjs/common': '11.1.0' }),
+    'src/h.controller.ts': "import { Controller, Get } from '@nestjs/common';\n@Controller('h')\nexport class HController {\n  @Get(':id')\n  one() { return 'o'; }\n  @Get()\n  list() { return 'l'; }\n}\n",
+    'src/app.module.ts': "import { Module } from '@nestjs/common';\nimport { HController } from './h.controller.js';\n@Module({ controllers: [HController] })\nexport class AppModule {}\n",
+  };
+  const main = (exclude: string): string => `import { NestFactory } from '@nestjs/core';\nimport { AppModule } from './app.module.js';\nexport async function create() {\n  const app = await NestFactory.create(AppModule);\n  app.setGlobalPrefix('api', { exclude: ${exclude} });\n  return app;\n}\n`;
+  const parameterized = await scanNodeProject({ ...base, 'src/main.ts': main("['h/:id']") });
+  assert.deepEqual(factLines(parameterized), ['GET base /h optional #1 ci', 'GET base /h/{} optional #0 ci']);
+  const upper = await scanNodeProject({ ...base, 'src/main.ts': main("['H']") });
+  assert.deepEqual(factLines(upper), ['GET root /api/h/{} optional #0 ci', 'GET root /h optional #1 ci']);
+});
+
+test('상수 배열·펼침 controllers와 두 모듈 등록을 읽고, 읽지 못한 목록은 알린다', async () => {
+  const controllersFile = "import { Controller, Get } from '@nestjs/common';\n@Controller('a')\nexport class AController {\n  @Get()\n  a() { return 'a'; }\n}\n@Controller('b')\nexport class BController {\n  @Get()\n  b() { return 'b'; }\n}\n";
+  const document = await scanNodeProject({
+    'package.json': packageJson({ '@nestjs/core': '11.1.0', '@nestjs/common': '11.1.0', '@nestjs/platform-fastify': '11.1.0' }),
+    'src/c.controller.ts': controllersFile,
+    'src/app.module.ts': [
+      "import { Module } from '@nestjs/common';",
+      "import { RouterModule } from '@nestjs/core';",
+      "import { AController, BController } from './c.controller.js';",
+      'const SHARED = [AController] as const;',
+      '@Module({ controllers: [...SHARED, BController] })',
+      'export class OneModule {}',
+      '@Module({ controllers: SHARED })',
+      'export class TwoModule {}',
+      "@Module({ imports: [RouterModule.register([{ path: 'two', module: TwoModule }])] })",
+      'export class AppModule {}',
+    ].join('\n'),
+    'src/main.ts': "import { NestFactory } from '@nestjs/core';\nimport { FastifyAdapter } from '@nestjs/platform-fastify';\nimport { AppModule } from './app.module.js';\nexport async function create() {\n  return await NestFactory.create(AppModule, new FastifyAdapter());\n}\n",
+  });
+  assert.deepEqual(factLines(document), ['GET root /a strict', 'GET root /b strict', 'GET root /two/a strict']);
+  assert.equal(limitationsWith(document, 'route-coverage:').length, 0);
+
+  const unresolved = await scanNodeProject({
+    'package.json': packageJson({ '@nestjs/core': '11.1.0', '@nestjs/common': '11.1.0' }),
+    'src/c.controller.ts': controllersFile,
+    'src/app.module.ts': "import { Module } from '@nestjs/common';\nimport { AController, BController } from './c.controller.js';\nfunction pick() { return [AController]; }\n@Module({ controllers: [BController, ...pick()] })\nexport class AppModule {}\n",
+  });
+  assert.deepEqual(factLines(unresolved), ['GET base /b optional #0 ci']);
+  assert.equal(limitationsWith(unresolved, 'route-coverage: 1 NestJS module controllers list(s) could not be fully read statically').length, 1);
+});

@@ -17,6 +17,8 @@ tsograph가 Hono·Express·Fastify·Koa(@koa/router)·NestJS 프로젝트에서 
 경로 문법이 주 버전마다 다른 경우(Express 4의 path-to-regexp 0.1과 5의 8, @koa/router 13의 6과 14 이상의 8) 주 버전을
 모르면 두 문법이 같은 결과를 낼 때만 정적 사실로 내고, 다르면 dynamic이다. 모델링하지 않는 서버 프레임워크(`@hapi/hapi`,
 `restify`, `polka`, `h3`, `elysia`, `itty-router`, `@hono/zod-openapi`의 `openapi()` 등)는 선언만 있어도 `route-coverage:`로 알린다.
+루트 `package.json`이 있는데 읽지 못하면(깨진 JSON, UTF-8 아님, 16 MiB 초과, symlink) 프레임워크를 감지하지 못한 이유를
+`route-coverage:`로 알린다.
 
 분석 대상 코드는 실행하지 않는다. `tsograph graph`와 같은 방식으로 TypeScript `Program`·`TypeChecker`(루트 `tsconfig.json`, 없으면
 `jsconfig.json`, 없으면 번들러 해석 기본값, `allowJs` 켬)를 만들어 import·재수출·기본 내보내기·CommonJS `require`를 따라간다.
@@ -103,8 +105,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 | 규칙 | 확인한 소스(@nestjs/core·common 12.1.2) |
 |---|---|
 | 경로 = 전역 접두사 + URI 버전 `/<prefix><version>` + RouterModule 모듈 경로 + 컨트롤러 경로 + 메서드 경로, `stripEndSlash(a) + addLeadingSlash(b)`로 잇고 끝 슬래시를 뗀다. `@Get()`의 경로는 `/` | `router/route-path-factory.js#create`, `common/utils/shared.utils.js`, `decorators/http/request-mapping.decorator.js` |
-| 모듈의 `controllers`에 든 컨트롤러만 등록한다. 메서드는 정의 순서(상속 메서드는 뒤) | `router/routes-resolver.js`, `metadata-scanner.js#getAllMethodNames` |
-| `setGlobalPrefix(prefix, {exclude})`: 제외는 버전 접두사를 뗀 경로로 비교한다. `enableVersioning({type: URI, prefix, defaultVersion})`, `VERSION_NEUTRAL`은 버전 없음 | `route-path-factory.js#isExcludedFromGlobalPrefix`·`#truncateVersionPrefixFromPath` |
+| 모듈의 `controllers`에 든 컨트롤러만 등록하고, 여러 모듈에 있으면 모듈마다 등록한다. 목록 원소는 펼치지 않는다. 메서드는 정의 순서(상속 메서드는 뒤). tsograph는 배열 리터럴·`const` 배열 참조·펼침(`...shared`)을 따라가고, 읽지 못한 원소가 있으면 `route-coverage:`로 알린다 | `scanner.js#reflectControllers`, `router/routes-resolver.js`, `metadata-scanner.js#getAllMethodNames` |
+| `setGlobalPrefix(prefix, {exclude})`: 제외는 버전 접두사를 뗀 경로를 `pathToRegexp(path)` 기본값(대소문자 무시)으로 비교한다. tsograph는 리터럴 제외만 옮기고, 파라미터·식이 든 제외는 어느 경로가 접두사를 받는지 모르므로 `pathAnchor: "base"`다. `enableVersioning({type: URI, prefix, defaultVersion})`, `VERSION_NEUTRAL`은 버전 없음 | `route-path-factory.js#isExcludedFromGlobalPrefix`·`#truncateVersionPrefixFromPath`, `middleware/utils.js#mapToExcludeRoute`, `router/utils/exclude-route.util.js` |
 | `RouterModule.register([{path, module, children}])`는 `normalizePath`로 모듈 경로를 잇는다 | `router/router-module.js`, `router/utils/flatten-route-paths.util.js` |
 | Express 어댑터: Nest 10은 Express 4, 11·12는 Express 5에 `LegacyRouteConverter`(`files/*` → `files/{*path}`)를 거친다. 기본 대소문자 무시·끝 슬래시 선택 | `router/legacy-route-converter.js`, platform-express `express-adapter.js#normalizePath` |
 | host 필터·헤더/미디어 타입 버전 필터는 조건이 맞지 않으면 `next()`로 넘긴다 → 조건부(`narrowed`)·순서 없음. `@Next()`를 받는 핸들러도 순서 없음 | `router/router-explorer.js#applyHostFilter`, express-adapter `#applyVersionFilter` |
@@ -144,6 +146,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
   끝나면 생략, 옵션을 확정하지 못했으면 생략.
 - **caseInsensitive**: Express·Koa·NestJS(Express)의 기본값처럼 대소문자를 무시함을 증명한 경우만(mount 경로를 거친 모든 라우터가
   무시할 때). **narrowed**: Fastify `constraints`, Koa `host`, Nest host·헤더 버전 필터.
+- **dynamic 사실의 channel**: 매칭에 쓰지 않는 정보용 원문이다. 증명한 앞부분 뒤에 풀지 못한 자리를 `{dynamic}`으로 적는다
+  (`/api/{dynamic}`). 모든 어댑터가 같은 표기를 쓴다.
 - **dynamicScope**: dynamic 사실의 증명된 정적 접두사(세그먼트 경계). 루트 앵커에서만 싣고, `methods`는 싣지 않는다(ANY 전용).
 - **location**: 경로 인자(없으면 등록 호출, Nest는 메서드 데코레이터의 경로 인자 또는 데코레이터). **symbol**: `usr`는 핸들러 함수
   본문이 속한 그래프 노드(`src/lib/h.ts#listBooks`, `src/app.ts#UsersController.findOne`, 인라인 함수는 감싼 선언 또는
