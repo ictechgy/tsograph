@@ -303,7 +303,108 @@ export class OrmEvaluator {
   private propertyAccess(expression: ts.PropertyAccessExpression): OrmValue {
     const name = expression.name.text;
     if (expression.expression.kind === ts.SyntaxKind.ThisKeyword) return this.thisMember(expression, name);
-    return this.memberValue(this.valueOf(expression.expression), name, expression);
+    const value = this.memberValue(this.valueOf(expression.expression), name, expression);
+    return value.kind === 'unknown' ? this.declaredMember(expression.expression, name) : value;
+  }
+
+  /**
+   * 수신자의 선언 타입 표기에서 멤버 타입을 찾아 값으로 읽는다(`deps.db`에서 `deps: { db: D1Database }`).
+   *
+   * @param receiver 수신자 식
+   * @param name 멤버 이름
+   * @returns 값
+   */
+  private declaredMember(receiver: ts.Expression, name: string): OrmValue {
+    const type = this.declaredType(receiver, 0);
+    const member = type === undefined ? undefined : this.memberType(type, name, 0);
+    return member === undefined ? UNKNOWN : this.typeValue(member);
+  }
+
+  /**
+   * 식의 선언 타입 표기다(식별자·`a.b` 사슬·구조 분해 매개변수).
+   *
+   * @param expression 식
+   * @param depth 깊이
+   * @returns 타입 노드 또는 undefined
+   */
+  private declaredType(expression: ts.Expression, depth: number): ts.TypeNode | undefined {
+    if (depth > 8) return undefined;
+    const inner = skipExpressionWrappers(expression);
+    if (ts.isPropertyAccessExpression(inner)) {
+      const owner = this.declaredType(inner.expression, depth + 1);
+      return owner === undefined ? undefined : this.memberType(owner, inner.name.text, 0);
+    }
+    if (!ts.isIdentifier(inner)) return undefined;
+    const origin = this.binder.originOf(inner);
+    return origin.kind === 'declaration' ? this.declarationType(origin.declaration, depth) : undefined;
+  }
+
+  /**
+   * 선언의 타입 표기다. 매개변수 구조 분해 원소는 매개변수 타입의 멤버 타입이다.
+   *
+   * @param declaration 선언
+   * @param depth 깊이
+   * @returns 타입 노드 또는 undefined
+   */
+  private declarationType(declaration: ts.Declaration, depth: number): ts.TypeNode | undefined {
+    if (ts.isParameter(declaration) || ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration)
+      || ts.isPropertySignature(declaration)) {
+      return declaration.type;
+    }
+    if (!ts.isBindingElement(declaration) || !ts.isObjectBindingPattern(declaration.parent)) return undefined;
+    const key = declaration.propertyName ?? declaration.name;
+    const owner = declaration.parent.parent;
+    const ownerType = ts.isBindingElement(owner) ? this.declarationType(owner, depth + 1) : (owner as ts.ParameterDeclaration | ts.VariableDeclaration).type;
+    if (ownerType === undefined || (!ts.isIdentifier(key) && !ts.isStringLiteral(key))) return undefined;
+    return this.memberType(ownerType, key.text, 0);
+  }
+
+  /**
+   * 타입 표기(타입 리터럴, 프로젝트 인터페이스·타입 별칭, 교차·합 타입)에서 멤버의 타입 표기를 찾는다.
+   *
+   * @param type 타입 노드
+   * @param name 멤버 이름
+   * @param depth 깊이
+   * @returns 멤버 타입 노드 또는 undefined
+   */
+  private memberType(type: ts.TypeNode, name: string, depth: number): ts.TypeNode | undefined {
+    if (depth > 8) return undefined;
+    if (ts.isParenthesizedTypeNode(type)) return this.memberType(type.type, name, depth + 1);
+    if (ts.isTypeLiteralNode(type)) return memberSignatureType(type.members, name);
+    if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+      for (const member of type.types) {
+        const found = this.memberType(member, name, depth + 1);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    if (!ts.isTypeReferenceNode(type)) return undefined;
+    const origin = this.binder.originOf(ts.isIdentifier(type.typeName) ? type.typeName : type.typeName.right);
+    if (origin.kind !== 'declaration') return undefined;
+    if (ts.isTypeAliasDeclaration(origin.declaration)) return this.memberType(origin.declaration.type, name, depth + 1);
+    return ts.isInterfaceDeclaration(origin.declaration) ? this.interfaceMember(origin.declaration, name, depth) : undefined;
+  }
+
+  /**
+   * 인터페이스(와 그것이 확장한 프로젝트 인터페이스)의 멤버 타입이다.
+   *
+   * @param declaration 인터페이스
+   * @param name 멤버 이름
+   * @param depth 깊이
+   * @returns 멤버 타입 노드 또는 undefined
+   */
+  private interfaceMember(declaration: ts.InterfaceDeclaration, name: string, depth: number): ts.TypeNode | undefined {
+    const own = memberSignatureType(declaration.members, name);
+    if (own !== undefined) return own;
+    for (const clause of declaration.heritageClauses ?? []) {
+      for (const base of clause.types) {
+        const origin = ts.isIdentifier(base.expression) ? this.binder.originOf(base.expression) : undefined;
+        if (origin?.kind !== 'declaration' || !ts.isInterfaceDeclaration(origin.declaration) || depth > 8) continue;
+        const found = this.interfaceMember(origin.declaration, name, depth + 1);
+        if (found !== undefined) return found;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -441,10 +542,17 @@ export class OrmEvaluator {
   private bindingElementValue(element: ts.BindingElement): OrmValue {
     const pattern = element.parent;
     const owner = pattern.parent;
-    if (!ts.isObjectBindingPattern(pattern) || !ts.isVariableDeclaration(owner) || owner.initializer === undefined) return UNKNOWN;
+    if (!ts.isObjectBindingPattern(pattern)) return UNKNOWN;
+    if (!ts.isVariableDeclaration(owner) || owner.initializer === undefined) {
+      const declared = this.declarationType(element, 0);
+      return declared === undefined ? UNKNOWN : this.typeValue(declared);
+    }
     const key = element.propertyName ?? element.name;
     if (!ts.isIdentifier(key) && !ts.isStringLiteral(key)) return UNKNOWN;
-    return this.memberValue(this.valueOf(owner.initializer), key.text, owner.initializer);
+    const value = this.memberValue(this.valueOf(owner.initializer), key.text, owner.initializer);
+    if (value.kind !== 'unknown') return value;
+    const declared = this.declarationType(element, 0);
+    return declared === undefined ? UNKNOWN : this.typeValue(declared);
   }
 
   /**
@@ -579,6 +687,32 @@ export class OrmEvaluator {
     if (ts.isIdentifier(name)) return this.originValue(this.binder.originOf(name), name);
     return this.memberValue(this.entityValue(name.left), name.right.text, name.right as unknown as ts.Expression);
   }
+}
+
+/**
+ * 타입 멤버 목록에서 이름 있는 속성 시그니처의 타입을 찾는다.
+ *
+ * @param members 타입 멤버
+ * @param name 멤버 이름
+ * @returns 타입 노드 또는 undefined
+ */
+function memberSignatureType(members: ts.NodeArray<ts.TypeElement>, name: string): ts.TypeNode | undefined {
+  for (const member of members) {
+    if (ts.isPropertySignature(member) && propertyNameText(member.name) === name) return member.type;
+  }
+  return undefined;
+}
+
+/**
+ * 괄호·`as`·non-null 래퍼를 벗긴다.
+ *
+ * @param expression 식
+ * @returns 벗긴 식
+ */
+function skipExpressionWrappers(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current) || ts.isAsExpression(current)) current = current.expression;
+  return current;
 }
 
 /**

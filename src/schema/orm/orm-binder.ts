@@ -72,7 +72,10 @@ export class OrmBinder {
    */
   originOf(node: ts.Node): BindingOrigin {
     const symbol = this.symbolAt(node);
-    if (symbol === undefined) return ts.isIdentifier(node) && !isPropertyName(node) ? { kind: 'global', name: node.text } : UNKNOWN_ORIGIN;
+    // 선언이 없는 심볼은 checker가 풀지 못한 이름에 주는 `unknown` 심볼이다(lib 없이 만든 Program의 전역 타입 등).
+    if (symbol === undefined || symbol.declarations === undefined || symbol.declarations.length === 0) {
+      return ts.isIdentifier(node) && !isPropertyName(node) ? { kind: 'global', name: node.text } : UNKNOWN_ORIGIN;
+    }
     return this.followSymbol(symbol);
   }
 
@@ -338,11 +341,12 @@ function isPackageSpecifier(specifier: string): boolean {
 }
 
 /**
- * 식별자가 속성 접근의 이름 자리(`a.b`의 `b`)인지 본다. 이 자리는 전역 이름이 아니다.
+ * 식별자가 속성 접근·한정 이름의 오른쪽 자리(`a.b`의 `b`, 타입 `A.B`의 `B`)인지 본다. 이 자리는 전역 이름이 아니다.
  *
  * @param node 식별자
  * @returns 속성 이름 자리면 true
  */
 function isPropertyName(node: ts.Identifier): boolean {
-  return ts.isPropertyAccessExpression(node.parent) && node.parent.name === node;
+  return (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+    || (ts.isQualifiedName(node.parent) && node.parent.right === node);
 }

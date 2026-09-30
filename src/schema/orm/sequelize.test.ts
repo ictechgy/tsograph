@@ -81,6 +81,7 @@ test('define·init 옵션, 자동 속성, 연관 외래 키·조인 테이블, �
     'src/use.ts:8:30 crm.People.nick_name @src/use.ts#find',
     'src/use.ts:8:45 crm.People.note @src/use.ts#find',
     'src/use.ts:9:25 `select * from persons where id = ${id}` dyn @src/use.ts#find',
+    'src/use.ts:9:25 persons @src/use.ts#find',
   ]);
   assert.deepEqual(result.limitations, [
     "unresolved-orm-receivers: 1 ORM call(s) have a query shape but receivers that could not be traced to a model, repository, or client; not emitted: sequelize (1)",

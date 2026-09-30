@@ -141,6 +141,21 @@ export class OrmFactEmitter {
   }
 
   /**
+   * 보간이 있는 일반 템플릿 문자열의 SQL을 부분 관찰로 낸다: 보간을 `?`로 둔 텍스트에서 이름으로 쓰인 관계는
+   * 정적 사실로 내고, 보간이 무엇이든 텍스트 전체는 알 수 없으므로 원문 요약 dynamic 사실 하나를 늘 더한다
+   * (보간이 관계·조인 조각일 수 있어 정적 사실만으로는 완전하지 않다).
+   *
+   * @param template 템플릿 식
+   * @param at 위치 노드
+   */
+  partialSql(template: ts.TemplateExpression, at: ts.Node): void {
+    const text = template.head.text + template.templateSpans.map((span) => ` ? ${span.literal.text}`).join('');
+    const result = sqlRelations(text, false);
+    for (const name of new Set(result.relations.map((relation) => relation.name))) this.use(name, undefined, false, at);
+    this.dynamic(template, at);
+  }
+
+  /**
    * 식의 원문 요약을 channel로 실은 dynamic 사실을 낸다.
    *
    * @param source 원문 식

@@ -118,3 +118,53 @@ test('D1 바인딩 선언은 구조 분해와 값 복사를 따라가고, 관련
   assert.deepEqual(lines, ['src/h.ts:5:25 h_rows @src/h.ts#handler']);
   assert.deepEqual(ormLines({ 'src/plain.ts': "export const q = 'SELECT * FROM plain_rows';\n" }), ['src/plain.ts:1:18 plain_rows @src/plain.ts#q']);
 });
+
+test('보간 템플릿 SQL은 이름으로 쓴 관계를 정적으로, 전체는 dynamic으로 낸다(const 템플릿 포함)', () => {
+  const lines = ormLines({
+    'src/q.ts': [
+      'export async function purge(db: D1Database, ids: number[]) {',
+      "  const placeholders = ids.map(() => '?').join(',');",
+      '  await db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).bind(...ids).run();',
+      '  const statement = `select * from ${placeholders}`;',
+      '  await db.prepare(statement).all();',
+      '  let mutable = `select * from audit where id = ${ids[0]}`;',
+      '  return db.prepare(mutable).all();',
+      '}',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(lines, [
+    'src/q.ts:3:20 `DELETE FROM sessions WHERE id IN (${placeholders})` dyn @src/q.ts#purge',
+    'src/q.ts:3:20 sessions @src/q.ts#purge',
+    'src/q.ts:5:20 `select * from ${placeholders}` dyn @src/q.ts#purge',
+    'src/q.ts:7:21 mutable dyn @src/q.ts#purge',
+  ]);
+});
+
+test('선언 타입의 멤버(인터페이스 상속·교차·구조 분해 매개변수)로 클라이언트를 증명한다', () => {
+  const lines = ormLines({
+    'src/deps.ts': [
+      "import type { Knex } from 'knex';",
+      'interface Base { db: D1Database }',
+      'export interface Deps extends Base { knex: Knex }',
+      'export type Ctx = { deps: Deps } & { other: string };',
+      '',
+    ].join('\n'),
+    'src/use.ts': [
+      "import type { Ctx, Deps } from './deps';",
+      "export async function a(deps: Deps) { return deps.db.prepare('select * from a_rows').all(); }",
+      "export async function b({ db, knex }: Deps) { await knex('b_knex'); return db.prepare('select * from b_rows').all(); }",
+      "export async function c(ctx: Ctx) { return ctx.deps.db.prepare('select * from c_rows').all(); }",
+      "export async function d({ deps: { db } }: Ctx) { return db.prepare('select * from d_rows').all(); }",
+      "export async function e(value: { db: unknown }) { return (value.db as any).prepare('select * from e_rows').all(); }",
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(lines, [
+    'src/use.ts:2:62 a_rows @src/use.ts#a',
+    'src/use.ts:3:58 b_knex @src/use.ts#b',
+    'src/use.ts:3:87 b_rows @src/use.ts#b',
+    'src/use.ts:4:64 c_rows @src/use.ts#c',
+    'src/use.ts:5:68 d_rows @src/use.ts#d',
+  ]);
+});

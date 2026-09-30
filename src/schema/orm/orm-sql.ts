@@ -1,10 +1,11 @@
 /**
  * 게이트가 확정한 SQL 인자·태그 템플릿을 SQL 텍스트로 읽는다.
  *
- * 가족 규칙(Prisma `$queryRawUnsafe`와 같다): 문자열 리터럴과 정적으로 풀리는 const는 읽고, 보간이 있는
- * 일반 템플릿 문자열과 그 밖의 식은 dynamic이다 — 문자열 보간은 바인드 파라미터가 아니라 텍스트 연결이라
- * 관계 이름이 들어갈 수 있기 때문이다. 태그 템플릿(`sql\`…\``)의 보간은 라이브러리가 파라미터로 바꾸므로
- * `?`로 읽고, 식별자로 렌더링되는 보간(테이블 객체, `sql.identifier('t')`)만 인용 이름으로 펼친다.
+ * 문자열 리터럴과 정적으로 풀리는 const는 읽고, 그 밖의 식은 dynamic이다. 보간이 있는 일반 템플릿 문자열은
+ * 부분 관찰이다: 문자열 보간은 바인드 파라미터가 아니라 텍스트 연결이라 관계·조인 조각이 들어갈 수 있으므로
+ * 늘 dynamic 사실을 내고, 템플릿 원문에 이름으로 쓰인 관계만 정적 사실로 더한다(`IN (${placeholders})` 관용구).
+ * 태그 템플릿(`sql\`…\``)의 보간은 라이브러리가 파라미터로 바꾸므로 `?`로 읽고, 식별자로 렌더링되는
+ * 보간(테이블 객체, `sql.identifier('t')`)만 인용 이름으로 펼친다.
  */
 
 import ts from 'typescript';
@@ -45,15 +46,39 @@ export function readSqlArgument(context: OrmContext, argument: ts.Expression | u
     return;
   }
   emitter.consume(inner);
-  const value = ts.isTemplateExpression(inner) ? undefined : evaluator.valueOf(inner);
-  if (value?.kind === 'string') {
+  const template = templateOf(inner, evaluator);
+  if (template !== undefined) {
+    emitter.consume(template);
+    emitter.partialSql(template, inner);
+    return;
+  }
+  const value = evaluator.valueOf(inner);
+  if (value.kind === 'string') {
     emitter.consume(value.node);
     emitter.sql(value.value, inner);
-  } else if (value?.kind === 'object') {
+  } else if (value.kind === 'object') {
     readSqlObject(context, value.node, inner, depth);
   } else {
     emitter.dynamic(inner, inner);
   }
+}
+
+/**
+ * 인자가 보간 있는 템플릿 문자열이거나 그것을 담은 const면 템플릿을 돌려준다.
+ *
+ * @param expression 인자 식(래퍼를 벗김)
+ * @param evaluator 평가기
+ * @returns 템플릿 또는 undefined
+ */
+function templateOf(expression: ts.Expression, evaluator: OrmEvaluator): ts.TemplateExpression | undefined {
+  if (ts.isTemplateExpression(expression)) return expression;
+  if (!ts.isIdentifier(expression)) return undefined;
+  const origin = evaluator.binder.originOf(expression);
+  if (origin.kind !== 'declaration' || !ts.isVariableDeclaration(origin.declaration)) return undefined;
+  const list = origin.declaration.parent;
+  const initializer = origin.declaration.initializer === undefined ? undefined : unwrap(origin.declaration.initializer);
+  const isConst = ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
+  return isConst && initializer !== undefined && ts.isTemplateExpression(initializer) ? initializer : undefined;
 }
 
 /**
