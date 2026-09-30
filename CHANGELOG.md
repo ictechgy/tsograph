@@ -16,6 +16,9 @@
 - routes: `app/`·`pages/`가 있으면 `/_next` 엔드포인트(빌드 자산·이미지 최적화·데이터 경로)를, 루트 `static/`이
   비어 있지 않으면 구 규칙 정적 파일을 `framework-provided-routes:`로 알린다. 전에는 알리지 않아 이 경로의 호출이
   거짓 error가 될 수 있었다.
+- conformance: isthmus `76b6141`의 공유 벡터로 다시 벤더링한다. `url-compose.json`에 더해진 `base-join/spring-*` 13개는
+  `producer:kartograph` 대상이고 tsograph는 `url-compose` 사례를 실행하지 않는다. 새 suite `http-dispatch.json`은 해시만
+  대조한다 — 서버 문서가 `specificity`라 `order`를 내지 않아 `dispatch.validate`의 대상 필드가 없다.
 - conformance: isthmus `78d3dee`의 공유 벡터로 다시 벤더링한다(`http-template.json`의 Spring 사례는
   `producer:kartograph` 대상이라 건너뛰고, 새 suite `http-limitation-scope.json`의 `scope.validate` 사례로 스코프
   검증기를 검사한다). 벤더링한 모든 벡터 파일을 `SHA256SUMS`와 대조한다.
