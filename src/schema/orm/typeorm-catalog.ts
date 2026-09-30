@@ -326,10 +326,11 @@ export class TypeormCatalog {
    */
   private factoryOptions(argument: ts.Expression | undefined): ts.Expression | undefined {
     const object = argument === undefined ? undefined : unwrap(argument);
-    const factory = object !== undefined && ts.isObjectLiteralExpression(object) ? objectMember(object, 'useFactory') : undefined;
-    const fn = factory === undefined ? undefined : unwrap(factory);
-    if (fn === undefined || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return undefined;
-    return ts.isBlock(fn.body) ? undefined : fn.body;
+    const fn = object !== undefined && ts.isObjectLiteralExpression(object) ? factoryFunction(object) : undefined;
+    const value = fn === undefined ? undefined : this.evaluator.returnValue(fn);
+    if (value?.kind === 'object') return value.node;
+    this.counts.namingUnverified.add(`${TYPEORM}: TypeOrmModule.forRootAsync options could not be read; the default naming strategy without entityPrefix is assumed`);
+    return undefined;
   }
 
   /**
@@ -395,7 +396,7 @@ export class TypeormCatalog {
     const options = kind === 'ChildEntity' ? undefined : entityOptions(call);
     const given = parent !== undefined ? undefined : this.givenName(call);
     const schema = parent?.schema ?? (options === undefined ? undefined : this.stringOption(options, 'schema')) ?? this.naming.schema;
-    const baseTable = parent?.baseTable ?? (given ?? (this.naming.custom ? undefined : snakeCase(className)));
+    const baseTable = parent?.baseTable ?? (given === null ? undefined : given ?? (this.naming.custom ? undefined : snakeCase(className)));
     const table: TableName = parent?.table ?? (baseTable === undefined || this.naming.prefix === undefined
       ? { channel: dynamicChannel(`${call.getText()} class ${className}`), dynamic: true }
       : { channel: qualifiedChannel(schema, this.naming.prefix + baseTable), dynamic: false });
@@ -411,19 +412,20 @@ export class TypeormCatalog {
    * `@Entity`의 명시 테이블 이름이다(문자열 첫 인자 또는 옵션 `name`).
    *
    * @param call 데코레이터 호출
-   * @returns 이름 또는 undefined
+   * @returns 이름, 없으면 undefined, 읽지 못하면 null(클래스 이름으로 추측하지 않고 dynamic으로 낸다)
    */
-  private givenName(call: ts.CallExpression): string | undefined {
+  private givenName(call: ts.CallExpression): string | undefined | null {
     const [first] = call.arguments;
     if (first === undefined) return undefined;
     const value = this.evaluator.valueOf(first);
     if (value.kind === 'string') return value.value.length > 0 ? value.value : undefined;
     const options = entityOptions(call);
-    if (options === undefined) {
-      bump(this.counts.unreadableDeclarations, TYPEORM);
-      return undefined;
-    }
-    return this.stringOption(options, 'name');
+    const name = options === undefined ? null : this.evaluator.propertyOf(options, 'name');
+    const named = name === undefined || name === null ? undefined : this.evaluator.valueOf(name);
+    if (name === undefined) return undefined;
+    if (named?.kind === 'string') return named.value.length > 0 ? named.value : undefined;
+    bump(this.counts.unreadableDeclarations, TYPEORM);
+    return null;
   }
 
   /**
@@ -727,6 +729,22 @@ function isTypeorm(value: OrmValue, name: string): boolean {
  */
 function ownsJoinColumn(relation: TypeormRelation): boolean {
   return relation.kind === 'many-to-one' || (relation.kind === 'one-to-one' && relation.joinColumn !== undefined);
+}
+
+/**
+ * `forRootAsync` 옵션의 `useFactory` 함수다(화살표·함수 식 값 또는 메서드 축약형).
+ *
+ * @param object forRootAsync 옵션 객체
+ * @returns 함수 노드 또는 undefined
+ */
+function factoryFunction(object: ts.ObjectLiteralExpression): ts.SignatureDeclaration | undefined {
+  for (const property of object.properties) {
+    if (property.name === undefined || propertyNameText(property.name) !== 'useFactory') continue;
+    if (ts.isMethodDeclaration(property)) return property;
+    const value = ts.isPropertyAssignment(property) ? unwrap(property.initializer) : undefined;
+    if (value !== undefined && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))) return value;
+  }
+  return undefined;
 }
 
 /**

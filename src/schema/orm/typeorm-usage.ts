@@ -94,7 +94,9 @@ export class TypeormUsage {
     else if (receiver.kind === 'unknown' && (whereMethods.has(method) && method.endsWith('By')) && this.catalog.all.length > 0) {
       bump(this.context.emitter.counts.unresolvedReceivers, TYPEORM);
     }
-    if (builderTableMethods.has(method) || mappedJoinMethods.has(method)) this.builderCall(node, method);
+    if ((builderTableMethods.has(method) || mappedJoinMethods.has(method)) && (receiver.kind === 'typeorm-manager' || this.isTypeormChain(node))) {
+      this.builderCall(node, method);
+    }
   }
 
   /**
@@ -325,7 +327,7 @@ export class TypeormUsage {
       return;
     }
     const inner = unwrap(argument);
-    if (!ts.isStringLiteralLike(inner) || !this.isTypeormChain(node)) return;
+    if (!ts.isStringLiteralLike(inner)) return;
     const [alias, relation, extra] = inner.text.split('.');
     if (relation !== undefined && extra === undefined && method !== 'from' && method !== 'into' && method !== 'update') {
       const owner = this.aliasEntity(node, alias!);

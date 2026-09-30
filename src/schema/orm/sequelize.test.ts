@@ -68,6 +68,7 @@ test('define·init 옵션, 자동 속성, 연관 외래 키·조인 테이블, �
     'src/models.ts:15:8 crm.Friendships.humanId @src/models.ts#model:Person.Friendships.humanId',
     'src/models.ts:15:8 crm.Friendships.rev @src/models.ts#model:Person.Friendships.rev',
     'src/use.ts:5:33 crm.People @src/use.ts#find',
+    'src/use.ts:5:64 crm.People.nick_name @src/use.ts#find',
     'src/use.ts:5:78 crm.People.note @src/use.ts#find',
     'src/use.ts:5:115 crm.People.nick_name @src/use.ts#find',
     'src/use.ts:5:135 crm.People.note @src/use.ts#find',
@@ -114,4 +115,69 @@ test('Sequelize 문자열 변환은 inflection·Sequelize utils와 같다', () =
   assert.equal(underscore('BlogPostId'), 'blog_post_id');
   assert.equal(camelize('author_id'), 'authorId');
   assert.equal(camelize('trailing_'), 'trailing');
+});
+
+
+test('GLM 지적: 읽지 못한 @Entity 이름은 dynamic, forRootAsync 메서드 팩토리, TypeORM 밖 from·update, 전역 define 없이 명시 테이블, 컬럼 우선 메서드·연산자 피연산자·defaults', () => {
+  const result = extractProject({
+  'src/e.ts': [
+    "import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';",
+    "import { TypeOrmModule } from '@nestjs/typeorm';",
+    'declare function resolveName(): string;',
+    '@Entity(resolveName())',
+    'export class Computed { @PrimaryGeneratedColumn() id!: number; }',
+    '@Entity({ name: resolveName() })',
+    'export class ComputedOption { @PrimaryGeneratedColumn() id!: number; }',
+    "export const mod = TypeOrmModule.forRootAsync({ useFactory() { return { type: 'postgres' as const, entityPrefix: 'api_' }; } });",
+    "@Entity() export class Plain { @PrimaryGeneratedColumn() id!: number; @Column() name!: string; }",
+    'export function notTypeorm(queue: { update(x: unknown): void; from(x: unknown): void }) { queue.update(Plain); queue.from(Plain); }',
+    '',
+  ].join('\n'),
+  'src/s.js': [
+    "const { Sequelize, DataTypes, Op } = require('sequelize');",
+    "const a = new Sequelize('x', { define: { underscored: true } });",
+    "const b = new Sequelize('y');",
+    "const Fixed = a.define('Fixed', { loginCount: DataTypes.INTEGER, email: { type: DataTypes.STRING, field: 'mail' }, age: DataTypes.INTEGER }, { tableName: 'fixed_rows' });",
+    "const Frozen = a.define('Frozen', { code: DataTypes.STRING }, { freezeTableName: true });",
+    "const Derived = a.define('Derived', { x: DataTypes.STRING });",
+    'Frozen.belongsTo(Fixed);',
+    'async function use() {',
+    "  await Fixed.sum('email', { where: { [Op.or]: [{ email: 'a' }, { email: 'b' }] } });",
+    "  await Fixed.increment(['email'], { where: { email: 'x' } });",
+    "  await Fixed.aggregate('email', 'max', { where: { email: 'y' } });",
+    "  await Fixed.findOrCreate({ where: { email: 'z' }, defaults: { email: 'w' } });",
+    '}',
+    'module.exports = { use, b, Derived };',
+    '',
+  ].join('\n'),
+});
+  assert.deepEqual(usrLines(result), [
+    'src/e.ts:5:14 Entity(resolveName()) class Computed dyn @src/e.ts#model:Computed',
+    'src/e.ts:7:14 Entity({ name: resolveName() }) class ComputedOption dyn @src/e.ts#model:ComputedOption',
+    'src/e.ts:9:24 api_plain @src/e.ts#model:Plain',
+    'src/e.ts:9:58 api_plain.id @src/e.ts#model:Plain.id',
+    'src/e.ts:9:81 api_plain.name @src/e.ts#model:Plain.name',
+    'src/s.js:4:24 fixed_rows @src/s.js#model:Fixed',
+    'src/s.js:4:66 fixed_rows.mail @src/s.js#model:Fixed.email',
+    'src/s.js:5:25 Frozen @src/s.js#model:Frozen',
+    'src/s.js:6:26 sequelize model Derived dyn @src/s.js#model:Derived',
+    'src/s.js:9:15 fixed_rows @src/s.js#use',
+    'src/s.js:9:19 fixed_rows.mail @src/s.js#use',
+    'src/s.js:9:51 fixed_rows.mail @src/s.js#use',
+    'src/s.js:9:67 fixed_rows.mail @src/s.js#use',
+    'src/s.js:10:15 fixed_rows @src/s.js#use',
+    'src/s.js:10:26 fixed_rows.mail @src/s.js#use',
+    'src/s.js:10:47 fixed_rows.mail @src/s.js#use',
+    'src/s.js:11:15 fixed_rows @src/s.js#use',
+    'src/s.js:11:25 fixed_rows.mail @src/s.js#use',
+    'src/s.js:11:52 fixed_rows.mail @src/s.js#use',
+    'src/s.js:12:15 fixed_rows @src/s.js#use',
+    'src/s.js:12:39 fixed_rows.mail @src/s.js#use',
+    'src/s.js:12:65 fixed_rows.mail @src/s.js#use',
+  ]);
+  assert.deepEqual(result.limitations, [
+    'orm-naming-unverified: sequelize: global define options differ across Sequelize instances or are not literals; derived table and column names are dynamic or omitted',
+    'unreadable-orm-declarations: 2 ORM declaration part(s) (spreads, computed keys, non-literal names or options) could not be read statically and were not emitted: typeorm (2)',
+    'dynamic-relation-names: 3 SQL argument(s), relation operand(s), or delegate access(es) were not statically readable; they are emitted as dynamic facts',
+  ]);
 });

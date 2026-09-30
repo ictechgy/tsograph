@@ -299,7 +299,7 @@ export class SequelizeCatalog {
     const options = own === undefined || this.define === undefined ? undefined : mergeOptions(this.define, own);
     const name = modelName ?? symbol;
     const underscored = options?.underscored ?? false;
-    const table = this.tableName(modelName, options, node);
+    const table = this.tableName(modelName, options ?? explicitNaming(own), node);
     const model: SequelizeModel = {
       symbol, node, name, table, underscored, options: options ?? {},
       attributes: new Map(), primaryKey: 'id',
@@ -319,12 +319,11 @@ export class SequelizeCatalog {
    * @returns 테이블 이름
    */
   private tableName(modelName: string | undefined, options: SequelizeModelOptions | undefined, node: ts.Node): TableName {
-    if (options === undefined || (options.tableName === undefined && modelName === undefined)) {
-      return { channel: dynamicChannel(`sequelize model ${modelName ?? node.getText()}`), dynamic: true };
-    }
-    const name = options.tableName ?? (options.freezeTableName === true ? modelName! : underscoredIf(pluralize(modelName!), options.underscored));
+    const name = options === undefined ? undefined : derivedTableName(modelName, options);
+    if (options === undefined || name === undefined) return { channel: dynamicChannel(`sequelize model ${modelName ?? node.getText()}`), dynamic: true };
     return { channel: qualifiedChannel(options.schema, name), dynamic: false };
   }
+
 
   /**
    * 속성 객체를 읽어 모델에 넣는다.
@@ -488,7 +487,9 @@ export class SequelizeCatalog {
   private addForeignKey(owner: SequelizeModel, key: string | undefined, options: ts.ObjectLiteralExpression | undefined, node: ts.Node): void {
     if (key === undefined || owner.table.dynamic) return;
     const existing = owner.attributes.get(key);
-    const column = existing?.column ?? this.foreignKeyField(options, 'foreignKey') ?? underscoredIf(key, owner.underscored);
+    const derived = this.define === undefined ? undefined : underscoredIf(key, owner.underscored);
+    const column = existing?.column ?? this.foreignKeyField(options, 'foreignKey') ?? derived;
+    if (column === undefined) return;
     if (existing === undefined) owner.attributes.set(key, { key, column, node });
     this.foreignKeys.push({ model: owner, key, column, node });
   }
@@ -674,6 +675,48 @@ function lastObjectArgument(args: readonly ts.Expression[], evaluator: OrmEvalua
     if (value.kind === 'object') return value.node;
   }
   return undefined;
+}
+
+/** 전역 define을 확정하지 못했을 때 모델 자신의 옵션만으로 만든 부분 옵션 표식이다. */
+const partialOptions = new WeakSet<SequelizeModelOptions>();
+
+/**
+ * 전역 define을 확정하지 못했을 때도 모델이 직접 준 이름 옵션(`tableName`, `freezeTableName`, `schema`)으로
+ * 테이블 이름을 정할 수 있게 부분 옵션을 만든다. `underscored`·복수화는 전역 옵션에 달려 있어 확정하지 않는다.
+ *
+ * @param own 모델 옵션(읽지 못했으면 undefined)
+ * @returns 부분 옵션 또는 undefined
+ */
+function explicitNaming(own: SequelizeModelOptions | undefined): SequelizeModelOptions | undefined {
+  if (own === undefined || (own.tableName === undefined && own.freezeTableName !== true)) return undefined;
+  const partial: SequelizeModelOptions = { tableName: own.tableName, freezeTableName: own.freezeTableName, schema: own.schema };
+  partialOptions.add(partial);
+  return partial;
+}
+
+/**
+ * 테이블 이름 규칙(`tableName` → `freezeTableName` → `underscoredIf(pluralize(modelName))`)이다. 부분 옵션은 복수화
+ * 규칙을 쓰지 않는다(전역 `underscored`를 모른다).
+ *
+ * @param modelName 모델 이름
+ * @param options 옵션
+ * @returns 테이블 이름 또는 undefined(확정 불가)
+ */
+function derivedTableName(modelName: string | undefined, options: SequelizeModelOptions): string | undefined {
+  if (options.tableName !== undefined) return options.tableName;
+  if (modelName === undefined) return undefined;
+  if (options.freezeTableName === true) return modelName;
+  return isPartial(options) ? undefined : underscoredIf(pluralize(modelName), options.underscored);
+}
+
+/**
+ * 옵션이 전역 define 없이 만든 부분 옵션인지 본다.
+ *
+ * @param options 옵션
+ * @returns 부분 옵션이면 true
+ */
+function isPartial(options: SequelizeModelOptions): boolean {
+  return partialOptions.has(options);
 }
 
 /**

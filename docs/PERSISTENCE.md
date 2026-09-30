@@ -83,7 +83,8 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
 - **테이블**: `@Entity('name')`·`@Entity({ name })`·`@ViewEntity({ name })`, 없으면 `snakeCase(클래스 이름)`
   (`tableName`, `snakeCase`는 `([A-Z])([A-Z])([a-z])`→`$1_$2$3`, `([a-z0-9])([A-Z])`→`$1_$2`, 소문자). DataSource
   `entityPrefix`가 앞에 붙고(`prefixTableName`), 엔터티 `schema` 또는 DataSource `schema`(`type`이 postgres·cockroachdb·
-  mssql·sap·oracle일 때)가 한정한다. `@ChildEntity`는 부모 엔터티의 테이블이다(단일 테이블 상속).
+  mssql·sap·oracle일 때)가 한정한다. `@ChildEntity`는 부모 엔터티의 테이블이다(단일 테이블 상속). `@Entity(…)` 이름
+  인자를 정적으로 읽지 못하면 클래스 이름으로 추측하지 않고 dynamic이다.
 - **컬럼**: `@Column`·`@PrimaryColumn`·`@PrimaryGeneratedColumn`·`@CreateDateColumn`·`@UpdateDateColumn`·
   `@DeleteDateColumn`·`@VersionColumn`·`@ViewColumn`의 옵션 `name`, 없으면 속성 이름 그대로(`columnName`). 부모
   클래스(추상 기반 클래스 포함)의 컬럼을 물려받는다. 임베디드 `@Column(() => Name, { prefix })`는
@@ -99,7 +100,8 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
   dynamic, 이름 없는 컬럼은 내지 않고 `orm-naming-unverified:`를 남긴다. 명시 이름도 전략이 바꿀 수는 있지만
   (`tableName(target, userSpecifiedName)`에 넘어간다) 널리 쓰이는 전략(typeorm-naming-strategies 등)은 명시 이름을
   그대로 두므로 정적으로 낸다. 여러 DataSource의 `entityPrefix`가 다르거나 비리터럴이면 테이블 이름은 dynamic이고,
-  스키마가 다르면 한정하지 않는다. 옵션 스프레드를 풀지 못하면 기본 전략을 가정하고 limitation에 남긴다.
+  스키마가 다르면 한정하지 않는다. 옵션 스프레드나 `TypeOrmModule.forRootAsync`의 `useFactory`(식 본문·블록·메서드
+  축약형의 반환 객체를 읽는다)를 풀지 못하면 기본 전략을 가정하고 limitation에 남긴다.
 - **사용**: 저장소(`getRepository(User)`·`x.getRepository(User)`·`Repository<User>`·`@InjectRepository(User)`·
   `class R extends Repository<User>`의 `this`·`withRepository`·`extend`)와 ActiveRecord 엔터티 클래스(`User.find()`)의
   `find`·`findBy`·`findOne(By)`·`findAndCount(By)`·`count(By)`·`exist(s)(By)`·`save`·`insert`·`update`·`upsert`·`delete`·
@@ -107,7 +109,7 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
   `createQueryBuilder`. EntityManager·DataSource(`new DataSource`, `EntityManager` 타입, `@InjectEntityManager`,
   `transaction(async (manager) => …)`)의 같은 메서드는 첫 인자가 엔터티일 때만. `where`·`order`·`select`와 `…By(where)`·
   `insert`·`save`·`update`의 객체 키는 컬럼, `relations`(문자열 경로·객체)는 대상 테이블과 다대다 조인 테이블.
-  QueryBuilder의 `from`·`into`·`update`·`…Join…`(`…AndMap…`은 둘째 인자)은 엔터티 인자, 같은 사슬 별칭으로 푼
+  QueryBuilder의 `from`·`into`·`update`·`…Join…`(`…AndMap…`은 둘째 인자)은 `createQueryBuilder`에서 시작한 사슬에서만 엔터티 인자, 같은 사슬 별칭으로 푼
   `'u.photos'` 관계 경로, `createQueryBuilder`에서 시작한 사슬의 문자열 테이블 이름을 읽는다. `query(sql)`은 SQL 텍스트다.
 - 읽지 않는 것: `EntitySchema`, 트리 엔터티의 추가 컬럼·closure 테이블, `@Entity({ database })`, 사용자 전략이 명시
   이름을 바꾸는 경우.
@@ -118,7 +120,9 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
 `lib/associations/{mixin,belongs-to,has-many,has-one,belongs-to-many}.js`.
 
 - **옵션 병합**: 모델 옵션은 `new Sequelize(…, { define })`의 전역 옵션 위에 덮인다(`Utils.merge`, undefined는 덮지
-  않는다). 인스턴스가 여럿이고 `define`이 다르거나 비리터럴이면 파생 이름을 확정하지 않는다(`orm-naming-unverified:`).
+  않는다). 인스턴스가 여럿이고 `define`이 다르거나 비리터럴이면 파생 이름(복수화 테이블, `underscored` 컬럼·외래 키)을
+  확정하지 않는다(`orm-naming-unverified:`). 모델이 직접 준 `tableName`·`freezeTableName`·`schema`와 속성의 `field`는
+  그래도 정적으로 낸다.
 - **테이블**: `tableName`, 없으면 `freezeTableName ? modelName : underscoredIf(pluralize(modelName), underscored)`.
   `pluralize`·`singularize`는 inflection 1.13.4의 규칙 데이터(`uncountable_words`·`plural_rules`·`singular_rules`,
   `src/schema/orm/inflection-rules.ts`에 스크립트로 옮김)와 `_apply_rules`를, `underscore`는 inflection `underscore`를,
@@ -140,7 +144,8 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
   함수·메서드 안 `models.User`는 모델 이름으로, 정적 메서드의 `this`는 그 모델 클래스로 푼다. `sequelize.models.User`·
   `sequelize.model('User')`도 이름으로 푼다.
 - **사용**: `findAll`·`findOne`·`findAndCountAll`·`count`·`destroy`·`restore`·`findOrCreate`·`truncate`·`create`·`bulkCreate`·
-  `upsert`·`update`·`findByPk`·`max`·`min`·`sum`·`increment`·`decrement`. `where` 키(연산자 키 `[Op.or]` 제외),
+  `upsert`·`update`·`findByPk`·`max`·`min`·`sum`·`increment`·`decrement`·`aggregate`. `where`·`defaults` 키(연산자 키
+  `[Op.or]`는 키가 아니라 피연산자 객체의 키), `sum('col')`·`increment(['a'])`·`aggregate('col', fn, opts)`의 컬럼,
   `attributes`(문자열, `[속성, 별칭]`, `{ include, exclude }`), 값 객체 키는 컬럼, `include`(모델·`{ model, include, where }`)는
   포함 모델 테이블이다. `sequelize.query(sql)`은 SQL 텍스트다. 모르는 수신자의 `findAll`·`findByPk` 같은 호출은
   `unresolved-orm-receivers:`로 센다.

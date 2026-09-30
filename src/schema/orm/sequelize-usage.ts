@@ -17,15 +17,17 @@ import { objectMember, propertyNameText } from './orm-values.ts';
 
 /** 첫 인자가 찾기 옵션인 모델 메서드다. */
 const findMethods: ReadonlySet<string> = new Set([
-  'findAll', 'findOne', 'findAndCountAll', 'count', 'destroy', 'restore', 'findOrCreate', 'findCreateFind', 'findOrBuild',
-  'truncate', 'aggregate',
+  'findAll', 'findOne', 'findAndCountAll', 'count', 'destroy', 'restore', 'findOrCreate', 'findCreateFind', 'findOrBuild', 'truncate',
 ]);
+
+/** 첫 인자가 컬럼(문자열·배열·컬럼 → 값 객체)이고 둘째 인자가 찾기 옵션인 모델 메서드다. */
+const columnFirstMethods: ReadonlySet<string> = new Set(['max', 'min', 'sum', 'increment', 'decrement']);
 
 /** 첫 인자가 값 객체(또는 배열)인 모델 메서드다. */
 const valueMethods: ReadonlySet<string> = new Set(['create', 'bulkCreate', 'upsert']);
 
 /** 둘째 인자가 찾기 옵션인 모델 메서드다. */
-const secondOptionMethods: ReadonlySet<string> = new Set(['findByPk', 'max', 'min', 'sum', 'increment', 'decrement']);
+const secondOptionMethods: ReadonlySet<string> = new Set(['findByPk']);
 
 /** 모르는 수신자라도 Sequelize 모델 호출로 보이는 이름이다(계수만 한다). */
 const distinctiveMethods: ReadonlySet<string> = new Set(['findAll', 'findByPk', 'findAndCountAll', 'bulkCreate', 'findOrCreate']);
@@ -55,7 +57,8 @@ export class SequelizeUsage {
     const callee = node.expression;
     if (!ts.isPropertyAccessExpression(callee)) return;
     const method = callee.name.text;
-    const isOperation = findMethods.has(method) || valueMethods.has(method) || secondOptionMethods.has(method) || method === 'update';
+    const isOperation = findMethods.has(method) || valueMethods.has(method) || secondOptionMethods.has(method)
+      || columnFirstMethods.has(method) || method === 'update' || method === 'aggregate';
     if (method === 'query') {
       if (this.context.evaluator.valueOf(callee.expression).kind === 'sequelize') readSqlArgument(this.context, node.arguments[0]);
       return;
@@ -82,10 +85,31 @@ export class SequelizeUsage {
     if (findMethods.has(method) && first !== undefined) this.readFindOptions(first, model, 0);
     else if (secondOptionMethods.has(method) && second !== undefined) this.readFindOptions(second, model, 0);
     else if (valueMethods.has(method) && first !== undefined) this.readValueKeys(first, model);
+    else if (columnFirstMethods.has(method) || method === 'aggregate') this.readColumnFirst(method, args, model);
     else if (method === 'update') {
       if (first !== undefined) this.readValueKeys(first, model);
       if (second !== undefined) this.readFindOptions(second, model, 0);
     }
+  }
+
+  /**
+   * `sum('age', opts)`·`increment(['a', 'b'], opts)`·`increment({ a: 1 }, opts)`·`aggregate('age', 'max', opts)`의
+   * 컬럼과 옵션을 읽는다.
+   *
+   * @param method 메서드 이름
+   * @param args 인자
+   * @param model 모델
+   */
+  private readColumnFirst(method: string, args: readonly ts.Expression[], model: SequelizeModel): void {
+    const [columns, second, third] = args;
+    if (columns !== undefined) {
+      const inner = unwrap(columns);
+      if (ts.isObjectLiteralExpression(inner)) this.readValueKeys(inner, model);
+      else if (ts.isArrayLiteralExpression(inner)) this.readAttributeList(inner, model);
+      else if (ts.isStringLiteralLike(inner)) this.emitColumn(model, inner.text, inner);
+    }
+    const options = method === 'aggregate' ? third : second;
+    if (options !== undefined) this.readFindOptions(options, model, 0);
   }
 
   /**
@@ -100,6 +124,8 @@ export class SequelizeUsage {
     if (!ts.isObjectLiteralExpression(object) || depth > 6) return;
     const where = objectMember(object, 'where');
     if (where !== undefined) this.readValueKeys(where, model);
+    const defaults = objectMember(object, 'defaults');
+    if (defaults !== undefined) this.readValueKeys(defaults, model);
     const attributes = objectMember(object, 'attributes');
     if (attributes !== undefined) this.readAttributeList(attributes, model);
     const include = objectMember(object, 'include');
@@ -129,14 +155,20 @@ export class SequelizeUsage {
    *
    * @param value 객체 식
    * @param model 모델
+   * @param depth 연산자 피연산자 깊이
    */
-  private readValueKeys(value: ts.Expression, model: SequelizeModel): void {
+  private readValueKeys(value: ts.Expression, model: SequelizeModel, depth = 0): void {
     const inner = unwrap(value);
     const objects = ts.isArrayLiteralExpression(inner) ? inner.elements.map(unwrap) : [inner];
     for (const object of objects) {
-      if (!ts.isObjectLiteralExpression(object)) continue;
+      if (!ts.isObjectLiteralExpression(object) || depth > 6) continue;
       for (const property of object.properties) {
-        const key = property.name === undefined || ts.isComputedPropertyName(property.name) ? undefined : propertyNameText(property.name);
+        if (property.name !== undefined && ts.isComputedPropertyName(property.name)) {
+          // 연산자 키(`[Op.or]: [{ email }, …]`)는 키가 아니라 피연산자 객체의 키가 컬럼이다.
+          if (ts.isPropertyAssignment(property)) this.readValueKeys(property.initializer, model, depth + 1);
+          continue;
+        }
+        const key = property.name === undefined ? undefined : propertyNameText(property.name);
         if (key !== undefined && property.name !== undefined) this.emitColumn(model, key, property.name);
       }
     }
