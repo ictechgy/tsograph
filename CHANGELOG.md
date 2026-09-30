@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-30
+
+첫 발행이다. npm 패키지 `tsograph`, 실행 명령 `tsograph`. Node.js 22.18.0 이상이 필요하고, 출력을 이으려면
+isthmus-cli 0.10.0 이상이 필요하다(http·`trace`·`language-traversal`을 소비하는 첫 isthmus 발행본).
+
+### 요약
+
+- `tsograph openapi`: Swagger 2.0·OpenAPI 3.0.x/3.1.x(JSON·YAML) → isthmus bridge-facts v1 http `route-contract`.
+  서버 접두사 합성, 정규 경로 템플릿, fail-closed limitation, 입력 크기·깊이·alias 상한.
+- `tsograph routes --role server`: Next.js App Router·Pages Router API와 Node 백엔드(Hono 4, Express 4·5,
+  Fastify 4·5, Koa + @koa/router, NestJS 10–12) → http `route-decl`. 등록 순서 디스패치(`order`),
+  `paramConstraints`·`dynamicScope`·`limitationScopes`를 싣는다.
+- `tsograph schema`: Prisma 스키마·Prisma Client, Drizzle·TypeORM·Sequelize 6·knex, 원시 SQL 드라이버,
+  Cloudflare D1, 원시 SQL → persistence `relation-use`. 이름 규칙은 각 라이브러리 소스와 오라클 기록으로 확인했다.
+- `tsograph graph`·`reach`·`impact`: TypeScript 컴파일러 API 호출 그래프 → `tsograph-graph` v1 스냅샷과 isthmus
+  `language-traversal` v1. 인터페이스·의존성 주입 호출을 `bound`·`candidate` 간선으로 잇고 `--dispatch`
+  (기본 `bound`)·root별 `evidence`·`unresolvedCalls`를 낸다.
+- 안정 심볼 id: 이름 있는 선언과 인라인 콜백 핸들러가 graph·routes·schema에서 같은 id(`symbol.usr`)를 가져
+  isthmus `trace`가 route → 핸들러 → relation-use를 정확한 문자열 일치로 잇는다.
+
+아래는 개발 중 기록한 세부 변경이다.
+
 ### Changed — 인라인 콜백 id (graph·reach·impact·routes·schema)
 
 - 호출·`new` 인자로 바로 넘긴 화살표·함수 식(인라인 콜백)이 자기 그래프 노드와 id를 갖는다:
