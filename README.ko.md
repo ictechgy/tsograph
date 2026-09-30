@@ -23,12 +23,22 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | 인터페이스·의존성 주입 디스패치: `bound`·`candidate` 간선, `--dispatch`, root별 하한 `evidence`, `unresolvedCalls` | 구현됨 |
 | 웹/React Native 클라이언트 route-call | 계획 |
 
-isthmus의 `http` target은 아직 isthmus `docs/GRAPH-EXCHANGE.md`의 **초안**("개발 중: HTTP 경계
-합의 초안")이다. 초안이 발행되기 전의 isthmus는 `target: "http"` 문서를 거부한다.
+isthmus의 `http` target은 isthmus `docs/GRAPH-EXCHANGE.md`에서 아직 "개발 중: HTTP 경계" 절이다.
+이 절을 소비하는 첫 발행본은 isthmus-cli **0.10.0**이다. `check`(`--pairs` 포함)·`query`·`trace`·`diff --http`가
+`target: "http"` 문서를 읽고, `trace`가 `language-traversal` v1 문서를 읽는다. isthmus-cli 0.9.0 이하는
+`target: "http"` 문서를 거부한다.
 
 ## 요구 사항
 
 - Node.js 22.18.0 이상
+- 문서를 이으려면 isthmus-cli 0.10.0 이상(`npm install -g isthmus-cli`)
+
+## 설치
+
+```sh
+npm install -g tsograph
+tsograph --version
+```
 
 ## `tsograph openapi`
 
@@ -322,7 +332,7 @@ tsograph 사실이 예측한 핸들러를 대조한다 — 다른 method, 끝 �
 
 ### isthmus로 검증
 
-`fixtures/next/`의 합성 fixture를 isthmus `main` 소비자로 확인했다:
+`fixtures/next/`의 합성 fixture를 isthmus `main` 소비자로 확인했다(이 소비자는 isthmus-cli 0.10.0에 발행됐다):
 
 ```sh
 tsograph openapi fixtures/next/app-router/openapi.yaml --service demo --project fixtures/next/app-router > contract.json
@@ -795,7 +805,7 @@ tsograph reach --project fixtures/graph/next-prisma --generated-at 2026-09-27T00
 `jobs`와 `AuditLog`에 닿는다. 같은 문서가 isthmus `feature/trace-language-traversal` 소비자의
 `language-traversal` 파서와 `isthmus trace`(`forward` 분석의 route 선택, `reverse` 분석의 심볼 선택)를
 통과하고, `dispatch`·`evidence`·`unresolvedCalls`를 실은 문서는 `feature/trace-evidence-tiers` 소비자의 파서를
-통과한다.
+통과한다. 두 소비자는 isthmus-cli 0.10.0에 발행됐다.
 
 디스패치 예시(합성 `fixtures/graph/di-dispatch`, 줄임): `GET /api/items`는 `primaryHandler.get()`을 부르고, 그
 안의 `this.deps.store.findItem()`은 `ItemStore` 인터페이스를 거친다. `PATCH`는 Next.js가 채우는 매개변수로

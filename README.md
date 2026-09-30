@@ -24,13 +24,23 @@ own language; isthmus joins the documents.
 | Interface / dependency-injection dispatch: `bound` and `candidate` edges, `--dispatch`, per-root `evidence`, `unresolvedCalls` | Implemented |
 | Web/React Native client route-calls | Planned |
 
-The isthmus `http` target is still a **draft** in isthmus `docs/GRAPH-EXCHANGE.md`
-("개발 중: HTTP 경계 합의 초안"). Released isthmus versions reject `target: "http"` documents
-until that draft ships.
+The isthmus `http` target is still marked as in development in isthmus `docs/GRAPH-EXCHANGE.md`
+("개발 중: HTTP 경계"). isthmus-cli **0.10.0** is the first release that consumes it: `check`
+(including `--pairs`), `query`, `trace`, and `diff --http` read `target: "http"` documents, and `trace`
+reads `language-traversal` v1 documents. isthmus-cli 0.9.0 and earlier reject `target: "http"`
+documents.
 
 ## Requirements
 
 - Node.js 22.18.0 or newer
+- isthmus-cli 0.10.0 or newer to join the documents (`npm install -g isthmus-cli`)
+
+## Installation
+
+```sh
+npm install -g tsograph
+tsograph --version
+```
 
 ## `tsograph openapi`
 
@@ -425,7 +435,8 @@ replays the recordings offline):
 
 ### Validation with isthmus
 
-The synthetic fixtures under `fixtures/next/` were checked with the isthmus `main` consumer:
+The synthetic fixtures under `fixtures/next/` were checked with the isthmus `main` consumer
+(these consumers shipped in isthmus-cli 0.10.0):
 
 ```sh
 tsograph openapi fixtures/next/app-router/openapi.yaml --service demo --project fixtures/next/app-router > contract.json
@@ -988,7 +999,7 @@ Joined with the relation-use facts of `tsograph schema` (`symbol.usr` ∈ reach 
 `language-traversal` parser and `isthmus trace` (route selection with a `forward` analysis, symbol
 selection with a `reverse` analysis) on the `feature/trace-language-traversal` consumer; documents
 with `dispatch`, `evidence`, and `unresolvedCalls` pass the parser on the `feature/trace-evidence-tiers`
-consumer.
+consumer. Both consumers shipped in isthmus-cli 0.10.0.
 
 Dispatch example (synthetic `fixtures/graph/di-dispatch`, trimmed): `GET /api/items` calls
 `primaryHandler.get()`, whose `this.deps.store.findItem()` goes through the `ItemStore` interface.
