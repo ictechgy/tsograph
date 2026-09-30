@@ -16,7 +16,7 @@ own language; isthmus joins the documents.
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` facts | Implemented |
 | `tsograph routes --role server`: Next.js App Router route handlers and Pages Router API routes → `route-decl` facts | Implemented |
-| Other Node backend route declarations (Hono, Express, Fastify, NestJS, Koa) | Planned |
+| `tsograph routes --role server`: Node backends — Hono 4, Express 4/5, Fastify 4/5, Koa with @koa/router 12–15, NestJS 10–12 → `route-decl` facts ([rules](docs/NODE-ROUTES.md), Korean) | Implemented |
 | `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
 | `tsograph schema`: Drizzle, TypeORM, Sequelize 6, knex, raw SQL drivers (`pg`, `mysql2`, SQLite, libSQL, postgres.js, Neon, Vercel Postgres, PlanetScale), Cloudflare D1 | Implemented ([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
 | Kysely, Objection, MikroORM, pg-promise, sequelize-typescript, MSSQL, Oracle, slonik relation-use facts | Planned (counted as limitations today) |
@@ -206,22 +206,27 @@ downgrades errors instead of reporting false ones.
 tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
 ```
 
-Scans a Next.js project and writes a bridge-facts v1 document to stdout: `platform: "js"`,
-`target: "http"`, `roles: ["server"]`, `dispatch: "specificity"`, `sourceSets`, and one
-`route-decl` fact per (route file, HTTP method). The analyzed code is parsed with the
-TypeScript parser only; it is never executed, and no module resolution, type checking, or
-network access happens.
+Scans a Next.js project or a Node backend (Hono, Express, Fastify, Koa with @koa/router, NestJS)
+and writes a bridge-facts v1 document to stdout: `platform: "js"`, `target: "http"`,
+`roles: ["server"]`, `dispatch`, `sourceSets`, and one `route-decl` fact per (route, HTTP method).
+The analyzed code is never executed and nothing is fetched from the network. Next.js route files
+are read with the TypeScript parser only; Node backends are read through a TypeScript `Program`
+(the same setup as `tsograph graph`) so routers can be followed across files. See
+[Node backends](#node-backends) below.
 
 - `--role server` (required): only the declaration side is implemented. `client` is a usage
   error until route-call extraction exists.
-- `--project` (required): the Next.js project root (where `next.config.*` and `app/` or
-  `pages/` live). `project` is its POSIX realpath and `location.path` is relative to it.
+- `--project` (required): the project root (where `package.json`, `next.config.*`, or `app/`/
+  `pages/` live). `project` is its POSIX realpath and `location.path` is relative to it. Node
+  frameworks are detected from the dependencies of the root `package.json`; Next.js is scanned
+  when `next` is declared, a `next.config.*` exists, or no Node backend framework is detected.
 - `--service`: service identity recorded on the document and on every fact.
 - `--include-tests`: also emit route files that look like tests, with `testSource: true`
   and `sourceSets.tests: "included"`. Without it they are skipped and the document declares
   `sourceSets.tests: "excluded"`. Test paths are `*.test.*`, `*.spec.*`, and files under
-  `__tests__/` or `__mocks__/`. `test/` folders are not treated as tests, because in Next.js
-  they are real URL segments (`app/api/test/route.ts` serves `/api/test`).
+  `__tests__/` or `__mocks__/`. For Next.js, `test/` folders are not treated as tests, because
+  they are real URL segments (`app/api/test/route.ts` serves `/api/test`); for Node backends,
+  files under `test/`, `tests/`, and `e2e/` and `*.e2e-spec.*`/`*.e2e.*` files are tests too.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness), `2`
   unreadable project or oversized output (more than 100,000 facts, or more than 16 Mi
   characters), `64` usage error. A single unreadable route file is a limitation, not a failure.
@@ -351,6 +356,70 @@ are checked against the contract before they are written (`src/exchange/http-lim
 - **Config lookup is the project root only.** Next.js searches parent directories too
   (`find-up`); pass the directory that holds `next.config.*`.
 
+### Node backends
+
+The full rule table with the verified package sources, the dispatch model, and the oracle results is in
+[docs/NODE-ROUTES.md](docs/NODE-ROUTES.md) (Korean). Every rule was read from the npm packages (Hono
+4.13.12, Express 4.22.3 and 5.2.1 with path-to-regexp 0.1.13/8.4.2, Fastify 4.29.1 and 5.12.5 with
+find-my-way 8.2.2/9.9.0, @koa/router 15.7.0 and 13.1.1, NestJS 12.1.2) and re-checked by running the
+synthetic fixtures under `fixtures/node/`.
+
+- **Registrations** are collected by a static interpreter that walks module top levels in order and
+  follows project functions that receive or create a router (`registerRoutes(app)`, `createApp()`,
+  Fastify plugins): `app.METHOD`/`all`/`on`/`route()` builders, `use()`/`route()`/`register()` mounts
+  with their prefixes, Hono `basePath()`, @koa/router `prefix`, Fastify `prefix` and `fastify-plugin`,
+  and NestJS `@Controller`/`@Get`… with `setGlobalPrefix`, URI versioning, and `RouterModule`. Values
+  are followed through `const`s, imports, enums, `as const` objects, template literals, and CommonJS
+  `require`/`module.exports`.
+- **Path syntax** is translated per router: Hono patterns, path-to-regexp 0.1 (Express 4), 8 (Express 5,
+  @koa/router 14+), 6 (@koa/router 12–13), and find-my-way (Fastify, NestJS on Fastify). Optional
+  segments expand into several templates, zero-segment catch-alls add the `catchAllPrefix` decl,
+  find-my-way parameters (which match empty values) add empty-value variants, and parameter regexes
+  become `paramConstraints` (`int`, `slug`, or `regex`). Anything the contract grammar cannot express
+  is `dynamic`, with a `dynamicScope` prefix when a static prefix is proven.
+- **Dispatch**: Hono, Express, Koa, and NestJS on Express pick the first matching registration, so a
+  document with any of them is `registration-order` and carries `order: {group, index}` (group = the
+  app that receives requests; NestJS: one controller). Handlers that can pass the request on (`next`
+  parameter, `@Next()`), conditional or out-of-module registrations, exclusive Koa routers, and NestJS
+  host or header-version filters get no `order`, reported under `route-dispatch-order-unknown:`.
+  Fastify and Next.js are `specificity`; in a mixed document their declarations carry no order.
+- **Flags**: `trailingSlash` and `caseInsensitive` follow the router options (Express/Koa defaults are
+  case-insensitive with an optional trailing slash, Hono and Fastify are strict and case-sensitive by
+  default); Fastify `constraints`, Koa `host`, and NestJS host/version filters set `narrowed`.
+- **symbol.usr** is the graph node that owns the handler body: a named function or method id
+  (`src/lib/books.ts#listBooks`, `src/users.controller.ts#UsersController.findOne`), or for an inline
+  handler the enclosing declaration or `<path>#<module>` (reported under `framework-dispatch-unmodeled:`,
+  since the graph has no separate node for inline functions). `tsograph graph` marks these handlers as
+  `route-handler` entry points.
+- **Limitations** (all with scopes when an upper bound is proven): conditional registrations and
+  non-contract verbs (`route-coverage:` with their templates), unresolved mount prefixes and routers known
+  only by a type annotation (`pathAnchor: "base"` and `unresolved-route-prefix:` with `templateSuffixes`),
+  static-file middleware and unknown package middleware or plugins (`framework-provided-routes:` with the
+  mount prefix, `GET`/`HEAD` for static files), handlers outside the project (`missing-route-usrs:`),
+  unverified major versions (`route-framework-version-unknown:`), and unmodeled server frameworks, symlinks,
+  oversized or unparsable files (`route-coverage:`). Middleware that calls `next` and well-known packages
+  (cors, helmet, body parsers, Hono built-ins, most official Fastify plugins) are assumed to pass requests
+  on; a `use()` function that takes no `next` is an open-ended `ANY` route, except a trailing 404 handler.
+
+**Oracle.** `experiments/node-routes-oracle/run-oracle.mjs <scratch>` installs each fixture into a scratch
+copy from the npm registry, loads it with the real framework (Hono `app.request`, Express/Koa/NestJS on an
+ephemeral 127.0.0.1 port, Fastify `inject`), and compares the handler each request reaches with the handler
+tsograph's facts predict — including other methods, toggled trailing slashes, uppercased paths, and requests
+built from the framework's own route table. Recorded 2026-09-30 (`src/routes/node/oracle-replay.test.ts`
+replays the recordings offline):
+
+| Fixture | Framework | Precision (static facts) | Recall (routes that answered) |
+|---|---|---|---|
+| `hono-app` | Hono 4.13.12 | 27/27 | 29/29 |
+| `hono-loose-app` | Hono 4.13.12, `strict: false` | 4/4 | 4/4 |
+| `express4-app` | Express 4.22.3 (CommonJS) | 22/22 | 34/34 |
+| `express5-app` | Express 5.2.1 (ESM TypeScript) | 14/14 | 13/13 |
+| `koa-app` | Koa 3.2.1 + @koa/router 15.7.0 | 18/18 | 18/18 |
+| `koa13-app` | Koa 2.16.4 + @koa/router 13.1.1 | 10/10 | 10/10 |
+| `fastify5-app` | Fastify 5.12.5 + fastify-plugin | 27/27 | 29/29 |
+| `fastify4-app` | Fastify 4.29.1, `ignoreTrailingSlash` | 5/5 | 5/5 |
+| `nest-app` | NestJS 12.1.2 + platform-express | 13/13 | 18/18 |
+
 ### Validation with isthmus
 
 The synthetic fixtures under `fixtures/next/` were checked with the isthmus `main` consumer:
@@ -365,6 +434,11 @@ node <isthmus>/src/cli/main.ts check contract.json decl.json client.json
 The check exits 0 and reports the intended drift (`route-contract-without-decl` for
 `GET /api/health` and `PUT /api/items/{}`, `route-decl-without-contract` for handlers the spec
 does not list).
+
+The `fixtures/node/` documents were checked with isthmus `2954375`: `check` accepts every document
+(`route-decl-shadowed` for a Hono literal route registered after a parameter route, an error for a call with
+no declaration, `-unverified` for a call inside a `dynamicScope`), and `trace` follows the handler usrs into
+`tsograph reach` forward analyses.
 
 ## `tsograph schema`
 
@@ -980,6 +1054,14 @@ node --test src/openapi/path-template.test.ts   # focused run
 `src/exchange/http-limitation-scope.test.ts` checks every vendored vector file against
 `conformance/SHA256SUMS`, runs the `scope.validate` cases of `conformance/http-limitation-scope.json`
 against the scope validator, and pins the `scope.applies` cases the `routes` scopes rely on.
+`src/exchange/dispatch-order.test.ts` runs the `dispatch.validate` cases of `conformance/http-dispatch.json`
+and `src/exchange/dynamic-scope.test.ts` the `scope.dynamic-validate` cases; `routes` checks its `order` and
+`dynamicScope` fields with the same validators before writing them.
+
+`src/routes/node/node-conformance.test.ts` keeps the verified Node path-syntax tables (Hono,
+path-to-regexp 0.1/6/8, find-my-way, the NestJS legacy route converter) with their package sources, and
+`src/routes/node/oracle-replay.test.ts` replays the oracle recordings under
+`experiments/node-routes-oracle/recorded/`.
 
 `src/routes/conformance.test.ts` checks every static channel from the Next fixtures against
 the grammar cases of the vendored `conformance/http-template.json`, and keeps the verified

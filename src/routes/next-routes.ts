@@ -128,6 +128,20 @@ export async function extractNextRoutes(input: NextRoutesInput): Promise<NextRou
 }
 
 /**
+ * Next.js를 스캔하지 않은 프로젝트(Node 백엔드만 감지)의 빈 추출 결과다. `graph`가 진입점·라우트 파일 입력으로 쓴다.
+ *
+ * @returns 빈 결과
+ */
+export function emptyNextRoutesResult(): NextRoutesResult {
+  return {
+    routes: [],
+    gaps: createRouteGaps(),
+    routerDirectories: { appDirectory: undefined, pagesDirectory: undefined, symlinkedLocations: [] },
+    frameworkSources: { metadataFiles: 0, proxyFiles: [], hasPublicFiles: false, hasLegacyStaticFiles: false },
+  };
+}
+
+/**
  * 0으로 시작하는 공백 계수기를 만든다.
  *
  * @returns 계수기

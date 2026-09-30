@@ -1,0 +1,9 @@
+{
+  "name": "fastify5-app-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fastify": "5.12.5",
+    "fastify-plugin": "5.1.0"
+  }
+}

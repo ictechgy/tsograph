@@ -1,0 +1,312 @@
+{
+  "fixture": "hono-loose-app",
+  "framework": "hono",
+  "versions": {
+    "hono": "4.13.12"
+  },
+  "dispatch": "registration-order",
+  "facts": [
+    {
+      "channel": "/api",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 5,
+        "path": "src/index.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "hono:src/index.ts:3:13",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/index.ts#<module>",
+        "usr": "src/index.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/api/Items/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 10,
+        "line": 8,
+        "path": "src/index.ts"
+      },
+      "method": "POST",
+      "order": {
+        "group": "hono:src/index.ts:3:13",
+        "index": 3
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/index.ts#<module>",
+        "usr": "src/index.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/api/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 6,
+        "path": "src/index.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "hono:src/index.ts:3:13",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/index.ts#<module>",
+        "usr": "src/index.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "channel": "/api/items/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 7,
+        "path": "src/index.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "hono:src/index.ts:3:13",
+        "index": 2
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/index.ts#<module>",
+        "usr": "src/index.ts#<module>"
+      }
+    }
+  ],
+  "limitations": [
+    "framework-dispatch-unmodeled: 4 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api",
+      "expect": [
+        "h:api-root"
+      ],
+      "actual": "h:api-root",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/",
+      "expect": [
+        "h:api-root"
+      ],
+      "actual": "h:api-root",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/Items/p1",
+      "expect": [
+        "h:item-post"
+      ],
+      "actual": "h:item-post",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/Items/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/api/Items/p1/",
+      "expect": [
+        "h:item-post"
+      ],
+      "actual": "h:item-post",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/API/ITEMS/P1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/items",
+      "expect": [
+        "h:items"
+      ],
+      "actual": "h:items",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/items/",
+      "expect": [
+        "h:items"
+      ],
+      "actual": "h:items",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ITEMS",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/items/",
+      "expect": [
+        "h:items"
+      ],
+      "actual": "h:items",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ITEMS/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api",
+      "expect": [
+        "h:api-root"
+      ],
+      "actual": "h:api-root",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/items",
+      "expect": [
+        "h:items"
+      ],
+      "actual": "h:items",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/items/",
+      "expect": [
+        "h:items"
+      ],
+      "actual": "h:items",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/api/Items/p1",
+      "expect": [
+        "h:item-post"
+      ],
+      "actual": "h:item-post",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 4,
+    "verifiedFacts": 4,
+    "dynamicFacts": 0,
+    "servedRoutes": 4,
+    "coveredRoutes": 4,
+    "probes": 19,
+    "failedProbes": 0
+  }
+}

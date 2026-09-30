@@ -108,11 +108,42 @@ export interface RouteDeclFact {
   readonly trailingSlash?: 'strict' | 'optional';
   /** `--include-tests`로 낸 테스트 소스 사실에만 단다. */
   readonly testSource?: true;
-  /** optional catch-all(`[[...x]]`)을 펼친 접두사 decl 표식이다. `symbol.usr`가 있을 때만 단다(isthmus 검증). */
+  /** 0세그먼트 catch-all을 펼친 접두사 decl 표식이다. `symbol.usr`가 있을 때만 단다(isthmus 검증). */
   readonly catchAllPrefix?: true;
+  /** 대소문자를 무시하고 매칭함을 증명한 선언에만 단다(Express·Koa 기본값 등). */
+  readonly caseInsensitive?: true;
+  /** host·version 같은 조건으로 같은 키를 나눈 핸들러다(조건이 맞지 않는 요청은 다른 핸들러로 간다). */
+  readonly narrowed?: true;
+  /** 파라미터 세그먼트의 제약이다. 세그먼트마다 하나이며 인덱스 순으로 싣는다. */
+  readonly paramConstraints?: readonly ParamConstraint[];
+  /** registration-order 문서에서 순서를 증명한 선언의 (라우터 체인, 등록 순번)이다. */
+  readonly order?: RouteOrder;
+  /** dynamic 선언이 받을 수 있는 요청의 증명된 상한이다. */
+  readonly dynamicScope?: DynamicScope;
   readonly location: BridgeLocation;
-  /** qualifiedName은 `<파일>#<내보낸 이름>`, usr는 핸들러의 tsograph 그래프 id다(CommonJS 내보내기는 생략). */
+  /** qualifiedName은 사람이 읽는 핸들러 이름, usr는 핸들러의 tsograph 그래프 id다(없으면 생략). */
   readonly symbol: { readonly qualifiedName: string; readonly usr?: string };
+}
+
+/** `paramConstraints` 원소다. `pattern`은 `regex` 전용 정보 필드다. */
+export interface ParamConstraint {
+  readonly segment: number;
+  readonly kind: 'int' | 'uuid' | 'slug' | 'path' | 'regex';
+  readonly pattern?: string;
+}
+
+/** registration-order 문서의 등록 순서다. 한 index는 한 등록(소스 위치 하나)이다. */
+export interface RouteOrder {
+  readonly group: string;
+  readonly index: number;
+}
+
+/** dynamic 선언의 요청 상한이다. `methods`는 `ANY` 선언에만 싣는다. */
+export interface DynamicScope {
+  readonly templates?: readonly string[];
+  readonly templatePrefixes?: readonly string[];
+  readonly templateSuffixes?: readonly string[];
+  readonly methods?: readonly HttpMethod[];
 }
 
 /** tsograph routes --role server가 내는 bridge-facts v1 문서다. */
@@ -125,8 +156,8 @@ export interface RouteDeclDocument {
   /** roles가 있는 http 문서는 사실이 0건이어도 target을 유지한다. */
   readonly target: 'http';
   readonly roles: readonly ['server'];
-  /** 파일 라우터(Next.js)는 구체성 순서로 고른다. */
-  readonly dispatch: 'specificity';
+  /** 파일 라우터(Next.js)·find-my-way(Fastify)는 구체성, 등록 순서로 고르는 라우터(Hono·Express·Koa)가 있으면 등록 순서다. */
+  readonly dispatch: 'specificity' | 'registration-order';
   readonly sourceSets: { readonly tests: 'excluded' | 'included' };
   readonly service?: string;
   readonly project: string;

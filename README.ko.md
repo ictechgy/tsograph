@@ -15,7 +15,7 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` 사실 | 구현됨 |
 | `tsograph routes --role server`: Next.js App Router route handler·Pages Router API route → `route-decl` 사실 | 구현됨 |
-| 그 밖의 Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa) | 계획 |
+| `tsograph routes --role server`: Node 백엔드 — Hono 4, Express 4·5, Fastify 4·5, Koa + @koa/router 12–15, NestJS 10–12 → `route-decl` 사실([규칙](docs/NODE-ROUTES.md)) | 구현됨 |
 | `tsograph schema`: Prisma 스키마·Prisma Client·원시 SQL → persistence `relation-use` 사실 | 구현됨 |
 | `tsograph schema`: Drizzle·TypeORM·Sequelize 6·knex·원시 SQL 드라이버(`pg`·`mysql2`·SQLite·libSQL·postgres.js·Neon·Vercel Postgres·PlanetScale)·Cloudflare D1 | 구현됨([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
 | Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·MSSQL·Oracle·slonik relation-use | 계획(현재는 limitation으로 센다) |
@@ -129,19 +129,23 @@ limitation 접두사를 써서 isthmus가 거짓 error 대신 판정을 낮추�
 tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
 ```
 
-Next.js 프로젝트를 스캔해 bridge-facts v1 문서를 표준 출력에 쓴다: `platform: "js"`,
-`target: "http"`, `roles: ["server"]`, `dispatch: "specificity"`, `sourceSets`, (route 파일, HTTP
-method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파서로 읽기만 하고 실행하지 않는다.
-모듈 해석·타입 검사·네트워크 접근도 하지 않는다.
+Next.js 프로젝트나 Node 백엔드(Hono·Express·Fastify·Koa + @koa/router·NestJS)를 스캔해 bridge-facts v1
+문서를 표준 출력에 쓴다: `platform: "js"`, `target: "http"`, `roles: ["server"]`, `dispatch`, `sourceSets`,
+(라우트, HTTP method)마다 `route-decl` 사실 하나. 분석 대상 코드는 실행하지 않고 네트워크 접근도 하지 않는다.
+Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는 라우터를 파일 사이로 따라가려고 `tsograph graph`와
+같은 방식의 TypeScript `Program`으로 읽는다. 아래 [Node 백엔드](#node-백엔드)를 본다.
 
 - `--role server`(필수): 선언 측만 구현했다. `client`는 route-call 추출이 생기기 전까지 사용법 오류다.
-- `--project`(필수): Next.js 프로젝트 루트(`next.config.*`와 `app/`·`pages/`가 있는 곳). `project`는
-  그 POSIX realpath이고 `location.path`는 그 기준 상대 경로다.
+- `--project`(필수): 프로젝트 루트(`package.json`, `next.config.*`, `app/`·`pages/`가 있는 곳). `project`는
+  그 POSIX realpath이고 `location.path`는 그 기준 상대 경로다. Node 프레임워크는 루트 `package.json` 의존성으로
+  감지하고, Next.js는 `next`가 선언됐거나 `next.config.*`가 있거나 Node 백엔드 프레임워크를 하나도 감지하지 못했을 때
+  스캔한다.
 - `--service`: 문서와 모든 사실에 싣는 서비스 신원.
 - `--include-tests`: 테스트로 보이는 route 파일도 `testSource: true`와 `sourceSets.tests: "included"`로
   낸다. 없으면 건너뛰고 `sourceSets.tests: "excluded"`를 선언한다. 테스트 경로는 `*.test.*`·`*.spec.*`와
-  `__tests__/`·`__mocks__/` 아래 파일이다. `test/` 폴더는 Next.js에서 실제 URL 세그먼트라
-  (`app/api/test/route.ts`는 `/api/test`) 테스트로 보지 않는다.
+  `__tests__/`·`__mocks__/` 아래 파일이다. Next.js에서 `test/` 폴더는 실제 URL 세그먼트라
+  (`app/api/test/route.ts`는 `/api/test`) 테스트로 보지 않고, Node 백엔드에서는 `test/`·`tests/`·`e2e/` 아래 파일과
+  `*.e2e-spec.*`·`*.e2e.*`도 테스트다.
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트나 상한을
   넘는 출력(사실 100,000개 초과, 16 Mi 문자 초과), `64` 사용법 오류. route 파일 하나를 읽지 못하는 것은
   실패가 아니라 limitation이다.
@@ -263,6 +267,57 @@ method)마다 `route-decl` 사실 하나. 분석 대상 코드는 TypeScript 파
 - **설정은 프로젝트 루트에서만 찾는다.** Next.js는 부모 디렉터리도 찾는다(`find-up`). `next.config.*`가 있는
   디렉터리를 넘긴다.
 
+### Node 백엔드
+
+확인한 패키지 소스가 붙은 전체 규칙표, 디스패치 모델, 오라클 결과는 [docs/NODE-ROUTES.md](docs/NODE-ROUTES.md)에 있다.
+모든 규칙은 npm 패키지(Hono 4.13.12, Express 4.22.3·5.2.1과 path-to-regexp 0.1.13·8.4.2, Fastify 4.29.1·5.12.5와
+find-my-way 8.2.2·9.9.0, @koa/router 15.7.0·13.1.1, NestJS 12.1.2)에서 읽었고 `fixtures/node/`의 합성 fixture를 실행해
+다시 확인했다.
+
+- **등록**: 모듈 최상위를 순서대로 걷고 라우터를 넘겨받거나 만드는 프로젝트 함수(`registerRoutes(app)`, `createApp()`,
+  Fastify 플러그인)를 따라가는 정적 해석기가 모은다. `app.METHOD`·`all`·`on`·`route()` 빌더, 접두사가 붙은
+  `use()`·`route()`·`register()` mount, Hono `basePath()`, @koa/router `prefix`, Fastify `prefix`·`fastify-plugin`, NestJS
+  `@Controller`·`@Get`…과 `setGlobalPrefix`·URI 버전·`RouterModule`을 다룬다. 값은 `const`·import·열거형·`as const` 객체·
+  템플릿 문자열·CommonJS `require`/`module.exports`로 따라간다.
+- **경로 문법**: 라우터마다 옮긴다 — Hono 패턴, path-to-regexp 0.1(Express 4)·8(Express 5, @koa/router 14 이상)·
+  6(@koa/router 12–13), find-my-way(Fastify, NestJS Fastify 어댑터). 선택 세그먼트는 템플릿 여러 개, 0세그먼트 catch-all은
+  `catchAllPrefix` decl, 빈 값을 받는 find-my-way 파라미터는 빈 값 변형, 파라미터 정규식은 `paramConstraints`(`int`·`slug`·
+  `regex`)다. 계약 문법으로 쓸 수 없으면 `dynamic`이고, 정적 접두사를 증명하면 `dynamicScope`를 싣는다.
+- **디스패치**: Hono·Express·Koa·NestJS(Express)는 먼저 맞는 등록이 받으므로, 이들이 있는 문서는 `registration-order`이고
+  `order: {group, index}`를 싣는다(group은 요청을 받는 앱, NestJS는 컨트롤러 하나). 요청을 넘길 수 있는 핸들러(`next`
+  매개변수, `@Next()`), 조건부·다른 모듈 등록, exclusive Koa 라우터, NestJS host·헤더 버전 필터는 `order` 없이
+  `route-dispatch-order-unknown:`으로 알린다. Fastify·Next.js는 `specificity`이고 섞인 문서에서는 순서 없이 낸다.
+- **표식**: `trailingSlash`·`caseInsensitive`는 라우터 옵션을 따른다(Express·Koa 기본은 대소문자 무시·끝 슬래시 선택, Hono·
+  Fastify 기본은 strict·대소문자 구분). Fastify `constraints`, Koa `host`, NestJS host·버전 필터는 `narrowed`다.
+- **symbol.usr**: 핸들러 본문이 속한 그래프 노드다. 이름 있는 함수·메서드면 그 id(`src/lib/books.ts#listBooks`,
+  `src/users.controller.ts#UsersController.findOne`), 인라인 핸들러면 감싼 선언이나 `<path>#<module>`이다(그래프에 인라인
+  함수 노드가 없어서이며 `framework-dispatch-unmodeled:`로 알린다). `tsograph graph`가 이 핸들러를 `route-handler`
+  진입점으로 표시한다.
+- **limitation**(상한을 증명하면 스코프를 단다): 조건부 등록·계약 밖 동사(`route-coverage:` + 템플릿), 모르는 mount 접두사·
+  타입으로만 아는 라우터(`pathAnchor: "base"`와 `templateSuffixes`를 단 `unresolved-route-prefix:`), 정적 파일 미들웨어와
+  모르는 패키지 미들웨어·플러그인(붙인 접두사를 단 `framework-provided-routes:`, 정적 파일은 `GET`·`HEAD`), 프로젝트 밖
+  핸들러(`missing-route-usrs:`), 확인하지 않은 주 버전(`route-framework-version-unknown:`), 모델링하지 않는 서버
+  프레임워크·symlink·크기 초과·구문 오류 파일(`route-coverage:`). `next`를 부르는 미들웨어와 잘 알려진 패키지(cors·helmet·
+  본문 파서·Hono 내장·Fastify 공식 플러그인 대부분)는 요청을 넘긴다고 본다. `next`를 받지 않는 `use()` 함수는 끝이 열린
+  `ANY` 라우트다(끝의 404 처리기는 제외).
+
+**오라클.** `experiments/node-routes-oracle/run-oracle.mjs <스크래치>`가 fixture마다 스크래치 사본에 npm 레지스트리로 설치하고
+실제 프레임워크로 불러와(Hono `app.request`, Express·Koa·NestJS는 127.0.0.1 임시 포트, Fastify `inject`) 요청이 닿는 핸들러와
+tsograph 사실이 예측한 핸들러를 대조한다 — 다른 method, 끝 슬래시를 바꾼 경로, 대문자 경로, 프레임워크 자신의 라우트 표로 만든
+요청까지. 2026-09-30 기록(`src/routes/node/oracle-replay.test.ts`가 오프라인으로 다시 본다):
+
+| fixture | 프레임워크 | 정밀도(정적 사실) | 재현율(응답한 라우트) |
+|---|---|---|---|
+| `hono-app` | Hono 4.13.12 | 27/27 | 29/29 |
+| `hono-loose-app` | Hono 4.13.12, `strict: false` | 4/4 | 4/4 |
+| `express4-app` | Express 4.22.3(CommonJS) | 22/22 | 34/34 |
+| `express5-app` | Express 5.2.1(ESM TypeScript) | 14/14 | 13/13 |
+| `koa-app` | Koa 3.2.1 + @koa/router 15.7.0 | 18/18 | 18/18 |
+| `koa13-app` | Koa 2.16.4 + @koa/router 13.1.1 | 10/10 | 10/10 |
+| `fastify5-app` | Fastify 5.12.5 + fastify-plugin | 27/27 | 29/29 |
+| `fastify4-app` | Fastify 4.29.1, `ignoreTrailingSlash` | 5/5 | 5/5 |
+| `nest-app` | NestJS 12.1.2 + platform-express | 13/13 | 18/18 |
+
 ### isthmus로 검증
 
 `fixtures/next/`의 합성 fixture를 isthmus `main` 소비자로 확인했다:
@@ -276,6 +331,10 @@ node <isthmus>/src/cli/main.ts check contract.json decl.json client.json
 
 check는 코드 0으로 끝나고 의도한 드리프트를 보고한다(`GET /api/health`·`PUT /api/items/{}`의
 `route-contract-without-decl`, 스펙에 없는 핸들러의 `route-decl-without-contract`).
+
+`fixtures/node/` 문서는 isthmus `2954375`로 확인했다: `check`가 모든 문서를 받고(파라미터 라우트 뒤에 등록한 Hono 리터럴
+라우트의 `route-decl-shadowed`, 선언 없는 호출의 error, `dynamicScope` 안 호출의 `-unverified`), `trace`가 핸들러 usr를
+`tsograph reach` forward 분석으로 잇는다.
 
 ## `tsograph schema`
 
@@ -807,7 +866,13 @@ dartograph `sql_relations_test`와 같은 기대값)를 담는다.
 
 `src/exchange/http-limitation-scope.test.ts`는 벤더링한 모든 벡터 파일을 `conformance/SHA256SUMS`와
 대조하고, `conformance/http-limitation-scope.json`의 `scope.validate` 사례로 스코프 검증기를 검사하며,
-`routes` 스코프가 기대는 `scope.applies` 사례를 고정한다.
+`routes` 스코프가 기대는 `scope.applies` 사례를 고정한다. `src/exchange/dispatch-order.test.ts`는
+`conformance/http-dispatch.json`의 `dispatch.validate` 사례를, `src/exchange/dynamic-scope.test.ts`는
+`scope.dynamic-validate` 사례를 실행하고, `routes`는 같은 검증기로 `order`·`dynamicScope`를 내기 전에 검사한다.
+
+`src/routes/node/node-conformance.test.ts`는 확인한 Node 경로 문법 변환표(Hono, path-to-regexp 0.1·6·8, find-my-way,
+NestJS 옛 경로 변환기)를 패키지 출처와 함께 고정하고, `src/routes/node/oracle-replay.test.ts`는
+`experiments/node-routes-oracle/recorded/`의 오라클 기록을 다시 본다.
 
 `src/routes/conformance.test.ts`는 Next fixture가 내는 모든 정적 channel을 벤더링한
 `conformance/http-template.json`의 문법 사례로 검사하고, 확인한 Next.js 변환표(`next/dist` 출처 포함)를

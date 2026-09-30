@@ -1,0 +1,1427 @@
+{
+  "fixture": "koa-app",
+  "framework": "koa",
+  "versions": {
+    "@koa/router": "15.7.0",
+    "koa": "3.2.1"
+  },
+  "dispatch": "registration-order",
+  "facts": [
+    {
+      "channel": "/Exact/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 43,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 15
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "channel": "/Plain",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 44,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 16
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/any",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 24,
+        "path": "src/app.ts"
+      },
+      "method": "ANY",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 8
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/files/{**}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 25,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 9
+      },
+      "paramConstraints": [
+        {
+          "kind": "path",
+          "segment": 2
+        }
+      ],
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 8,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 0
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/items.ts#listItems",
+        "usr": "src/routes/items.ts#listItems"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/items",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 10,
+        "line": 10,
+        "path": "src/app.ts"
+      },
+      "method": "POST",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 2
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/items/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 17,
+        "line": 9,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 1
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/routes/items.ts#getItem",
+        "usr": "src/routes/items.ts#getItem"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/items/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 10,
+        "line": 11,
+        "path": "src/app.ts"
+      },
+      "method": "PUT",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 3
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/nested",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 31,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 13
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/nested/list",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 12,
+        "line": 30,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 12
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/opt",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 26,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 10
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/opt/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 26,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 10
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/regions/{dynamic}",
+      "dynamic": true,
+      "dynamicScope": {
+        "templatePrefixes": [
+          "/api/regions"
+        ]
+      },
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 40,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 14
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      }
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/shadow/fixed",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 22,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 7
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/shadow/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 21,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 6
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/slash/",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 27,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 11
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "strict"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/things/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 24,
+        "line": 11,
+        "path": "src/app.ts"
+      },
+      "method": "PUT",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 4
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/users/me",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 18,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "order": {
+        "group": "koa:src/app.ts:5:13",
+        "index": 5
+      },
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    },
+    {
+      "caseInsensitive": true,
+      "channel": "/api/users/{}",
+      "dynamic": false,
+      "kind": "route-decl",
+      "location": {
+        "column": 9,
+        "line": 14,
+        "path": "src/app.ts"
+      },
+      "method": "GET",
+      "pathAnchor": "root",
+      "symbol": {
+        "qualifiedName": "src/app.ts#<module>",
+        "usr": "src/app.ts#<module>"
+      },
+      "trailingSlash": "optional"
+    }
+  ],
+  "limitations": [
+    "framework-dispatch-unmodeled: 1 middleware registration(s) run before route handlers and are treated as passing every request on; their code is not attached to handler usrs",
+    "framework-dispatch-unmodeled: 16 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code",
+    "route-coverage: 1 route declaration(s) have paths tsograph could not translate into a canonical template; their facts are dynamic",
+    "route-coverage: 1 route registration(s) run only under a condition (if, switch, loop, catch, or short-circuit expression); they are not emitted as declarations",
+    "route-dispatch-order-unknown: 1 route declaration(s) carry no order (a handler that may pass the request on with next(), a registration outside the app's own module or behind a condition, or a router that picks by specificity)"
+  ],
+  "records": [
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/Exact/",
+      "expect": [
+        "h:exact"
+      ],
+      "actual": "h:exact",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/Exact/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/Exact",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/EXACT/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 0
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/Plain",
+      "expect": [
+        "h:plain"
+      ],
+      "actual": "h:plain",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/Plain",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/Plain/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/PLAIN",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 1
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "DELETE",
+      "path": "/api/any",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/any/",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ANY",
+      "expect": [
+        "h:any"
+      ],
+      "actual": "h:any",
+      "ok": true,
+      "fact": 2
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/files/a/b",
+      "expect": [
+        "h:files"
+      ],
+      "actual": "h:files",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/files/a/b",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/FILES/A/B",
+      "expect": [
+        "h:files"
+      ],
+      "actual": "h:files",
+      "ok": true,
+      "fact": 3
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/items",
+      "expect": [
+        "h:list-items"
+      ],
+      "actual": "h:list-items",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/items/",
+      "expect": [
+        "h:list-items"
+      ],
+      "actual": "h:list-items",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ITEMS",
+      "expect": [
+        "h:list-items"
+      ],
+      "actual": "h:list-items",
+      "ok": true,
+      "fact": 4
+    },
+    {
+      "kind": "fact",
+      "method": "POST",
+      "path": "/api/items",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "slash",
+      "method": "POST",
+      "path": "/api/items/",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "case",
+      "method": "POST",
+      "path": "/API/ITEMS",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true,
+      "fact": 5
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/items/p1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/items/p1/",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/ITEMS/P1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true,
+      "fact": 6
+    },
+    {
+      "kind": "fact",
+      "method": "PUT",
+      "path": "/api/items/p1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/items/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "slash",
+      "method": "PUT",
+      "path": "/api/items/p1/",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "case",
+      "method": "PUT",
+      "path": "/API/ITEMS/P1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 7
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/nested",
+      "expect": [
+        "h:nested-root"
+      ],
+      "actual": "h:nested-root",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/nested",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/nested/",
+      "expect": [
+        "h:nested-root"
+      ],
+      "actual": "h:nested-root",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/NESTED",
+      "expect": [
+        "h:nested-root"
+      ],
+      "actual": "h:nested-root",
+      "ok": true,
+      "fact": 8
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/nested/list",
+      "expect": [
+        "h:nested-list"
+      ],
+      "actual": "h:nested-list",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/nested/list",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/nested/list/",
+      "expect": [
+        "h:nested-list"
+      ],
+      "actual": "h:nested-list",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/NESTED/LIST",
+      "expect": [
+        "h:nested-list"
+      ],
+      "actual": "h:nested-list",
+      "ok": true,
+      "fact": 9
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/opt",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/opt",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/opt/",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/OPT",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 10
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/opt/p1",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/opt/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/opt/p1/",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/OPT/P1",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true,
+      "fact": 11
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/shadow/fixed",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/shadow/fixed",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/shadow/fixed/",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/SHADOW/FIXED",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 13
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/shadow/p1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/shadow/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/shadow/p1/",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/SHADOW/P1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true,
+      "fact": 14
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/slash/",
+      "expect": [
+        "h:slash"
+      ],
+      "actual": "h:slash",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/slash/",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/slash",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:404",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/SLASH/",
+      "expect": [
+        "h:slash"
+      ],
+      "actual": "h:slash",
+      "ok": true,
+      "fact": 15
+    },
+    {
+      "kind": "fact",
+      "method": "PUT",
+      "path": "/api/things/p1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/things/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "slash",
+      "method": "PUT",
+      "path": "/api/things/p1/",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "case",
+      "method": "PUT",
+      "path": "/API/THINGS/P1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true,
+      "fact": 16
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/users/me",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/users/me",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/users/me/",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/USERS/ME",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 17
+    },
+    {
+      "kind": "fact",
+      "method": "GET",
+      "path": "/api/users/p1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "method",
+      "method": "DELETE",
+      "path": "/api/users/p1",
+      "expect": [
+        "(no handler)"
+      ],
+      "actual": "status:405",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "slash",
+      "method": "GET",
+      "path": "/api/users/p1/",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "case",
+      "method": "GET",
+      "path": "/API/USERS/P1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true,
+      "fact": 18
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/items",
+      "expect": [
+        "h:list-items"
+      ],
+      "actual": "h:list-items",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/items/p1",
+      "expect": [
+        "h:get-item"
+      ],
+      "actual": "h:get-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "POST",
+      "path": "/api/items",
+      "expect": [
+        "h:create-item"
+      ],
+      "actual": "h:create-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/api/items/p1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "PUT",
+      "path": "/api/things/p1",
+      "expect": [
+        "h:replace-item"
+      ],
+      "actual": "h:replace-item",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/users/p1",
+      "expect": [
+        "h:user-by-id"
+      ],
+      "actual": "h:user-by-id",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/users/me",
+      "expect": [
+        "h:user-me",
+        "h:user-by-id"
+      ],
+      "actual": "h:user-me",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/shadow/p1",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/shadow/fixed",
+      "expect": [
+        "h:shadow-param"
+      ],
+      "actual": "h:shadow-param",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/files/a/b",
+      "expect": [
+        "h:files"
+      ],
+      "actual": "h:files",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/opt/p1",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/opt",
+      "expect": [
+        "h:optional-page"
+      ],
+      "actual": "h:optional-page",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/slash/",
+      "expect": [
+        "h:slash"
+      ],
+      "actual": "h:slash",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/nested/list",
+      "expect": [
+        "h:nested-list"
+      ],
+      "actual": "h:nested-list",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/nested",
+      "expect": [
+        "h:nested-root"
+      ],
+      "actual": "h:nested-root",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/api/regions/undefined/stats",
+      "expect": [
+        "h:region-stats"
+      ],
+      "dynamic": true,
+      "actual": "h:region-stats",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/Exact/",
+      "expect": [
+        "h:exact"
+      ],
+      "actual": "h:exact",
+      "ok": true
+    },
+    {
+      "kind": "recall",
+      "method": "GET",
+      "path": "/Plain",
+      "expect": [
+        "h:plain"
+      ],
+      "actual": "h:plain",
+      "ok": true
+    }
+  ],
+  "summary": {
+    "staticFacts": 18,
+    "verifiedFacts": 18,
+    "dynamicFacts": 1,
+    "servedRoutes": 18,
+    "coveredRoutes": 18,
+    "probes": 90,
+    "failedProbes": 0
+  }
+}

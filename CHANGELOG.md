@@ -27,6 +27,29 @@
   `src/schema/orm/oracle.test.ts`가 오프라인으로 100% 일치를 검사한다.
 - fixtures: `prisma-app`의 지원 표면 밖 예시를 TypeORM에서 Kysely로 바꾼다(TypeORM은 이제 읽는다).
 
+### Added — Node 백엔드 라우트 선언
+
+- routes: `tsograph routes --role server`가 Next.js 밖의 Node 백엔드 — Hono 4, Express 4·5, Fastify 4·5, Koa + @koa/router
+  12–15(koa-router 12–14), NestJS 10–12(Express·Fastify 어댑터) — 의 `route-decl`을 낸다. 규칙은 npm 레지스트리에서 받은 패키지
+  소스로 확인했고 출처는 `docs/NODE-ROUTES.md`에 적었다. 프레임워크는 루트 `package.json` 의존성으로 감지하고 주 버전은 잠금
+  파일(없으면 선언 범위)로 정한다. 경로 문법이 주 버전마다 다른 Express·@koa/router는 주 버전을 모르면 두 문법이 같은 결과일
+  때만 정적 사실로 낸다.
+- routes: 등록을 실행 순서대로 모으는 정적 해석기를 더한다. 모듈 최상위와 라우터를 넘겨받거나 만드는 프로젝트 함수를
+  걷고(깊이 8), import·재수출·CommonJS `require`/`module.exports`·팩토리·`this.app`·Hono `basePath()`·Fastify 플러그인·
+  `fastify-plugin`을 따라간다. 조건부 등록은 사실 대신 템플릿 스코프를 단 `route-coverage:`다.
+- routes: 등록 순서로 요청을 고르는 Hono·Express·Koa·NestJS(Express)가 있으면 문서가 `dispatch: "registration-order"`이고
+  `order: {group, index}`를 싣는다. 요청을 넘길 수 있는 핸들러(`next` 매개변수·`@Next()`), 다른 모듈·조건부 등록, exclusive
+  라우터, host·헤더 버전 필터는 순서 없이 `route-dispatch-order-unknown:`으로 알린다(isthmus #128 규칙). 내보내기 전에
+  `dispatch.validate` 규칙으로 다시 검사한다.
+- routes: `paramConstraints`(`int`·`slug`·`regex`·`path`), `caseInsensitive`, `narrowed`, dynamic 선언의 `dynamicScope`
+  (isthmus #133), 0세그먼트 catch-all 접두사 decl, find-my-way·Express 4 `*`의 빈 값 변형 decl을 낸다. 인라인 핸들러의
+  `symbol.usr`는 감싼 선언(또는 모듈 스코프)이고 `framework-dispatch-unmodeled:`로 알린다.
+- graph: Node 백엔드 라우트 핸들러를 `route-handler` 진입점으로 표시한다.
+- experiments: `experiments/node-routes-oracle/`가 합성 fixture 9개를 실제 프레임워크로 실행해 tsograph 예측과 대조한다
+  (정밀도·재현율 100%, 탐침 756개). `src/routes/node/oracle-replay.test.ts`가 기록을 오프라인으로 다시 본다.
+- conformance: isthmus `2954375`의 공유 벡터로 다시 벤더링하고, `dispatch.validate`·`scope.dynamic-validate` 사례를 제품
+  검증기(`src/exchange/dispatch-order.ts`·`dynamic-scope.ts`)로 실행한다.
+
 ### Changed
 
 - routes: framework 제공 경로 limitation에 isthmus http `limitationScopes`를 싣는다. `public/`은

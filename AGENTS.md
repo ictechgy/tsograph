@@ -12,11 +12,11 @@
 - 출력 계약은 isthmus `docs/GRAPH-EXCHANGE.md`(bridge-facts v1)다. http 절은 아직 "개발 중" 초안이므로
   계약 관련 변경 전에 그 문서를 먼저 읽고, 초안과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
 - 구현: `tsograph openapi`(OpenAPI 2.0/3.0/3.1 → http `route-contract`), `tsograph routes`
-  (Next.js App Router·Pages Router API → http `route-decl`), `tsograph schema`(Prisma 스키마·
+  (Next.js App Router·Pages Router API와 Node 백엔드 Hono·Express·Fastify·Koa(@koa/router)·NestJS → http `route-decl`,
+  규칙은 `docs/NODE-ROUTES.md`), `tsograph schema`(Prisma 스키마·
   Prisma Client·원시 SQL → persistence `relation-use`), `tsograph graph`·`reach`·`impact`(호출 그래프 →
   isthmus `language-traversal` v1, id는 routes·schema `symbol.usr`와 같은 문자열, 간선 근거 `direct`·`bound`·
-  `candidate`와 `--dispatch`). 장기 범위: 그 밖의
-  Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa), 그 밖의 ORM/SQL relation-use(TypeORM·
+  `candidate`와 `--dispatch`). 장기 범위: 그 밖의 ORM/SQL relation-use(TypeORM·
   Sequelize·Drizzle·Knex·raw 드라이버·D1), 웹/RN 클라이언트 route-call.
   구현된 것과 계획을 구분해 적는다.
 - 정규 경로 템플릿 규칙은 isthmus 공유 벡터(`conformance/http-template.json`)와 맞춘다.

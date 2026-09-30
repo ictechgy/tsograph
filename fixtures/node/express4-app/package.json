@@ -1,0 +1,9 @@
+{
+  "name": "express4-app-fixture",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "2.8.5",
+    "express": "4.22.3"
+  }
+}
