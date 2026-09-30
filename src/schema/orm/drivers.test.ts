@@ -105,6 +105,7 @@ test('knex 사슬·원시 드라이버·SQL 태그·D1 바인딩(선언 파일·
 test('D1 바인딩 선언은 구조 분해와 값 복사를 따라가고, 관련 패키지가 없으면 ORM 단계를 건너뛴다', () => {
   const lines = ormLines({
     'src/env.ts': 'export type Bindings = { DB?: D1Database | undefined };\n',
+    'src/imported.ts': "import type { D1Database as Db } from '@cloudflare/workers-types';\nimport type { D1Database } from '@cloudflare/workers-types/experimental';\nexport async function i(db: D1Database, other: Db) { await other.prepare('select * from i_other').all(); return db.prepare('select * from i_rows').all(); }\n",
     'src/h.ts': [
       "import type { Bindings } from './env';",
       'export async function handler(c: { env: Bindings }) {',
@@ -115,7 +116,7 @@ test('D1 바인딩 선언은 구조 분해와 값 복사를 따라가고, 관련
       '',
     ].join('\n'),
   });
-  assert.deepEqual(lines, ['src/h.ts:5:25 h_rows @src/h.ts#handler']);
+  assert.deepEqual(lines, ['src/h.ts:5:25 h_rows @src/h.ts#handler', 'src/imported.ts:3:74 i_other @src/imported.ts#i', 'src/imported.ts:3:124 i_rows @src/imported.ts#i']);
   assert.deepEqual(ormLines({ 'src/plain.ts': "export const q = 'SELECT * FROM plain_rows';\n" }), ['src/plain.ts:1:18 plain_rows @src/plain.ts#q']);
 });
 

@@ -120,7 +120,7 @@ export function driverRules(d1Bindings: ReadonlySet<string>): OrmValueRules {
       return undefined;
     },
     typeReference: (target) => {
-      if (target.kind === 'global' && target.name === D1_TYPE_NAME) return client('d1');
+      if (isD1Target(target)) return client('d1');
       if (target.kind === 'external' && target.module === KNEX && knexTypeNames.has(target.name)) return { kind: 'knex' };
       return lookup(driverTypes, target);
     },
@@ -132,6 +132,17 @@ export function driverRules(d1Bindings: ReadonlySet<string>): OrmValueRules {
       return undefined;
     },
   };
+}
+
+/**
+ * 타입 이름이 D1 바인딩 타입(전역 `D1Database` 또는 `@cloudflare/workers-types`에서 가져온 것)인지 본다.
+ *
+ * @param target 타입 이름의 값
+ * @returns D1 타입이면 true
+ */
+function isD1Target(target: OrmValue | { readonly kind: 'global'; readonly name: string }): boolean {
+  if (target.kind === 'global') return target.name === D1_TYPE_NAME;
+  return target.kind === 'external' && target.module.startsWith('@cloudflare/workers-types') && target.name === D1_TYPE_NAME;
 }
 
 /**
