@@ -1,0 +1,9 @@
+{
+  "name": "koa13-app-fixture",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@koa/router": "13.1.1",
+    "koa": "2.16.4"
+  }
+}

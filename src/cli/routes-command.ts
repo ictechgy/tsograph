@@ -1,16 +1,15 @@
 /**
- * `tsograph routes --role server` — Next.js 서버 라우트 선언을 isthmus http `route-decl` 문서로 낸다.
+ * `tsograph routes --role server` — Next.js·Node 백엔드 서버 라우트 선언을 isthmus http `route-decl` 문서로 낸다.
  *
- * 흐름: 인자 검증 → 프로젝트 경로 정규화 → next.config·package.json 읽기 → route 파일 스캔·파싱 →
- * 문서 조립 → 키 정렬 JSON 출력. 파일 하나를 읽지 못하는 것은 limitation이고, 프로젝트 자체를 읽지
+ * 흐름: 인자 검증 → 프로젝트 경로 정규화 → package.json·next.config 읽기 → Next.js route 파일 스캔과 Node 백엔드
+ * 라우터 해석 → 문서 조립 → 키 정렬 JSON 출력. 파일 하나를 읽지 못하는 것은 limitation이고, 프로젝트 자체를 읽지
  * 못하거나 출력이 상한을 넘으면 코드 2, 잘못된 호출은 사용법과 코드 64다. 분석 대상 코드는
  * 실행하지 않는다.
  */
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJson } from '../exchange/sorted-json.ts';
-import { extractNextRoutes } from '../routes/next-routes.ts';
-import { loadNextRouteConfig, readNextVersionStatus } from '../routes/project-config.ts';
+import { extractProjectRoutes } from '../routes/project-routes.ts';
 import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -20,15 +19,16 @@ import { parseArguments } from './parse-arguments.ts';
 /** routes 명령 사용법이다. */
 export const routesUsage = `Usage: tsograph routes --role server --project <root> [--service <name>] [--include-tests] [--format json]
 
-Scan a Next.js project (App Router route handlers and Pages Router API routes) and
-write an isthmus bridge-facts v1 document (platform "js", target "http", route-decl facts).
+Scan a Next.js project (App Router route handlers and Pages Router API routes) or a Node
+backend (Hono, Express, Fastify, Koa with @koa/router, NestJS) and write an isthmus
+bridge-facts v1 document (platform "js", target "http", route-decl facts).
 
 Options:
   --role server      Declaration side to extract (server is the only role implemented)
-  --project <root>   Next.js project root (the directory with next.config.* and app/ or pages/)
+  --project <root>   Project root (the directory with package.json, next.config.*, app/ or pages/)
   --service <name>   Service identity recorded on the document and every fact
-  --include-tests    Also emit route files that look like tests (*.test.*, *.spec.*, __tests__/)
-                     with testSource: true
+  --include-tests    Also emit routes declared in test sources (*.test.*, *.spec.*, __tests__/;
+                     for Node backends also test/, tests/, e2e/) with testSource: true
   --format json      Output format (json is the only format)
 
 Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error.
@@ -103,7 +103,7 @@ async function resolveProject(fileSystem: CommandFileSystem, projectArgument: st
     if ((await fileSystem.status(project)).kind !== 'directory') throw new Error('not a directory');
   } catch {
     // 원인(없음·권한·파일)은 같은 해결 방향이라 한 문구로 보고한다. 경로 원문은 싣지 않는다.
-    return inputFailure('--project does not name a readable directory; pass the Next.js project root.');
+    return inputFailure('--project does not name a readable directory; pass the project root.');
   }
   if (!isSafeIdentifier(project)) {
     return inputFailure('the project path contains characters the exchange format forbids; rename or move the project.');
@@ -120,14 +120,10 @@ async function resolveProject(fileSystem: CommandFileSystem, projectArgument: st
  * @returns 성공 또는 실패 결과
  */
 async function extractDocument(project: string, parsed: RoutesArguments, environment: RoutesEnvironment): Promise<CommandResult> {
-  const { fileSystem } = environment;
-  const config = await loadNextRouteConfig(fileSystem, project);
-  const extraction = await extractNextRoutes({ fileSystem, project, config, includeTests: parsed.includeTests });
-  const versionStatus = await readNextVersionStatus(fileSystem, project);
+  const routes = await extractProjectRoutes(environment.fileSystem, project, parsed.includeTests);
   return renderDocument(() => createRouteDocument({
-    extraction,
-    config,
-    versionStatus,
+    next: routes.next,
+    node: routes.node,
     project,
     service: parsed.service,
     includeTests: parsed.includeTests,

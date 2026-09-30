@@ -1,0 +1,8 @@
+{
+  "name": "fastify4-app-fixture",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "fastify": "4.29.1"
+  }
+}

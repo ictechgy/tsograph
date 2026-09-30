@@ -1,5 +1,5 @@
 /**
- * 추출한 Next.js 라우트 선언을 isthmus bridge-facts v1 `route-decl` 문서로 조립한다.
+ * 추출한 라우트 선언(Next.js 파일 라우터, Node 백엔드 프레임워크)을 isthmus bridge-facts v1 `route-decl` 문서로 조립한다.
  *
  * 파일 시스템을 읽지 않는 순수 조립이다. 결정 사항(README "Decisions"와 같다):
  * - `symbol.qualifiedName`은 `<프로젝트 기준 파일 경로>#<내보낸 이름>`이다. Next가 호출하는 것은
@@ -11,6 +11,10 @@
  *   일반 decl로 낸다(Next는 같은 자리의 명시 라우트를 빌드 오류 E458로 막아 충돌하지 않는다).
  * - framework 제공 경로(`public/`, 구 규칙 `static/`, `/_next`)는 경로 접두사와 method로 상한을 증명할 수
  *   있을 때만 `limitationScopes`로 좁힌다(아래 `frameworkLimitations`).
+ * - `dispatch`: 등록 순서로 요청을 고르는 프레임워크(Hono·Express·Koa·NestJS Express 어댑터)의 선언이 있으면
+ *   `registration-order`, 아니면 `specificity`다. registration-order 문서의 구체성 프레임워크 선언(Next·Fastify)은
+ *   `order` 없이 내고 `route-dispatch-order-unknown:`으로 알린다(순서 없는 decl은 비교하지 않으므로 거짓 가림이 없다).
+ *   내보내기 전에 `order`를 계약 규칙(`src/exchange/dispatch-order.ts`)으로 다시 검사해, 어긋나면 순서를 모두 버린다.
  */
 
 import {
@@ -20,6 +24,7 @@ import {
   type RouteDeclDocument,
   type RouteDeclFact,
 } from '../exchange/bridge-facts.ts';
+import { dispatchOrderProblem } from '../exchange/dispatch-order.ts';
 import { httpLimitationScopeProblem } from '../exchange/http-limitation-scope.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import type { NextRouteConfig } from './next-config.ts';
@@ -29,6 +34,9 @@ import { MAX_ROUTE_FILE_BYTES } from './next-routes.ts';
 import { type ChannelPolicy, channelFor, dynamicChannel, normalizeBasePath, type RouteChannel } from './route-channel.ts';
 import { joinTemplate } from './next-path.ts';
 import { MAX_SCAN_DEPTH, MAX_SCANNED_ENTRIES } from './project-scan.ts';
+import { buildNodeFacts, type LimitationEntry as NodeLimitationEntry } from './node/node-facts.ts';
+import { nodeProjectLimitations } from './node/node-limitations.ts';
+import type { NodeRoutesResult } from './node/node-routes.ts';
 
 /** 문서 하나에 담는 최대 사실 수다. isthmus 입력 상한과 같다. */
 export const MAX_ROUTE_FACTS = 100_000;
@@ -41,11 +49,19 @@ export class RouteFactLimitError extends Error {
   }
 }
 
-/** 조립 입력이다. */
-export interface RouteDocumentInput {
+/** Next.js 부분의 조립 입력이다. */
+export interface NextDocumentPart {
   readonly extraction: NextRoutesResult;
   readonly config: NextRouteConfig;
   readonly versionStatus: NextVersionStatus;
+}
+
+/** 조립 입력이다. */
+export interface RouteDocumentInput {
+  /** Next.js를 스캔했으면 있다 */
+  readonly next: NextDocumentPart | undefined;
+  /** Node 백엔드 감지·추출 결과 */
+  readonly node: NodeRoutesResult | undefined;
   readonly project: string;
   readonly service: string | undefined;
   readonly includeTests: boolean;
@@ -87,11 +103,14 @@ interface FrameworkScoping {
  * @throws RouteFactLimitError 사실 수가 상한을 넘을 때
  */
 export function createRouteDocument(input: RouteDocumentInput): RouteDeclDocument {
-  const decision = decideBasePath(input.config);
-  // 선언 하나는 사실을 최대 둘 낸다. 펼치기 전에 세어 상한을 넘는 입력이 메모리를 먼저 쓰지 않게 한다.
-  if (input.extraction.routes.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
-  const facts = sortAndDeduplicate(input.extraction.routes.flatMap((route) => routeFacts(route, decision.policy, input.service)));
-  if (facts.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+  const registrationOrder = usesRegistrationOrder(input.node);
+  const nextPart = input.next === undefined ? undefined : nextFacts(input.next, input.service);
+  const nodePart = nodeFacts(input, registrationOrder);
+  const merged = sortAndDeduplicate([...(nextPart?.facts ?? []), ...nodePart.facts]);
+  if (merged.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+  const ordered = checkOrders(merged, registrationOrder, input.service);
+  const nextOrderless = registrationOrder && nextPart !== undefined && nextPart.facts.length > 0 ? [nextOrderlessLimitation(nextPart.facts)] : [];
+  const entries: LimitationEntry[] = [...(nextPart?.limitations ?? []), ...nodePart.limitations, ...ordered.limitations, ...nextOrderless];
   return {
     format: 'bridge-facts',
     version: 1,
@@ -100,13 +119,84 @@ export function createRouteDocument(input: RouteDocumentInput): RouteDeclDocumen
     platform: 'js',
     target: 'http',
     roles: ['server'],
-    dispatch: 'specificity',
+    dispatch: registrationOrder ? 'registration-order' : 'specificity',
     sourceSets: { tests: input.includeTests ? 'included' : 'excluded' },
     ...(input.service === undefined ? {} : { service: input.service }),
     project: input.project,
-    facts,
-    ...buildLimitations(input, decision),
+    facts: ordered.facts,
+    ...assembleLimitations(entries),
   };
+}
+
+/**
+ * Node 결과에 등록 순서 프레임워크의 선언이 있는지 본다.
+ *
+ * @param node Node 결과
+ * @returns 있으면 true
+ */
+function usesRegistrationOrder(node: NodeRoutesResult | undefined): boolean {
+  return node?.analysis?.frameworks.some((framework) => framework.dispatch === 'registration-order' && framework.routes.some((route) => !route.conditional)) ?? false;
+}
+
+/**
+ * registration-order 문서에 섞인 Next.js 선언의 순서 한계다. 모두 루트 앵커의 정적 템플릿이면 그 템플릿으로 좁힌다.
+ *
+ * @param facts Next.js 사실
+ * @returns 한계 항목
+ */
+function nextOrderlessLimitation(facts: readonly RouteDeclFact[]): LimitationEntry {
+  const text = `route-dispatch-order-unknown: ${facts.length} Next.js route declaration(s) carry no order (the file router picks by specificity)`;
+  if (facts.some((fact) => fact.dynamic || fact.pathAnchor !== 'root')) return { text };
+  return { text, range: { templates: [...new Set(facts.map((fact) => fact.channel))].sort() } };
+}
+
+/**
+ * Next.js 부분의 사실과 한계를 만든다.
+ *
+ * @param part Next.js 입력
+ * @param service 서비스 신원
+ * @returns 사실과 한계
+ */
+function nextFacts(part: NextDocumentPart, service: string | undefined): { facts: RouteDeclFact[]; limitations: LimitationEntry[] } {
+  const decision = decideBasePath(part.config);
+  // 선언 하나는 사실을 최대 둘 낸다. 펼치기 전에 세어 상한을 넘는 입력이 메모리를 먼저 쓰지 않게 한다.
+  if (part.extraction.routes.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+  const facts = part.extraction.routes.flatMap((route) => routeFacts(route, decision.policy, service));
+  if (facts.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+  return { facts, limitations: buildLimitations(part, decision) };
+}
+
+/**
+ * Node 부분의 사실과 한계를 만든다.
+ *
+ * @param input 조립 입력
+ * @param registrationOrder registration-order 문서인지
+ * @returns 사실과 한계
+ */
+function nodeFacts(input: RouteDocumentInput, registrationOrder: boolean): { facts: RouteDeclFact[]; limitations: NodeLimitationEntry[] } {
+  if (input.node === undefined) return { facts: [], limitations: [] };
+  const projectLimitations = nodeProjectLimitations(input.node);
+  const analysis = input.node.analysis;
+  if (analysis === undefined) return { facts: [], limitations: projectLimitations };
+  const built = buildNodeFacts({ project: analysis.project, frameworks: analysis.frameworks, service: input.service, includeTests: input.includeTests, registrationOrder });
+  return { facts: built.facts, limitations: [...projectLimitations, ...built.limitations] };
+}
+
+/**
+ * 조립한 사실의 `order`를 계약 규칙으로 다시 검사한다. 어긋나면 모든 순서를 버리고 한계로 알린다.
+ *
+ * @param facts 정렬한 사실
+ * @param registrationOrder registration-order 문서인지
+ * @param service 문서 서비스
+ * @returns 사실과 추가 한계
+ */
+function checkOrders(facts: RouteDeclFact[], registrationOrder: boolean, service: string | undefined): { facts: RouteDeclFact[]; limitations: LimitationEntry[] } {
+  if (!registrationOrder) return { facts, limitations: [] };
+  const problem = dispatchOrderProblem({ dispatch: 'registration-order', ...(service === undefined ? {} : { service }), facts });
+  if (problem === undefined) return { facts, limitations: [] };
+  /* node:coverage ignore next 3 */
+  const stripped = facts.map(({ order: _order, ...rest }) => rest as RouteDeclFact);
+  return { facts: stripped, limitations: [{ text: 'route-dispatch-order-unknown: registration orders failed the contract check and were dropped; no declaration carries order' }] };
 }
 
 /**
@@ -209,13 +299,10 @@ function compareFacts(left: RouteDeclFact, right: RouteDeclFact): number {
  * @param decision basePath 판정
  * @returns 정렬한 limitation 목록과 스코프
  */
-function buildLimitations(
-  input: RouteDocumentInput,
-  decision: BasePathDecision,
-): Pick<RouteDeclDocument, 'limitations' | 'limitationScopes'> {
+function buildLimitations(input: NextDocumentPart, decision: BasePathDecision): LimitationEntry[] {
   const hasRouterDirectory = input.extraction.routerDirectories.appDirectory !== undefined
     || input.extraction.routerDirectories.pagesDirectory !== undefined;
-  const entries: LimitationEntry[] = [
+  return [
     ...frameworkLimitations(input.extraction.frameworkSources, hasRouterDirectory, decideFrameworkScoping(input.config, decision)),
     ...[
       ...configLimitations(input.config, decision),
@@ -224,7 +311,22 @@ function buildLimitations(
       ...versionLimitations(input.versionStatus),
       ...usrLimitations(input.extraction.routes),
     ].map((text) => ({ text })),
-  ].sort((left, right) => compareStrings(left.text, right.text));
+  ];
+}
+
+/**
+ * limitation 항목을 정렬해 문장과 스코프로 나눈다. 같은 문장은 하나로 줄인다(스코프가 다르면 스코프 없는 쪽이 이긴다).
+ *
+ * @param unsorted limitation 항목
+ * @returns 정렬한 limitation 목록과 스코프
+ */
+function assembleLimitations(unsorted: readonly LimitationEntry[]): Pick<RouteDeclDocument, 'limitations' | 'limitationScopes'> {
+  const byText = new Map<string, LimitationEntry>();
+  for (const entry of unsorted) {
+    const existing = byText.get(entry.text);
+    byText.set(entry.text, existing === undefined || (existing.range !== undefined && JSON.stringify(existing.range) === JSON.stringify(entry.range)) ? entry : { text: entry.text });
+  }
+  const entries = [...byText.values()].sort((left, right) => compareStrings(left.text, right.text));
   const limitationScopes = entries.flatMap((entry, limitationIndex) => scopeOf(entry, limitationIndex));
   return {
     limitations: entries.map((entry) => entry.text),

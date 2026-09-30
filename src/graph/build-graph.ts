@@ -18,8 +18,8 @@ import type { CommandFileSystem } from '../cli/file-system.ts';
 import type { RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
-import { extractNextRoutes, type NextRoutesResult } from '../routes/next-routes.ts';
-import { loadNextRouteConfig, readNextVersionStatus } from '../routes/project-config.ts';
+import { emptyNextRoutesResult, type NextRoutesResult } from '../routes/next-routes.ts';
+import { extractProjectRoutes } from '../routes/project-routes.ts';
 import { createRouteDocument } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
@@ -209,21 +209,21 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
 }
 
 /**
- * Next.js 라우트를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙).
+ * 서버 라우트(Next.js·Node 백엔드)를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙).
  *
  * @param project 프로젝트 realpath
  * @param fileSystem 파일 시스템
  * @returns 추출 결과·route-decl 사실·페이지 확장자
  */
 async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): Promise<RouteInputs> {
-  const config = await loadNextRouteConfig(fileSystem, project);
-  const extraction = await extractNextRoutes({ fileSystem, project, config, includeTests: false });
-  const versionStatus = await readNextVersionStatus(fileSystem, project);
-  const pageExtensions = config.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
+  const routes = await extractProjectRoutes(fileSystem, project, false);
+  const extraction = routes.next?.extraction ?? emptyNextRoutesResult();
+  const config = routes.next?.config;
+  const pageExtensions = config?.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
   let facts: readonly RouteDeclFact[] = [];
   try {
     facts = createRouteDocument({
-      extraction, config, versionStatus, project, service: undefined, includeTests: false, toolVersion: '', generatedAt: new Date(0),
+      next: routes.next, node: routes.node, project, service: undefined, includeTests: false, toolVersion: '', generatedAt: new Date(0),
     }).facts;
   } catch {
     // 사실 상한 초과면 진입점 표식 없이 계속하고 limitation으로 알린다(buildLimitations의 routeFactsTruncated).
