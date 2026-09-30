@@ -114,3 +114,33 @@ test('타입 정보 없는 첫 인자도 뒤에 인자가 있으면 경로이고
   assert.deepEqual(factLines(document), ['GET base /r optional #0 ci']);
   assert.deepEqual(limitationsWith(document, 'route-coverage: 1 registration(s) of a value passed to use()').map((entry) => entry.scope), [{ templatePrefixes: ['/ext'] }]);
 });
+
+test('route 빌더 순서는 route() 호출 위치이고, 펼친 핸들러·풀지 못한 라우터 모양 use()를 조용히 빠뜨리지 않는다', async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '5.1.0' }),
+    'src/app.ts': [
+      "import express from 'express';",
+      "import { handlers } from './h.js';",
+      'const app = express();',
+      "const route = app.route('/x');",
+      "app.get('/y', (req, res) => { res.send('y'); });",
+      "function wire() { route.get((req, res) => { res.send('x'); }); }",
+      'wire();',
+      "app.get('/spread', ...handlers);",
+      "app.get('/nested', [handlers[0]!, ...handlers]);",
+      'declare const routers: express.Router[];',
+      'app.use(routers[0]!);',
+      '// 임시 프로젝트에는 @types/express가 없어 패키지 타입은 any다. 라우터 표식이 없는 함수 타입은 미들웨어로 센다.',
+      'declare const logger: (req: unknown, res: unknown, next: () => void) => void;',
+      'app.use(logger);',
+      'declare const mounted: ((req: unknown, res: unknown) => void) & { stack: unknown[] };',
+      'app.use(mounted);',
+      'export default app;',
+    ].join('\n'),
+    'src/h.ts': "import type { RequestHandler } from 'express';\nexport const handlers: RequestHandler[] = [(req, res) => { res.send('s'); }];\n",
+  });
+  assert.deepEqual(factLines(document), ['GET root /nested optional ci', 'GET root /spread optional ci', 'GET root /x optional #0 ci', 'GET root /y optional #1 ci']);
+  assert.equal(limitationsWith(document, 'missing-route-usrs: 2 route declaration(s)').length, 1);
+  assert.equal(limitationsWith(document, 'route-coverage: 2 registration(s) of a value passed to use() that tsograph could not resolve').length, 1);
+  assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 middleware registration(s)').length, 1);
+});

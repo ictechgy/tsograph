@@ -27,7 +27,7 @@ import { compilePte6Path } from './pte6-path.ts';
 import { compilePte8Path } from './pte8-path.ts';
 import type { FrameworkAdapter, InstanceSpec, InterpreterContext } from './router-interpreter.ts';
 import type { EventSite, Frame, MountEvent, PathArgument, PathValue, ProvidedEvent, RouteEvent, RouterEvent, RouterInstance, RouterTarget, SettingEvent } from './router-model.ts';
-import { calleeFromPackage, packageBindingOf, unwrap } from './symbols.ts';
+import { calleeFromPackage, mayCarryRoutes, packageBindingOf, unwrap } from './symbols.ts';
 
 /** 라우터 패키지다. */
 const ROUTER_MODULES = ['@koa/router', 'koa-router'];
@@ -128,7 +128,8 @@ function recordVerb(target: RouterTarget, member: string, call: ts.CallExpressio
   const named = call.arguments.length >= 3 && !ts.isArrayLiteralExpression(unwrap(call.arguments[1]!)) && context.isPathArgument(call.arguments[1]!, site.frame);
   const pathArgument = call.arguments[named ? 1 : 0];
   const handler = call.arguments.slice(named ? 2 : 1).at(-1);
-  if (pathArgument === undefined || handler === undefined || ts.isSpreadElement(handler)) return;
+  // 마지막 핸들러가 펼침이면 핸들러를 모르는 선언(usr 없음, 순서 없음)으로 낸다.
+  if (pathArgument === undefined || handler === undefined) return;
   const verb = member === 'del' ? 'DELETE' : member.toUpperCase();
   const methods: RouteDeclMethod[] = member === 'all' ? ['ANY'] : CONTRACT_METHODS.has(verb) ? [verb as RouteDeclMethod] : [];
   context.emit({
@@ -188,10 +189,15 @@ function recordUseFunction(target: RouterTarget, prefix: PathArgument | undefine
     else emitProvided(target, prefix, classified.kind === 'static' ? ['GET', 'HEAD'] : undefined, classified.description, site, context);
     return;
   }
+  if (isAllowedMethods(fn, site, context)) {
+    context.emit({ kind: 'middleware', target, site });
+    return;
+  }
   const handler = context.resolveHandler(fn, site.frame, 1, call);
-  if (handler.usr === undefined && prefix !== undefined) {
-    // 경로를 붙여 넘긴 값을 풀지 못했다: 중첩 라우터일 수 있으므로 그 접두사 아래를 모델링하지 못한 것으로 알린다.
-    context.emit({ kind: 'provided', target, prefix, methods: undefined, prefixKind: 'route-coverage', description: 'a value passed to router.use() with a path that tsograph could not resolve (a router or middleware)', site });
+  if (handler.usr === undefined && (prefix !== undefined || mayCarryRoutes(context.checker, fn))) {
+    // 풀지 못한 값이 라우터일 수 있다(경로를 붙였거나, 타입이 라우터 모양·모름): 그 접두사 아래를 모델링하지 못한 것으로 알린다.
+    const coveragePrefix = prefix ?? { value: { kind: 'literal', text: '/' }, node: call };
+    context.emit({ kind: 'provided', target, prefix: coveragePrefix, methods: undefined, prefixKind: 'route-coverage', description: 'a value passed to use() that tsograph could not resolve (a router or middleware)', site });
     return;
   }
   if (handler.usr === undefined || handler.mayCallNext || setsNotFound(fn, site.frame, context)) {
@@ -200,6 +206,21 @@ function recordUseFunction(target: RouterTarget, prefix: PathArgument | undefine
   }
   const path: PathArgument = prefix ?? { value: { kind: 'literal', text: '/' }, node: call };
   context.emit({ kind: 'route', target, methods: ['ANY'], unsupportedMethods: [], paths: [path], handler, narrowed: false, methodDynamic: false, site, registrationNode: call, openEnded: true });
+}
+
+/**
+ * 인자가 아는 Koa 라우터의 `allowedMethods()`인지 본다. 이 미들웨어는 먼저 `next()`를 부르고, 그 라우터가 이미 맞춘
+ * 경로(`ctx.matched`)에만 OPTIONS·405·501로 답하므로(@koa/router `allowedMethods`) 넘기는 미들웨어다.
+ *
+ * @param fn 인자 식
+ * @param site 위치
+ * @param context 문맥
+ * @returns `allowedMethods()`면 true
+ */
+function isAllowedMethods(fn: ts.Expression, site: EventSite, context: InterpreterContext): boolean {
+  const node = unwrap(fn);
+  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== 'allowedMethods') return false;
+  return context.resolveTargets(node.expression.expression, site.frame).some((owner) => owner.instance.framework === 'koa' && owner.instance.kind !== 'app');
 }
 
 /**

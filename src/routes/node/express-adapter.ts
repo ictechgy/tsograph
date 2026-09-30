@@ -26,7 +26,7 @@ import { type CompiledPath, isRootVariant, joinVariants, type PathVariant, prefi
 import { compilePte8Path } from './pte8-path.ts';
 import type { FrameworkAdapter, InstanceSpec, InterpreterContext } from './router-interpreter.ts';
 import type { EventSite, Frame, MountEvent, PathArgument, ProvidedEvent, RouteEvent, RouterEvent, RouterInstance, RouterTarget, SettingEvent } from './router-model.ts';
-import { calleeFromPackage, packageBindingOf, unwrap } from './symbols.ts';
+import { calleeFromPackage, mayCarryRoutes, packageBindingOf, unwrap } from './symbols.ts';
 
 /** Express가 method 멤버로 만드는 동사(`methods` 패키지·Node `http.METHODS`)다. */
 const EXPRESS_VERBS = new Set([
@@ -85,7 +85,7 @@ function expressChain(target: RouterTarget, member: string, call: ts.CallExpress
   if (member === 'route') {
     const argument = call.arguments[0];
     const routePath: PathArgument = { value: argument === undefined ? { kind: 'unknown' } : context.resolvePath(argument, frame), node: argument ?? call };
-    return [{ instance: target.instance, basePaths: [], routePath, routeNode: call }];
+    return [{ instance: target.instance, basePaths: [], routePath, routeNode: call, routeTimeline: frame.timeline }];
   }
   if (member === 'get' && call.arguments.length === 1) return [];
   return expressAdapter.memberNames.has(member) ? [target] : [];
@@ -179,18 +179,20 @@ function recordRouteBuilder(target: RouterTarget, member: string, call: ts.CallE
 }
 
 /**
- * route 빌더 method의 위치다. 레이어는 `route()`가 스택에 넣으므로 같은 뿌리면 그 호출 위치를 쓴다.
+ * route 빌더 method의 위치다. 레이어는 `route()`가 스택에 넣으므로 method를 다른 함수에서 붙여도 `route()` 호출의
+ * 실행 위치(그 프레임의 timeline + 호출 끝)를 쓴다.
  *
  * @param target route 빌더 대상
  * @param site method 호출 위치
  * @returns 위치
  */
 function routeBuilderPosition(target: RouterTarget, site: EventSite): readonly number[] {
-  return [...site.frame.timeline, target.routeNode!.getEnd()];
+  return [...(target.routeTimeline ?? site.frame.timeline), target.routeNode!.getEnd()];
 }
 
 /**
- * 인자 목록에서 마지막 핸들러 식을 찾는다(배열 인자는 펼친다).
+ * 인자 목록에서 마지막 핸들러 식을 찾는다(배열 인자는 펼친다). 마지막이 펼침(`...handlers`)이면 그 펼침 식을 돌려준다 —
+ * 핸들러를 모르는 선언(usr 없음, 순서 없음)으로 내기 위해서다.
  *
  * @param args 인자
  * @returns 핸들러 식 또는 undefined
@@ -198,10 +200,9 @@ function routeBuilderPosition(target: RouterTarget, site: EventSite): readonly n
 function lastFunction(args: readonly ts.Expression[]): ts.Expression | undefined {
   const flat = args.flatMap((argument) => {
     const node = unwrap(argument);
-    return ts.isArrayLiteralExpression(node) ? node.elements.filter((element) => !ts.isSpreadElement(element)) : [argument];
+    return ts.isArrayLiteralExpression(node) ? [...node.elements] : [argument];
   });
-  const last = flat.at(-1);
-  return last === undefined || ts.isSpreadElement(last) ? undefined : last;
+  return flat.at(-1);
 }
 
 /**
@@ -220,7 +221,7 @@ function recordUse(target: RouterTarget, call: ts.CallExpression, site: EventSit
   const prefixes: (PathArgument | undefined)[] = hasPath ? context.resolvePaths(first, site.frame) : [undefined];
   const functions = call.arguments.slice(hasPath ? 1 : 0).flatMap((argument) => {
     const node = unwrap(argument);
-    return ts.isArrayLiteralExpression(node) ? node.elements.filter((element): element is ts.Expression => !ts.isSpreadElement(element)) : [argument];
+    return ts.isArrayLiteralExpression(node) ? [...node.elements] : [argument];
   });
   for (const prefix of prefixes) {
     for (const fn of functions) recordUseFunction(target, prefix, fn, call, site, context);
@@ -251,9 +252,10 @@ function recordUseFunction(target: RouterTarget, prefix: PathArgument | undefine
     return;
   }
   const handler = context.resolveHandler(fn, site.frame, 2, call);
-  if (handler.usr === undefined && prefix !== undefined) {
-    // 경로를 붙여 넘긴 값을 풀지 못했다: 라우터일 수 있으므로 그 접두사 아래를 모델링하지 못한 것으로 알린다.
-    context.emit({ kind: 'provided', target, prefix, methods: undefined, prefixKind: 'route-coverage', description: 'a value passed to use() with a path that tsograph could not resolve (a router or middleware)', site });
+  if (handler.usr === undefined && (prefix !== undefined || mayCarryRoutes(context.checker, fn))) {
+    // 풀지 못한 값이 라우터일 수 있다(경로를 붙였거나, 타입이 라우터 모양·모름): 그 접두사 아래를 모델링하지 못한 것으로 알린다.
+    const coveragePrefix = prefix ?? { value: { kind: 'literal', text: '/' }, node: call };
+    context.emit({ kind: 'provided', target, prefix: coveragePrefix, methods: undefined, prefixKind: 'route-coverage', description: 'a value passed to use() that tsograph could not resolve (a router or middleware)', site });
     return;
   }
   if (handler.usr === undefined || handler.mayCallNext || isErrorHandler(fn, site.frame, context)) {

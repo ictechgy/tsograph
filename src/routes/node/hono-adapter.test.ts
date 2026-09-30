@@ -95,3 +95,21 @@ test('팩토리를 두 번 부르면 앱마다 다른 group이다', async () => 
   assert.notEqual(groups[0], groups[1]);
   assert.ok(groups.every((group) => /^hono:src\/factory\.ts:3:15@[0-9a-f]{8}$/u.test(group ?? '')));
 });
+
+test('펼친 핸들러는 usr 없는 선언이고, 펼친 use() 인자는 미들웨어로 센다', async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ hono: '4.6.0' }),
+    'src/app.ts': [
+      "import { Hono, type MiddlewareHandler } from 'hono';",
+      'declare const handlers: MiddlewareHandler[];',
+      'const app = new Hono();',
+      'app.use(...handlers);',
+      "app.get('/s', ...handlers);",
+      "app.on('POST', '/o', ...handlers);",
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(document), ['GET root /s strict', 'POST root /o strict']);
+  assert.equal(limitationsWith(document, 'missing-route-usrs: 2 route declaration(s)').length, 1);
+  assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 middleware registration(s)').length, 1);
+});

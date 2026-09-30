@@ -233,3 +233,24 @@ export function enclosingFunction(node: ts.Node): ts.SignatureDeclaration | unde
   }
   return undefined;
 }
+
+/**
+ * 라우터·앱 값의 타입에 있는 속성 이름이다. Express `Router`·`Application`은 `route`·`stack`, @koa/router `routes()`의
+ * 반환 타입(`RouterComposedMiddleware`)은 `router`, 라우터 자체는 `routes`를 가진다. 일반 미들웨어 함수 타입에는 없다.
+ */
+const ROUTER_TYPE_MARKERS = ['route', 'routes', 'router', 'stack'] as const;
+
+/**
+ * 풀지 못한 `use()` 인자가 라우터(그래서 라우트)를 담을 수 있는지 타입으로 가늠한다. 타입을 모르면(`any`·`unknown`,
+ * 해석 실패, 펼침 인자) 담을 수 있다고 본다 — 라우트가 조용히 빠지는 것보다 한계로 알리는 편이 안전하기 때문이다.
+ *
+ * @param checker TypeChecker
+ * @param expression 인자 식
+ * @returns 라우터일 수 있으면 true
+ */
+export function mayCarryRoutes(checker: ts.TypeChecker, expression: ts.Expression): boolean {
+  if (ts.isSpreadElement(expression)) return true;
+  const type = checker.getTypeAtLocation(expression);
+  const parts = type.isUnion() || type.isIntersection() ? type.types : [type];
+  return parts.some((part) => (part.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || ROUTER_TYPE_MARKERS.some((name) => part.getProperty(name) !== undefined));
+}

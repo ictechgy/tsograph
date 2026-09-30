@@ -154,7 +154,8 @@ function recordMethod(target: RouterTarget, member: string, call: ts.CallExpress
   const hasPath = first !== undefined && context.isPathArgument(first, site.frame, call.arguments.length >= 2);
   const handlers = call.arguments.slice(hasPath ? 1 : 0);
   const handler = handlers.at(-1);
-  if (handler === undefined || ts.isSpreadElement(handler)) return;
+  // 마지막 핸들러가 펼침이면 핸들러를 모르는 선언(usr 없음, 순서 없음)으로 낸다.
+  if (handler === undefined) return;
   const path: PathArgument = hasPath ? { value: context.resolvePath(first, site.frame), node: first } : ((target as HonoTarget).chainPath ?? { value: { kind: 'unknown' }, node: call });
   const verb = member.toUpperCase();
   emitRoute(target, verb === 'ALL' ? ['ANY'] : methodsOf([verb]), [path], handler, call, site, context);
@@ -171,7 +172,7 @@ function recordMethod(target: RouterTarget, member: string, call: ts.CallExpress
 function recordOn(target: RouterTarget, call: ts.CallExpression, site: EventSite, context: InterpreterContext): void {
   const [methodArgument, pathArgument, ...handlers] = call.arguments;
   const handler = handlers.at(-1);
-  if (methodArgument === undefined || pathArgument === undefined || handler === undefined || ts.isSpreadElement(handler)) return;
+  if (methodArgument === undefined || pathArgument === undefined || handler === undefined) return;
   const verbs = context.resolvePaths(methodArgument, site.frame).map((entry) => (entry.value.kind === 'literal' ? entry.value.text.toUpperCase() : undefined));
   const dynamicMethod = verbs.includes(undefined);
   const known = verbs.filter((verb): verb is string => verb !== undefined && verb !== 'HEAD');
@@ -243,7 +244,7 @@ function recordUse(target: RouterTarget, call: ts.CallExpression, site: EventSit
   const hasPath = first !== undefined && context.isPathArgument(first, site.frame, call.arguments.length >= 2);
   const path: PathArgument = hasPath ? { value: context.resolvePath(first, site.frame), node: first } : { value: { kind: 'literal', text: '*' }, node: call };
   for (const argument of call.arguments.slice(hasPath ? 1 : 0)) {
-    if (ts.isSpreadElement(argument)) continue;
+    // 펼침 인자는 풀지 못한 미들웨어로 센다(resolveHandler가 usr 없음·next 호출 가능으로 돌려준다).
     const provided = providedMiddleware(argument, context);
     if (provided !== undefined) {
       context.emit({ kind: 'provided', target, prefix: path, methods: undefined, prefixKind: 'framework-provided-routes', description: provided, site });

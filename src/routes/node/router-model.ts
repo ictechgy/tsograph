@@ -73,6 +73,8 @@ export interface RouterTarget {
   readonly routePath?: PathArgument;
   /** route 빌더를 만든 호출(같은 route의 method는 한 등록이다) */
   readonly routeNode?: ts.Node;
+  /** route 빌더를 만든 호출이 실행된 프레임의 timeline(레이어의 스택 위치) */
+  readonly routeTimeline?: readonly number[];
 }
 
 /** 사건이 일어난 실행 위치다. */

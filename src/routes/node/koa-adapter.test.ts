@@ -65,3 +65,23 @@ test('라우터 버전을 모르면 두 문법이 같을 때만 정적 사실이
   ]);
   assert.equal(limitationsWith(document, 'route-framework-version-unknown:').length, 1);
 });
+
+test('펼친 핸들러는 usr 없는 선언이고, 풀지 못한 routes() 값은 route-coverage다', async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ koa: '3.0.0', '@koa/router': '15.7.0' }),
+    'src/app.ts': [
+      "import Koa from 'koa';",
+      "import Router from '@koa/router';",
+      'declare const handlers: Koa.Middleware[];',
+      'declare const other: Router;',
+      'const router = new Router();',
+      "router.get('/s', ...handlers);",
+      'const app = new Koa();',
+      'app.use(router.routes());',
+      'app.use([other][0]!.routes());',
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(document), ['GET root /s optional ci']);
+  assert.equal(limitationsWith(document, 'route-coverage: 1 registration(s) of a value passed to use() that tsograph could not resolve').length, 1);
+});

@@ -127,6 +127,7 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
   모호함은 생겨도 거짓 가림은 없다).
 - 한 index는 한 등록(소스 위치 하나)이다. method별 사실, 선택 세그먼트·빈 값 변형·catch-all 접두사 decl, Express `route()` 빌더의
   method들, 복사 mount로 여러 접두사에 복제된 같은 레이어는 같은 index를 공유한다. 배열 경로의 원소는 각각 한 등록이다.
+  `route()` 빌더의 위치는 method를 다른 함수에서 붙여도 레이어를 스택에 넣는 `route()` 호출의 실행 위치다.
 - 순서는 인스턴스를 만든 타임라인 뿌리(모듈 최상위 또는 그 모듈에서 부른 팩토리·등록 함수) 안에서만 위치로 증명한다. 팩토리를
   여러 번 부르면 앱마다 다른 group이다(`<만든 위치>@<프레임 해시>`).
 - 내보내기 전에 `order`를 계약 규칙(`src/exchange/dispatch-order.ts`, isthmus `dispatch.validate` 벡터)으로 다시 검사하고, 어긋나면
@@ -164,7 +165,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 | 정적 파일(`express.static`, `serve-static`, `koa-static`, `@fastify/static`, Hono `serveStatic`) | `framework-provided-routes:` + 붙인 경로 접두사, Express·Koa·Fastify는 `GET`·`HEAD`(Hono `serveStatic`은 method를 보지 않아 생략) |
 | 모르는 패키지 미들웨어·플러그인, `@fastify/cors`(OPTIONS), `@fastify/autoload` | `framework-provided-routes:`·`route-coverage:` + 붙인 경로 접두사(없으면 스코프 없음) |
 | 경로를 붙여 넘긴 값을 풀지 못함(`use('/x', require(dynamic))`), Hono `route()`의 풀지 못한 앱, `mount()` | `route-coverage:` + 그 접두사 |
-| 핸들러가 프로젝트 밖·해석 불가 | usr 없음, `missing-route-usrs:`(체인 전용) |
+| 경로 없이 넘긴 값을 풀지 못했고 타입이 라우터일 수 있음(Express·Koa `use(x)`: 타입을 모르거나 `route`·`routes`·`router`·`stack` 속성이 있음) | `route-coverage:` + 붙인 라우터의 접두사. 라우터 표식이 없는 함수 타입은 넘기는 미들웨어 |
+| 핸들러가 프로젝트 밖·해석 불가, 마지막 핸들러가 펼침(`get('/x', ...handlers)`) | usr 없음·순서 없음, `missing-route-usrs:`(체인 전용) |
 | 인라인 핸들러, 요청을 넘긴다고 본 미들웨어 | `framework-dispatch-unmodeled:`(체인 전용) |
 | 순서를 증명하지 못한 decl | `route-dispatch-order-unknown:` + 템플릿 스코프 |
 | 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
