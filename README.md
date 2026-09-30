@@ -18,7 +18,8 @@ own language; isthmus joins the documents.
 | `tsograph routes --role server`: Next.js App Router route handlers and Pages Router API routes → `route-decl` facts | Implemented |
 | Other Node backend route declarations (Hono, Express, Fastify, NestJS, Koa) | Planned |
 | `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
-| TypeORM, Sequelize, Drizzle, Knex, raw drivers, D1 relation-use facts | Planned (counted as limitations today) |
+| `tsograph schema`: Drizzle, TypeORM, Sequelize 6, knex, raw SQL drivers (`pg`, `mysql2`, SQLite, libSQL, postgres.js, Neon, Vercel Postgres, PlanetScale), Cloudflare D1 | Implemented ([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
+| Kysely, Objection, MikroORM, pg-promise, sequelize-typescript, MSSQL, Oracle, slonik relation-use facts | Planned (counted as limitations today) |
 | `tsograph graph` / `reach` / `impact`: TypeScript/JavaScript call graph → isthmus `language-traversal` v1 | Implemented |
 | Interface / dependency-injection dispatch: `bound` and `candidate` edges, `--dispatch`, per-root `evidence`, `unresolvedCalls` | Implemented |
 | Web/React Native client route-calls | Planned |
@@ -371,7 +372,8 @@ does not list).
 tsograph schema --project <root> [--format json]
 ```
 
-Scans the project for Prisma schemas, Prisma Client usage, and SQL text, and writes a
+Scans the project for Prisma schemas, Prisma Client usage, Node ORM and SQL driver usage
+([Node ORMs and SQL drivers](#node-orms-and-sql-drivers)), and SQL text, and writes a
 bridge-facts v1 document to stdout: `platform: "js"`, `target: "persistence"` (or `null` when
 there are no facts), one `relation-use` fact per observed relation or column reference. isthmus
 joins it with a `platform: "sql"` document (schemagraph `facts --document <catalog>`) under the
@@ -383,7 +385,8 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
   `64` usage error. `1` is reserved.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
-  Prisma generator output directories, `*.d.ts`, and files over 4 MiB (counted).
+  Prisma generator output directories, and files over 4 MiB (counted). `*.d.ts` files are not
+  parsed as sources; they are read only for Cloudflare D1 binding declarations.
 
 ### Facts
 
@@ -395,6 +398,8 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
 | `client.<delegate>` access | the model's table | — | delegate name | enclosing declaration |
 | Delegate call arguments | the model's table | column | object key or string | enclosing declaration |
 | Raw SQL (`$queryRaw`, `$executeRaw`, `Prisma.sql`, `…Unsafe`, TypedSQL, uppercase literals) | relation as written | — | the SQL literal (TypedSQL: the keyword) | enclosing declaration |
+| Drizzle table / TypeORM entity / Sequelize model declaration | resolved table name | — and resolved columns | table name, class, or model name; column key | `table` / `table.key` (`Entity`, `Model.attribute`) |
+| ORM and driver queries (builders, repositories, model methods, driver SQL) | resolved table name | column when read | table argument, method name, or SQL argument | enclosing declaration |
 
 Channels are written as the code or mapping names them: `schema.table` when qualified
 (`@@schema`, `FROM s.t`), otherwise unqualified — tsograph never guesses a default schema such as
@@ -418,7 +423,9 @@ with relation-use facts by exact string match.
 Schema declaration facts and TypedSQL facts also carry a stable usr, in namespaces that are **not**
 graph nodes: `<schema path>#model:<Model>` / `#model:<Model.field>` (for example
 `prisma/schema.prisma#model:Job`, `prisma/schema.prisma#model:Job.title`, and
-`#model:Book.tags` for an implicit many-to-many join table), and `<sql path>#typedsql:<name>`.
+`#model:Book.tags` for an implicit many-to-many join table), and `<sql path>#typedsql:<name>`. Node ORM declarations use the same `#model:` namespace with the declaring
+source file as the path (`src/db/schema.ts#model:users`, `src/entities/user.ts#model:User.email`,
+`src/models/post.js#model:BlogPost.authorId`), so isthmus capture needs no new marker.
 They are declaration-side facts, so no traversal ever reaches them; isthmus `trace` reads an id
 that is absent from every traversal as unreached, not as a missing symbol.
 
@@ -519,11 +526,50 @@ same SQL yields the same relations in every producer.
 - Other string literals are read only when their SQL verb and relation keywords are uppercase
   (strict mode); lowercase SQL-looking literals are counted under `skipped-sql-literals:`.
 
+### Node ORMs and SQL drivers
+
+Naming rules, sources, and the naming oracle are documented in Korean in
+[docs/PERSISTENCE.md](docs/PERSISTENCE.md). Summary:
+
+- **Resolution.** A TypeScript Program over the project's own sources only (no lib, no
+  `node_modules`, project-local module resolution) is used for symbol resolution; nothing is
+  executed and no inferred types are used. Package values are identified by import specifier and
+  name. A receiver counts only when its provenance is proven (initializers, return values, type
+  annotations and their members, decorators, callback parameters, imports and CommonJS
+  `require`/`module.exports`). The phase is skipped when no source imports a supported package or
+  mentions `D1Database`.
+- **Drizzle** (drizzle-orm 0.45.3): table names as written (`pgTable`, `sqliteTable`, `mysqlTable`,
+  views, `pgSchema().table`, statically computable `pgTableCreator`); column = builder name, else
+  the object key converted by the `casing` option (`snake_case`/`camelCase`) only when every
+  `drizzle()` call and `drizzle.config.*` agree. Uses: `from`/`insert`/`update`/`delete`/joins/`$count`
+  with a table argument, `t.column`, `.values()`/`.set()` keys, `db.query.<key>.findMany/findFirst`
+  with `columns` and `with` (via `relations()`), and `sql` templates.
+- **TypeORM** (1.1.1 and 0.3.31): `@Entity` name or `snakeCase(class)`, `entityPrefix`, schema;
+  column `name` or the property; embedded prefixes; join columns `camelCase(property_referenced)`;
+  join tables `snakeCase(owner_property_target)` with `camelCase(table_primaryColumn)` columns. A
+  custom `namingStrategy` keeps only explicit names. Uses: repositories, ActiveRecord entities,
+  EntityManager calls with an entity argument, QueryBuilder entities/aliases, `query(sql)`.
+- **Sequelize 6** (6.37.8, inflection 1.13.4): `tableName`, else `modelName` frozen or
+  `underscoredIf(pluralize(modelName))`; `field` or `underscoredIf(attribute)`; implicit `id` and
+  timestamps; association foreign keys and string `through` join tables. Uses: model methods,
+  `include`, `where`/`attributes`/value keys, `sequelize.query(sql)`.
+- **knex** (3.3.0): `knex('t')`, `from`/`into`/`table`/joins (`'t as a'`, `{ a: 't' }`, `withSchema`),
+  qualified or single-table columns, `knex.raw(sql)`; `knex.schema` DDL is ignored.
+- **Raw drivers and D1**: `query`/`execute`/`prepare`/`exec`/`run`/`all`/`get`/`each` SQL on proven
+  clients, libSQL `batch`, `postgres`/`neon`/`@vercel/postgres` tagged templates, and D1 bindings
+  (`env.DB` for properties declared `D1Database`, including `.d.ts` files, `D1Database` annotations).
+  A gated template string with substitutions emits the relations it names literally plus one
+  dynamic fact.
+
+Every rule is checked by `experiments/orm-naming-oracle`, which runs the real libraries against
+synthetic fixtures (drizzle-kit DDL on sql.js, TypeORM `sqljs` synchronize, Sequelize on pg-mem,
+knex `toSQL()`) and records the names; `src/schema/orm/oracle.test.ts` compares them offline
+(100% agreement at recording time).
+
 ### Outside the supported surface
 
-TypeORM, Sequelize, Drizzle, Knex, Kysely, Objection, MikroORM, `pg`, `postgres`, `mysql`,
-`mysql2`, SQLite drivers, libSQL, Neon, Vercel Postgres, PlanetScale, MSSQL, Oracle, slonik, and
-Cloudflare D1 (`D1Database`) queries are not interpreted. Files using them are counted under
+Kysely, Objection, MikroORM, pg-promise, sequelize-typescript models, the `sqlite` wrapper, MSSQL,
+Oracle, and slonik queries are not interpreted. Files using them are counted under
 `unsupported-db-packages:`, and Mongoose, MongoDB, DynamoDB, Firebase, and Redis under
 `non-relational-stores:`. Uppercase SQL literals in those files are still read as SQL text.
 
@@ -534,7 +580,8 @@ Cloudflare D1 (`D1Database`) queries are not interpreted. Files using them are c
 `prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
-`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-usrs:`,
+`unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
+`unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
 `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
@@ -555,6 +602,13 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app` is a synthetic project with its own migration; joined this way it
 reports no errors (one expected `relation-decl-without-use-unverified` warning for its `@@ignore` model).
+
+`fixtures/schema/drizzle-d1-app` (Hono, Drizzle, and raw D1 SQL) joins with a SQLite catalog built
+from its migrations (`sqlite3 app.db < migrations/0000_init.sql` and `0001_audit.sql`, then
+`schemagraph scan "sqlite:app.db" …`): no errors or warnings, 5 relations and 14 columns paired.
+With named route handlers, `tsograph reach` and `schemagraph impact --format language-traversal`
+let `isthmus trace` follow a route to its tables and their database dependents
+([docs/PERSISTENCE.md](docs/PERSISTENCE.md#isthmus와-잇기)).
 
 ## `tsograph graph`, `tsograph reach`, `tsograph impact`
 
@@ -912,7 +966,8 @@ facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exac
 - Declarations that produce the same id (overloads, a getter/setter pair, same-named functions in
   sibling blocks) are one node.
 - Declaration-side relation-use facts use `#model:` and `#typedsql:` ids (see
-  [Facts](#facts)); these are never graph nodes.
+  [Facts](#facts)); these are never graph nodes. Node ORM declarations (Drizzle tables, TypeORM
+  entities, Sequelize models) reuse `#model:`.
 
 ## Development
 

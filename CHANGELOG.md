@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### Added — schema: Node ORM·원시 SQL 드라이버·Cloudflare D1
+
+- schema: Drizzle·TypeORM·Sequelize 6·knex·원시 SQL 드라이버(`pg`·`mysql2`·`mysql`·`better-sqlite3`·`sqlite3`·
+  `@libsql/client`·`postgres`·`@neondatabase/serverless`·`@vercel/postgres`·`@planetscale/database`)·Cloudflare D1의
+  테이블·컬럼 선언과 쿼리를 `relation-use` 사실로 낸다. 전에는 이 패키지를 쓰는 파일 수만
+  `unsupported-db-packages:`로 셌다. 이름 규칙은 각 라이브러리 소스로 확인했고(Drizzle casing, TypeORM
+  `DefaultNamingStrategy`, Sequelize inflection 복수화·`underscored`·연관 외래 키) [docs/PERSISTENCE.md](docs/PERSISTENCE.md)에
+  출처와 함께 적었다.
+- schema: 이름 해석에 프로젝트 소스만 담은 TypeScript Program의 심볼 해석만 쓴다(lib·`node_modules` 없음, 실행·타입
+  추론 없음). 지원 패키지 import나 `D1Database` 언급이 없으면 이 단계를 건너뛴다.
+- schema: ORM 선언 사실은 Prisma와 같은 `#model:` 선언 이름공간(`<선언 파일>#model:<테이블 변수·Entity·Model>[.<키>]`)을
+  쓴다. 새 이름공간이 없으므로 isthmus capture의 root 위생 표를 바꿀 필요가 없다.
+- schema: limitation 접두사 `unresolved-orm-receivers:`·`orm-naming-unverified:`·`unreadable-orm-declarations:`를 더한다.
+  `unsupported-db-packages:`에는 Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·`sqlite`·MSSQL·Oracle·slonik만 남는다.
+- schema: ORM·드라이버 게이트가 받은 보간 템플릿 문자열(과 그것을 담은 const)은 원문에 이름으로 쓴 관계를 정적 사실로,
+  전체를 dynamic 사실로 낸다(`IN (${placeholders})` 관용구). 게이트가 읽은 SQL은 소문자여도 읽고, 게이트 없는 대문자
+  SQL 스캔은 같은 리터럴을 다시 읽지 않는다. Prisma `$queryRawUnsafe` 규칙은 바꾸지 않았다.
+- schema: `.d.ts` 파일을 탐색에 포함해 D1 바인딩 선언(`interface Env { DB: D1Database }`)만 읽는다(소스로 파싱하지 않는다).
+- experiments/orm-naming-oracle: 합성 fixture(`fixtures/schema/{drizzle-d1,typeorm,sequelize,knex}-app`)를 실제 라이브러리로
+  실행해(drizzle-kit DDL→sql.js, TypeORM `sqljs`, Sequelize pg-mem, knex `toSQL()`) 이름을 기록하고,
+  `src/schema/orm/oracle.test.ts`가 오프라인으로 100% 일치를 검사한다.
+- fixtures: `prisma-app`의 지원 표면 밖 예시를 TypeORM에서 Kysely로 바꾼다(TypeORM은 이제 읽는다).
+
 ### Changed
 
 - routes: framework 제공 경로 limitation에 isthmus http `limitationScopes`를 싣는다. `public/`은

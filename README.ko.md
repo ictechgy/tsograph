@@ -17,7 +17,8 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | `tsograph routes --role server`: Next.js App Router route handler·Pages Router API route → `route-decl` 사실 | 구현됨 |
 | 그 밖의 Node 백엔드 라우트 선언(Hono·Express·Fastify·NestJS·Koa) | 계획 |
 | `tsograph schema`: Prisma 스키마·Prisma Client·원시 SQL → persistence `relation-use` 사실 | 구현됨 |
-| TypeORM·Sequelize·Drizzle·Knex·raw 드라이버·D1 relation-use | 계획(현재는 limitation으로 센다) |
+| `tsograph schema`: Drizzle·TypeORM·Sequelize 6·knex·원시 SQL 드라이버(`pg`·`mysql2`·SQLite·libSQL·postgres.js·Neon·Vercel Postgres·PlanetScale)·Cloudflare D1 | 구현됨([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
+| Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·MSSQL·Oracle·slonik relation-use | 계획(현재는 limitation으로 센다) |
 | `tsograph graph`·`reach`·`impact`: TypeScript/JavaScript 호출 그래프 → isthmus `language-traversal` v1 | 구현됨 |
 | 인터페이스·의존성 주입 디스패치: `bound`·`candidate` 간선, `--dispatch`, root별 하한 `evidence`, `unresolvedCalls` | 구현됨 |
 | 웹/React Native 클라이언트 route-call | 계획 |
@@ -282,8 +283,8 @@ check는 코드 0으로 끝나고 의도한 드리프트를 보고한다(`GET /a
 tsograph schema --project <root> [--format json]
 ```
 
-프로젝트의 Prisma 스키마, Prisma Client 사용, SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에
-쓴다. `platform: "js"`, `target: "persistence"`(사실이 없으면 `null`), 관찰한 관계·컬럼 참조마다
+프로젝트의 Prisma 스키마, Prisma Client 사용, Node ORM·SQL 드라이버 사용([Node ORM과 SQL 드라이버](#node-orm과-sql-드라이버)),
+SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `platform: "js"`, `target: "persistence"`(사실이 없으면 `null`), 관찰한 관계·컬럼 참조마다
 `relation-use` 사실 하나다. isthmus가 `docs/GRAPH-EXCHANGE.md` persistence 규칙으로
 `platform: "sql"` 문서(schemagraph `facts --document <catalog>`)와 조인한다.
 
@@ -292,7 +293,8 @@ tsograph schema --project <root> [--format json]
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
   사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다.
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
-  generator 출력 디렉터리, `*.d.ts`, 4 MiB 넘는 파일(개수로 센다).
+  generator 출력 디렉터리, 4 MiB 넘는 파일(개수로 센다). `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
+  선언을 찾을 때만 읽는다.
 
 ### 사실
 
@@ -304,6 +306,8 @@ tsograph schema --project <root> [--format json]
 | `client.<delegate>` 접근 | 모델의 테이블 | — | delegate 이름 | 감싸는 선언 |
 | delegate 호출 인자 | 모델의 테이블 | 컬럼 | 객체 키·문자열 | 감싸는 선언 |
 | 원시 SQL(`$queryRaw`·`$executeRaw`·`Prisma.sql`·`…Unsafe`·TypedSQL·대문자 리터럴) | 쓰인 그대로의 관계 | — | SQL 리터럴(TypedSQL은 키워드) | 감싸는 선언 |
+| Drizzle 테이블·TypeORM 엔터티·Sequelize 모델 선언 | 해석한 테이블 이름 | —와 해석한 컬럼 | 테이블 이름·클래스·모델 이름, 컬럼 키 | `table`·`table.key`(`Entity`, `Model.attribute`) |
+| ORM·드라이버 쿼리(빌더·저장소·모델 메서드·드라이버 SQL) | 해석한 테이블 이름 | 읽었을 때 컬럼 | 테이블 인자·메서드 이름·SQL 인자 | 감싸는 선언 |
 
 채널은 코드·매핑이 쓴 그대로다. 한정됐으면(`@@schema`, `FROM s.t`) `schema.table`, 아니면
 비한정이다 — PostgreSQL 기본 스키마는 연결 설정이 정하므로 `public` 같은 값을 추측하지 않는다.
@@ -323,7 +327,9 @@ id([심볼 id](#심볼-id))라서 `tsograph reach` 출력과 relation-use 사실
 스키마 선언 사실과 TypedSQL 사실도 안정 usr를 싣지만, 그래프 노드가 **아닌** 이름공간을 쓴다:
 `<스키마 경로>#model:<Model>`·`#model:<Model.field>`(예: `prisma/schema.prisma#model:Job`,
 `prisma/schema.prisma#model:Job.title`, 암시적 다대다 조인 테이블은 `#model:Book.tags`)와
-`<sql 경로>#typedsql:<이름>`. 선언 측 사실이라 어떤 순회에도 나오지 않으며, isthmus `trace`는 모든 순회에 없는
+`<sql 경로>#typedsql:<이름>`. Node ORM 선언은 선언 소스 파일을 경로로 삼아 같은 `#model:` 이름공간을 쓴다
+(`src/db/schema.ts#model:users`, `src/entities/user.ts#model:User.email`, `src/models/post.js#model:BlogPost.authorId`) —
+isthmus capture에 새 표식이 필요 없다. 선언 측 사실이라 어떤 순회에도 나오지 않으며, isthmus `trace`는 모든 순회에 없는
 id를 "심볼 없음"이 아니라 "닿지 않음"으로 읽는다.
 
 ### Prisma 스키마 위치(Prisma 7.8.0 CLI 규칙)
@@ -410,13 +416,42 @@ SQL은 가족 공유 어휘 추출기(dartograph `sql_relations.dart`·cartograp
 - 그 밖의 문자열 리터럴은 SQL 동사와 관계 키워드가 대문자일 때만 읽는다(strict). 소문자 SQL처럼 보이는
   리터럴은 `skipped-sql-literals:`로 센다.
 
+### Node ORM과 SQL 드라이버
+
+이름 규칙·출처·오라클은 [docs/PERSISTENCE.md](docs/PERSISTENCE.md)에 있다. 요약:
+
+- **해석.** 프로젝트 소스만 담은 TypeScript Program(lib·`node_modules` 없음, 프로젝트 안 모듈 해석)의 심볼 해석만
+  쓴다. 아무것도 실행하지 않고 추론한 타입도 쓰지 않는다. 패키지 값은 import 지정자와 이름으로 식별한다. 수신자는
+  출처(초기값, 반환 값, 타입 표기와 그 멤버, 데코레이터, 콜백 매개변수, import·CommonJS `require`·`module.exports`)를
+  증명했을 때만 인정한다. 지원 패키지를 import하거나 `D1Database`를 언급하는 소스가 없으면 이 단계를 건너뛴다.
+- **Drizzle**(drizzle-orm 0.45.3): 테이블은 쓴 그대로(`pgTable`·`sqliteTable`·`mysqlTable`·뷰·`pgSchema().table`·
+  정적으로 계산되는 `pgTableCreator`). 컬럼은 빌더 이름, 없으면 객체 키 — 모든 `drizzle()` 호출과 `drizzle.config.*`의
+  `casing`(`snake_case`·`camelCase`)이 같을 때만 변환한다. 사용: 테이블 인자의 `from`·`insert`·`update`·`delete`·조인·
+  `$count`, `t.column`, `.values()`·`.set()` 키, `columns`·`with`(`relations()` 경유)가 있는
+  `db.query.<key>.findMany/findFirst`, `sql` 템플릿.
+- **TypeORM**(1.1.1·0.3.31): `@Entity` 이름 또는 `snakeCase(클래스)`, `entityPrefix`, 스키마; 컬럼 `name` 또는 속성;
+  임베디드 접두사; 조인 컬럼 `camelCase(속성_참조)`; 조인 테이블 `snakeCase(소유_속성_대상)`과 `camelCase(테이블_주키)`
+  컬럼. 사용자 `namingStrategy`면 명시 이름만 남긴다. 사용: 저장소, ActiveRecord 엔터티, 엔터티 인자의 EntityManager
+  호출, QueryBuilder 엔터티·별칭, `query(sql)`.
+- **Sequelize 6**(6.37.8, inflection 1.13.4): `tableName`, 없으면 `modelName`(freeze) 또는
+  `underscoredIf(pluralize(modelName))`; `field` 또는 `underscoredIf(속성)`; 자동 `id`·타임스탬프; 연관 외래 키와 문자열
+  `through` 조인 테이블. 사용: 모델 메서드, `include`, `where`·`attributes`·값 키, `sequelize.query(sql)`.
+- **knex**(3.3.0): `knex('t')`, `from`·`into`·`table`·조인(`'t as a'`, `{ a: 't' }`, `withSchema`), 한정했거나 테이블이
+  하나인 사슬의 컬럼, `knex.raw(sql)`. `knex.schema` DDL은 무시한다.
+- **원시 드라이버와 D1**: 증명한 클라이언트의 `query`·`execute`·`prepare`·`exec`·`run`·`all`·`get`·`each` SQL, libSQL
+  `batch`, `postgres`·`neon`·`@vercel/postgres` 태그 템플릿, D1 바인딩(`D1Database`로 선언된 속성의 `env.DB` —
+  `.d.ts` 포함 — 과 `D1Database` 표기). 게이트가 받은 보간 템플릿 문자열은 원문에 이름으로 쓴 관계와 dynamic 사실
+  하나를 낸다.
+
+모든 규칙은 `experiments/orm-naming-oracle`이 검증한다: 합성 fixture를 실제 라이브러리로 실행해(sql.js의 drizzle-kit
+DDL, TypeORM `sqljs` synchronize, pg-mem의 Sequelize, knex `toSQL()`) 이름을 기록하고, `src/schema/orm/oracle.test.ts`가
+오프라인으로 대조한다(기록 시점 100% 일치).
+
 ### 지원 표면 밖
 
-TypeORM, Sequelize, Drizzle, Knex, Kysely, Objection, MikroORM, `pg`, `postgres`, `mysql`, `mysql2`,
-SQLite 드라이버, libSQL, Neon, Vercel Postgres, PlanetScale, MSSQL, Oracle, slonik, Cloudflare D1
-(`D1Database`)의 쿼리는 해석하지 않는다. 이를 쓰는 파일 수를 `unsupported-db-packages:`로, Mongoose·
-MongoDB·DynamoDB·Firebase·Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터럴은
-여전히 SQL 텍스트로 읽는다.
+Kysely, Objection, MikroORM, pg-promise, sequelize-typescript 모델, `sqlite` 래퍼, MSSQL, Oracle, slonik의
+쿼리는 해석하지 않는다. 이를 쓰는 파일 수를 `unsupported-db-packages:`로, Mongoose·MongoDB·DynamoDB·Firebase·
+Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터럴은 여전히 SQL 텍스트로 읽는다.
 
 ### limitation 접두사
 
@@ -425,7 +460,8 @@ MongoDB·DynamoDB·Firebase·Redis는 `non-relational-stores:`로 센다. 그 �
 `prisma-8-surface-unscanned:`, `unparsed-schema-lines:`, `unresolved-field-types:`,
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
-`unresolved-client-receivers:`, `provenance-truncated:`, `missing-relation-usrs:`,
+`unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
+`unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
 `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
 심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
@@ -444,6 +480,12 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 `fixtures/schema/prisma-app`은 자체 마이그레이션을 가진 합성 프로젝트다. 이렇게 조인하면 오류가 없다
 (`@@ignore` 모델에 대한 예상된 `relation-decl-without-use-unverified` 경고 하나).
+
+`fixtures/schema/drizzle-d1-app`(Hono·Drizzle·원시 D1 SQL)은 마이그레이션으로 만든 SQLite 카탈로그와 조인한다
+(`sqlite3 app.db < migrations/0000_init.sql`과 `0001_audit.sql` 뒤 `schemagraph scan "sqlite:app.db" …`): 오류·경고 없이
+관계 5개와 컬럼 14개가 짝지어진다. 라우트 핸들러가 이름 있는 함수면 `tsograph reach`와
+`schemagraph impact --format language-traversal`로 `isthmus trace`가 라우트에서 테이블과 DB 의존자까지 잇는다
+([docs/PERSISTENCE.md](docs/PERSISTENCE.md#isthmus와-잇기)).
 
 ## `tsograph graph`, `tsograph reach`, `tsograph impact`
 
@@ -746,6 +788,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
   대상으로 `alias` 간선을 잇는다.
 - 같은 id가 되는 선언(오버로드, getter/setter 쌍, 형제 블록의 같은 이름 함수)은 한 노드다.
 - 선언 측 relation-use 사실은 `#model:`·`#typedsql:` id를 쓴다([사실](#사실)). 이 id는 그래프 노드가 아니다.
+  Node ORM 선언(Drizzle 테이블·TypeORM 엔터티·Sequelize 모델)도 `#model:`을 쓴다.
 
 ## 개발
 
