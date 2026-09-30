@@ -1,0 +1,62 @@
+{
+  "fixture": "fixtures/schema/knex-app",
+  "packages": {
+    "knex": "3.3.0",
+    "pg": "8.23.0"
+  },
+  "declared": [],
+  "relations": [],
+  "queries": {
+    "src/queries.ts#activeUsers": {
+      "sql": "select \"u\".\"id\", \"u\".\"email\", \"o\".\"total\" from \"users\" as \"u\" left join \"orders\" as \"o\" on \"u\".\"id\" = \"o\".\"user_id\" where \"u\".\"active\" = ?",
+      "relations": [
+        "orders",
+        "users"
+      ],
+      "columns": [
+        "orders.total",
+        "orders.user_id",
+        "users.active",
+        "users.email",
+        "users.id"
+      ]
+    },
+    "src/queries.ts#dailyRevenue": {
+      "sql": "select \"day\", \"revenue\" from \"reporting\".\"daily_revenue\" order by \"day\" asc",
+      "relations": [
+        "reporting.daily_revenue"
+      ],
+      "columns": [
+        "reporting.daily_revenue.day",
+        "reporting.daily_revenue.revenue"
+      ]
+    },
+    "src/queries.ts#recordEvent": {
+      "sql": "insert into \"audit_events\" (\"actor_id\", \"event\") values (?, ?)",
+      "relations": [
+        "audit_events"
+      ],
+      "columns": [
+        "audit_events.actor_id",
+        "audit_events.event"
+      ]
+    },
+    "src/queries.ts#totals": {
+      "sql": "select sum(total) from orders where user_id = ?",
+      "relations": [
+        "orders"
+      ],
+      "columns": []
+    },
+    "src/queries.ts#productSkus": {
+      "sql": "select \"p\".\"sku\" from \"products\" as \"p\" where \"p\".\"archived\" = ?",
+      "relations": [
+        "products"
+      ],
+      "columns": [
+        "products.archived",
+        "products.sku"
+      ]
+    }
+  }
+}

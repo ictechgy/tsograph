@@ -1,0 +1,21 @@
+{
+  "name": "tsograph-orm-naming-oracle",
+  "private": true,
+  "description": "Runs Drizzle, TypeORM, Sequelize and knex against in-memory databases to record the real table and column names for tsograph's ORM fixtures.",
+  "type": "module",
+  "scripts": {
+    "record": "node oracle.mjs"
+  },
+  "dependencies": {
+    "drizzle-kit": "0.31.11",
+    "drizzle-orm": "0.45.3",
+    "knex": "3.3.0",
+    "pg": "8.23.0",
+    "pg-mem": "3.0.14",
+    "reflect-metadata": "0.2.2",
+    "sequelize": "6.37.8",
+    "sql.js": "1.14.2",
+    "typeorm": "1.1.1",
+    "typescript": "5.9.3"
+  }
+}
