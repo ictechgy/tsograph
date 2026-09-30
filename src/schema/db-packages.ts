@@ -1,9 +1,10 @@
 /**
- * 지원 표면 밖 DB 패키지(다른 ORM·raw 드라이버·비관계 저장소)의 사용을 파일 수로 센다.
+ * 지원 표면 밖 DB 패키지(읽지 않는 ORM·드라이버·비관계 저장소)의 사용을 파일 수로 센다.
  *
  * 이 패키지들의 쿼리는 사실로 만들지 않는다 — API마다 테이블 이름 규칙이 달라 추측하면 거짓
  * 진단이 된다. 대신 "관측했지만 읽지 않은" 범위를 limitation으로 드러낸다. 게이트 없는 대문자
- * SQL 리터럴은 패키지와 무관하게 따로 읽힌다.
+ * SQL 리터럴은 패키지와 무관하게 따로 읽힌다. Drizzle·TypeORM·Sequelize·knex·원시 드라이버·D1은
+ * `orm/` 표면이 읽으므로 여기서 세지 않는다.
  */
 
 import ts from 'typescript';
@@ -13,9 +14,7 @@ import type { SourceModule } from './source-module.ts';
 
 /** 관계형이지만 지원 표면 밖인 패키지다(가져오기 이름의 패키지 부분). */
 const unsupportedSqlPackages: ReadonlySet<string> = new Set([
-  'typeorm', 'sequelize', 'sequelize-typescript', 'drizzle-orm', 'knex', 'kysely', 'objection', 'pg', 'pg-promise',
-  'postgres', 'mysql', 'mysql2', 'better-sqlite3', 'sqlite3', 'sqlite', '@libsql/client', '@neondatabase/serverless',
-  '@vercel/postgres', '@planetscale/database', 'mssql', 'tedious', 'oracledb', '@mikro-orm/core', 'slonik',
+  'sequelize-typescript', 'kysely', 'objection', 'pg-promise', 'sqlite', 'mssql', 'tedious', 'oracledb', '@mikro-orm/core', 'slonik',
 ]);
 
 /** 비관계 저장소 패키지다. */
@@ -24,12 +23,9 @@ const nonRelationalPackages: ReadonlySet<string> = new Set([
   'redis', 'ioredis', '@upstash/redis',
 ]);
 
-/** Cloudflare D1 바인딩 타입 이름이다. 패키지 import 없이 전역 타입으로 쓰인다. */
-const d1TypeName = 'D1Database';
-
 /** 패키지별 관측 파일 수다. */
 export interface PackageObservations {
-  /** 지원 표면 밖 SQL 패키지 → 파일 수(D1은 `d1`)다. */
+  /** 지원 표면 밖 SQL 패키지 → 파일 수다. */
   readonly unsupported: ReadonlyMap<string, number>;
   /** 비관계 저장소 패키지 → 파일 수다. */
   readonly nonRelational: ReadonlyMap<string, number>;
@@ -40,7 +36,7 @@ export interface PackageObservations {
 }
 
 /**
- * 모듈들의 import·require·D1 타입 참조를 센다.
+ * 모듈들의 import·require를 센다.
  *
  * @param modules 소스 모듈
  * @returns 관측 계수
@@ -53,7 +49,6 @@ export function observeDbPackages(modules: readonly SourceModule[]): PackageObse
   for (const module of modules) {
     const packages = modulePackages(module);
     const sql = [...packages].filter((name) => unsupportedSqlPackages.has(name));
-    if (usesD1(module)) sql.push('d1');
     const stores = [...packages].filter((name) => nonRelationalPackages.has(name));
     if (sql.length > 0) unsupportedFiles++;
     if (stores.length > 0) nonRelationalFiles++;
@@ -117,21 +112,4 @@ export function packageName(specifier: string): string | undefined {
   if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('node:')) return undefined;
   const parts = specifier.split('/');
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-}
-
-/**
- * 모듈이 D1 바인딩 타입을 참조하는지 본다.
- *
- * @param module 소스 모듈
- * @returns 참조하면 true
- */
-function usesD1(module: SourceModule): boolean {
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && node.typeName.text === d1TypeName) found = true;
-    else ts.forEachChild(node, visit);
-  };
-  visit(module.sourceFile);
-  return found;
 }

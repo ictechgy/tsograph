@@ -1,8 +1,8 @@
 /**
  * 프로젝트 하나에서 persistence `relation-use` 사실과 limitation을 뽑는다.
  *
- * 단계: Prisma 입력 수집 → 스키마 사실 → 소스 파싱 → 파일 사이 클라이언트 출처 고정점 →
- * 파일별 사용 스캔 → TypedSQL 파일 → 지원 표면 밖 패키지 계수 → limitation 조립.
+ * 단계: Prisma 입력 수집 → 스키마 사실 → 소스 파싱 → ORM·드라이버 표면(`orm/`) → 파일 사이 클라이언트 출처
+ * 고정점 → 파일별 사용 스캔 → TypedSQL 파일 → 지원 표면 밖 패키지 계수 → limitation 조립.
  * 사실로 만들지 못한 근거는 모두 계수로 남긴다 — 빈 결과를 완전성의 증거로 읽지 않게 한다.
  */
 
@@ -13,7 +13,9 @@ import { ClientUsageScanner, type UsageCounts } from './client-usage.ts';
 import { formatBreakdown, observeDbPackages, type PackageObservations } from './db-packages.ts';
 import { ModuleResolver, isWithinDirectory } from './module-resolver.ts';
 import type { PrismaCatalog } from './prisma-catalog.ts';
-import { loadPrismaProject, type PrismaProject } from './prisma-project.ts';
+import { extractOrmFacts, type OrmExtraction } from './orm/orm-extract.ts';
+import { ormLimitations } from './orm/orm-limitations.ts';
+import { isDeclarationFileName, loadPrismaProject, type PrismaProject } from './prisma-project.ts';
 import { ProjectReader } from './project-reader.ts';
 import { toPosixRelative } from './project-files.ts';
 import { type RelationUseFact, RelationFactSink } from './relation-facts.ts';
@@ -52,17 +54,19 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   if (relational && project.catalog !== undefined) emitSchemaFacts(project.catalog, sink);
   const modules = parseModules(root, project, reader, counts);
   const resolver = new ModuleResolver(root, new Set(modules.map((module) => module.absolutePath)));
+  const orm = extractOrmFacts({ modules, resolver, sink, declarationFiles: () => declarationFiles(root, project, reader) });
+  counts.dynamicRelations += orm.counts.dynamicRelations;
   const provenance = new ClientProvenance(modules, resolver, new PrismaModuleMatcher(project.outputDirectories, resolver));
   provenance.run();
   for (const module of modules) {
     const catalog = relational ? project.catalog : 'non-relational';
-    new ClientUsageScanner(module, provenance.analyze(module), catalog, sink, counts).scan();
+    new ClientUsageScanner(module, provenance.analyze(module), catalog, sink, counts, orm.consumed).scan();
   }
   emitTypedSql(root, project.typedSqlFiles, reader, sink, counts);
   const facts = sink.sorted();
   const limitations = buildLimitations({
     project, counts, facts, sink, reader, packages: observeDbPackages(modules),
-    unreadableConfigs: resolver.unreadableConfigs, provenanceTruncated: provenance.truncated, relational,
+    unreadableConfigs: resolver.unreadableConfigs, provenanceTruncated: provenance.truncated, relational, orm,
   });
   return { facts, limitations, sourceModifiedAt: reader.newestModifiedAt };
 }
@@ -166,6 +170,24 @@ function emitTypedSql(root: string, files: readonly string[], reader: ProjectRea
   }
 }
 
+/**
+ * 선언 파일(`.d.ts`)의 텍스트를 읽는다(D1 바인딩 선언 수집용). ORM 단계가 필요할 때만 부른다.
+ *
+ * @param root 프로젝트 realpath
+ * @param project Prisma 입력(파일 목록)
+ * @param reader 파일 읽기 도우미
+ * @returns 경로·텍스트 목록
+ */
+function declarationFiles(root: string, project: PrismaProject, reader: ProjectReader): { path: string; text: string }[] {
+  const result: { path: string; text: string }[] = [];
+  for (const [path, absolutePath] of project.walk.files) {
+    if (!isDeclarationFileName(basename(path))) continue;
+    const text = reader.read(absolutePath)?.text;
+    if (text !== undefined) result.push({ path: toPosixRelative(root, absolutePath), text });
+  }
+  return result;
+}
+
 /** limitation 조립 입력이다. */
 interface LimitationInput {
   readonly project: PrismaProject;
@@ -177,6 +199,7 @@ interface LimitationInput {
   readonly unreadableConfigs: number;
   readonly provenanceTruncated: boolean;
   readonly relational: boolean;
+  readonly orm: OrmExtraction;
 }
 
 /**
@@ -257,8 +280,8 @@ function catalogLimitations(catalog: PrismaCatalog): string[] {
  * @param input 조립 입력
  * @returns limitation 목록
  */
-function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated }: LimitationInput): string[] {
-  const result: string[] = [];
+function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated, orm }: LimitationInput): string[] {
+  const result: string[] = [...ormLimitations(orm.counts)];
   if (packages.nonRelationalFiles > 0) {
     result.push(`non-relational-stores: ${packages.nonRelationalFiles} source file(s) import non-SQL persistence packages outside the relation join: ${formatBreakdown(packages.nonRelational)}`);
   }

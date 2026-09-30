@@ -57,7 +57,7 @@ test('합성 fixture를 결정적인 persistence 문서로 바꾼다', async () 
   assert.ok(!summary.includes('Book.legacy'));
   assert.deepEqual(document.limitations, [
     'ignored-prisma-elements: 1 @@ignore model(s) and 1 @ignore field(s) are not emitted',
-    'unsupported-db-packages: 1 source file(s) use SQL packages outside the supported surface: typeorm (1)',
+    'unsupported-db-packages: 1 source file(s) use SQL packages outside the supported surface: kysely (1)',
     'dynamic-relation-names: 1 SQL argument(s), relation operand(s), or delegate access(es) were not statically readable; they are emitted as dynamic facts',
     'unresolved-client-receivers: 1 Prisma delegate call(s) use receivers that could not be traced to a PrismaClient; not emitted',
     'missing-relation-usrs: 2 relation-use fact(s) have source locations but no enclosing declaration name, so they carry no symbol and no usr',
