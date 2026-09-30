@@ -5,7 +5,8 @@
  * 한 번에 읽는다. 테이블은 `knex('t')`·`from`·`into`·`table`·`…join`의 문자열(`'t as a'`, `{ a: 't' }`, `'s.t'`)이고,
  * `withSchema('s')`는 본 테이블(위치 무관)과 그 뒤의 조인에 스키마를 붙인다(knex 3.3.0 `querybuilder.js` `join`,
  * `querycompiler.js` `tableName`). 컬럼은 별칭으로 한정했거나 사슬의 테이블이 하나일 때만 낸다.
- * `knex.raw(sql)`은 SQL 텍스트이고, `knex.schema.…`(DDL)는 사용으로 보지 않는다.
+ * `knex.raw(sql)`과 `whereRaw`·`joinRaw` 같은 조각은 SQL 텍스트로, `fromRaw`는 테이블 자리 SQL로 읽는다.
+ * `knex.schema.…`(DDL)는 사용으로 보지 않는다.
  */
 
 import ts from 'typescript';
@@ -36,6 +37,14 @@ const firstColumnMethods: ReadonlySet<string> = new Set([
   'orWhereNull', 'whereNotNull', 'orWhereNotNull', 'whereBetween', 'whereNotBetween', 'whereLike', 'whereILike', 'orderBy',
   'increment', 'decrement', 'having',
 ]);
+
+/** 첫 인자가 SQL 조각인 빌더 메서드다(`whereRaw('id in (select … from t)')`). */
+const rawFragmentMethods: ReadonlySet<string> = new Set([
+  'whereRaw', 'orWhereRaw', 'andWhereRaw', 'havingRaw', 'orHavingRaw', 'orderByRaw', 'groupByRaw', 'selectRaw', 'joinRaw',
+]);
+
+/** 첫 인자 SQL 조각이 테이블 자리인 메서드다(`fromRaw('users as u')`). */
+const rawTableMethods: ReadonlySet<string> = new Set(['fromRaw', 'intoRaw']);
 
 /** 첫 인자 객체의 키가 컬럼인 메서드다. */
 const valueObjectMethods: ReadonlySet<string> = new Set(['insert', 'update', 'onConflict', 'merge']);
@@ -96,7 +105,8 @@ export class KnexUsage {
     for (const call of calls) {
       const method = methodName(call);
       if (method === 'withSchema') joinSchema = literalText(call.arguments[0]);
-      if (method === 'raw') readSqlArgument(this.context, call.arguments[0]);
+      if (method === 'raw' || (method !== undefined && rawFragmentMethods.has(method))) readSqlArgument(this.context, call.arguments[0]);
+      if (method !== undefined && rawTableMethods.has(method)) this.readRawTable(call.arguments[0]);
       if (method !== undefined && !tableMethods.has(method)) continue;
       const scope = method === undefined || !joinMethods.has(method) ? schema : joinSchema;
       const table = this.readTable(call.arguments[0], scope);
@@ -126,6 +136,19 @@ export class KnexUsage {
     const channel = schema === undefined ? escapeQualified(name) : qualifiedChannel(schema, name);
     this.context.emitter.use(channel, undefined, false, inner);
     return { channel, alias: alias ?? name.split('.').at(-1)! };
+  }
+
+  /**
+   * `fromRaw('…')`·`intoRaw('…')`의 조각을 테이블 자리 SQL로 읽는다. 리터럴이 아니면 dynamic이다.
+   *
+   * @param argument 조각 인자
+   */
+  private readRawTable(argument: ts.Expression | undefined): void {
+    const inner = argument === undefined ? undefined : unwrap(argument);
+    if (inner === undefined) return;
+    this.context.emitter.consume(inner);
+    if (ts.isStringLiteralLike(inner)) this.context.emitter.sql(`SELECT * FROM ${inner.text}`, inner);
+    else this.context.emitter.dynamic(inner, inner);
   }
 
   /**

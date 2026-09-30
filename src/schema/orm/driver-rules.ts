@@ -50,7 +50,7 @@ const driverTypes: ReadonlyMap<string, ReadonlyMap<string, OrmValue>> = new Map(
 ]);
 
 /** 드라이버 값에서 또 드라이버 값을 돌려주는 메서드다(`pool.connect()`, `pool.getConnection()`). */
-const derivedClientMethods: ReadonlySet<string> = new Set(['connect', 'getConnection', 'promise', 'connection', 'transaction', 'reserve', 'withSession']);
+const derivedClientMethods: ReadonlySet<string> = new Set(['connect', 'getConnection', 'promise', 'connection', 'transaction', 'reserve', 'withSession', 'of']);
 
 /** knex 인스턴스를 만드는 export 이름이다. */
 const knexFactoryNames: ReadonlySet<string> = new Set(['*', 'default', 'knex', 'Knex']);
@@ -154,6 +154,17 @@ function isD1Target(target: OrmValue | { readonly kind: 'global'; readonly name:
 export function isBindingAccess(node: ts.Expression): boolean {
   const inner = unwrap(node);
   if (isEnvExpression(inner)) return true;
+  return (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) && isEnvExpression(unwrap(inner.expression));
+}
+
+/**
+ * 식이 Workers 환경 객체의 멤버(`env.NAME`·`c.env.NAME`)인지 본다. 환경 객체 자체(`c.env`)는 아니다.
+ *
+ * @param node 식
+ * @returns 바인딩 멤버면 true
+ */
+export function isBindingMember(node: ts.Expression): boolean {
+  const inner = unwrap(node);
   return (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) && isEnvExpression(unwrap(inner.expression));
 }
 

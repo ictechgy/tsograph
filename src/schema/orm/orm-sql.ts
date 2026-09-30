@@ -10,7 +10,7 @@
 
 import ts from 'typescript';
 
-import { objectMember, type OrmEvaluator } from './orm-values.ts';
+import type { OrmEvaluator } from './orm-values.ts';
 import { type OrmFactEmitter, unwrap } from './orm-facts.ts';
 
 /** ORM 표면이 공유하는 분석 문맥이다. */
@@ -31,35 +31,37 @@ export type Interpolator = (expression: ts.Expression) => string | undefined;
  * @param context 분석 문맥
  * @param argument 인자 식
  * @param depth 객체 속성을 따라간 깊이
+ * @param site 사실 위치(객체 속성을 따라가도 호출 인자 자리에 둔다; 없으면 인자 자신)
  */
-export function readSqlArgument(context: OrmContext, argument: ts.Expression | undefined, depth = 0): void {
+export function readSqlArgument(context: OrmContext, argument: ts.Expression | undefined, depth = 0, site?: ts.Node): void {
   if (argument === undefined || depth > 4) return;
   const { emitter, evaluator } = context;
   const inner = unwrap(argument);
+  const at = site ?? inner;
   if (ts.isStringLiteralLike(inner)) {
     emitter.consume(inner);
-    emitter.sql(inner.text, inner);
+    emitter.sql(inner.text, at);
     return;
   }
   if (ts.isObjectLiteralExpression(inner)) {
-    readSqlObject(context, inner, inner, depth);
+    readSqlObject(context, inner, at, depth);
     return;
   }
   emitter.consume(inner);
   const template = templateOf(inner, evaluator);
   if (template !== undefined) {
     emitter.consume(template);
-    emitter.partialSql(template, inner);
+    emitter.partialSql(template, at);
     return;
   }
   const value = evaluator.valueOf(inner);
   if (value.kind === 'string') {
     emitter.consume(value.node);
-    emitter.sql(value.value, inner);
+    emitter.sql(value.value, at);
   } else if (value.kind === 'object') {
-    readSqlObject(context, value.node, inner, depth);
+    readSqlObject(context, value.node, at, depth);
   } else {
-    emitter.dynamic(inner, inner);
+    emitter.dynamic(inner, at);
   }
 }
 
@@ -82,18 +84,20 @@ function templateOf(expression: ts.Expression, evaluator: OrmEvaluator): ts.Temp
 }
 
 /**
- * `{ text: '…' }`·`{ sql: '…' }` 인자의 SQL을 읽는다. SQL 키가 없으면 dynamic이다.
+ * `{ text: '…' }`·`{ sql: '…' }` 인자의 SQL을 읽는다(뒤의 스프레드가 덮으면 그 값). SQL 키가 없거나 풀지 못한
+ * 스프레드가 가릴 수 있으면 dynamic이다.
  *
  * @param context 분석 문맥
  * @param object 객체 리터럴
- * @param at 키가 없을 때의 위치
+ * @param at 사실 위치
  * @param depth 깊이
  */
-function readSqlObject(context: OrmContext, object: ts.ObjectLiteralExpression, at: ts.Expression, depth: number): void {
+function readSqlObject(context: OrmContext, object: ts.ObjectLiteralExpression, at: ts.Node, depth: number): void {
   for (const key of sqlObjectKeys) {
-    const member = objectMember(object, key);
+    const member = context.evaluator.propertyOf(object, key);
+    if (member === null) break;
     if (member !== undefined) {
-      readSqlArgument(context, member, depth + 1);
+      readSqlArgument(context, member, depth + 1, at);
       return;
     }
   }

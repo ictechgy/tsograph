@@ -26,6 +26,9 @@ const tableMethods: ReadonlySet<string> = new Set([
 /** 값 객체 키가 컬럼인 메서드(`insert(t).values({…})`, `update(t).set({…})`)다. */
 const valueMethods: ReadonlySet<string> = new Set(['values', 'set']);
 
+/** 충돌 시 갱신 옵션(`{ set: {…} }`)을 받는 메서드다. */
+const upsertMethods: ReadonlySet<string> = new Set(['onConflictDoUpdate', 'onDuplicateKeyUpdate']);
+
 /** 관계형 쿼리 연산이다. */
 const relationalOperations: ReadonlySet<string> = new Set(['findMany', 'findFirst']);
 
@@ -114,8 +117,21 @@ export class DrizzleUsage {
       if (!ts.isPropertyAccessExpression(access) || access.expression !== current || !ts.isCallExpression(access.parent)) return;
       const call = access.parent;
       if (valueMethods.has(access.name.text)) for (const argument of call.arguments) this.readObjectKeys(argument, table);
+      if (upsertMethods.has(access.name.text)) this.readUpsertSet(call.arguments[0], table);
       current = call;
     }
+  }
+
+  /**
+   * `onConflictDoUpdate({ set: {…} })`·`onDuplicateKeyUpdate({ set })`의 `set` 키를 컬럼 사실로 낸다.
+   *
+   * @param options 옵션 인자
+   * @param table 테이블
+   */
+  private readUpsertSet(options: ts.Expression | undefined, table: DrizzleTable): void {
+    const object = options === undefined ? undefined : unwrap(options);
+    const set = object !== undefined && ts.isObjectLiteralExpression(object) ? objectMember(object, 'set') : undefined;
+    if (set !== undefined) this.readObjectKeys(set, table);
   }
 
   /**

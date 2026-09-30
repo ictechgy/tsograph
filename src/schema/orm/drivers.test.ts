@@ -69,12 +69,12 @@ test('knex 사슬·원시 드라이버·SQL 태그·D1 바인딩(선언 파일·
   assert.deepEqual(usrLines(result), [
     'src/do.ts:3:47 d1_counter @src/do.ts#Counter.fetch',
     'src/do.ts:3:145 d1_session @src/do.ts#Counter.fetch',
-    'src/drivers.ts:13:28 shared_const @src/drivers.ts#all',
+    'src/drivers.ts:13:20 shared_const @src/drivers.ts#all',
     'src/drivers.ts:14:22 pg_log @src/drivers.ts#all',
     'src/drivers.ts:15:36 my_legacy @src/drivers.ts#all',
     'src/drivers.ts:16:52 lite_rows @src/drivers.ts#all',
     'src/drivers.ts:18:23 lib_a @src/drivers.ts#all',
-    'src/drivers.ts:18:51 lib_b @src/drivers.ts#all',
+    'src/drivers.ts:18:44 lib_b @src/drivers.ts#all',
     'src/drivers.ts:19:24 { args: [] } dyn @src/drivers.ts#all',
     'src/drivers.ts:21:12 neon_rows @src/drivers.ts#all',
     'src/drivers.ts:22:19 neon_query @src/drivers.ts#all',
@@ -167,5 +167,41 @@ test('선언 타입의 멤버(인터페이스 상속·교차·구조 분해 매�
     'src/use.ts:3:87 b_rows @src/use.ts#b',
     'src/use.ts:4:64 c_rows @src/use.ts#c',
     'src/use.ts:5:68 d_rows @src/use.ts#d',
+  ]);
+});
+
+
+test('GLM 지적: knex Raw 조각·fromRaw, 뒤 스프레드가 덮는 SQL 키, env 자체의 exec, 동적 import, of(), onConflictDoUpdate set', () => {
+  const lines = ormLines({
+  'src/a.ts': [
+    "import knex from 'knex';",
+    "import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';",
+    "import { drizzle } from 'drizzle-orm/libsql';",
+    "export const counters = sqliteTable('counters', { id: integer().primaryKey(), hits: integer('hit_count'), label: text() });",
+    "const db = knex({ client: 'pg' });",
+    "const overrides = { text: 'select * from overridden' };",
+    'export async function f(orm: ReturnType<typeof drizzle>, harness: { env: { exec(s: string): void } }) {',
+    "  await db('users').whereRaw('id in (select user_id from bans)').joinRaw('join roles on roles.id = users.role_id');",
+    "  await db.select('*').fromRaw('legacy_view as v');",
+    "  harness.env.exec('select * from not_d1');",
+    "  const { Pool } = await import('pg');",
+    "  await new Pool().query({ text: 'select * from shadowed', ...overrides });",
+    "  await orm.insert(counters).values({ id: 1 }).onConflictDoUpdate({ target: counters.id, set: { hits: 2 } });",
+    '}',
+    '',
+  ].join('\n'),
+  'src/b.ts': "export async function g() { const mod = await import('mysql2/promise'); const cluster = mod.createPoolCluster(); return cluster.of('app').query('select * from clustered'); }\n",
+}).filter((line) => !line.includes('#model:'));
+  assert.deepEqual(lines, [
+    'src/a.ts:8:12 users @src/a.ts#f',
+    'src/a.ts:8:30 bans @src/a.ts#f',
+    'src/a.ts:8:74 roles @src/a.ts#f',
+    'src/a.ts:9:32 legacy_view @src/a.ts#f',
+    'src/a.ts:12:26 overridden @src/a.ts#f',
+    'src/a.ts:13:20 counters @src/a.ts#f',
+    'src/a.ts:13:39 counters.id @src/a.ts#f',
+    'src/a.ts:13:86 counters.id @src/a.ts#f',
+    'src/a.ts:13:97 counters.hit_count @src/a.ts#f',
+    'src/b.ts:1:145 clustered @src/b.ts#g',
   ]);
 });

@@ -159,7 +159,9 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
 - 컬럼은 `select`·`returning`·`first`·`pluck`·`where…`·`orderBy`·`groupBy`의 문자열(`'a.col as x'`의 별칭 제거),
   `where({…})`·`insert({…})`·`update({…})`의 키, 조인 조건 인자다. 별칭(`u.id`)으로 한정했거나 사슬의 테이블이 하나일
   때만 낸다.
-- `knex.raw(sql)`은 SQL 텍스트이고, `knex.schema.…`(DDL)는 사용으로 보지 않는다.
+- `knex.raw(sql)`과 사슬의 `whereRaw`·`orWhereRaw`·`havingRaw`·`orderByRaw`·`groupByRaw`·`selectRaw`·`joinRaw` 조각은
+  SQL 텍스트로, `fromRaw`·`intoRaw` 조각은 테이블 자리 SQL로 읽는다(리터럴이 아니면 dynamic). `knex.schema.…`(DDL)는
+  사용으로 보지 않는다.
 
 ## 원시 드라이버와 Cloudflare D1
 
@@ -168,7 +170,8 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
   Vercel Postgres), `connect`(PlanetScale), 타입 표기(`Pool`·`PoolClient`·`Client`, `Connection`·`Pool`·`PoolConnection`,
   `Database`, libSQL `Client`·`Transaction`, `D1Database`).
 - **SQL을 읽는 메서드**: `query`·`execute`·`prepare`·`exec`·`run`·`all`·`get`·`each`의 첫 인자, libSQL `batch([…])`의
-  각 원소. 인자는 문자열 리터럴, 정적으로 풀리는 const(파일 사이 포함), `{ text }`·`{ sql }`·`{ query }` 객체다.
+  각 원소. 인자는 문자열 리터럴, 정적으로 풀리는 const(파일 사이 포함), `{ text }`·`{ sql }`·`{ query }` 객체다
+  (뒤의 스프레드가 키를 덮으면 그 값, 풀지 못한 스프레드가 가릴 수 있으면 dynamic).
   보간이 있는 일반 템플릿 문자열(과 그것을 담은 const)은 **부분 관찰**이다: 원문에 이름으로 쓴 관계는 정적 사실로
   내고(`IN (${placeholders})` 관용구), 보간이 관계·조인 조각일 수 있으므로 원문 요약 dynamic 사실을 늘 하나 더한다.
   그 밖의 식은 dynamic이다. 게이트가 읽은 SQL은 소문자여도 읽는다(게이트 없는 리터럴은 여전히 대문자만).
@@ -177,7 +180,8 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
   `sql.query(text)`는 SQL 텍스트다. `sql.begin(async (tx) => …)`의 `tx`도 태그다.
 - **D1**: `D1Database`로 선언된 속성 이름(소스와 `.d.ts` — `wrangler types`가 만드는 `interface Env { DB: D1Database }`)을
   모아 `env.DB`·`c.env.DB`·`this.env.DB`와 그 구조 분해·복사를 D1 클라이언트로 본다. 매개변수·필드의 `D1Database`
-  표기와 `withSession()`도 같다. 선언을 찾지 못해도 `…env.NAME.prepare(…)`·`.exec(…)` 모양이면 D1으로 본다.
+  표기와 `withSession()`도 같다. 선언을 찾지 못해도 `…env.NAME.prepare(…)`·`.exec(…)` 모양이면 D1으로 본다(`env` 자체의
+  `env.exec(…)`는 아니다).
   `batch([…])`의 원소는 이미 `prepare`로 읽힌 문장이라 다시 읽지 않는다.
 
 ## limitation 접두사(추가분)

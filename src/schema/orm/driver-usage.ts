@@ -12,7 +12,7 @@
 
 import ts from 'typescript';
 
-import { isBindingAccess } from './driver-rules.ts';
+import { isBindingMember } from './driver-rules.ts';
 import { unwrap } from './orm-facts.ts';
 import { type OrmContext, quoteIdentifier, readSqlArgument, templateSql } from './orm-sql.ts';
 import type { OrmValue } from './orm-values.ts';
@@ -50,7 +50,7 @@ export class DriverUsage {
     const receiver = this.context.evaluator.valueOf(callee.expression);
     if (isSqlClient(receiver)) this.clientCall(node, method, receiver);
     else if (isSqlTag(receiver) && tagSqlMethods.has(method)) readSqlArgument(this.context, node.arguments[0]);
-    else if (receiver.kind === 'unknown' && bindingSqlMethods.has(method) && isBindingAccess(callee.expression)) {
+    else if (receiver.kind === 'unknown' && bindingSqlMethods.has(method) && isBindingMember(callee.expression)) {
       readSqlArgument(this.context, node.arguments[0]);
     }
   }

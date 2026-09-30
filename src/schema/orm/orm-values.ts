@@ -205,7 +205,8 @@ export class OrmEvaluator {
       return { kind: 'external', module: receiver.module, name };
     }
     if (receiver.kind === 'object') {
-      const initializer = objectMember(receiver.node, name);
+      const initializer = this.propertyOf(receiver.node, name);
+      if (initializer === null) return UNKNOWN;
       if (initializer !== undefined) return this.valueOf(initializer);
     }
     const ruled = this.firstRule((rules) => rules.member?.(receiver, name, node));

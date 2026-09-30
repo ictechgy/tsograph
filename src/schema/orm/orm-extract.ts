@@ -91,7 +91,7 @@ export function extractOrmFacts(input: OrmExtractionInput): OrmExtraction {
 }
 
 /**
- * 모듈이 ORM 표면과 관련 있는지 본다(지원 패키지 import 또는 `D1Database` 참조).
+ * 모듈이 ORM 표면과 관련 있는지 본다(지원 패키지 import·require·동적 import 또는 `D1Database` 참조).
  *
  * @param module 소스 모듈
  * @returns 관련 있으면 true
@@ -100,8 +100,9 @@ function isOrmModule(module: SourceModule): boolean {
   if (module.text.text.includes(D1_TYPE_NAME)) return true;
   const specifiers = module.imports.map((binding) => binding.specifier);
   walk(module.sourceFile, (node) => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require'
-      && node.arguments[0] !== undefined && ts.isStringLiteralLike(node.arguments[0])) specifiers.push(node.arguments[0].text);
+    const isLoad = ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+      || (ts.isIdentifier(node.expression) && node.expression.text === 'require'));
+    if (isLoad && node.arguments[0] !== undefined && ts.isStringLiteralLike(node.arguments[0])) specifiers.push(node.arguments[0].text);
   });
   return specifiers.some((specifier) => SUPPORTED_ORM_PACKAGES.has(packageName(specifier) ?? ''));
 }
