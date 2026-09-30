@@ -19,10 +19,16 @@ export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 /** 의존성 섹션 이름이다. */
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const;
 
+/**
+ * 루트 package.json 상태다. `unusable`은 파일은 있는데 선언을 읽지 못한 경우(깨진 JSON, UTF-8 아님, 크기 상한 초과,
+ * symlink)다 — 없는 것과 달리 프레임워크를 감지하지 못한 이유를 limitation으로 알려야 한다.
+ */
+export type ManifestState = 'absent' | 'parsed' | 'unusable';
+
 /** 읽은 프로젝트 의존성이다. */
 export interface ProjectDependencies {
-  /** package.json을 읽었는지 */
-  readonly manifestRead: boolean;
+  /** 루트 package.json 상태 */
+  readonly manifest: ManifestState;
   /** 선언한 이름 → 범위 문자열 */
   readonly declared: ReadonlyMap<string, string>;
   /** 이름 → 확정한 주 버전(잠금 파일 우선). 모르면 없다. */
@@ -37,8 +43,8 @@ export interface ProjectDependencies {
  * @returns 의존성
  */
 export async function readProjectDependencies(fileSystem: CommandFileSystem, project: string): Promise<ProjectDependencies> {
-  const manifest = await readRootFile(fileSystem, project, 'package.json');
-  const declared = manifest === undefined ? new Map<string, string>() : declaredRanges(manifest);
+  const manifest = await readManifest(fileSystem, project);
+  const declared = manifest.declared ?? new Map<string, string>();
   const lockfiles: [string, string][] = [];
   for (const name of ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock']) {
     const text = await readRootFile(fileSystem, project, name);
@@ -46,13 +52,27 @@ export async function readProjectDependencies(fileSystem: CommandFileSystem, pro
   }
   const cache = new Map<string, number | undefined>();
   return {
-    manifestRead: manifest !== undefined,
+    manifest: manifest.state,
     declared,
     majorOf: (name) => {
       if (!cache.has(name)) cache.set(name, decideMajor(name, declared.get(name), lockfiles));
       return cache.get(name);
     },
   };
+}
+
+/**
+ * 루트 package.json을 읽어 상태와 선언 범위를 돌려준다.
+ *
+ * @param fileSystem 파일 시스템
+ * @param project 프로젝트 realpath
+ * @returns 상태와 선언 범위(읽지 못했으면 undefined)
+ */
+async function readManifest(fileSystem: CommandFileSystem, project: string): Promise<{ state: ManifestState; declared: Map<string, string> | undefined }> {
+  if ((await lookupEntry(fileSystem, project, 'package.json')).kind === 'absent') return { state: 'absent', declared: undefined };
+  const text = await readRootFile(fileSystem, project, 'package.json');
+  const declared = text === undefined ? undefined : declaredRanges(text);
+  return { state: declared === undefined ? 'unusable' : 'parsed', declared };
 }
 
 /**
@@ -70,19 +90,19 @@ async function readRootFile(fileSystem: CommandFileSystem, project: string, name
 }
 
 /**
- * package.json 텍스트에서 선언 범위를 모은다. 깨진 JSON은 빈 목록이다.
+ * package.json 텍스트에서 선언 범위를 모은다.
  *
  * @param text package.json 텍스트
- * @returns 이름 → 범위
+ * @returns 이름 → 범위, 깨진 JSON이면 undefined
  */
-export function declaredRanges(text: string): Map<string, string> {
+export function declaredRanges(text: string): Map<string, string> | undefined {
   const ranges = new Map<string, string>();
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    // 깨진 package.json은 선언이 없는 것과 같게 보고 호출자가 limitation으로 알린다.
-    return ranges;
+    // 깨진 package.json은 선언을 알 수 없다는 뜻이다. 호출자가 `unusable` 상태로 limitation을 낸다.
+    return undefined;
   }
   for (const field of DEPENDENCY_FIELDS) {
     const section = isRecord(parsed) ? parsed[field] : undefined;

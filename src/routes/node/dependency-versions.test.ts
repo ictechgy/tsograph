@@ -58,7 +58,7 @@ test('package.json 선언과 잠금 파일을 합쳐 주 버전을 정한다', a
     'package.json': JSON.stringify({ dependencies: { express: '*' }, devDependencies: { fastify: '^5.0.0', express: '4' } }),
     'yarn.lock': 'express@*:\n  version "4.21.2"\n',
   });
-  assert.equal(locked.manifestRead, true);
+  assert.equal(locked.manifest, 'parsed');
   assert.equal(locked.majorOf('express'), 4);
   assert.equal(locked.majorOf('fastify'), 5);
   assert.equal(locked.majorOf('hono'), undefined);
@@ -70,6 +70,8 @@ test('package.json 선언과 잠금 파일을 합쳐 주 버전을 정한다', a
   assert.equal(conflicting.majorOf('express'), undefined);
   const broken = await readWith({ 'package.json': '{' });
   assert.deepEqual([...broken.declared], []);
+  assert.equal(broken.manifest, 'unusable');
+  assert.equal((await readWith({ 'a.ts': '' })).manifest, 'absent');
 });
 
 test('symlink package.json은 읽지 않는다', async () => {
@@ -79,7 +81,7 @@ test('symlink package.json은 읽지 않는다', async () => {
     writeFileSync(join(root, 'real', 'package.json'), JSON.stringify({ dependencies: { hono: '4.0.0' } }));
     symlinkSync(join(root, 'real', 'package.json'), join(root, 'package.json'));
     const dependencies = await readProjectDependencies(createNodeFileSystem(), root);
-    assert.equal(dependencies.manifestRead, false);
+    assert.equal(dependencies.manifest, 'unusable');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -98,4 +100,5 @@ test('프레임워크 감지는 확인한 주 버전과 모델링하지 않는 �
   assert.equal(hasNodeFramework(detected), true);
   assert.equal(hasNodeFramework(detectFrameworks(await readWith({ 'package.json': JSON.stringify({ dependencies: { next: '16.0.0' } }) }))), false);
   assert.deepEqual(declaredRanges(JSON.stringify({ dependencies: { a: 1 } })), new Map());
+  assert.equal(declaredRanges('{'), undefined);
 });

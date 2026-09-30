@@ -33,6 +33,15 @@ test('모델링하지 않는 서버 프레임워크만 있으면 Next 기본 스
   assert.equal(limitationsWith(document, 'route-coverage: no app or pages directory').length, 1);
 });
 
+test('깨진 package.json은 프레임워크를 감지하지 못한 이유를 알린다', async () => {
+  const document = await scanNodeProject({
+    'package.json': '{ "dependencies": { "hono": "4.6.0" ',
+    'src/app.ts': "import { Hono } from 'hono';\nconst app = new Hono();\napp.get('/a', (c) => c.text('a'));\nexport default app;\n",
+  });
+  assert.equal(document.facts.length, 0);
+  assert.equal(limitationsWith(document, 'route-coverage: the root package.json exists but could not be read').length, 1);
+});
+
 test('해석기는 CommonJS 플러그인·네임스페이스·열거형·조건부 등록·재귀를 다룬다', async () => {
   const document = await scanNodeProject({
     'package.json': packageJson({ express: '4.21.2' }),

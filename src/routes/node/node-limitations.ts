@@ -26,6 +26,9 @@ const VERSION_PACKAGES: Readonly<Record<FrameworkRoutes['framework'], readonly s
 export function nodeProjectLimitations(result: NodeRoutesResult): LimitationEntry[] {
   const entries: LimitationEntry[] = [];
   const { detected, analysis } = result;
+  if (detected.manifestUnusable) {
+    entries.push({ text: 'route-coverage: the root package.json exists but could not be read (invalid JSON, not UTF-8, over 16 MiB, or a symbolic link); Node backend frameworks were not detected from it, so their routes may be missing' });
+  }
   if (detected.unsupported.length > 0) {
     entries.push({ text: `route-coverage: package.json declares ${detected.unsupported.join(', ')}, whose route registrations tsograph does not model` });
   }

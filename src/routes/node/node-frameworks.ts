@@ -22,6 +22,8 @@ export interface DetectedFrameworks {
   readonly unsupported: readonly string[];
   /** 확인한 주 버전과 다르거나 정하지 못한 패키지(정렬) */
   readonly unverified: readonly string[];
+  /** 루트 package.json이 있는데 읽지 못했는지(감지 결과를 믿을 수 없다) */
+  readonly manifestUnusable: boolean;
 }
 
 /** 확인한 주 버전이다. */
@@ -66,6 +68,7 @@ export function detectFrameworks(dependencies: ProjectDependencies): DetectedFra
     next: has('next'),
     unsupported: UNSUPPORTED_SERVER_PACKAGES.filter(has),
     unverified: [...unverified].sort(),
+    manifestUnusable: dependencies.manifest === 'unusable',
   };
 }
 
