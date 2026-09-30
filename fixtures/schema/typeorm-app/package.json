@@ -1,0 +1,9 @@
+{
+  "name": "typeorm-fixture-app",
+  "private": true,
+  "dependencies": {
+    "@nestjs/typeorm": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "typeorm": "1.1.1"
+  }
+}

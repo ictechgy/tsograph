@@ -3,7 +3,7 @@
   "private": true,
   "dependencies": {
     "@prisma/client": "^7.8.0",
-    "typeorm": "0.3.20"
+    "kysely": "0.28.2"
   },
   "devDependencies": {
     "prisma": "^7.8.0"

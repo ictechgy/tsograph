@@ -1,0 +1,8 @@
+{
+  "name": "knex-fixture-app",
+  "private": true,
+  "dependencies": {
+    "knex": "3.3.0",
+    "pg": "^8.16.0"
+  }
+}

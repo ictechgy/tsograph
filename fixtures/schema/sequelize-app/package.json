@@ -1,0 +1,8 @@
+{
+  "name": "sequelize-fixture-app",
+  "private": true,
+  "dependencies": {
+    "sequelize": "6.37.8",
+    "sqlite3": "^5.1.7"
+  }
+}

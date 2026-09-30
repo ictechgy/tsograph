@@ -224,12 +224,12 @@ test('generator output 경로의 클라이언트를 tsconfig paths로 인식하�
   assert.deepEqual(lines, ['src/lib/use.ts:2:35 users @src/lib/use.ts#count']);
 });
 
-test('지원 표면 밖 DB 패키지와 D1은 파일 수로만 센다', () => {
+test('지원 표면 밖 DB 패키지는 파일 수로만 센다', () => {
   const result = extractProject({
-    'src/a.ts': "import { Pool } from 'pg';\nimport knex from 'knex/lib';\nexport { Pool, knex };\n",
-    'src/b.ts': "const mongoose = require('mongoose');\nexport async function f(db: D1Database) { await import('drizzle-orm/pg-core'); return mongoose; }\n",
+    'src/a.ts': "import { Kysely } from 'kysely';\nimport objection from 'objection/lib';\nexport { Kysely, objection };\n",
+    'src/b.ts': "const mongoose = require('mongoose');\nexport async function f() { await import('slonik'); return mongoose; }\n",
   });
   assert.deepEqual(result.facts, []);
-  assert.ok(result.limitations.includes('unsupported-db-packages: 2 source file(s) use SQL packages outside the supported surface: d1 (1), drizzle-orm (1), knex (1), pg (1)'));
+  assert.ok(result.limitations.includes('unsupported-db-packages: 2 source file(s) use SQL packages outside the supported surface: kysely (1), objection (1), slonik (1)'));
   assert.ok(result.limitations.includes('non-relational-stores: 1 source file(s) import non-SQL persistence packages outside the relation join: mongoose (1)'));
 });

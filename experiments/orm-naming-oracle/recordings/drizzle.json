@@ -1,0 +1,154 @@
+{
+  "fixture": "fixtures/schema/drizzle-d1-app",
+  "packages": {
+    "drizzle-orm": "0.45.3",
+    "drizzle-kit": "0.31.11",
+    "sql.js": "1.14.2"
+  },
+  "declared": [
+    "app_post_tags",
+    "app_post_tags.post_id",
+    "app_post_tags.tag_id",
+    "app_tags",
+    "app_tags.id",
+    "app_tags.label",
+    "blog_posts",
+    "blog_posts.author_id",
+    "blog_posts.body_html",
+    "blog_posts.id",
+    "blog_posts.published_on",
+    "blog_posts.title",
+    "users",
+    "users.created_at",
+    "users.display_name",
+    "users.email",
+    "users.id",
+    "users.modified_at"
+  ],
+  "relations": [
+    "app_post_tags",
+    "app_post_tags.post_id",
+    "app_post_tags.tag_id",
+    "app_tags",
+    "app_tags.id",
+    "app_tags.label",
+    "audit_log",
+    "audit_log.actor_id",
+    "audit_log.event",
+    "audit_log.id",
+    "blog_posts",
+    "blog_posts.author_id",
+    "blog_posts.body_html",
+    "blog_posts.id",
+    "blog_posts.published_on",
+    "blog_posts.title",
+    "users",
+    "users.created_at",
+    "users.display_name",
+    "users.email",
+    "users.id",
+    "users.modified_at"
+  ],
+  "queries": {
+    "src/db/queries.ts#listUsers": {
+      "sql": "select \"id\", \"display_name\" from \"users\" order by \"users\".\"created_at\"",
+      "relations": [
+        "users"
+      ],
+      "columns": [
+        "users.created_at",
+        "users.display_name",
+        "users.id"
+      ]
+    },
+    "src/db/queries.ts#postsWithAuthors": {
+      "sql": "select \"blog_posts\".\"id\", \"blog_posts\".\"author_id\", \"blog_posts\".\"title\", \"blog_posts\".\"body_html\", \"blog_posts\".\"published_on\", \"users\".\"id\", \"users\".\"display_name\", \"users\".\"email\", \"users\".\"created_at\", \"users\".\"modified_at\" from \"blog_posts\" inner join \"users\" on \"blog_posts\".\"author_id\" = \"users\".\"id\" where \"users\".\"email\" = ?",
+      "relations": [
+        "blog_posts",
+        "users"
+      ],
+      "columns": [
+        "blog_posts.author_id",
+        "blog_posts.body_html",
+        "blog_posts.id",
+        "blog_posts.published_on",
+        "blog_posts.title",
+        "users.created_at",
+        "users.display_name",
+        "users.email",
+        "users.id",
+        "users.modified_at"
+      ]
+    },
+    "src/db/queries.ts#userFeed": {
+      "sql": "select \"display_name\", \"modified_at\", (select coalesce(json_group_array(json_array(\"title\", (select coalesce(json_group_array(json_array(\"post_id\", \"tag_id\", (select json_array(\"id\", \"label\") as \"data\" from (select * from \"app_tags\" \"users_posts_postTags_tag\" where \"users_posts_postTags_tag\".\"id\" = \"users_posts_postTags\".\"tag_id\" limit ?) \"users_posts_postTags_tag\"))), json_array()) as \"data\" from \"app_post_tags\" \"users_posts_postTags\" where \"users_posts_postTags\".\"post_id\" = \"users_posts\".\"id\"))), json_array()) as \"data\" from \"blog_posts\" \"users_posts\" where \"users_posts\".\"author_id\" = \"users\".\"id\") as \"posts\" from \"users\" \"users\" where \"users\".\"id\" = ? limit ?",
+      "relations": [
+        "app_post_tags",
+        "app_tags",
+        "blog_posts",
+        "users"
+      ],
+      "columns": [
+        "app_post_tags.post_id",
+        "app_post_tags.tag_id",
+        "app_tags.id",
+        "blog_posts.author_id",
+        "blog_posts.id",
+        "users.id"
+      ]
+    },
+    "src/db/queries.ts#createPost": {
+      "sql": "insert into \"blog_posts\" (\"id\", \"author_id\", \"title\", \"body_html\", \"published_on\") values (null, ?, ?, ?, null)",
+      "relations": [
+        "blog_posts"
+      ],
+      "columns": [
+        "blog_posts.author_id",
+        "blog_posts.body_html",
+        "blog_posts.id",
+        "blog_posts.published_on",
+        "blog_posts.title"
+      ]
+    },
+    "src/db/queries.ts#renameTag": {
+      "sql": "update \"app_tags\" set \"label\" = ? where \"app_tags\".\"id\" = ?",
+      "relations": [
+        "app_tags"
+      ],
+      "columns": [
+        "app_tags.id",
+        "app_tags.label"
+      ]
+    },
+    "src/db/queries.ts#unlinkTag": {
+      "sql": "delete from \"app_post_tags\" where \"app_post_tags\".\"tag_id\" = ?",
+      "relations": [
+        "app_post_tags"
+      ],
+      "columns": [
+        "app_post_tags.tag_id"
+      ]
+    },
+    "src/db/queries.ts#countPublished": {
+      "sql": "select count(*) from \"blog_posts\" where \"blog_posts\".\"published_on\" is not null",
+      "relations": [
+        "blog_posts"
+      ],
+      "columns": [
+        "blog_posts.published_on"
+      ]
+    },
+    "src/db/queries.ts#authorPostCounts": {
+      "sql": "select \"users\".\"display_name\", count(*) from \"users\" join \"blog_posts\" on \"blog_posts\".\"author_id\" = \"users\".\"id\" group by \"users\".\"id\"",
+      "relations": [
+        "blog_posts",
+        "users"
+      ],
+      "columns": [
+        "blog_posts.author_id",
+        "users.display_name",
+        "users.id"
+      ]
+    }
+  }
+}

@@ -77,6 +77,8 @@ export class ClientUsageScanner {
   private readonly counts: UsageCounts;
   /** 게이트가 이미 읽은 노드(그 아래 리터럴은 다시 읽지 않는다)다. */
   private readonly consumed = new Set<ts.Node>();
+  /** ORM·드라이버 게이트가 먼저 읽은 노드다(같은 SQL을 게이트 없는 스캔이 다시 읽지 않게 한다). */
+  private readonly preconsumed: ReadonlySet<ts.Node>;
   /** 게이트가 소비한 같은 파일 const 문자열 리터럴 시작 위치다. */
   private readonly consumedLiteralStarts = new Set<number>();
   /** `$transaction` 콜백 함수 노드다. 첫 매개변수가 클라이언트다. */
@@ -93,6 +95,7 @@ export class ClientUsageScanner {
    * @param catalog 스키마 이름 표. `'non-relational'`이면 delegate 접근을 사실로 내지 않는다
    * @param sink 사실 수집기
    * @param counts 계수
+   * @param preconsumed ORM·드라이버 게이트가 먼저 읽은 노드
    */
   constructor(
     module: SourceModule,
@@ -100,6 +103,7 @@ export class ClientUsageScanner {
     catalog: PrismaCatalog | undefined | 'non-relational',
     sink: RelationFactSink,
     counts: UsageCounts,
+    preconsumed: ReadonlySet<ts.Node> = new Set(),
   ) {
     this.module = module;
     this.moduleScope = analysis.scope;
@@ -109,6 +113,7 @@ export class ClientUsageScanner {
     this.emitsDelegates = catalog !== 'non-relational';
     this.sink = sink;
     this.counts = counts;
+    this.preconsumed = preconsumed;
   }
 
   /** 파일 전체를 스캔한다. */
@@ -559,7 +564,7 @@ export class ClientUsageScanner {
    */
   private isConsumed(node: ts.Node): boolean {
     for (let current: ts.Node | undefined = node; current !== undefined; current = current.parent) {
-      if (this.consumed.has(current)) return true;
+      if (this.consumed.has(current) || this.preconsumed.has(current)) return true;
     }
     return false;
   }

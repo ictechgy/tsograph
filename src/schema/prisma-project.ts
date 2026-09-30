@@ -90,13 +90,24 @@ export function loadPrismaProject(root: string, reader: ProjectReader): PrismaPr
 }
 
 /**
- * 트리 탐색에서 모을 파일인지 본다.
+ * 트리 탐색에서 모을 파일인지 본다. 선언 파일(`.d.ts`)은 소스로 파싱하지 않고, Cloudflare D1 바인딩 선언
+ * (`wrangler types`가 만드는 `interface Env { DB: D1Database }`)을 찾을 때만 읽는다.
  *
  * @param name 파일 이름
  * @returns 모으면 true
  */
 function isInterestingFile(name: string): boolean {
-  return isSourceFileName(name) || name === 'package.json' || LOCKFILE_NAMES.includes(name);
+  return isSourceFileName(name) || isDeclarationFileName(name) || name === 'package.json' || LOCKFILE_NAMES.includes(name);
+}
+
+/**
+ * 파일 이름이 TypeScript 선언 파일인지 본다.
+ *
+ * @param name 파일 이름
+ * @returns 선언 파일이면 true
+ */
+export function isDeclarationFileName(name: string): boolean {
+  return /\.d\.[cm]?ts$/u.test(name);
 }
 
 /**
