@@ -13,11 +13,12 @@
   계약 관련 변경 전에 그 문서를 먼저 읽고, 초안과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
 - 구현: `tsograph openapi`(OpenAPI 2.0/3.0/3.1 → http `route-contract`), `tsograph routes`
   (Next.js App Router·Pages Router API와 Node 백엔드 Hono·Express·Fastify·Koa(@koa/router)·NestJS → http `route-decl`,
-  규칙은 `docs/NODE-ROUTES.md`), `tsograph schema`(Prisma 스키마·
-  Prisma Client·원시 SQL → persistence `relation-use`), `tsograph graph`·`reach`·`impact`(호출 그래프 →
-  isthmus `language-traversal` v1, id는 routes·schema `symbol.usr`와 같은 문자열, 간선 근거 `direct`·`bound`·
-  `candidate`와 `--dispatch`). 장기 범위: 그 밖의 ORM/SQL relation-use(TypeORM·
-  Sequelize·Drizzle·Knex·raw 드라이버·D1), 웹/RN 클라이언트 route-call.
+  규칙은 `docs/NODE-ROUTES.md`), `tsograph schema`(Prisma 스키마·Prisma Client·Drizzle·TypeORM·Sequelize 6·
+  knex·원시 SQL 드라이버·Cloudflare D1·원시 SQL → persistence `relation-use`, 규칙은 `docs/PERSISTENCE.md`),
+  `tsograph graph`·`reach`·`impact`(호출 그래프 → isthmus `language-traversal` v1, id는 routes·schema
+  `symbol.usr`와 같은 문자열, 인라인 콜백도 안정 id, 간선 근거 `direct`·`bound`·`candidate`와 `--dispatch`).
+  장기 범위: 그 밖의 ORM/드라이버 relation-use(Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·
+  MSSQL·Oracle·slonik), 웹/RN 클라이언트 route-call.
   구현된 것과 계획을 구분해 적는다.
 - 정규 경로 템플릿 규칙은 isthmus 공유 벡터(`conformance/http-template.json`)와 맞춘다.
   벡터가 생기면 `src/openapi/conformance.test.ts`가 검증한다. http limitation 스코프는
