@@ -235,7 +235,9 @@ tsograph schema --project fixtures/schema/drizzle-d1-app > js-facts.json
 isthmus check --pairs js-facts.json sql-facts.json
 ```
 
-오류·경고 없이 관계 5개(원시 D1 SQL만 쓰는 `audit_log` 포함)와 컬럼 14개가 짝지어진다. 라우트 핸들러를 이름 있는
-함수(`app.get('/users', getUsers)`)로 두면 `tsograph reach`의 정방향 순회와 `schemagraph impact --format
-language-traversal`로 `isthmus trace`가 라우트에서 테이블과 DB 의존자까지 잇는다. `app.get('/x', async (c) => …)`처럼
-모듈 최상위의 익명 핸들러 안 사실은 감싼 선언 이름이 없어 usr가 없다(`missing-relation-usrs:`).
+오류·경고 없이 관계 5개(원시 D1 SQL만 쓰는 `audit_log` 포함)와 컬럼 14개가 짝지어진다. `tsograph reach`의 정방향 순회와
+`schemagraph impact --format language-traversal`로 `isthmus trace`가 라우트에서 테이블과 DB 의존자까지 잇는다.
+핸들러가 이름 있는 함수(`app.get('/users', getUsers)`)든 모듈 최상위의 인라인 함수(`app.get('/x', async (c) => …)`)든
+같다 — 인라인 핸들러와 그 안의 relation-use는 같은 인라인 콜백 id(`src/routes.ts#<module>.app.get("/x")`)를 갖는다
+(README "인라인 콜백 id"). 인라인 핸들러만 쓰는 Hono·Express 합성 fixture는 `fixtures/graph/hono-d1-inline`·
+`fixtures/graph/express-pg-inline`이다(마이그레이션 SQL 포함).

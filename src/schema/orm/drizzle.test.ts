@@ -72,7 +72,7 @@ test('쿼리 빌더·컬럼 접근·값 객체 키·관계형 쿼리를 사용 �
     'src/repo.ts:6:39 auth.sessions.id @src/repo.ts#all',
     'src/repo.ts:6:48 auth.sessions.user_id @src/repo.ts#all',
     'src/repo.ts:7:19 users @src/repo.ts#all',
-    'src/repo.ts:8:48 auth.sessions @src/repo.ts#all',
+    'src/repo.ts:8:48 auth.sessions @src/repo.ts#all.db.transaction()',
     'src/repo.ts:9:23 users @src/repo.ts#all',
     'src/repo.ts:9:51 users.fullName @src/repo.ts#all',
     'src/repo.ts:9:77 auth.sessions @src/repo.ts#all',

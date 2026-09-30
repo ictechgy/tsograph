@@ -4,7 +4,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -48,9 +50,11 @@ test('간선 종류: 호출·new·콜백·참조·JSX·별칭·초기값과 모�
     // 재내보내기 배럴(`export { createJob as addJob }`)·기본 내보내기·경로 별칭을 넘는 호출
     'src/app/api/jobs/route.ts#GET -> src/lib/jobs.ts#listJobs call',
     'src/app/api/jobs/route.ts#GET -> src/lib/jobs.ts#countJobs call',
-    'src/app/api/jobs/route.ts#POST -> src/lib/jobs.ts#createJob call',
     'src/app/api/jobs/route.ts#POST -> src/lib/hof.ts#withAuth call',
-    'src/app/api/jobs/route.ts#POST -> src/lib/repository.ts#saveProven call',
+    // 인라인 콜백(`withAuth(async (request) => …)`)은 자기 노드이고, 담은 노드가 `contains`로 잇는다.
+    'src/app/api/jobs/route.ts#POST -> src/app/api/jobs/route.ts#POST.withAuth() contains',
+    'src/app/api/jobs/route.ts#POST.withAuth() -> src/lib/jobs.ts#createJob call',
+    'src/app/api/jobs/route.ts#POST.withAuth() -> src/lib/repository.ts#saveProven call',
     // 함수를 인자로 넘김
     'src/app/api/jobs/route.ts#GET -> src/lib/jobs.ts#formatJob callback',
     // 생성자·필드 초기값·암묵 super
@@ -146,7 +150,8 @@ test('같은 입력의 그래프와 graphRevision은 같다', async () => {
 
 test('모든 route-decl·소스 relation-use usr는 그래프 노드이고, 선언 사실 usr는 노드가 아니다(모든 fixture)', async () => {
   const environment = { fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) };
-  const projects = ['graph/next-prisma', 'next/app-router', 'next/pages-api', 'schema/prisma-app'].map((name) => realpathSync(`${fixtures}${name}`));
+  const projects = ['graph/next-prisma', 'graph/hono-d1-inline', 'graph/express-pg-inline', 'next/app-router', 'next/pages-api', 'node/hono-app',
+    'node/express4-app', 'schema/prisma-app', 'schema/drizzle-d1-app'].map((name) => realpathSync(`${fixtures}${name}`));
   for (const project of projects) {
     const nodes = new Set((await buildCallGraph(project, fileSystem)).nodes.map((node) => node.id));
     const routes = usrsOf((await runRoutesCommand(['--role', 'server', '--project', project, '--include-tests'], environment)).standardOutput);
@@ -158,21 +163,92 @@ test('모든 route-decl·소스 relation-use usr는 그래프 노드이고, 선�
   }
 });
 
-test('route 핸들러 reach 집합과 relation-use usr로 route가 닿는 테이블을 구한다', async () => {
+/**
+ * route 핸들러마다 reach 집합(핸들러 포함)에 든 relation-use의 테이블을 구한다(isthmus trace의 route → 테이블 사슬).
+ *
+ * @param project 프로젝트 루트
+ * @param target 그 프로젝트의 그래프
+ * @returns `<핸들러 usr> <테이블,…>` 목록
+ */
+async function routeTables(project: string, target: CallGraph): Promise<string[]> {
   const environment = { fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) };
-  const routeDocument = JSON.parse((await runRoutesCommand(['--role', 'server', '--project', graphFixture], environment)).standardOutput) as {
+  const routeDocument = JSON.parse((await runRoutesCommand(['--role', 'server', '--project', project], environment)).standardOutput) as {
     facts: { method: string; channel: string; symbol: { usr: string } }[];
   };
-  const relationDocument = JSON.parse((await runSchemaCommand(['--project', graphFixture], environment)).standardOutput) as {
+  const relationDocument = JSON.parse((await runSchemaCommand(['--project', project], environment)).standardOutput) as {
     facts: { channel: string; method?: string; symbol?: { usr?: string } }[];
   };
   const handlers = [...new Set(routeDocument.facts.map((fact) => fact.symbol.usr))];
-  const result = traverse(graph, { rootIds: handlers, direction: 'dependencies', maxDepth: 128, maxReached: 100_000, dispatch: 'bound' });
-  const tables = handlers.map((handler, index) => {
+  const result = traverse(target, { rootIds: handlers, direction: 'dependencies', maxDepth: 128, maxReached: 100_000, dispatch: 'bound' });
+  return handlers.map((handler, index) => {
     const reach = new Set([handler, ...result.reached.filter((entry) => entry.roots.includes(index)).map((entry) => entry.id)]);
     const touched = relationDocument.facts.filter((fact) => fact.method === undefined && fact.symbol?.usr !== undefined && reach.has(fact.symbol.usr));
     return `${handler} ${[...new Set(touched.map((fact) => fact.channel))].sort().join(',')}`;
   });
+}
+
+test('인라인 핸들러(Hono·Express): route usr가 핸들러 노드이고, 안의 relation-use가 같은 id라 route가 제 테이블에만 닿는다', async () => {
+  const hono = realpathSync(`${fixtures}graph/hono-d1-inline`);
+  const honoGraph = await buildCallGraph(hono, fileSystem);
+  assert.deepEqual(await routeTables(hono, honoGraph), [
+    'src/admin.ts#admin.….get("/audit") audit_log',
+    'src/index.ts#<module>.app.get("/health") ',
+    'src/index.ts#<module>.app.post("/posts") posts',
+    'src/index.ts#<module>.app.get("/users") users',
+  ]);
+  const lines = edgeLines(honoGraph);
+  assert.ok(lines.has('src/index.ts#<module> -> src/index.ts#<module>.app.get("/users") contains'));
+  assert.ok(lines.has('src/index.ts#<module>.app.post("/posts") -> src/db.ts#insertPost call'));
+  assert.ok(lines.has('src/admin.ts#admin -> src/admin.ts#admin.….get("/audit") contains'));
+  assert.ok(honoGraph.nodes.find((node) => node.id === 'src/index.ts#<module>.app.get("/users")')?.entries?.includes('route-handler'));
+  const express = realpathSync(`${fixtures}graph/express-pg-inline`);
+  assert.deepEqual(await routeTables(express, await buildCallGraph(express, fileSystem)), [
+    'src/app.ts#<module>.router.get("/customers") customers',
+    'src/app.ts#<module>.app.get("/orders") orders',
+    'src/app.ts#<module>.app.delete("/orders/:id") order_items',
+  ]);
+});
+
+test('인라인 콜백 id·contains 간선은 두 번 만들어도 같고, 무관한 수정에 흔들리지 않는다', async () => {
+  const hono = realpathSync(`${fixtures}graph/hono-d1-inline`);
+  const first = await buildCallGraph(hono, fileSystem);
+  const second = await buildCallGraph(hono, fileSystem);
+  assert.deepEqual(second, first);
+  assert.equal(computeGraphRevision(second), computeGraphRevision(first));
+  const ids = (target: CallGraph): string[] => target.nodes.map((node) => node.id).filter((id) => id.includes('('));
+  assert.deepEqual(ids(first), [
+    'src/admin.ts#admin.….get("/audit")',
+    'src/index.ts#<module>.app.get("/health")',
+    'src/index.ts#<module>.app.get("/users")',
+    'src/index.ts#<module>.app.post("/posts")',
+  ]);
+});
+
+test('contains 간선은 자기 id를 얻은 콜백에만 잇고, 계산된 이름 멤버 안 콜백은 담은 스코프에 남는다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-contains-')));
+  try {
+    writeFileSync(join(project, 'package.json'), '{"name":"contains-probe","private":true}\n');
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'src/a.ts'), [
+      'export function g() { return 1; }',
+      'export function run(items: number[]) { return items.map(() => g()); }',
+      "const key = 'k';",
+      'export class C { [key]() { return [1].map(() => g()); } }',
+      '',
+    ].join('\n'));
+    const target = await buildCallGraph(project, fileSystem);
+    const lines = edgeLines(target);
+    assert.ok(lines.has('src/a.ts#run -> src/a.ts#run.items.map() contains'));
+    assert.ok(lines.has('src/a.ts#run.items.map() -> src/a.ts#g call'));
+    assert.ok(lines.has('src/a.ts#<module> -> src/a.ts#g call'));
+    assert.deepEqual(target.edges.filter((edge) => edge.kinds.includes('contains')).length, 1);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('route 핸들러 reach 집합과 relation-use usr로 route가 닿는 테이블을 구한다', async () => {
+  const tables = await routeTables(graphFixture, graph);
   assert.deepEqual(tables, [
     'src/app/api/auth/[...nextauth]/route.ts#GET ',
     'src/app/api/auth/[...nextauth]/route.ts#POST AuditLog',

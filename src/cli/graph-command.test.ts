@@ -84,23 +84,27 @@ test('reach는 language-traversal v1(dependencies)을 낸다', async () => {
       usr: 'src/lib/audit.ts#audit', qualifiedName: 'src/lib/audit.ts#audit', kind: 'function',
       location: { path: 'src/lib/audit.ts', line: 3, column: 23 },
     },
-    via: 'src/lib/jobs.ts#createJob', depth: 2, roots: [0], relationships: ['call'], evidence: 'direct',
+    via: 'src/lib/jobs.ts#createJob', depth: 3, roots: [0], relationships: ['call'], evidence: 'direct',
   });
+  // POST는 인라인 콜백(`withAuth(async …)`)을 `contains`로 담는다.
+  const callback = document.reached.find((entry: { symbol: { usr: string } }) => entry.symbol.usr === 'src/app/api/jobs/route.ts#POST.withAuth()');
+  assert.deepEqual([callback.via, callback.depth, callback.relationships], ['src/app/api/jobs/route.ts#POST', 1, ['contains']]);
   assert.equal(document.dispatch, 'bound');
   assert.ok(document.limitations.some((line: string) => line.startsWith('unresolved-calls:')));
   assert.ok(!document.limitations.some((line: string) => line.startsWith('non-http-entries:')));
 });
 
 test('impact는 dependents 방향이고 비HTTP 진입점을 이 문서 범위로 센다', async () => {
-  const result = await runImpactCommand(['--project', fixture, '--max-depth', '2', 'src/lib/jobs.ts#createJob'], environment());
+  const result = await runImpactCommand(['--project', fixture, '--max-depth', '3', 'src/lib/jobs.ts#createJob'], environment());
   const document = JSON.parse(result.standardOutput);
   assert.equal(document.direction, 'dependents');
   assert.deepEqual(document.reached.map((entry: { symbol: { usr: string }; depth: number }) => `${entry.depth} ${entry.symbol.usr}`), [
-    '1 src/app/api/jobs/route.ts#POST',
+    '1 src/app/api/jobs/route.ts#POST.withAuth()',
     '1 src/app/jobs/actions.ts#createJobAction',
     '1 src/lib/index.ts#addJob',
-    '2 src/app/api/jobs/route.ts#<module>',
+    '2 src/app/api/jobs/route.ts#POST',
     '2 src/app/jobs/page.tsx#JobsPage',
+    '3 src/app/api/jobs/route.ts#<module>',
   ]);
   assert.equal(document.truncated, false);
   assert.deepEqual(document.limitations.filter((line: string) => line.startsWith('non-http-entries:')), [
@@ -117,7 +121,7 @@ test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 
   const byUsr = new Map(document.reached.map((entry: { symbol: { usr: string } }) => [entry.symbol.usr, entry]));
   assert.deepEqual(byUsr.get('src/lib/jobs.ts#createJob'), {
     symbol: { usr: 'src/lib/jobs.ts#createJob', qualifiedName: 'src/lib/jobs.ts#createJob', kind: 'function', location: { path: 'src/lib/jobs.ts', line: 8, column: 23 } },
-    via: 'src/app/api/jobs/route.ts#POST', depth: 1, roots: [0], relationships: ['call'], evidence: 'direct',
+    via: 'src/app/api/jobs/route.ts#POST.withAuth()', depth: 2, roots: [0], relationships: ['call'], evidence: 'direct',
   });
   const audit = byUsr.get('src/lib/audit.ts#audit') as { via: string; depth: number; roots: number[] };
   assert.deepEqual([audit.via, audit.depth, audit.roots], ['src/lib/jobs.ts#createJob', 1, [0, 1]]);

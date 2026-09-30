@@ -19,8 +19,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#build",
-        "usr": "src/app.js#build"
+        "qualifiedName": "src/app.js#build.app.get(\"/Status\")",
+        "usr": "src/app.js#build.app.get(\"/Status\")"
       },
       "trailingSlash": "optional"
     },
@@ -37,8 +37,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#build",
-        "usr": "src/app.js#build"
+        "qualifiedName": "src/app.js#build.app.register().instance.get(\"/\")",
+        "usr": "src/app.js#build.app.register().instance.get(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -55,8 +55,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#build",
-        "usr": "src/app.js#build"
+        "qualifiedName": "src/app.js#build.app.register().instance.get(\"/users\")",
+        "usr": "src/app.js#build.app.register().instance.get(\"/users\")"
       },
       "trailingSlash": "optional"
     },
@@ -73,8 +73,8 @@
       "method": "POST",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#build",
-        "usr": "src/app.js#build"
+        "qualifiedName": "src/app.js#build.app.post(\"/items\")",
+        "usr": "src/app.js#build.app.post(\"/items\")"
       },
       "trailingSlash": "optional"
     },
@@ -91,15 +91,13 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#build",
-        "usr": "src/app.js#build"
+        "qualifiedName": "src/app.js#build.app.get(\"/items/:id\")",
+        "usr": "src/app.js#build.app.get(\"/items/:id\")"
       },
       "trailingSlash": "optional"
     }
   ],
-  "limitations": [
-    "framework-dispatch-unmodeled: 5 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
-  ],
+  "limitations": [],
   "records": [
     {
       "kind": "fact",

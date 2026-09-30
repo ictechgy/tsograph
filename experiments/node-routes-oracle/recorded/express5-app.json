@@ -23,8 +23,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#<module>",
-        "usr": "src/app.ts#<module>"
+        "qualifiedName": "src/app.ts#<module>.app.get(\"/\")",
+        "usr": "src/app.ts#<module>.app.get(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -45,8 +45,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#<module>",
-        "usr": "src/app.ts#<module>"
+        "qualifiedName": "src/app.ts#<module>.app.get(\"/Mixed/Case\")",
+        "usr": "src/app.ts#<module>.app.get(\"/Mixed/Case\")"
       },
       "trailingSlash": "optional"
     },
@@ -67,8 +67,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#<module>",
-        "usr": "src/app.ts#<module>"
+        "qualifiedName": "src/app.ts#<module>.app.options(\"/cors-check\")",
+        "usr": "src/app.ts#<module>.app.options(\"/cors-check\")"
       },
       "trailingSlash": "optional"
     },
@@ -89,8 +89,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/export.:format\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/export.:format\")"
       },
       "trailingSlash": "optional"
     },
@@ -117,8 +117,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/files/*path\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/files/*path\")"
       }
     },
     {
@@ -138,8 +138,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/list{/:page}\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/list{/:page}\")"
       },
       "trailingSlash": "optional"
     },
@@ -160,8 +160,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/list{/:page}\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/list{/:page}\")"
       },
       "trailingSlash": "optional"
     },
@@ -182,8 +182,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/products\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/products\")"
       },
       "trailingSlash": "optional"
     },
@@ -204,8 +204,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.catalog.get(\"/products/:id\")",
+        "usr": "src/routes/catalog.ts#<module>.catalog.get(\"/products/:id\")"
       },
       "trailingSlash": "optional"
     },
@@ -226,8 +226,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.….delete()",
+        "usr": "src/routes/catalog.ts#<module>.….delete()"
       },
       "trailingSlash": "optional"
     },
@@ -248,8 +248,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/catalog.ts#<module>",
-        "usr": "src/routes/catalog.ts#<module>"
+        "qualifiedName": "src/routes/catalog.ts#<module>.….get()",
+        "usr": "src/routes/catalog.ts#<module>.….get()"
       },
       "trailingSlash": "optional"
     },
@@ -270,8 +270,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#<module>",
-        "usr": "src/app.ts#<module>"
+        "qualifiedName": "src/app.ts#<module>.strictRouter.get(\"/exact/\")",
+        "usr": "src/app.ts#<module>.strictRouter.get(\"/exact/\")"
       },
       "trailingSlash": "strict"
     },
@@ -292,8 +292,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/register.ts#registerStatus",
-        "usr": "src/routes/register.ts#registerStatus"
+        "qualifiedName": "src/routes/register.ts#registerStatus.app.get(\"${prefix}/status\")",
+        "usr": "src/routes/register.ts#registerStatus.app.get(\"${prefix}/status\")"
       },
       "trailingSlash": "optional"
     },
@@ -314,15 +314,13 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/register.ts#registerStatus",
-        "usr": "src/routes/register.ts#registerStatus"
+        "qualifiedName": "src/routes/register.ts#registerStatus.app.head(\"${prefix}/status\")",
+        "usr": "src/routes/register.ts#registerStatus.app.head(\"${prefix}/status\")"
       },
       "trailingSlash": "optional"
     }
   ],
-  "limitations": [
-    "framework-dispatch-unmodeled: 13 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
-  ],
+  "limitations": [],
   "records": [
     {
       "kind": "fact",

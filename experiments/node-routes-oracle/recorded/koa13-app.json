@@ -24,8 +24,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.post(\"/\")",
+        "usr": "src/app.js#<module>.router.post(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -52,8 +52,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/docs/:path+\")",
+        "usr": "src/app.js#<module>.router.get(\"/docs/:path+\")"
       }
     },
     {
@@ -73,8 +73,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/file-:name\")",
+        "usr": "src/app.js#<module>.router.get(\"/file-:name\")"
       },
       "trailingSlash": "optional"
     },
@@ -96,8 +96,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/files/:path*\")",
+        "usr": "src/app.js#<module>.router.get(\"/files/:path*\")"
       },
       "trailingSlash": "optional"
     },
@@ -124,8 +124,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/files/:path*\")",
+        "usr": "src/app.js#<module>.router.get(\"/files/:path*\")"
       }
     },
     {
@@ -151,8 +151,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/num/:id(\\\\d+)\")",
+        "usr": "src/app.js#<module>.router.get(\"/num/:id(\\\\d+)\")"
       },
       "trailingSlash": "optional"
     },
@@ -173,8 +173,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/report.:ext\")",
+        "usr": "src/app.js#<module>.router.get(\"/report.:ext\")"
       },
       "trailingSlash": "optional"
     },
@@ -195,8 +195,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/slash/\")",
+        "usr": "src/app.js#<module>.router.get(\"/slash/\")"
       },
       "trailingSlash": "strict"
     },
@@ -217,8 +217,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/users/:id?\")",
+        "usr": "src/app.js#<module>.router.get(\"/users/:id?\")"
       },
       "trailingSlash": "optional"
     },
@@ -239,15 +239,13 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.router.get(\"/users/:id?\")",
+        "usr": "src/app.js#<module>.router.get(\"/users/:id?\")"
       },
       "trailingSlash": "optional"
     }
   ],
-  "limitations": [
-    "framework-dispatch-unmodeled: 8 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
-  ],
+  "limitations": [],
   "records": [
     {
       "kind": "fact",

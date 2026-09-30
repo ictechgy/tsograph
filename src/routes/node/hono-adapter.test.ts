@@ -113,3 +113,31 @@ test('펼친 핸들러는 usr 없는 선언이고, 펼친 use() 인자는 미들
   assert.equal(limitationsWith(document, 'missing-route-usrs: 2 route declaration(s)').length, 1);
   assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 middleware registration(s)').length, 1);
 });
+
+test('인라인 핸들러 usr는 콜백 노드이고, 자기 노드를 얻지 못한 인라인 핸들러만 framework-dispatch-unmodeled로 센다', async () => {
+  const document = await scanNodeProject({
+    'package.json': hono,
+    'src/index.ts': [
+      "import { Hono } from 'hono';",
+      'const app = new Hono();',
+      "app.get('/own', (c) => c.text('own'));",
+      '// 감싼 이름 있는 핸들러는 자기 선언 노드라 한계가 아니다.',
+      'const wrap = <T>(fn: T): T => fn;',
+      "const named = async (c: any) => c.text('named');",
+      "app.get('/named', wrap(named));",
+      "const key = 'mount';",
+      'class Routes {',
+      "  [key]() { app.get('/computed', (c) => c.text('computed')); }",
+      '}',
+      'new Routes()[key]();',
+      'export default app;',
+    ].join('\n'),
+  });
+  // 계산된 이름 멤버 안의 콜백은 이름을 만들지 않으므로(추측하지 않는다) 모듈 스코프에 귀속하고 한계로 센다.
+  assert.deepEqual(document.facts.map((fact) => `${fact.channel} ${(fact.symbol as { usr?: string }).usr}`), [
+    '/computed src/index.ts#<module>',
+    '/named src/index.ts#named',
+    '/own src/index.ts#<module>.app.get("/own")',
+  ]);
+  assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 route handler(s) are inline functions without their own graph node').length, 1);
+});

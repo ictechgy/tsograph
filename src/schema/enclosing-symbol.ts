@@ -10,7 +10,13 @@
  * - 객체 리터럴의 메서드·함수 값 속성: 속성 이름(`handlers.GET`).
  * - `export default <식>`(CommonJS `export =`는 제외)의 식 안은 `default`다 — 모듈이 내보낸 값이고
  *   `routes`의 Pages Router 핸들러 id(`#default`)와 같아야 하기 때문이다.
- * - 이름 없는 콜백(화살표·함수 식)은 투명하다 — 감싸는 선언에 귀속한다.
+ * - 호출·`new` 인자로 바로 넘긴 화살표·함수 식(인라인 콜백)은 자기 조각을 갖는다
+ *   (`inline-callback.ts`의 `<호출 대상>(<리터럴>)`, 겹치면 `~2`…). 그 앞 이름은 **콜백 식 자신이 속한
+ *   스코프**다 — 콜백 안에서 올라온 것처럼 지역 변수를 이름으로 삼지 않는다(`const rows = ids.map(cb)`의
+ *   콜백은 `f.rows.…`가 아니라 `f.ids.map()`). 그래서 콜백 id의 앞부분은 언제나 콜백을 담은 노드의 id이고,
+ *   그래프가 그 노드에서 콜백으로 `contains` 간선을 잇는다. 모듈 최상위 콜백은 `<module>` 아래다
+ *   (`src/app.ts#<module>.app.get("/x")`).
+ * - 그 밖의 이름 없는 함수(JSX 속성 값, 즉시 실행 함수, 조건식 값 등)는 투명하다 — 감싸는 선언에 귀속한다.
  * - 계산된 이름이 끼면 이름을 만들지 않는다(추측하지 않는다). 이름이 하나도 없으면(모듈 최상위 문장)
  *   심볼을 생략하고 호출자가 `missing-relation-usrs:`로 센다(isthmus 체인 전용 접두사).
  *
@@ -19,7 +25,17 @@
 
 import ts from 'typescript';
 
+import { inlineCallbackKey, type InlineFunction, isInlineCallback } from './inline-callback.ts';
 import { memberName } from './scope-builder.ts';
+
+/** 모듈 스코프 이름 조각이다. JS 식별자가 될 수 없는 이름이라 실제 선언과 겹치지 않는다. */
+export const MODULE_SCOPE_NAME = '<module>';
+
+/**
+ * 파일 → 인라인 콜백 → 한정 이름 조각 목록(계산된 이름이 끼면 null)이다. 이름 조각은 경로와 무관하므로 파일마다
+ * 한 번 만든다. 순번(`~n`)이 어느 노드에서 물어도 같도록 파일 전체를 한꺼번에 정한다.
+ */
+const callbackNameTables = new WeakMap<ts.SourceFile, Map<ts.Node, readonly string[] | null>>();
 
 /**
  * 노드를 담은 선언의 한정 이름을 만든다.
@@ -29,16 +45,100 @@ import { memberName } from './scope-builder.ts';
  * @returns `path#A.B` 또는 undefined
  */
 export function enclosingSymbol(node: ts.Node, path: string): string | undefined {
+  const names = namesAbove(node, callbackNames);
+  return names === null || names.length === 0 ? undefined : `${path}#${names.join('.')}`;
+}
+
+/** 이미 정한 인라인 콜백의 한정 이름을 읽는 함수다(계산된 이름이 끼면 null). */
+type CallbackNameReader = (callback: InlineFunction) => readonly string[] | null;
+
+/**
+ * 노드에서 위로 올라가며 이름 조각을 모은다. 인라인 콜백을 만나면 그 콜백의 한정 이름에 잇고 멈춘다.
+ *
+ * @param node 시작 노드(자신은 조각이 되지 않는다)
+ * @param readCallback 인라인 콜백의 한정 이름을 읽는다
+ * @returns 이름 조각(없으면 빈 목록), 계산된 이름이 끼면 null
+ */
+function namesAbove(node: ts.Node, readCallback: CallbackNameReader): readonly string[] | null {
   const names: string[] = [];
   let insideFunction = false;
   for (let current: ts.Node = node; current.parent !== undefined; current = current.parent) {
     const parent = current.parent;
+    if (isInlineCallback(parent)) {
+      const outer = readCallback(parent);
+      return outer === null ? null : [...outer, ...names.reverse()];
+    }
     const name = declarationSegment(parent, current, insideFunction);
-    if (name === null) return undefined;
+    if (name === null) return null;
     if (name !== undefined) names.push(name);
     if (isFunctionLike(parent)) insideFunction = true;
   }
-  return names.length === 0 ? undefined : `${path}#${names.reverse().join('.')}`;
+  return names.reverse();
+}
+
+/**
+ * 인라인 콜백의 한정 이름 조각을 파일별 표에서 읽는다. 표는 파일마다 처음 한 번 만든다.
+ *
+ * @param callback 인라인 콜백
+ * @returns 이름 조각, 계산된 이름이 끼면 null
+ */
+function callbackNames(callback: InlineFunction): readonly string[] | null {
+  const sourceFile = callback.getSourceFile();
+  let table = callbackNameTables.get(sourceFile);
+  if (table === undefined) {
+    table = buildCallbackTable(sourceFile);
+    callbackNameTables.set(sourceFile, table);
+  }
+  return table.get(callback) ?? null;
+}
+
+/**
+ * 파일의 인라인 콜백마다 한정 이름을 정한다. 전위 순회라 바깥 콜백이 먼저 정해지고, 안쪽 콜백은 만드는 중인 표에서
+ * 바깥 콜백 이름을 읽는다. 같은 스코프·같은 조각이 겹치면 소스 순서로 두 번째부터 `~n`을 붙인다.
+ *
+ * @param sourceFile 파일
+ * @returns 콜백 → 이름 조각(계산된 이름이 끼면 null)
+ */
+function buildCallbackTable(sourceFile: ts.SourceFile): Map<ts.Node, readonly string[] | null> {
+  const table = new Map<ts.Node, readonly string[] | null>();
+  const occurrences = new Map<string, number>();
+  const readOuter: CallbackNameReader = (callback) => table.get(callback) ?? null;
+  const visit = (node: ts.Node): void => {
+    if (isInlineCallback(node)) table.set(node, callbackEntry(node, readOuter, occurrences));
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return table;
+}
+
+/**
+ * 콜백 하나의 한정 이름을 만든다: 콜백 식이 속한 스코프 이름(없으면 `<module>`) + 조각(겹치면 `~n`).
+ *
+ * @param callback 인라인 콜백
+ * @param readOuter 이미 정한 바깥 콜백 이름을 읽는다
+ * @param occurrences 스코프·조각별 등장 수(갱신)
+ * @returns 이름 조각, 계산된 이름이 끼면 null
+ */
+function callbackEntry(callback: InlineFunction, readOuter: CallbackNameReader, occurrences: Map<string, number>): readonly string[] | null {
+  const owner = ownerNames(callback, readOuter);
+  if (owner === null) return null;
+  const key = inlineCallbackKey(callback);
+  const slot = `${owner.join('\u0000')}\u0000${key}`;
+  const count = (occurrences.get(slot) ?? 0) + 1;
+  occurrences.set(slot, count);
+  return [...owner, count === 1 ? key : `${key}~${count}`];
+}
+
+/**
+ * 콜백 식 자신이 속한 스코프의 이름 조각이다(모듈 최상위면 `<module>`).
+ *
+ * @param callback 인라인 콜백
+ * @param readOuter 바깥 콜백 이름을 읽는다
+ * @returns 이름 조각, 계산된 이름이 끼면 null
+ */
+function ownerNames(callback: InlineFunction, readOuter: CallbackNameReader): readonly string[] | null {
+  const names = namesAbove(callback, readOuter);
+  return names === null || names.length > 0 ? names : [MODULE_SCOPE_NAME];
 }
 
 /**

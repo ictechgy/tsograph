@@ -83,7 +83,7 @@ test('knex 사슬·원시 드라이버·SQL 태그·D1 바인딩(선언 파일·
     'src/drivers.ts:25:24 vercel_db @src/drivers.ts#all',
     'src/drivers.ts:26:28 vercel_pool @src/drivers.ts#all',
     'src/drivers.ts:27:29 ps_rows @src/drivers.ts#all',
-    'src/drivers.ts:29:35 pj_rows @src/drivers.ts#all',
+    'src/drivers.ts:29:35 pj_rows @src/drivers.ts#all.pg2.begin()',
     'src/drivers.ts:30:29 d1_main @src/drivers.ts#all',
     'src/drivers.ts:31:36 d1_shape @src/drivers.ts#all',
     'src/drivers.ts:32:48 d1_batch @src/drivers.ts#all',

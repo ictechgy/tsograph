@@ -3,12 +3,14 @@
  *
  * 출발 노드는 코드 위치의 스코프 id(`scopeIdOf`)다. 호출·`new`·태그 템플릿·데코레이터·JSX 태그는
  * `TargetResolver.resolveCallee`로, 함수 값 참조(콜백·일반 참조)는 `referenceTargets`로 잇는다.
+ * 인라인 콜백(호출 인자로 바로 넘긴 화살표·함수 식)은 담은 노드에서 `contains` 간선으로 잇는다.
  * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다. 인터페이스 공백 메서드 호출(`recv.m()`)은
  * 디스패치 단계(`dispatch.ts`)로 넘기고, 노드별 미해석 계수는 그 단계가 모드별로 센다.
  */
 
 import ts from 'typescript';
 
+import { isInlineCallback } from '../schema/inline-callback.ts';
 import type { CallStatistics, EdgeKind, GraphStore, UnresolvedReason } from './graph-model.ts';
 import { isFunctionValued, isTypeOnly, skipWrappers } from './node-collector.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
@@ -109,6 +111,8 @@ function visitNode(context: EdgeContext, path: string, node: ts.Node): void {
     recordCall(context, path, node, context.resolver.resolveCallee(node.expression), 'call');
   } else if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
     visitJsxTag(context, path, node);
+  } else if (isInlineCallback(node)) {
+    addContainsEdge(context.store, path, node);
   } else {
     visitReference(context, path, node);
   }
@@ -133,6 +137,20 @@ function visitCall(context: EdgeContext, path: string, call: ts.CallExpression):
   if (pending !== undefined) context.pending.push(pending);
   recordCall(context, path, call, resolution, 'call', pending !== undefined);
   countOverriddenCall(context, call.expression, resolution);
+}
+
+/**
+ * 인라인 콜백을 담은 노드에서 콜백 노드로 `contains` 간선을 잇는다. 계산된 이름이 끼어 콜백이 자기 id를 얻지 못하면
+ * (담은 노드와 같은 id) 잇지 않는다.
+ *
+ * @param store 그래프 저장소
+ * @param path 프로젝트 기준 경로
+ * @param callback 인라인 콜백
+ */
+function addContainsEdge(store: GraphStore, path: string, callback: ts.ArrowFunction | ts.FunctionExpression): void {
+  const inner = ensureScope(store, path, callback.body);
+  const owner = ensureScope(store, path, callback);
+  if (owner !== inner) store.addEdge(owner, inner, 'contains');
 }
 
 /**

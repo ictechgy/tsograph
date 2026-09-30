@@ -24,8 +24,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get(\"/\")",
+        "usr": "src/app.js#<module>.app.get(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -46,8 +46,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.post(\"/Case/Path\")",
+        "usr": "src/app.js#<module>.app.post(\"/Case/Path\")"
       },
       "trailingSlash": "optional"
     },
@@ -68,8 +68,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/admin.js#<module>",
-        "usr": "src/admin.js#<module>"
+        "qualifiedName": "src/admin.js#<module>.admin.get(\"/panel\")",
+        "usr": "src/admin.js#<module>.admin.get(\"/panel\")"
       },
       "trailingSlash": "strict"
     },
@@ -90,8 +90,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/admin.js#<module>",
-        "usr": "src/admin.js#<module>"
+        "qualifiedName": "src/admin.js#<module>.admin.get(\"/panel/\")",
+        "usr": "src/admin.js#<module>.admin.get(\"/panel/\")"
       },
       "trailingSlash": "strict"
     },
@@ -112,8 +112,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.all(\"/any\")",
+        "usr": "src/app.js#<module>.app.all(\"/any\")"
       },
       "trailingSlash": "optional"
     },
@@ -156,8 +156,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/orders.js#<module>",
-        "usr": "src/routes/orders.js#<module>"
+        "qualifiedName": "src/routes/orders.js#<module>.router.post(\"/\")",
+        "usr": "src/routes/orders.js#<module>.router.post(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -212,8 +212,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/orders.js#<module>",
-        "usr": "src/routes/orders.js#<module>"
+        "qualifiedName": "src/routes/orders.js#<module>.….get()",
+        "usr": "src/routes/orders.js#<module>.….get()"
       },
       "trailingSlash": "optional"
     },
@@ -240,8 +240,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/orders.js#<module>",
-        "usr": "src/routes/orders.js#<module>"
+        "qualifiedName": "src/routes/orders.js#<module>.….put()",
+        "usr": "src/routes/orders.js#<module>.….put()"
       },
       "trailingSlash": "optional"
     },
@@ -266,8 +266,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/:name.:ext\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/:name.:ext\")"
       }
     },
     {
@@ -286,8 +286,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/Docs/:name\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/Docs/:name\")"
       },
       "trailingSlash": "optional"
     },
@@ -307,8 +307,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/img-:id\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/img-:id\")"
       },
       "trailingSlash": "optional"
     },
@@ -328,8 +328,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/pages/:page?\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/pages/:page?\")"
       },
       "trailingSlash": "optional"
     },
@@ -349,8 +349,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/pages/:page?\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/pages/:page?\")"
       },
       "trailingSlash": "optional"
     },
@@ -370,8 +370,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/raw/*\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/raw/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -397,8 +397,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/files.js#<module>",
-        "usr": "src/routes/files.js#<module>"
+        "qualifiedName": "src/routes/files.js#<module>.files.get(\"/raw/*\")",
+        "usr": "src/routes/files.js#<module>.files.get(\"/raw/*\")"
       }
     },
     {
@@ -419,8 +419,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.use(\"/health\")",
+        "usr": "src/app.js#<module>.app.use(\"/health\")"
       },
       "trailingSlash": "optional"
     },
@@ -447,8 +447,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.use(\"/health\")",
+        "usr": "src/app.js#<module>.app.use(\"/health\")"
       }
     },
     {
@@ -468,8 +468,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get(\"/shadow/fixed\")",
+        "usr": "src/app.js#<module>.app.get(\"/shadow/fixed\")"
       },
       "trailingSlash": "optional"
     },
@@ -490,8 +490,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get(\"/shadow/:x\")",
+        "usr": "src/app.js#<module>.app.get(\"/shadow/:x\")"
       },
       "trailingSlash": "optional"
     },
@@ -512,8 +512,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get(\"/users/me\")",
+        "usr": "src/app.js#<module>.app.get(\"/users/me\")"
       },
       "trailingSlash": "optional"
     },
@@ -530,8 +530,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get(\"/users/:id\")",
+        "usr": "src/app.js#<module>.app.get(\"/users/:id\")"
       },
       "trailingSlash": "optional"
     },
@@ -557,13 +557,12 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.js#<module>",
-        "usr": "src/app.js#<module>"
+        "qualifiedName": "src/app.js#<module>.app.get()",
+        "usr": "src/app.js#<module>.app.get()"
       }
     }
   ],
   "limitations": [
-    "framework-dispatch-unmodeled: 19 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code",
     "framework-dispatch-unmodeled: 2 middleware registration(s) run before route handlers and are treated as passing every request on; their code is not attached to handler usrs",
     "framework-provided-routes: 1 registration(s) of static files from express.static can answer requests that have no route declaration in the project",
     "route-coverage: 1 route registration(s) run only under a condition (if, switch, loop, catch, or short-circuit expression); they are not emitted as declarations",

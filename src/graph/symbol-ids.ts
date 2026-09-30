@@ -6,16 +6,19 @@
  * `src/lib/repo.ts#Repo.save`, `src/app/api/items/[id]/route.ts#GET`). 어떤 선언에도 속하지 않는
  * 코드(모듈 최상위 문장, 계산된 이름 멤버 안)는 모듈 스코프 `<경로>#<module>`에 속한다.
  *
+ * 호출 인자로 바로 넘긴 인라인 함수는 자기 id를 갖는다: 콜백 식이 속한 스코프 id 뒤에 `.<호출 대상>(<리터럴>)`
+ * 조각을 붙인다(`src/app.ts#<module>.app.get("/x")`, `src/lib/jobs.ts#listJobs.items.map()`, 겹치면 `~2`…).
+ * 규칙은 `src/schema/inline-callback.ts`와 `enclosing-symbol.ts`에 있다.
+ *
  * 같은 규칙을 세 곳이 쓴다: 호출 그래프의 노드 id, `schema` relation-use의 `symbol.usr`,
  * `routes` route-decl의 `symbol.usr`. 그래서 isthmus가 생산자 id를 정확한 문자열 일치로만 이을 수 있다.
  */
 
 import ts from 'typescript';
 
-import { enclosingSymbol } from '../schema/enclosing-symbol.ts';
+import { enclosingSymbol, MODULE_SCOPE_NAME } from '../schema/enclosing-symbol.ts';
 
-/** 모듈 스코프 선언 경로다. JS 식별자가 될 수 없는 이름이라 실제 선언과 겹치지 않는다. */
-export const MODULE_SCOPE_NAME = '<module>';
+export { MODULE_SCOPE_NAME };
 
 /**
  * 파일의 모듈 스코프 id를 만든다.
