@@ -90,7 +90,7 @@ export interface EventSite {
 export interface HandlerInfo {
   readonly usr: string | undefined;
   readonly qualifiedName: string;
-  /** 인라인 함수라 usr가 감싼 선언(또는 모듈 스코프)이면 true */
+  /** 인라인 함수인데 자기 노드를 얻지 못해 usr가 감싼 선언(또는 모듈 스코프)이면 true */
   readonly inline: boolean;
   /** 다음 핸들러로 넘길 수 있으면(`next` 매개변수, 모르는 함수) true */
   readonly mayCallNext: boolean;

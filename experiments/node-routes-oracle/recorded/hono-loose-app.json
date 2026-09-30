@@ -22,8 +22,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/\")",
+        "usr": "src/index.ts#<module>.app.get(\"/\")"
       },
       "trailingSlash": "optional"
     },
@@ -43,8 +43,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.post(\"/Items/:id\")",
+        "usr": "src/index.ts#<module>.app.post(\"/Items/:id\")"
       },
       "trailingSlash": "optional"
     },
@@ -64,8 +64,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/items\")",
+        "usr": "src/index.ts#<module>.app.get(\"/items\")"
       },
       "trailingSlash": "optional"
     },
@@ -85,14 +85,12 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/items/\")",
+        "usr": "src/index.ts#<module>.app.get(\"/items/\")"
       }
     }
   ],
-  "limitations": [
-    "framework-dispatch-unmodeled: 4 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code"
-  ],
+  "limitations": [],
   "records": [
     {
       "kind": "fact",

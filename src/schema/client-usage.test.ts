@@ -86,7 +86,7 @@ test('트랜잭션 콜백·TransactionClient 타입·클래스 필드·팩토리
     ].join('\n'),
   });
   assert.deepEqual(lines, [
-    'src/db.ts:8:50 users @src/db.ts#run',
+    'src/db.ts:8:50 users @src/db.ts#run.base.$transaction()',
     'src/db.ts:9:12 Post @src/db.ts#run',
     'src/db.ts:10:13 Post @src/db.ts#run',
     'src/db.ts:11:18 users @src/db.ts#run',

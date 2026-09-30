@@ -161,8 +161,8 @@ test('저장소·ActiveRecord·EntityManager·QueryBuilder 사용과 관계·컬
     'src/usage.ts:18:51 book @src/usage.ts#Service.run',
     'src/usage.ts:19:25 raw_books @src/usage.ts#Service.run',
     'src/usage.ts:20:47 `select 1 from ${Date.now()}` dyn @src/usage.ts#Service.run',
-    'src/usage.ts:21:67 genre @src/usage.ts#Service.run',
-    'src/usage.ts:21:76 genre.label @src/usage.ts#Service.run',
+    'src/usage.ts:21:67 genre @src/usage.ts#Service.run.this.source.manager.transaction()',
+    'src/usage.ts:21:76 genre.label @src/usage.ts#Service.run.this.source.manager.transaction()',
     'src/usage.ts:22:47 genre @src/usage.ts#Service.run',
   ]);
   assert.ok(result.limitations.includes('unresolved-orm-receivers: 1 ORM call(s) have a query shape but receivers that could not be traced to a model, repository, or client; not emitted: typeorm (1)'));

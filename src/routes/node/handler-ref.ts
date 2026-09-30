@@ -2,9 +2,10 @@
  * 라우트 등록의 핸들러 인자를 tsograph 심볼 id(`symbol.usr`)로 옮긴다.
  *
  * usr는 핸들러 함수 **본문 코드가 속하는 그래프 노드**다(`src/graph/symbol-ids.ts`의 `scopeIdOf`). 그래서 이름 있는
- * 함수·메서드·`const h = () => …`는 그 선언 id가 되고, 등록 호출에 바로 넘긴 인라인 함수는 감싼 선언(모듈 최상위면
- * `<path>#<module>`)이 된다 — tsograph 그래프는 인라인 함수에 따로 노드를 만들지 않기 때문이다. 인라인 핸들러는
- * `inline`으로 표시해 호출자가 `framework-dispatch-unmodeled:` 한계로 알린다.
+ * 함수·메서드·`const h = () => …`는 그 선언 id가 되고, 등록 호출에 바로 넘긴 인라인 함수(감싼 `asyncHandler(fn)`
+ * 포함)는 인라인 콜백 id가 된다(`src/app.ts#<module>.app.get("/x")`). 인라인 함수가 자기 노드를 얻지 못해 본문이
+ * 감싼 선언(또는 모듈 스코프)에 귀속하는 경우 — 계산된 이름 멤버 안, 호출 인자가 아닌 자리(옵션 객체의 `handler:`) —
+ * 만 `inline`으로 표시해 호출자가 `framework-dispatch-unmodeled:` 한계로 알린다.
  *
  * `mayCallNext`는 핸들러가 요청을 다음 등록으로 넘길 수 있는지다. `next` 자리의 매개변수(Express 셋째, Hono·Koa 둘째)나
  * 나머지 매개변수가 있거나 함수를 찾지 못하면 true다. 이런 등록에는 `order`를 싣지 않는다(isthmus 계약).
@@ -30,7 +31,7 @@ export interface HandlerEnvironment {
 /** 찾은 핸들러 함수다. */
 interface FoundFunction {
   readonly node: ts.SignatureDeclaration & { readonly body?: ts.Node | undefined };
-  /** 등록 호출 인자에 바로 쓴 함수면 true */
+  /** 등록 호출 인자에 바로 쓴 함수 식, 또는 그 인자인 감싼 호출(`asyncHandler(…)`)에 바로 쓴 함수 식이면 true(이름 참조는 false) */
   readonly inline: boolean;
 }
 
@@ -52,7 +53,8 @@ export function resolveHandler(environment: HandlerEnvironment, expression: ts.E
     return { usr: undefined, qualifiedName: scopeIdOf(call, callPath), inline: false, mayCallNext: true };
   }
   const usr = scopeIdOf(found.node.body, path);
-  return { usr, qualifiedName: usr, inline: found.inline, mayCallNext: mayCallNext(found.node, nextParameterIndex) };
+  const sharesEnclosingNode = found.inline && usr === scopeIdOf(found.node, path);
+  return { usr, qualifiedName: usr, inline: sharesEnclosingNode, mayCallNext: mayCallNext(found.node, nextParameterIndex) };
 }
 
 /**

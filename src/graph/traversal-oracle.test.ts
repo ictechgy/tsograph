@@ -185,10 +185,11 @@ const DISPATCH_CHOICES: readonly DispatchMode[] = ['direct', 'bound', 'bound', '
  * @returns 간선(1~2개)
  */
 function randomEdges(next: () => number, from: string, to: string): GraphEdge[] {
-  const edgeKinds: EdgeKind[] = ['call', 'callback', 'alias'];
+  // `contains`(인라인 콜백의 어휘적 포함)는 스냅샷에서 언제나 direct지만, 순회는 종류를 가리지 않으므로 같은 표본에 섞는다.
+  const edgeKinds: EdgeKind[] = ['call', 'callback', 'alias', 'contains'];
   const roll = next();
   const evidence: EdgeEvidence = roll < 0.6 ? 'direct' : roll < 0.8 ? 'bound' : 'candidate';
-  const first: GraphEdge = { from, to, kinds: [edgeKinds[Math.floor(next() * 3)]!], evidence };
+  const first: GraphEdge = { from, to, kinds: [edgeKinds[Math.floor(next() * edgeKinds.length)]!], evidence };
   if (evidence === 'candidate' || next() < 0.8) return [first];
   const weaker: EdgeEvidence = evidence === 'direct' ? 'bound' : 'candidate';
   const kind = first.kinds[0] === 'call' ? 'reference' : 'call';

@@ -24,8 +24,12 @@ export type NodeKind =
  * - `jsx`: JSX 컴포넌트 참조. `alias`: export 노드 → 해석한 대상.
  * - `initializer`: 생성자·클래스 → 인스턴스 필드 초기값, 파생 클래스 → 기반 생성자(암묵 `super()`),
  *   모듈 스코프 → 모듈 최상위 변수·static 필드 초기값.
+ * - `contains`: 인라인 콜백을 담은 노드 → 콜백 노드(어휘적 포함). 콜백을 부르는 쪽(`app.get`, `items.map`)은
+ *   대개 외부라 호출 간선이 없으므로, 담은 노드에서의 도달과 콜백 안에서의 역방향 영향이 끊기지 않게 잇는다
+ *   (kartograph의 어휘적 포함 선례). 콜백을 실제로 부르는지는 증명하지 않는다(예전에는 콜백 코드가 담은 노드에
+ *   그대로 귀속했으므로 도달 범위는 같다).
  */
-export type EdgeKind = 'call' | 'new' | 'callback' | 'reference' | 'jsx' | 'alias' | 'initializer';
+export type EdgeKind = 'call' | 'new' | 'callback' | 'reference' | 'jsx' | 'alias' | 'initializer' | 'contains';
 
 /**
  * 간선 근거의 강도다(강한 것부터).

@@ -22,8 +22,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/\")",
+        "usr": "src/index.ts#<module>.app.get(\"/\")"
       },
       "trailingSlash": "strict"
     },
@@ -43,8 +43,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/admin.ts#registerAdmin",
-        "usr": "src/routes/admin.ts#registerAdmin"
+        "qualifiedName": "src/routes/admin.ts#registerAdmin.app.delete(\"/admin/cache\")",
+        "usr": "src/routes/admin.ts#registerAdmin.app.delete(\"/admin/cache\")"
       },
       "trailingSlash": "strict"
     },
@@ -64,8 +64,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/admin.ts#registerAdmin",
-        "usr": "src/routes/admin.ts#registerAdmin"
+        "qualifiedName": "src/routes/admin.ts#registerAdmin.app.get(\"/admin/stats\")",
+        "usr": "src/routes/admin.ts#registerAdmin.app.get(\"/admin/stats\")"
       },
       "trailingSlash": "strict"
     },
@@ -85,8 +85,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.all(\"/any\")",
+        "usr": "src/index.ts#<module>.app.all(\"/any\")"
       },
       "trailingSlash": "strict"
     },
@@ -106,8 +106,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/authors.ts#createAuthors",
-        "usr": "src/routes/authors.ts#createAuthors"
+        "qualifiedName": "src/routes/authors.ts#createAuthors.authors.get(PATHS.authors)",
+        "usr": "src/routes/authors.ts#createAuthors.authors.get(PATHS.authors)"
       },
       "trailingSlash": "strict"
     },
@@ -127,8 +127,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/authors.ts#createAuthors",
-        "usr": "src/routes/authors.ts#createAuthors"
+        "qualifiedName": "src/routes/authors.ts#createAuthors.authors.get(\"${PATHS.authors}/:name?\")",
+        "usr": "src/routes/authors.ts#createAuthors.authors.get(\"${PATHS.authors}/:name?\")"
       },
       "trailingSlash": "strict"
     },
@@ -148,8 +148,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/authors.ts#createAuthors",
-        "usr": "src/routes/authors.ts#createAuthors"
+        "qualifiedName": "src/routes/authors.ts#createAuthors.authors.get(\"${PATHS.authors}/:name?\")",
+        "usr": "src/routes/authors.ts#createAuthors.authors.get(\"${PATHS.authors}/:name?\")"
       },
       "trailingSlash": "strict"
     },
@@ -190,8 +190,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/books.ts#<module>",
-        "usr": "src/routes/books.ts#<module>"
+        "qualifiedName": "src/routes/books.ts#<module>.books.post(BOOKS)",
+        "usr": "src/routes/books.ts#<module>.books.post(BOOKS)"
       },
       "trailingSlash": "strict"
     },
@@ -211,8 +211,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/books.ts#<module>",
-        "usr": "src/routes/books.ts#<module>"
+        "qualifiedName": "src/routes/books.ts#<module>.books.get(\"${BOOKS}/featured\")",
+        "usr": "src/routes/books.ts#<module>.books.get(\"${BOOKS}/featured\")"
       },
       "trailingSlash": "strict"
     },
@@ -259,8 +259,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/books.ts#<module>",
-        "usr": "src/routes/books.ts#<module>"
+        "qualifiedName": "src/routes/books.ts#<module>.books.on([\"PUT\",\"PATCH\"],\"${BOOKS}/:id\")",
+        "usr": "src/routes/books.ts#<module>.books.on([\"PUT\",\"PATCH\"],\"${BOOKS}/:id\")"
       },
       "trailingSlash": "strict"
     },
@@ -280,8 +280,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/routes/books.ts#<module>",
-        "usr": "src/routes/books.ts#<module>"
+        "qualifiedName": "src/routes/books.ts#<module>.books.on([\"PUT\",\"PATCH\"],\"${BOOKS}/:id\")",
+        "usr": "src/routes/books.ts#<module>.books.on([\"PUT\",\"PATCH\"],\"${BOOKS}/:id\")"
       },
       "trailingSlash": "strict"
     },
@@ -301,8 +301,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/chain\")",
+        "usr": "src/index.ts#<module>.app.get(\"/chain\")"
       },
       "trailingSlash": "strict"
     },
@@ -322,8 +322,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.….post()",
+        "usr": "src/index.ts#<module>.….post()"
       },
       "trailingSlash": "strict"
     },
@@ -344,8 +344,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/files/*\")",
+        "usr": "src/index.ts#<module>.app.get(\"/files/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -365,8 +365,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/files/*\")",
+        "usr": "src/index.ts#<module>.app.get(\"/files/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -392,8 +392,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/files/*\")",
+        "usr": "src/index.ts#<module>.app.get(\"/files/*\")"
       }
     },
     {
@@ -433,8 +433,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.late.get(\"/early\")",
+        "usr": "src/index.ts#<module>.late.get(\"/early\")"
       },
       "trailingSlash": "strict"
     },
@@ -450,8 +450,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/maybe\")",
+        "usr": "src/index.ts#<module>.app.get(\"/maybe\")"
       },
       "trailingSlash": "strict"
     },
@@ -471,8 +471,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/maybe\")~2",
+        "usr": "src/index.ts#<module>.app.get(\"/maybe\")~2"
       },
       "trailingSlash": "strict"
     },
@@ -497,8 +497,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/sections/${section}/items\")",
+        "usr": "src/index.ts#<module>.app.get(\"/sections/${section}/items\")"
       }
     },
     {
@@ -518,8 +518,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.use(\"/terminal/*\")",
+        "usr": "src/index.ts#<module>.app.use(\"/terminal/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -539,8 +539,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.use(\"/terminal/*\")",
+        "usr": "src/index.ts#<module>.app.use(\"/terminal/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -566,8 +566,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.use(\"/terminal/*\")",
+        "usr": "src/index.ts#<module>.app.use(\"/terminal/*\")"
       }
     },
     {
@@ -586,8 +586,8 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/users/me\")",
+        "usr": "src/index.ts#<module>.app.get(\"/users/me\")"
       },
       "trailingSlash": "strict"
     },
@@ -607,15 +607,14 @@
       },
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/index.ts#<module>",
-        "usr": "src/index.ts#<module>"
+        "qualifiedName": "src/index.ts#<module>.app.get(\"/users/:id\")",
+        "usr": "src/index.ts#<module>.app.get(\"/users/:id\")"
       },
       "trailingSlash": "strict"
     }
   ],
   "limitations": [
     "framework-dispatch-unmodeled: 1 middleware registration(s) run before route handlers and are treated as passing every request on; their code is not attached to handler usrs",
-    "framework-dispatch-unmodeled: 19 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code",
     "route-coverage: 1 route declaration(s) have paths tsograph could not translate into a canonical template; their facts are dynamic",
     "route-coverage: 1 route registration(s) run only under a condition (if, switch, loop, catch, or short-circuit expression); they are not emitted as declarations",
     "route-dispatch-order-unknown: 1 route declaration(s) carry no order (a handler that may pass the request on with next(), a registration outside the app's own module or behind a condition, or a router that picks by specificity)"

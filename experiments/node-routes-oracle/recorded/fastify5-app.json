@@ -19,8 +19,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/\")"
       },
       "trailingSlash": "strict"
     },
@@ -36,8 +36,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/Case\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/Case\")"
       },
       "trailingSlash": "strict"
     },
@@ -53,8 +53,8 @@
       "method": "HEAD",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.head(\"/Case\")",
+        "usr": "src/app.ts#buildApp.app.head(\"/Case\")"
       },
       "trailingSlash": "strict"
     },
@@ -87,8 +87,8 @@
       "method": "POST",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/accounts.ts#accounts",
-        "usr": "src/plugins/accounts.ts#accounts"
+        "qualifiedName": "src/plugins/accounts.ts#accounts.app.post(\"/\")",
+        "usr": "src/plugins/accounts.ts#accounts.app.post(\"/\")"
       },
       "trailingSlash": "strict"
     },
@@ -138,8 +138,8 @@
       "method": "POST",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/accounts.ts#accounts",
-        "usr": "src/plugins/accounts.ts#accounts"
+        "qualifiedName": "src/plugins/accounts.ts#accounts.app.post(\"/\")",
+        "usr": "src/plugins/accounts.ts#accounts.app.post(\"/\")"
       },
       "trailingSlash": "strict"
     },
@@ -172,8 +172,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/accounts.ts#accounts",
-        "usr": "src/plugins/accounts.ts#accounts"
+        "qualifiedName": "src/plugins/accounts.ts#accounts.app.register().nested.get(\"/summary\")",
+        "usr": "src/plugins/accounts.ts#accounts.app.register().nested.get(\"/summary\")"
       },
       "trailingSlash": "strict"
     },
@@ -189,8 +189,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/accounts.ts#accounts",
-        "usr": "src/plugins/accounts.ts#accounts"
+        "qualifiedName": "src/plugins/accounts.ts#accounts.app.get(\"/:id\")",
+        "usr": "src/plugins/accounts.ts#accounts.app.get(\"/:id\")"
       },
       "trailingSlash": "strict"
     },
@@ -246,8 +246,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/accounts.ts#accounts",
-        "usr": "src/plugins/accounts.ts#accounts"
+        "qualifiedName": "src/plugins/accounts.ts#accounts.app.get(\"/:id(^\\\\d+$)/audit\")",
+        "usr": "src/plugins/accounts.ts#accounts.app.get(\"/:id(^\\\\d+$)/audit\")"
       },
       "trailingSlash": "strict"
     },
@@ -263,8 +263,8 @@
       "method": "ANY",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.all(\"/any\")",
+        "usr": "src/app.ts#buildApp.app.all(\"/any\")"
       },
       "trailingSlash": "strict"
     },
@@ -280,8 +280,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/files/*\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/files/*\")"
       },
       "trailingSlash": "strict"
     },
@@ -303,8 +303,8 @@
       ],
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/files/*\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/files/*\")"
       }
     },
     {
@@ -319,8 +319,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/opt/:page?\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/opt/:page?\")"
       },
       "trailingSlash": "strict"
     },
@@ -336,8 +336,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/opt/:page?\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/opt/:page?\")"
       },
       "trailingSlash": "strict"
     },
@@ -353,8 +353,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/opt/:page?\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/opt/:page?\")"
       },
       "trailingSlash": "strict"
     },
@@ -375,8 +375,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/range/:from-:to\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/range/:from-:to\")"
       }
     },
     {
@@ -391,8 +391,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/report.:format\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/report.:format\")"
       },
       "trailingSlash": "strict"
     },
@@ -408,8 +408,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/report.:format\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/report.:format\")"
       },
       "trailingSlash": "strict"
     },
@@ -425,8 +425,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/plugins/shared.ts#sharedRoutes",
-        "usr": "src/plugins/shared.ts#sharedRoutes"
+        "qualifiedName": "src/plugins/shared.ts#sharedRoutes.fp().app.get(\"/shared/ping\")",
+        "usr": "src/plugins/shared.ts#sharedRoutes.fp().app.get(\"/shared/ping\")"
       },
       "trailingSlash": "strict"
     },
@@ -442,8 +442,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/users/:id\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/users/:id\")"
       },
       "trailingSlash": "strict"
     },
@@ -459,8 +459,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/users/me\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/users/me\")"
       },
       "trailingSlash": "strict"
     },
@@ -476,8 +476,8 @@
       "method": "GET",
       "pathAnchor": "root",
       "symbol": {
-        "qualifiedName": "src/app.ts#buildApp",
-        "usr": "src/app.ts#buildApp"
+        "qualifiedName": "src/app.ts#buildApp.app.get(\"/users/:id\")",
+        "usr": "src/app.ts#buildApp.app.get(\"/users/:id\")"
       },
       "trailingSlash": "strict"
     },
@@ -501,7 +501,6 @@
     }
   ],
   "limitations": [
-    "framework-dispatch-unmodeled: 18 route handler(s) are inline functions; their symbol.usr is the enclosing declaration or module scope, so reach from them includes sibling code",
     "route-coverage: 1 route declaration(s) have paths tsograph could not translate into a canonical template; their facts are dynamic",
     "route-coverage: 1 route registration(s) run only under a condition (if, switch, loop, catch, or short-circuit expression); they are not emitted as declarations"
   ],
