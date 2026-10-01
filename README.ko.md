@@ -21,12 +21,32 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 | Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·MSSQL·Oracle·slonik relation-use | 계획(현재는 limitation으로 센다) |
 | `tsograph graph`·`reach`·`impact`: TypeScript/JavaScript 호출 그래프 → isthmus `language-traversal` v1 | 구현됨 |
 | 인터페이스·의존성 주입 디스패치: `bound`·`candidate` 간선, `--dispatch`, root별 하한 `evidence`, `unresolvedCalls` | 구현됨 |
-| 웹/React Native 클라이언트 route-call | 계획 |
+| `tsograph routes --role client`: 웹/React Native fetch·axios·ky route-call | 구현됨 |
 
-isthmus의 `http` target은 isthmus `docs/GRAPH-EXCHANGE.md`에서 아직 "개발 중: HTTP 경계" 절이다.
-이 절을 소비하는 첫 발행본은 isthmus-cli **0.10.0**이다. `check`(`--pairs` 포함)·`query`·`trace`·`diff --http`가
-`target: "http"` 문서를 읽고, `trace`가 `language-traversal` v1 문서를 읽는다. isthmus-cli 0.9.0 이하는
-`target: "http"` 문서를 거부한다.
+HTTP v1 계약은 isthmus-cli **0.10.0**에 발행됐다. `check`(`--pairs` 포함)·`query`·`trace`·`diff --http`가
+`target: "http"` 문서를 읽고, `trace`는 `language-traversal` v1도 읽는다. 구현되지 않은 확장 필드는
+명시적 초안으로 남기고 입력 오류로 거부한다. isthmus-cli 0.9.0 이하는 `target: "http"`를 거부한다.
+
+## `tsograph routes --role client`
+
+```sh
+tsograph routes --role client --project ./web --service example-api > calls.json
+tsograph impact --project ./web --roots-from affected-call-symbols.json
+```
+
+전역 `fetch`(웹·React Native), 심볼 provenance가 있는 axios import·`create` 인스턴스,
+ky import·`create`/`extend` 인스턴스를 `platform: "js"`, `target: "http"`, `roles: ["client"]`로 낸다.
+`symbol.usr`는 화면 콜백을 포함한 감싸는 선언의 그래프 id이며, 위치는 1 기반 UTF-8 바이트 열이다.
+테스트 소스는 `--include-tests`로 포함할 때만 `testSource: true`를 단다.
+
+axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 isthmus 공유 벡터와 실제
+로컬 HTTP 요청 27개로 검증했다. ky 설정은 선언된 major가 명확해야 한다. 전체 세그먼트 보간만 `{}`가
+되고 부분 보간은 dynamic이다. query·fragment·userinfo를 제거하고 고엔트로피·웹훅 경로를 마스킹한다.
+
+미상 전개, 변경되거나 외부로 넘겨진 설정, interceptor·hook·adapter 및 미확정 동사는 `dynamic`·
+`methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 자체 래퍼, URL/Request 객체, 계산된 메서드,
+런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
+라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
 
 ## 요구 사항
 

@@ -9,8 +9,8 @@
 - 정적 분석 CLI 가족(cartograph/Swift, kartograph/Kotlin, dartograph/Dart, gartograph/Go,
   rustograph/Rust, schemagraph/SQL)의 TypeScript/JavaScript(Node) 생산자다. 조인·판정은
   [isthmus](https://github.com/ictechgy/isthmus)가 하고, tsograph는 **자기 언어에서 본 사실만** 낸다.
-- 출력 계약은 isthmus `docs/GRAPH-EXCHANGE.md`(bridge-facts v1)다. http 절은 아직 "개발 중" 초안이므로
-  계약 관련 변경 전에 그 문서를 먼저 읽고, 초안과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
+- 출력 계약은 isthmus `docs/GRAPH-EXCHANGE.md`(bridge-facts v1)다. http v1 절은 isthmus-cli 0.10.0에 발행됐으므로
+  계약 관련 변경 전에 그 문서를 먼저 읽고, 공유 계약과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
 - 구현: `tsograph openapi`(OpenAPI 2.0/3.0/3.1 → http `route-contract`), `tsograph routes`
   (Next.js App Router·Pages Router API와 Node 백엔드 Hono·Express·Fastify·Koa(@koa/router)·NestJS → http `route-decl`,
   규칙은 `docs/NODE-ROUTES.md`), `tsograph schema`(Prisma 스키마·Prisma Client·Drizzle·TypeORM·Sequelize 6·
@@ -18,7 +18,8 @@
   `tsograph graph`·`reach`·`impact`(호출 그래프 → isthmus `language-traversal` v1, id는 routes·schema
   `symbol.usr`와 같은 문자열, 인라인 콜백도 안정 id, 간선 근거 `direct`·`bound`·`candidate`와 `--dispatch`).
   장기 범위: 그 밖의 ORM/드라이버 relation-use(Kysely·Objection·MikroORM·pg-promise·sequelize-typescript·
-  MSSQL·Oracle·slonik), 웹/RN 클라이언트 route-call.
+  MSSQL·Oracle·slonik), 그 밖의 클라이언트 라이브러리 route-call.
+  `routes --role client`는 전역 fetch(웹/RN), axios와 ky 호출부를 구현했다.
   구현된 것과 계획을 구분해 적는다.
 - 정규 경로 템플릿 규칙은 isthmus 공유 벡터(`conformance/http-template.json`)와 맞춘다.
   벡터가 생기면 `src/openapi/conformance.test.ts`가 검증한다. http limitation 스코프는

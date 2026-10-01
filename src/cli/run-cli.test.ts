@@ -54,10 +54,10 @@ test('help routes는 명령 사용법을 내고 routes는 명령으로 분배된
   const help = await runCli(['help', 'routes'], environment);
   assert.equal(help.exitCode, 0);
   assert.match(help.standardOutput, /^Usage: tsograph routes/);
-  assert.match(rootHelp, /routes {7}Extract Next\.js server route declarations/);
+  assert.match(rootHelp, /routes {7}Extract server route-decl or web\/React Native client route-call facts/);
   const missingRole = await runCli(['routes', '--project', '.'], environment);
   assert.equal(missingRole.exitCode, 64);
-  assert.match(missingRole.standardError, /--role server is required/);
+  assert.match(missingRole.standardError, /--role server\|client is required/);
 });
 
 test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없는 문구로 바꾼다', async () => {

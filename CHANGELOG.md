@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SQL FROM/JOIN의 테이블 값 함수를 관계로 추측하지 않고 미해석 피연산자로 센다.
+
+### Added
+
+- `routes --role client`: 웹·React Native 전역 fetch, axios와 ky 요청을 route-call로 낸다.
+  라이브러리별 URL 결합·UTF-8 위치·그래프 심볼 id·테스트 제외·민감 경로 마스킹·보수적 limitation을 검증했다.
+  공유 URL 벡터 38개와 실제 HTTP 오라클 27개(axios 1.20.0·ky 1.10.0/2.1.0)를 추가했다.
+
 ## [0.1.0] - 2026-09-30
 
 첫 발행이다. npm 패키지 `tsograph`, 실행 명령 `tsograph`. Node.js 22.18.0 이상이 필요하고, 출력을 이으려면
