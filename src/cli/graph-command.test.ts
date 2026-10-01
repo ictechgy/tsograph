@@ -128,6 +128,36 @@ test('root이기도 한 도우미는 다른 root 인덱스만 달고 reached에 
   assert.ok(!byUsr.has('src/app/api/jobs/route.ts#POST'));
 });
 
+test('--entry-points는 실제 페이지·액션 표식을 내고 기본 순회는 옛 소비자와 호환된다', async () => {
+  const args = ['--project', fixture, '--max-depth', '3', 'src/lib/jobs.ts#createJob'];
+  const legacy = JSON.parse((await runImpactCommand(args, environment())).standardOutput);
+  assert.ok(legacy.reached.every((row: any) => row.symbol.entries === undefined));
+  const result = await runImpactCommand([...args, '--entry-points'], environment());
+  assert.equal(result.exitCode, 0, result.standardError);
+  const marked = JSON.parse(result.standardOutput);
+  assert.deepEqual(marked.reached.filter((row: any) => row.symbol.entries).map((row: any) => [row.symbol.usr, row.symbol.entries]), [
+    ['src/app/jobs/actions.ts#createJobAction', ['server-action']],
+    ['src/app/api/jobs/route.ts#POST', ['route-handler']],
+    ['src/app/jobs/page.tsx#JobsPage', ['page']],
+  ]);
+  const reached = await runReachCommand(['--project', fixture, '--entry-points', 'src/app/jobs/page.tsx#JobsPage'], environment());
+  assert.equal(reached.exitCode, 0, reached.standardError);
+  const root = JSON.parse(reached.standardOutput).roots[0];
+  assert.deepEqual(root.symbol.entries, ['page']);
+  assert.equal(root.symbol.location.path, 'src/app/jobs/page.tsx');
+});
+
+test('root이기도 한 진입점의 표식은 두 항목에서 같고 해석하지 못한 root는 표식을 지어내지 않는다', async () => {
+  const env = environment({ buildGraph: async () => tinyGraph });
+  const result = await runImpactCommand(['--project', '.', '--entry-points', 'a.ts#b', 'a.ts#page', 'missing'], env);
+  assert.equal(result.exitCode, 64);
+  const marked = JSON.parse(result.standardOutput);
+  assert.deepEqual(marked.roots[1].symbol.entries, ['page']);
+  assert.deepEqual(marked.reached.find((row: any) => row.symbol.usr === 'a.ts#page').symbol.entries, ['page']);
+  assert.deepEqual(marked.roots[2], { id: 'missing' });
+  assert.equal((await runGraphCommand(['--project', '.', '--entry-points'], env)).exitCode, 64);
+});
+
 test('모르는 id는 문서에 root-not-found로 남기고 64로 끝나며 표준 오류에 목록을 알린다', async () => {
   const ids = Array.from({ length: 22 }, (_, index) => `x.ts#missing${index}`);
   const result = await runReachCommand(['--project', '.', ...ids, 'a.ts#a'], environment({ buildGraph: async () => tinyGraph }));

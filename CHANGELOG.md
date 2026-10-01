@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `reach`·`impact --entry-points`가 생산자가 관찰한 페이지·서버 액션 등의 진입점 표식을
+  `symbol.entries`에 싣는다. 기본 출력은 유지하며 지원하는 isthmus 소비자에서 비HTTP 영향 보고에 쓴다.
+
 ## [0.2.0] - 2026-10-01
 
 ### Fixed

@@ -18,7 +18,7 @@
 import { type BridgeLocation, formatBridgeTimestamp } from '../exchange/bridge-facts.ts';
 import { nonHttpEntryLimitations } from './build-graph.ts';
 import type { DocumentHeader } from './graph-document.ts';
-import type { CallGraph, DispatchMode, EdgeEvidence, EdgeKind, GraphNode } from './graph-model.ts';
+import type { CallGraph, DispatchMode, EdgeEvidence, EdgeKind, EntryKind, GraphNode } from './graph-model.ts';
 import { type RootResolution, rootNotFoundLimitation } from './root-resolution.ts';
 import type { TraversalDirection, TraversalResult, TruncationReason } from './traversal.ts';
 
@@ -28,6 +28,8 @@ interface TraversalSymbol {
   readonly qualifiedName: string;
   readonly kind?: string;
   readonly location?: BridgeLocation;
+  /** 호출자가 요청한 경우에만 내는 생산자 진입점 표식이다. */
+  readonly entries?: readonly EntryKind[];
 }
 
 /**
@@ -84,6 +86,8 @@ export interface TraversalDocumentInput {
   readonly roots: RootResolution;
   /** 요청 순서의 root 인덱스를 쓰는 순회 결과 */
   readonly result: TraversalResult;
+  /** strict 옛 소비자와의 기본 출력 호환을 보존하기 위한 선택적 확장이다. */
+  readonly entryPoints?: boolean;
 }
 
 /**
@@ -108,9 +112,11 @@ export function createTraversalDocument(input: TraversalDocumentInput): Language
     graphRevision: input.graphRevision,
     direction: input.direction,
     dispatch,
-    roots: input.roots.requestedIds.map((id) => input.roots.unresolved.has(id) ? { id } : { id, symbol: symbolOf(id), ...unresolved(id) }),
+    roots: input.roots.requestedIds.map((id) => input.roots.unresolved.has(id) ? { id } : {
+      id, symbol: symbolOf(nodes.get(id)!, input.entryPoints === true), ...unresolved(id),
+    }),
     reached: result.reached.map((entry) => ({
-      symbol: { ...symbolOf(entry.id), kind: nodes.get(entry.id)!.kind, location: nodes.get(entry.id)!.location },
+      symbol: { ...symbolOf(nodes.get(entry.id)!, input.entryPoints === true), kind: nodes.get(entry.id)!.kind, location: nodes.get(entry.id)!.location },
       via: entry.via,
       depth: entry.depth,
       roots: entry.roots,
@@ -153,11 +159,14 @@ function unresolvedField(node: GraphNode, dispatch: DispatchMode): { unresolvedC
 /**
  * id의 심볼 표기다.
  *
- * @param id 노드 id
+ * @param node 그래프 노드
+ * @param entryPoints 진입점 확장을 요청했는지
  * @returns usr·qualifiedName
  */
-function symbolOf(id: string): TraversalSymbol {
-  return { usr: id, qualifiedName: id };
+function symbolOf(node: GraphNode, entryPoints: boolean): TraversalSymbol {
+  return { usr: node.id, qualifiedName: node.id,
+    ...(entryPoints && (node.entries?.length ?? 0) > 0 ? { entries: node.entries!, location: node.location } : {}),
+  };
 }
 
 /**

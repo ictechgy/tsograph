@@ -923,6 +923,12 @@ documents count the other entry kinds among their roots and reached symbols unde
 `non-http-entries:`, so isthmus `trace` can report them as `non-http-entry` gaps instead of
 missing routes.
 
+`reach` and `impact --entry-points` additionally emit observed `symbol.entries` on roots and reached
+symbols, with locations for marked roots. A supporting isthmus consumer can report non-HTTP entry points
+alongside API impact for relation, symbol, and file selections. Page marks include layouts and special
+files and do not prove that a component is an RSC. The option is off by default to preserve output
+compatibility; released isthmus-cli 0.11.0 rejects `symbol.entries`, so upgrade the consumer first.
+
 ### language-traversal output
 
 - `dispatch`: the mode used (`--dispatch`, default `bound`). `direct` follows `direct` edges only (the
