@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `reach`·`impact --entry-points`가 생산자가 관찰한 페이지·서버 액션 등의 진입점 표식을
