@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 호출 그래프가 닫힌 callback 매개변수, 프로젝트 함수가 반환한 callable, 생성자에서 대입한 callback과
+  안전하게 읽은 이름 있는 메서드를 bounded value flow로 추적한다. 객체·함수 혼합이나 열린·반사적·몽키 패치
+  흐름은 원래 `unresolved-calls:` 이유를 유지하고 candidate로 과대 추정하지 않는다. 이름 있는·계산된 속성
+  삭제와 `Reflect.deleteProperty`도 값 모르는 쓰기로 보존하되, 닫힌 nominal 클래스 계보와 겹칠 수 없는 반사
+  대상은 관계없는 호출을 오염시키지 않는다.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

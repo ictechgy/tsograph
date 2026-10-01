@@ -11,6 +11,7 @@ import ts from 'typescript';
 
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { enclosingSymbol, isFunctionLike } from '../schema/enclosing-symbol.ts';
+import type { FlowIndex } from './flow-index.ts';
 import type { GraphStore, UnresolvedReason } from './graph-model.ts';
 import { isFunctionValued, skipWrappers } from './node-collector.ts';
 import { scopeIdOf } from './symbol-ids.ts';
@@ -46,23 +47,29 @@ export class TargetResolver {
   private readonly store: GraphStore;
   private readonly pathOf: (sourceFile: ts.SourceFile) => string | undefined;
   private readonly isProjectSpecifier: (specifier: string) => boolean;
+  private readonly writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'>;
 
   /**
    * @param checker TypeChecker
    * @param store 노드가 모두 등록된 저장소
    * @param pathOf 노드 파일이면 프로젝트 기준 경로, 아니면 undefined
    * @param isProjectSpecifier import 지정자가 프로젝트 모듈(상대 경로·`paths` 별칭)을 가리키는지
+   * @param writes 이 resolver 범위(운영 또는 전체)의 값 쓰기 색인
    */
   constructor(
     checker: ts.TypeChecker,
     store: GraphStore,
     pathOf: (sourceFile: ts.SourceFile) => string | undefined,
     isProjectSpecifier: (specifier: string) => boolean,
+    writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> = {
+      identifierWrites: new Map(), propertyWrites: new Map(), reflectiveTargets: [],
+    },
   ) {
     this.checker = checker;
     this.store = store;
     this.pathOf = pathOf;
     this.isProjectSpecifier = isProjectSpecifier;
+    this.writes = writes;
   }
 
   /**
@@ -104,7 +111,9 @@ export class TargetResolver {
     return (target.declarations ?? []).flatMap((declaration) => {
       if (isFunctionValuedDeclaration(declaration)) {
         const resolution = this.resolveDeclaration(declaration, depth);
-        return resolution.kind === 'nodes' ? resolution.ids : [];
+        if (resolution.kind === 'nodes') return resolution.ids;
+        const binding = ts.isVariableDeclaration(declaration) ? this.variableBindingNode(declaration) : resolution;
+        return binding.kind === 'nodes' ? binding.ids : [];
       }
       return this.functionValueTargets(this.aliasedValueSymbol(declaration), depth + 1);
     });
@@ -157,9 +166,24 @@ export class TargetResolver {
     if (target === undefined) return this.isMissingPackageImport(symbol) ? missingExternal : unresolved('unresolved-import');
     const declarations = target.declarations ?? [];
     if (declarations.length === 0) return unresolved('untyped');
+    if (declarations.some((declaration) => isFunctionLike(declaration) && declaration.body !== undefined && this.hasSymbolWrite(target))) {
+      return unresolved('indirect');
+    }
     const hasBody = declarations.some((declaration) => isFunctionLike(declaration) && declaration.body !== undefined);
     const candidates = declarations.filter((declaration) => !hasBody || !isFunctionLike(declaration) || declaration.body !== undefined);
     return mergeResolutions(candidates.map((declaration) => this.resolveDeclaration(declaration, depth)));
+  }
+
+  /** export 별칭만을 위해 변수 초기화 노드의 안정 id를 보존한다. 호출 대상 해석에는 쓰지 않는다. */
+  resolveExportSymbol(symbol: ts.Symbol | undefined, depth: number): Resolution {
+    const target = this.dealias(symbol);
+    const binding = target?.valueDeclaration;
+    if (binding !== undefined && ts.isBindingElement(binding)) return this.resolveExportBinding(binding, depth);
+    const resolution = this.resolveSymbol(symbol, depth);
+    if (resolution.kind !== 'unresolved' || resolution.reason !== 'indirect') return resolution;
+    const declaration = target?.valueDeclaration;
+    if (!target || !declaration || !ts.isVariableDeclaration(declaration) || declaration.initializer === undefined) return resolution;
+    return this.variableBindingNode(declaration);
   }
 
   /**
@@ -187,9 +211,17 @@ export class TargetResolver {
    */
   private resolveExpression(expression: ts.Expression, depth: number): Resolution {
     if (ts.isIdentifier(expression)) return this.resolveSymbol(this.checker.getSymbolAtLocation(expression), depth);
-    if (ts.isPropertyAccessExpression(expression)) return this.resolveSymbol(this.checker.getSymbolAtLocation(expression.name), depth);
+    if (ts.isPropertyAccessExpression(expression)) {
+      const resolution = this.resolveSymbol(this.checker.getSymbolAtLocation(expression.name), depth);
+      const mutable = this.isReflectivelyMutable(expression.expression)
+        || this.hasPotentialPropertyWrite(expression.expression, expression.name.text);
+      return resolution.kind === 'nodes' && mutable ? unresolved('indirect') : resolution;
+    }
     if (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression)) {
-      return this.resolveSymbol(this.checker.getSymbolAtLocation(expression.argumentExpression), depth);
+      const resolution = this.resolveSymbol(this.checker.getSymbolAtLocation(expression.argumentExpression), depth);
+      const mutable = this.isReflectivelyMutable(expression.expression)
+        || this.hasPotentialPropertyWrite(expression.expression, expression.argumentExpression.text);
+      return resolution.kind === 'nodes' && mutable ? unresolved('indirect') : resolution;
     }
     return unresolved('computed');
   }
@@ -204,8 +236,18 @@ export class TargetResolver {
   private resolveDeclaration(declaration: ts.Declaration, depth: number): Resolution {
     const path = this.pathOf(declaration.getSourceFile());
     if (path === undefined || isAmbient(declaration)) return external;
+    if (isDecoratedMember(declaration)) return unresolved('indirect');
+    if (ts.isGetAccessorDeclaration(declaration)) {
+      if (declaration.body === undefined) return unresolved('interface');
+      const direct = this.node(scopeIdOf(declaration.body, path));
+      return direct.kind === 'nodes' ? { ...direct, partial: 'indirect' } : direct;
+    }
     if (isFunctionLike(declaration)) {
       return declaration.body === undefined ? unresolved('interface') : this.node(scopeIdOf(declaration.body, path));
+    }
+    if (ts.isPropertySignature(declaration)
+      && this.checker.getNonNullableType(this.checker.getTypeAtLocation(declaration)).getCallSignatures().length > 0) {
+      return unresolved('indirect');
     }
     if (isSignature(declaration)) return unresolved('interface');
     if (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) return this.constructorTarget(declaration);
@@ -225,6 +267,7 @@ export class TargetResolver {
    */
   private resolveOtherDeclaration(declaration: ts.Declaration, path: string, depth: number): Resolution {
     if (ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)) {
+      if (ts.isPropertyDeclaration(declaration) && isDecoratedMember(declaration)) return unresolved('indirect');
       return this.resolveInitialized(declaration.initializer, path, depth, ts.isPropertyDeclaration(declaration) ? declaration.name : undefined);
     }
     if (ts.isShorthandPropertyAssignment(declaration)) {
@@ -273,13 +316,24 @@ export class TargetResolver {
   private resolveVariable(declaration: ts.VariableDeclaration, path: string, depth: number): Resolution {
     if (!ts.isIdentifier(declaration.name)) return unresolved('indirect');
     const initializer = declaration.initializer === undefined ? undefined : skipWrappers(declaration.initializer);
-    if (initializer !== undefined && isFunctionValued(initializer)) {
+    const immutable = ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0;
+    if (immutable && initializer !== undefined && isFunctionValued(initializer)) {
       return this.node(scopeIdOf((initializer as ts.ArrowFunction | ts.FunctionExpression).body, path));
     }
-    if (initializer !== undefined && isFollowable(initializer)) {
+    if (immutable && initializer !== undefined && isFollowable(initializer)) {
       const followed = this.resolveExpression(initializer, depth + 1);
       if (followed.kind !== 'unresolved') return followed;
     }
+    // 호출·객체·그 밖의 계산값으로 초기화한 변수는 그 자체가 호출 가능 선언이 아니다.
+    // 반환 callback을 값 흐름으로 증명할 수 있도록 공백으로 남기고 변수 초기화 노드를 호출 대상으로 꾸미지 않는다.
+    return unresolved('indirect');
+  }
+
+  /** 변수의 안정 binding 노드를 구한다. export/reference 의미에만 쓰고 호출 대상으로는 쓰지 않는다. */
+  private variableBindingNode(declaration: ts.VariableDeclaration): Resolution {
+    if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) return unresolved('indirect');
+    const path = this.pathOf(declaration.getSourceFile());
+    if (path === undefined) return external;
     const outer = enclosingSymbol(declaration.name, path);
     const candidate = outer === undefined ? `${path}#${declaration.name.text}` : `${outer}.${declaration.name.text}`;
     return this.store.hasNode(candidate) ? { kind: 'nodes', ids: [candidate] } : unresolved('indirect');
@@ -295,6 +349,21 @@ export class TargetResolver {
    */
   private resolveBinding(element: ts.BindingElement, depth: number): Resolution {
     if (bindingRoot(element) === 'parameter') return unresolved('parameter');
+    const source = bindingSourceExpression(element);
+    const name = ts.isObjectBindingPattern(element.parent) ? bindingPropertyName(element) : undefined;
+    if (source !== undefined && name !== undefined && isFollowable(source)
+      && (this.isReflectivelyMutable(source) || this.hasPotentialPropertyWrite(source, name))) return unresolved('indirect');
+    return this.resolveBindingProperty(element, depth);
+  }
+
+  /** export 노드 전용으로 구조 분해 바인딩의 선언 대상을 푼다. */
+  private resolveExportBinding(element: ts.BindingElement, depth: number): Resolution {
+    if (bindingRoot(element) === 'parameter') return unresolved('parameter');
+    return this.resolveBindingProperty(element, depth);
+  }
+
+  /** 구조 분해 바인딩의 타입 속성을 선언 대상으로 푼다. */
+  private resolveBindingProperty(element: ts.BindingElement, depth: number): Resolution {
     const pattern = element.parent;
     const name = ts.isObjectBindingPattern(pattern) ? bindingPropertyName(element) : undefined;
     if (name === undefined) return unresolved('indirect');
@@ -316,7 +385,8 @@ export class TargetResolver {
     if (initializer === undefined) return undefined;
     const property = this.checker.getPropertyOfType(this.checker.getTypeAtLocation(initializer), access.name.text);
     const proven = this.resolveSymbol(property, 1);
-    return proven.kind === 'nodes' && proven.partial === undefined ? proven : undefined;
+    const mutable = this.isReflectivelyMutable(receiver) || this.hasPotentialPropertyWrite(receiver, access.name.text);
+    return proven.kind === 'nodes' && proven.partial === undefined && !mutable ? proven : undefined;
   }
 
   /**
@@ -347,6 +417,122 @@ export class TargetResolver {
     const symbol = this.checker.getSymbolAtLocation(current);
     return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0 && this.dealias(symbol) === undefined
       && this.isMissingPackageImport(symbol);
+  }
+
+  /** 함수 선언 심볼에 값 대입이 있는지 본다. */
+  private hasSymbolWrite(symbol: ts.Symbol): boolean {
+    return (this.writes.identifierWrites.get(symbol)?.length ?? 0) > 0;
+  }
+
+  /** 같은 이름 쓰기 중 호출 수신자와 겹칠 수 있는 것이 있는지 본다. */
+  private hasPotentialPropertyWrite(receiver: ts.Expression, name: string): boolean {
+    return (this.writes.propertyWrites.get(name) ?? [])
+      .some((write) => !this.expressionsProvablyDisjoint(receiver, write.target.expression));
+  }
+
+  /**
+   * 반사적 쓰기 대상과 같은 수신자이거나 대상을 정적으로 식별할 수 없으면 멤버의 선언 전 본문을 직접 잇지 않는다.
+   * dispatch 값 흐름이 실제 수신자와 겹치지 않음을 증명할 때만 bound로 복구한다.
+   */
+  private isReflectivelyMutable(receiver: ts.Expression): boolean {
+    if (this.writes.reflectiveTargets.length === 0) return false;
+    return this.writes.reflectiveTargets.some((target) => !this.expressionsProvablyDisjoint(receiver, target));
+  }
+
+  /** 두 수신자 식이 같은 객체를 가리킬 수 없음을 할당·클래스 정체성으로 증명한다. */
+  private expressionsProvablyDisjoint(left: ts.Expression, right: ts.Expression): boolean {
+    const leftIdentities = this.expressionIdentities(left);
+    const rightIdentities = this.expressionIdentities(right);
+    if (leftIdentities.length === 0 || rightIdentities.length === 0) return false;
+    if (leftIdentities.some((identity) => rightIdentities.includes(identity))) return false;
+    const leftPrimary = this.expressionIdentity(left);
+    const rightPrimary = this.expressionIdentity(right);
+    if (leftPrimary === undefined || rightPrimary === undefined) return false;
+    if (isObjectAllocation(leftPrimary) && isObjectAllocation(rightPrimary)) return leftPrimary !== rightPrimary;
+    if ((isNodeIdentity(leftPrimary) && ts.isObjectLiteralExpression(leftPrimary))
+      || (isNodeIdentity(rightPrimary) && ts.isObjectLiteralExpression(rightPrimary))) return true;
+    const leftClass = this.identityClass(leftPrimary);
+    const rightClass = this.identityClass(rightPrimary);
+    if (leftClass === undefined || rightClass === undefined) return false;
+    const leftLineage = this.classLineage(leftClass);
+    const rightLineage = this.classLineage(rightClass);
+    return leftLineage !== undefined && rightLineage !== undefined
+      && !leftLineage.some((declaration) => rightLineage.includes(declaration));
+  }
+
+  /** 정체성이 나타내는 클래스(`this` 또는 `new C`)다. */
+  private identityClass(identity: ts.Node | ts.Symbol): ts.ClassLikeDeclaration | undefined {
+    if (!isNodeIdentity(identity)) return undefined;
+    if (ts.isClassLike(identity)) return identity;
+    if (!ts.isNewExpression(identity)) return undefined;
+    const callee = skipWrappers(identity.expression);
+    if (ts.isClassExpression(callee)) return callee;
+    const symbol = this.dealias(this.expressionSymbol(callee));
+    return symbol?.declarations?.find(ts.isClassLike);
+  }
+
+  /** 클래스와 해석 가능한 기반 클래스 계보. 계산된 기반을 풀지 못하면 undefined다. */
+  private classLineage(declaration: ts.ClassLikeDeclaration): readonly ts.ClassLikeDeclaration[] | undefined {
+    const result: ts.ClassLikeDeclaration[] = [];
+    const seen = new Set<ts.ClassLikeDeclaration>();
+    let current: ts.ClassLikeDeclaration | undefined = declaration;
+    while (current !== undefined && !seen.has(current)) {
+      seen.add(current);
+      result.push(current);
+      const base: ts.Expression | undefined = current.heritageClauses
+        ?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+      if (base === undefined) break;
+      const symbol = this.dealias(this.expressionSymbol(skipWrappers(base)));
+      const next = symbol?.declarations?.find(ts.isClassLike);
+      if (next === undefined) return undefined;
+      current = next;
+    }
+    return result;
+  }
+
+  /** 수신자와 그 속성 사슬의 각 접두사를 반사적 쓰기 대상 비교용 정체성으로 바꾼다. */
+  private expressionIdentities(expression: ts.Expression): (ts.Node | ts.Symbol)[] {
+    const result: (ts.Node | ts.Symbol)[] = [];
+    let current = skipWrappers(expression);
+    while (true) {
+      const identity = this.expressionIdentity(current);
+      if (identity !== undefined) result.push(identity);
+      if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) current = skipWrappers(current.expression);
+      else break;
+    }
+    return result;
+  }
+
+  /** 반사적 쓰기 대상 비교에 쓸 선언·객체 값·심볼 정체성이다. */
+  private expressionIdentity(
+    expression: ts.Expression,
+    seen: ReadonlySet<ts.Symbol> = new Set(),
+    depth = 0,
+  ): ts.Node | ts.Symbol | undefined {
+    if (depth > MAX_FOLLOW_DEPTH) return undefined;
+    const inner = skipWrappers(expression);
+    if (inner.kind === ts.SyntaxKind.ThisKeyword) return ts.findAncestor(inner, ts.isClassLike);
+    if (ts.isObjectLiteralExpression(inner) || ts.isNewExpression(inner)) return inner;
+    if (ts.isIdentifier(inner)) {
+      const symbol = this.dealias(this.checker.getSymbolAtLocation(inner));
+      if (symbol === undefined || seen.has(symbol) || this.hasSymbolWrite(symbol)) return undefined;
+      const declaration = symbol.valueDeclaration;
+      const immutableVariable = declaration !== undefined && ts.isVariableDeclaration(declaration)
+        && (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0;
+      const readonlyProperty = declaration !== undefined && ts.isPropertyDeclaration(declaration)
+        && (ts.getModifiers(declaration) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword);
+      if ((immutableVariable || readonlyProperty) && declaration !== undefined && declaration.initializer !== undefined) {
+        const nextSeen = new Set(seen);
+        nextSeen.add(symbol);
+        return this.expressionIdentity(declaration.initializer, nextSeen, depth + 1);
+      }
+      return symbol;
+    }
+    if (ts.isPropertyAccessExpression(inner)) return this.dealias(this.checker.getSymbolAtLocation(inner.name));
+    if (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression)) {
+      return this.dealias(this.checker.getSymbolAtLocation(inner.argumentExpression));
+    }
+    return undefined;
   }
 
   /**
@@ -459,6 +645,26 @@ function isFollowable(expression: ts.Expression): boolean {
     || (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression));
 }
 
+/** 정체성 값이 AST 노드인지 본다. */
+function isNodeIdentity(identity: ts.Node | ts.Symbol): identity is ts.Node {
+  return 'kind' in identity;
+}
+
+/** 정체성 값이 매 평가마다 고유한 객체 할당인지 본다. */
+function isObjectAllocation(identity: ts.Node | ts.Symbol): identity is ts.ObjectLiteralExpression | ts.NewExpression {
+  return isNodeIdentity(identity) && (ts.isObjectLiteralExpression(identity) || ts.isNewExpression(identity));
+}
+
+/** 멤버나 소유 클래스의 데코레이터가 런타임 값을 바꿀 수 있는지 본다. */
+function isDecoratedMember(declaration: ts.Declaration): boolean {
+  if (ts.canHaveDecorators(declaration) && (ts.getDecorators(declaration) ?? []).length > 0) return true;
+  const owner = declaration.parent;
+  if (!ts.isClassLike(owner)) return false;
+  if ((ts.getDecorators(owner) ?? []).length > 0) return true;
+  return owner.members.some((member) => ts.isConstructorDeclaration(member)
+    && member.parameters.some((parameter) => (ts.getDecorators(parameter) ?? []).length > 0));
+}
+
 /**
  * 함수 값 선언인지 본다(참조 간선 대상).
  *
@@ -483,6 +689,13 @@ function bindingRoot(element: ts.BindingElement): 'parameter' | 'variable' {
   let current: ts.Node = element.parent.parent;
   while (ts.isBindingElement(current)) current = current.parent.parent;
   return ts.isParameter(current) ? 'parameter' : 'variable';
+}
+
+/** 구조 분해 변수 선언의 원본 식이다. */
+function bindingSourceExpression(element: ts.BindingElement): ts.Expression | undefined {
+  let owner: ts.Node = element.parent.parent;
+  while (ts.isBindingElement(owner)) owner = owner.parent.parent;
+  return ts.isVariableDeclaration(owner) && owner.initializer !== undefined ? skipWrappers(owner.initializer) : undefined;
 }
 
 /**

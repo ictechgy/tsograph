@@ -45,16 +45,21 @@ export function registerExportNodes(store: GraphStore, path: string, sourceFile:
  *
  * @param store 그래프 저장소
  * @param checker TypeChecker
- * @param resolver 대상 해석기
+ * @param resolverFor export 파일 범위(운영/전체)에 맞는 대상 해석기
  * @param pending export 노드
  * @returns 대상을 해석하지 못한 export 노드 수(외부 대상은 세지 않는다)
  */
-export function linkExportNodes(store: GraphStore, checker: ts.TypeChecker, resolver: TargetResolver, pending: readonly PendingExport[]): number {
+export function linkExportNodes(
+  store: GraphStore,
+  checker: ts.TypeChecker,
+  resolverFor: (sourceFile: ts.SourceFile) => TargetResolver,
+  pending: readonly PendingExport[],
+): number {
   let unresolvedCount = 0;
   for (const entry of pending) {
     const symbol = exportTargetSymbol(checker, entry.name);
     if (symbol === 'none') continue;
-    const resolution = resolver.resolveSymbol(symbol, 0);
+    const resolution = resolverFor(entry.name.getSourceFile()).resolveExportSymbol(symbol, 0);
     if (resolution.kind === 'nodes') resolution.ids.forEach((id) => store.addEdge(entry.id, id, 'alias'));
     if (resolution.kind === 'unresolved') unresolvedCount++;
   }

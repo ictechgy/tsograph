@@ -802,6 +802,10 @@ Nothing is guessed:
   only and counted under `overridden-methods:`.
 - Calls through parameters, `any`, computed callees, non-function values, and unresolvable
   project imports get no edge and are counted by reason under `unresolved-calls:`.
+- Calls through a closed callback parameter, a local callback returned by a project function, or a
+  safely readable named method can be proven with callable value flow and linked with `bound`
+  evidence. Callable flow is all-or-nothing: mixed object/function or unknown values keep the
+  original gap and do not expand to type candidates.
 - Calls through packages whose type declarations cannot be resolved (dependencies not installed,
   untyped packages) are external and counted under `missing-dependencies:`.
 - Module scopes are not linked from importers (import-time side effects stay on the `<module>` node).
@@ -814,7 +818,7 @@ Every edge carries an `evidence` tier. The tiers nest: the `direct` graph ⊂ th
 | `evidence` | Meaning |
 |---|---|
 | `direct` | The target is proven by checker symbols (or by the receiver's fixed initializer, above). |
-| `bound` | A call through an interface-typed or structurally typed receiver (`this.deps.store.findItem()`, `repository.save()`) where **every value observed flowing into the receiver** within the scanned project is an instance of a project class or a project object literal, and the method resolves on each of them to a project declaration with a body. One `bound` edge per distinct implementation, unless a stronger edge between the same pair already covers it (see the snapshot rule). |
+| `bound` | A call through an interface-typed or structurally typed receiver (`this.deps.store.findItem()`, `repository.save()`), or a closed callable value (`invoke(callback)`, `make()()`), where **every observed receiver/callable value** within the scanned project resolves to a project implementation or callable declaration with a body. One `bound` edge per distinct target, unless a stronger edge between the same pair already covers it (see the snapshot rule). |
 | `candidate` | The flows could not all be proven, so the call is linked to every project class or object that could implement it: classes that declare `implements` for the receiver's interface (directly, through a base class, or through an extending interface), and classes and object literals whose type is assignable to the receiver type (`TypeChecker.isTypeAssignableTo`, public in the pinned TypeScript 5.9.3; a type-parameter receiver uses its constraint). An over-approximation. |
 
 How `bound` values are found (whole program, context- and path-insensitive): `new C(...)`, object
@@ -833,6 +837,13 @@ and method-parameter bivariance let an instance reach any typed slot without a c
 `new ItemHandler({ store: new SqlItemStore(client) })`, `createLookup({ store })`, `new ItemService(sql)`,
 default-parameter DI (`store: ItemStore = new MemoryItemStore()`), and module singletons created by a
 factory are followed across modules.
+
+Callable values use the same flow engine: function declarations and function-valued initializers plus
+their observed assignments, closed callback parameters, function and getter return values, constructor
+assignments/defaults, and safely readable object/class methods are followed. Function-object properties,
+decorated or unprovably monkey-patched methods, reflective writes, open exports/entry points, and unknown values stay unresolved. A callable
+failure keeps its original `parameter`, `indirect`, or `computed` reason and never emits candidate
+edges.
 
 What `bound` guarantees, and what it does not:
 
@@ -877,16 +888,20 @@ What `bound` guarantees, and what it does not:
   declaration they re-export are open, as are top-level declarations of files that are not ES
   modules (scripts and CommonJS files). A variable declared more than once (`var x = a; var x = b;`)
   unions every initializer.
-- **Not modeled** (documented gaps): writes through computed keys (`obj[key] = v`), prototype mutation,
-  `eval`, values that leave the
+- **Not modeled** (documented gaps): prototype mutation, `eval`, values that leave the
   project through library code and come back, and properties that library code mutates. When
   dependencies are not installed, values that pass through their APIs are unknown, so same-named
   writes and method reads on such values elsewhere in the project can block `bound` for unrelated
   classes (fewer `bound` edges, never wrong ones). Dynamic `import()`/`require()` with a non-string specifier and file-pattern
   loaders (`import.meta.glob`, `require.context`) open every export. `Object.assign`,
-  `Object.defineProperty(ies)`, `Reflect.set`, and `Reflect.defineProperty` targets are handled
+  `Object.defineProperty(ies)`, `Reflect.set`, `Reflect.defineProperty`, and `Reflect.deleteProperty`
+  targets are handled
   conservatively (their properties and members become unknown, including for statically resolved member
-  calls). A same-named property write that replaces a
+  calls). A write or delete through a computed key (`obj[key] = v`, `delete obj[key]`) likewise makes
+  that receiver's properties unknown. An unknown reflective target keeps its static type: it is excluded
+  only from a closed, non-escaped nominal class family when neither the class nor any project subclass can
+  overlap that type. Structurally unrelated types can still overlap through an intersection and therefore
+  remain unknown. A same-named property write that replaces a
   method (monkey patching) blocks `bound` for that method.
 - **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
   `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the
@@ -901,10 +916,10 @@ What `bound` guarantees, and what it does not:
 
 `unresolvedCalls` counts, per node and per mode, the node's own call sites (calls, `new`, tagged
 templates, decorators, JSX) that have no edge or only a partial set of targets under that mode:
-`direct` counts every such site, `bound` drops the interface calls linked by `bound` edges, and
-`candidates` also drops those linked by `candidate` edges. Calls into dependencies are external, not
-unresolved. Callback invocations through parameters are counted even though the caller's `callback`
-edge covers the reach.
+`direct` counts every such site, `bound` drops deferred calls linked by `bound` edges, and
+`candidates` also drops deferred calls linked by `candidate` edges. Calls into dependencies are
+external, not unresolved. Callback invocations through parameters are counted even though the
+caller's `callback` edge covers the reach.
 
 ### Entry points
 

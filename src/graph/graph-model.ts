@@ -114,13 +114,13 @@ export interface CallStatistics {
   missingDependencies: number;
   /** 잇지 못한 호출 수(이유별, direct 기준) */
   readonly unresolved: Record<UnresolvedReason, number>;
-  /** 인터페이스 공백 호출 중 bound·candidate 간선으로 이은 수 */
+  /** 인터페이스·호출 가능 값 공백 호출 중 bound·candidate 간선으로 이은 수 */
   readonly dispatch: DispatchStatistics;
 }
 
 /**
- * 인터페이스 공백 호출(`unresolved.interface`와 인터페이스 부분 해석)을 디스패치로 이은 수다.
- * `*Partial`은 direct로 일부만 이었던 호출(`partial-dispatch:`)의 나머지를 이은 수다.
+ * 인터페이스·호출 가능 값 공백 호출을 디스패치로 이은 수다.
+ * `*Partial`은 direct로 일부만 이었던 인터페이스 호출(`partial-dispatch:`)의 나머지를 이은 수다.
  */
 export interface DispatchStatistics {
   bound: number;

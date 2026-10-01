@@ -1,7 +1,7 @@
 /**
  * bound 디스패치용 요구 기반(demand-driven) 전체 프로그램 값 흐름 분석이다.
  *
- * 식 하나에 흘러들 수 있는 **추상 값**(프로젝트 클래스의 인스턴스, 객체 리터럴 하나)의 집합을 구한다.
+ * 식 하나에 흘러들 수 있는 **추상 값**(프로젝트 클래스의 인스턴스·객체 리터럴·호출 가능 함수)의 집합을 구한다.
  * 문맥에 민감하지 않은(context-insensitive) 합집합이라 과대 근사이고, 증명하지 못한 흐름이 하나라도
  * 섞이면 결과 전체를 "모름"(`null`)으로 돌려준다 — 호출자는 모름이면 bound 간선을 만들지 않는다.
  *
@@ -9,8 +9,8 @@
  * - `new C(...)`(프로젝트 클래스), 객체 리터럴, `this`(감싼 클래스와 프로젝트 하위 클래스).
  * - 변수: 초기값 + 모든 대입. 매개변수: 기본값 + 모든 호출 위치의 같은 자리 인자(함수 선언·`const` 함수·
  *   생성자만 — 메서드·콜백은 호출자를 다 알 수 없어 모름). 구조 분해 바인딩: 원본 값의 같은 이름 속성.
- * - 속성 `a.b`: `a`의 각 값에서 — 객체 리터럴이면 그 속성 초기값, 클래스 인스턴스면 필드 초기값·매개변수
- *   속성·getter 반환값 — 에 이름이 같은 모든 속성 쓰기(`x.b = e`, 관계없는 클래스의 필드 쓰기는 제외)를 더한다.
+ * - 속성 `a.b`: `a`의 각 객체 값에서 — 객체 리터럴이면 그 속성 초기값·메서드, 클래스 인스턴스면 필드 초기값·매개변수
+ *   속성·getter 반환값·메서드 — 에 이름이 같은 모든 속성 쓰기(`x.b = e`, 관계없는 클래스의 필드 쓰기는 제외)를 더한다.
  * - 호출 `f(...)`: 호출 대상 함수(인터페이스 메서드면 수신자 값의 구현)의 모든 `return` 값. `await`는 통과.
  * - `?:`·`??`·`||`·`&&`·쉼표·대입식은 해당 피연산자의 합집합.
  *
@@ -25,8 +25,14 @@ import { memberName } from '../schema/scope-builder.ts';
 import { climbWrappers, type FlowIndex, type PropertyWrite, referenceSite } from './flow-index.ts';
 import { isFunctionValued, skipWrappers } from './node-collector.ts';
 
-/** 추상 값: 프로젝트 클래스의 인스턴스, 또는 객체 리터럴 하나가 만든 객체다. */
-export type AbstractValue = ts.ClassLikeDeclaration | ts.ObjectLiteralExpression;
+/** 객체 값: 프로젝트 클래스의 인스턴스, 또는 객체 리터럴 하나가 만든 객체다. */
+export type ObjectValue = ts.ClassLikeDeclaration | ts.ObjectLiteralExpression;
+
+/** 호출 가능 값: 본문이 있는 함수 선언·함수 식·화살표·메서드다. */
+export type CallableValue = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
+
+/** 값 흐름의 추상 값이다. 객체와 호출 가능 값을 한 질의에서 함께 보존한다. */
+export type AbstractValue = ObjectValue | CallableValue;
 
 /** 값 집합이다. `null`은 모르는 값이 섞였다는 뜻이다. */
 export type Flow = ReadonlySet<AbstractValue> | null;
@@ -70,6 +76,12 @@ type UnitKey = object;
 /** 호출 위치 목록이다. `null`은 호출자를 다 볼 수 없다는 뜻이다. */
 type CallSites = readonly (readonly ts.Expression[])[] | null;
 
+/** 반사적 쓰기로 확정한 값과, 값은 모르지만 정적 타입을 보존한 대상 식이다. */
+interface ReflectiveState {
+  readonly values: ReadonlySet<AbstractValue>;
+  readonly unknownTargets: readonly ts.Expression[];
+}
+
 /**
  * 두 흐름을 합친다.
  *
@@ -94,6 +106,13 @@ export function unionFlows(left: Flow, right: Flow): Flow {
 function sameFlow(left: Flow, right: Flow): boolean {
   if (left === null || right === null) return left === right;
   return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+/** 반사 상태의 값·모르는 대상 식이 같은지 본다. */
+function sameReflectiveState(left: ReflectiveState, right: ReflectiveState): boolean {
+  return left.values.size === right.values.size && [...left.values].every((value) => right.values.has(value))
+    && left.unknownTargets.length === right.unknownTargets.length
+    && left.unknownTargets.every((target) => right.unknownTargets.includes(target));
 }
 
 /** 값 흐름 분석기다. 결과는 분석기 수명 동안 메모한다. */
@@ -124,8 +143,8 @@ export class ValueFlow {
   private readonly subclassMemo = new Map<ts.ClassLikeDeclaration, readonly ts.ClassLikeDeclaration[]>();
   /** 호출 위치(함수·클래스별) 메모 */
   private readonly sitesMemo = new Map<ts.Node, CallSites>();
-  /** 반사적 쓰기 대상 값(지연 계산) */
-  private reflective: Flow | undefined;
+  /** 반사적 쓰기 대상 값과 타입 보존 대상(지연 계산) */
+  private reflective: ReflectiveState | undefined;
 
   /**
    * @param checker TypeChecker
@@ -142,11 +161,22 @@ export class ValueFlow {
    * 식에 흘러들 수 있는 값을 구한다(질의 진입점).
    *
    * @param expression 식
-   * @returns 값 집합, 모르면 null
+   * @returns 객체 값 집합, 호출 가능 값이나 모르는 값이 섞이면 null
    */
-  valuesOf(expression: ts.Expression): Flow {
+  valuesOf(expression: ts.Expression): ReadonlySet<ObjectValue> | null {
     this.ensureReflective();
-    return this.query(() => this.expressionValues(expression));
+    return this.objectsOnly(this.query(() => this.expressionValues(expression)));
+  }
+
+  /**
+   * 식에 흘러들 수 있는 호출 가능 값을 구한다(질의 진입점).
+   *
+   * @param expression 식
+   * @returns 호출 가능 값 집합, 객체나 모르는 값이 섞이면 null
+   */
+  callablesOf(expression: ts.Expression): ReadonlySet<CallableValue> | null {
+    this.ensureReflective();
+    return this.callablesOnly(this.query(() => this.expressionValues(expression)));
   }
 
   /**
@@ -157,7 +187,7 @@ export class ValueFlow {
    * @param name 멤버 이름
    * @returns 멤버 심볼, 증명하지 못하면 undefined
    */
-  memberSymbol(value: AbstractValue, name: string): ts.Symbol | undefined {
+  memberSymbol(value: ObjectValue, name: string): ts.Symbol | undefined {
     this.ensureReflective();
     // 본문 검증은 속성 쓰기 수신자의 흐름을 구하므로 질의 예산 안에서 돌린다(넘으면 증명 실패).
     let body: ts.FunctionLikeDeclaration | undefined;
@@ -185,16 +215,23 @@ export class ValueFlow {
    */
   private ensureReflective(): void {
     if (this.reflective !== undefined) return;
-    this.reflective = EMPTY;
+    this.reflective = { values: EMPTY, unknownTargets: [] };
     if (this.index.reflectiveTargets.length === 0) return;
-    const first = this.query(() => this.reflectiveValues());
+    const first = this.computeReflectiveState();
     // 빈 가정으로 빈 집합을 얻었으면 가정이 곧 답이라 메모를 버릴 필요가 없다.
-    if (first !== null && first.size === 0) return;
+    if (first.values.size === 0 && first.unknownTargets.length === 0) return;
     this.memo.clear();
     this.reflective = first;
-    const second = first === null ? null : this.query(() => this.reflectiveValues());
+    const second = this.computeReflectiveState();
     this.memo.clear();
-    this.reflective = second !== null && first !== null && second.size === first.size && [...second].every((value) => first.has(value)) ? first : null;
+    if (sameReflectiveState(first, second)) {
+      this.reflective = first;
+      return;
+    }
+    this.reflective = {
+      values: new Set([...first.values, ...second.values]),
+      unknownTargets: this.index.reflectiveTargets,
+    };
   }
 
   /**
@@ -222,6 +259,38 @@ export class ValueFlow {
   }
 
   /**
+   * 객체 흐름만 투영한다. 호출 가능 값이나 모르는 값이 하나라도 섞이면 객체 흐름을 증명하지 못한다.
+   *
+   * @param flow 내부 값 흐름
+   * @returns 객체 값 집합, 종류가 섞였거나 모르면 null
+   */
+  private objectsOnly(flow: Flow): ReadonlySet<ObjectValue> | null {
+    if (flow === null) return null;
+    const result = new Set<ObjectValue>();
+    for (const value of flow) {
+      if (!isObjectValue(value)) return null;
+      result.add(value);
+    }
+    return result;
+  }
+
+  /**
+   * 호출 가능 흐름만 투영한다. 객체 값이나 모르는 값이 하나라도 섞이면 호출 가능 흐름을 증명하지 못한다.
+   *
+   * @param flow 내부 값 흐름
+   * @returns 호출 가능 값 집합, 종류가 섞였거나 모르면 null
+   */
+  private callablesOnly(flow: Flow): ReadonlySet<CallableValue> | null {
+    if (flow === null) return null;
+    const result = new Set<CallableValue>();
+    for (const value of flow) {
+      if (!isCallableValue(value)) return null;
+      result.add(value);
+    }
+    return result;
+  }
+
+  /**
    * 식의 값을 구한다.
    *
    * @param node 식
@@ -245,6 +314,7 @@ export class ValueFlow {
    */
   private expressionKindValues(expression: ts.Expression): Flow {
     if (ts.isObjectLiteralExpression(expression)) return new Set([expression]);
+    if (isCallableValue(expression)) return new Set([expression]);
     if (ts.isNewExpression(expression)) return this.newValues(expression);
     if (ts.isIdentifier(expression)) return this.identifierValues(expression);
     if (expression.kind === ts.SyntaxKind.ThisKeyword) return this.thisValues(expression);
@@ -470,9 +540,10 @@ export class ValueFlow {
    * @returns 값 집합
    */
   private propertyValues(flow: Flow, name: string): Flow {
-    if (flow === null) return null;
+    const objects = this.objectsOnly(flow);
+    if (objects === null) return null;
     let result: Flow = EMPTY;
-    for (const value of flow) {
+    for (const value of objects) {
       result = unionFlows(result, ts.isObjectLiteralExpression(value) ? this.literalProperty(value, name) : this.instanceProperty(value, name));
       if (result === null) return null;
     }
@@ -512,22 +583,31 @@ export class ValueFlow {
   private literalMemberValues(property: ts.ObjectLiteralElementLike): Flow {
     if (ts.isPropertyAssignment(property)) return this.expressionValues(property.initializer);
     if (ts.isShorthandPropertyAssignment(property)) return this.symbolValues(this.checker.getShorthandAssignmentValueSymbol(property));
+    if (ts.isMethodDeclaration(property) && property.body !== undefined && !hasThisReference(property)) return new Set([property]);
     return null;
   }
 
   /**
-   * 클래스 인스턴스 값의 속성 값이다(필드·매개변수 속성·getter). 메서드는 모름이다.
+   * 클래스 인스턴스 값의 속성 값이다(필드·매개변수 속성·getter·메서드).
    *
    * @param declaration 클래스
    * @param name 속성 이름
    * @returns 값 집합
    */
   private instanceProperty(declaration: ts.ClassLikeDeclaration, name: string): Flow {
+    if (hasDecorators(declaration)) return null;
     if (this.isReflectivelyWritten(declaration)) return null;
     const member = this.checker.getPropertyOfType(this.valueType(declaration), name);
     const memberDeclaration = member?.valueDeclaration;
     if (memberDeclaration === undefined || !this.policy.isProjectFile(memberDeclaration.getSourceFile())) return null;
-    if (ts.isGetAccessorDeclaration(memberDeclaration)) return this.returnValues(memberDeclaration);
+    if (ts.isGetAccessorDeclaration(memberDeclaration)) {
+      return hasDecorators(memberDeclaration) ? null : this.returnValues(memberDeclaration);
+    }
+    if (ts.isMethodDeclaration(memberDeclaration)) {
+      if (hasThisReference(memberDeclaration) && this.isDetachable(memberDeclaration, declaration)) return null;
+      const body = this.functionBody(memberDeclaration, name, true);
+      return body === undefined || body === null || !isCallableDeclaration(body) ? null : new Set<CallableValue>([body]);
+    }
     if (ts.isPropertyDeclaration(memberDeclaration) || ts.isParameter(memberDeclaration)) return this.symbolValues(member);
     return null;
   }
@@ -553,6 +633,10 @@ export class ValueFlow {
    * @returns 값 집합
    */
   private computeSymbolValues(symbol: ts.Symbol, declaration: ts.Declaration): Flow {
+    if (isCallableDeclaration(declaration)) {
+      if (declaration.body === undefined) return null;
+      return unionFlows(new Set([declaration]), this.identifierWrites(symbol));
+    }
     if (ts.isVariableDeclaration(declaration)) return unionFlows(this.allVariableValues(symbol), this.identifierWrites(symbol));
     if (ts.isBindingElement(declaration)) return unionFlows(this.bindingValues(declaration), this.identifierWrites(symbol));
     if (ts.isParameter(declaration)) {
@@ -692,7 +776,7 @@ export class ValueFlow {
     if ((this.index.references.get(symbol) ?? []).length > 0) return false;
     const names = new Set([symbol.name, ...(this.index.aliasNames.get(symbol) ?? [])]);
     const own = new Set((symbol.declarations ?? []).map((declaration) => (declaration as { name?: ts.Node }).name).filter((name) => name !== undefined));
-    return this.index.files.every((sourceFile) => ![...names].some((name) => sourceFile.text.includes(name)) || !hasForeignToken(sourceFile, names, own));
+    return [...names].every((name) => (this.index.tokenOccurrences.get(name) ?? []).every((node) => own.has(node)));
   }
 
   /**
@@ -814,7 +898,7 @@ export class ValueFlow {
    * @param owner 값의 클래스(객체 리터럴이면 undefined)
    * @returns 값 집합
    */
-  private foreignWrites(name: string, owner: AbstractValue): Flow {
+  private foreignWrites(name: string, owner: ObjectValue): Flow {
     const writes = this.index.propertyWrites.get(name) ?? [];
     if (writes.length === 0) return EMPTY;
     return this.unit(this.keyFor(`writes:${name}`, owner), () => {
@@ -835,7 +919,7 @@ export class ValueFlow {
    * @param owner 값(클래스·객체 리터럴)
    * @returns 닿을 수 없으면 true
    */
-  private isUnrelatedClassWrite(write: PropertyWrite, owner: AbstractValue): boolean {
+  private isUnrelatedClassWrite(write: PropertyWrite, owner: ObjectValue): boolean {
     return this.cannotReach(this.expressionUnit(write.target.expression), owner);
   }
 
@@ -848,11 +932,14 @@ export class ValueFlow {
    * @param owner 값(클래스·객체 리터럴)
    * @returns 닿을 수 없으면 true
    */
-  private cannotReach(receivers: Flow, owner: AbstractValue): boolean {
+  private cannotReach(receivers: Flow, owner: ObjectValue): boolean {
     // 빈 흐름(프로젝트 안 호출자가 없는 내보낸 함수의 매개변수 등)은 스캔 밖에서 채워질 수 있어 증명으로 쓰지 않는다.
     if (receivers === null || receivers.size === 0) return false;
-    const targets = new Set<AbstractValue>(ts.isClassLike(owner) ? this.withSubclasses(owner) : [owner]);
-    return ![...receivers].some((value) => targets.has(value));
+    const values = [...receivers];
+    const objects = values.filter(isObjectValue);
+    if (objects.length !== values.length) return false;
+    const targets = new Set<ObjectValue>(ts.isClassLike(owner) ? this.withSubclasses(owner) : [owner]);
+    return !objects.some((value) => targets.has(value));
   }
 
   /**
@@ -898,6 +985,10 @@ export class ValueFlow {
     const symbol = this.dealias(this.calleeSymbol(callee));
     if (symbol === undefined) return null;
     const declarations = symbol.declarations ?? [];
+    if (declarations.some(ts.isFunctionDeclaration) && (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) {
+      const values = this.callablesOnly(this.symbolValues(symbol));
+      return values === null || values.size === 0 ? null : [...values];
+    }
     if (declarations.some((declaration) => ts.isMethodSignature(declaration) || ts.isPropertySignature(declaration))) {
       return ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? this.dispatchedFunctions(callee) : null;
     }
@@ -916,8 +1007,8 @@ export class ValueFlow {
    * @returns 안전하면 true
    */
   private isSafeFromReflection(callee: ts.Expression): boolean {
-    if (this.reflective !== null && this.reflective !== undefined && this.reflective.size === 0) return true;
-    if (this.reflective === null || (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee))) return false;
+    if (this.reflective !== undefined && this.reflective.values.size === 0 && this.reflective.unknownTargets.length === 0) return true;
+    if (this.reflective === undefined || (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee))) return false;
     const owner = skipWrappers(callee.expression);
     const ownerSymbol = ts.isIdentifier(owner) ? this.dealias(this.checker.getSymbolAtLocation(owner)) : undefined;
     if (ownerSymbol !== undefined && (ownerSymbol.flags & (ts.SymbolFlags.ValueModule | ts.SymbolFlags.Class)) !== 0) return true;
@@ -933,7 +1024,7 @@ export class ValueFlow {
    */
   private dispatchedFunctions(callee: ts.PropertyAccessExpression | ts.ElementAccessExpression): ts.FunctionLikeDeclaration[] | null {
     const name = accessName(callee);
-    const receivers = name === undefined ? null : this.expressionValues(callee.expression);
+    const receivers = name === undefined ? null : this.objectsOnly(this.expressionValues(callee.expression));
     if (receivers === null) return null;
     const result: ts.FunctionLikeDeclaration[] = [];
     for (const value of receivers) {
@@ -952,7 +1043,7 @@ export class ValueFlow {
    * @param name 멤버 이름
    * @returns 함수 계열 또는 undefined
    */
-  private memberBody(value: AbstractValue, name: string): ts.FunctionLikeDeclaration | undefined {
+  private memberBody(value: ObjectValue, name: string): ts.FunctionLikeDeclaration | undefined {
     if (this.isReflectivelyWritten(value)) return undefined;
     const member = this.checker.getPropertyOfType(this.valueType(value), name);
     const body = member?.valueDeclaration === undefined ? null : this.functionBody(member.valueDeclaration, name, true);
@@ -970,7 +1061,8 @@ export class ValueFlow {
    */
   private functionBody(declaration: ts.Declaration, name: string, exact = false, depth = 0): ts.FunctionLikeDeclaration | undefined | null {
     if (!this.policy.isProjectFile(declaration.getSourceFile()) || isAmbient(declaration) || depth > MAX_ALIAS_DEPTH) return null;
-    if ((ts.isMethodDeclaration(declaration) || ts.isPropertyDeclaration(declaration)) && (ts.getDecorators(declaration) ?? []).length > 0) return null;
+    if ((ts.isMethodDeclaration(declaration) || ts.isPropertyDeclaration(declaration) || ts.isGetAccessorDeclaration(declaration))
+      && (hasDecorators(declaration) || (ts.isClassLike(declaration.parent) && hasDecorators(declaration.parent)))) return null;
     if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) {
       if (declaration.body === undefined) return undefined;
       if (!exact && ts.isMethodDeclaration(declaration) && ts.isClassLike(declaration.parent) && this.policy.isOverridden(declaration)) return null;
@@ -1046,27 +1138,69 @@ export class ValueFlow {
    * @returns 대상일 수 있으면 true
    */
   private isReflectivelyWritten(value: AbstractValue): boolean {
-    return this.reflective === null || this.reflective?.has(value) === true;
+    if (this.reflective === undefined) return false;
+    if (this.reflective.values.has(value)) return true;
+    return this.reflective.unknownTargets.some((target) => !this.unknownReflectiveTargetIsDisjoint(target, value));
   }
 
   /**
-   * 반사적 쓰기 대상의 값 합이다(현재 가정 아래). 외부 클래스의 새 인스턴스(`new Error()`)는 프로젝트 값일
-   * 수 없어 뺀다.
+   * 반사적 쓰기 대상의 알려진 값과 값 흐름을 모르는 대상 식을 구한다. 외부 클래스의 새 인스턴스(`new Error()`)
+   * 는 프로젝트 값일 수 없어 뺀다.
    *
-   * @returns 값 집합
+   * @returns 반사적 상태
    */
-  private reflectiveValues(): Flow {
-    let result: Flow = EMPTY;
-    for (const target of this.index.reflectiveTargets) {
-      const inner = skipWrappers(target);
-      if (ts.isNewExpression(inner) && this.classOfSymbol(this.calleeSymbol(skipWrappers(inner.expression))) === undefined
-        && !ts.isClassExpression(skipWrappers(inner.expression))) {
-        continue;
+  private computeReflectiveState(): ReflectiveState {
+    let state: ReflectiveState | undefined;
+    const completed = this.query(() => {
+      const values = new Set<AbstractValue>();
+      const unknownTargets: ts.Expression[] = [];
+      for (const target of this.index.reflectiveTargets) {
+        const inner = skipWrappers(target);
+        if (ts.isNewExpression(inner) && this.classOfSymbol(this.calleeSymbol(skipWrappers(inner.expression))) === undefined
+          && !ts.isClassExpression(skipWrappers(inner.expression))) {
+          continue;
+        }
+        const flow = this.expressionValues(target);
+        if (flow === null) unknownTargets.push(target);
+        else flow.forEach((value) => values.add(value));
       }
-      result = unionFlows(result, this.expressionValues(target));
-      if (result === null) break;
+      state = { values, unknownTargets };
+      return EMPTY;
+    });
+    return completed === null || state === undefined
+      ? { values: EMPTY, unknownTargets: this.index.reflectiveTargets }
+      : state;
+  }
+
+  /**
+   * 값을 모르는 반사 대상의 정적 타입과 닫힌 nominal 클래스 값이 겹칠 수 없음을 엄격히 증명한다.
+   * 구조 타입끼리의 양방향 비대입만으로는 교차 객체가 있을 수 있으므로 쓰지 않는다.
+   */
+  private unknownReflectiveTargetIsDisjoint(target: ts.Expression, value: AbstractValue): boolean {
+    if (!ts.isClassLike(value) || this.policy.isOpenCallable(value) || this.isEscapedClass(value)
+      || !this.hasNominalMember(value)) return false;
+    const targetType = this.checker.getTypeAtLocation(target);
+    if ((targetType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false;
+    for (const candidate of this.withSubclasses(value)) {
+      if (this.policy.isOpenCallable(candidate) || this.isEscapedClass(candidate)) return false;
+      const candidateType = this.valueType(candidate);
+      if (this.checker.isTypeAssignableTo(candidateType, targetType) || this.checker.isTypeAssignableTo(targetType, candidateType)) return false;
     }
-    return result;
+    return true;
+  }
+
+  /** 클래스나 기반 클래스가 private/protected 브랜드를 가지는지 본다. */
+  private hasNominalMember(declaration: ts.ClassLikeDeclaration): boolean {
+    const seen = new Set<ts.ClassLikeDeclaration>();
+    let current: ts.ClassLikeDeclaration | undefined = declaration;
+    while (current !== undefined && !seen.has(current)) {
+      seen.add(current);
+      if (current.members.some(isNominalMember)) return true;
+      const base: ts.Expression | undefined = current.heritageClauses
+        ?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+      current = base === undefined ? undefined : this.classOfSymbol(this.calleeSymbol(skipWrappers(base)));
+    }
+    return false;
   }
 
   /**
@@ -1075,7 +1209,7 @@ export class ValueFlow {
    * @param value 추상 값
    * @returns 타입
    */
-  private valueType(value: AbstractValue): ts.Type {
+  private valueType(value: ObjectValue): ts.Type {
     return ts.isObjectLiteralExpression(value) ? this.checker.getTypeAtLocation(value) : instanceTypeOf(this.checker, value);
   }
 
@@ -1187,26 +1321,36 @@ export function instanceTypeOf(checker: ts.TypeChecker, declaration: ts.ClassLik
   return ts.isClassExpression(declaration) ? type.getConstructSignatures()[0]?.getReturnType() ?? type : type;
 }
 
-/**
- * 파일에 이름이 같은 토큰 중 허용한 선언 이름이 아닌 것이 있는지 본다(해석하지 않는 문법 검사).
- *
- * @param sourceFile 파일
- * @param names 찾는 이름
- * @param own 허용하는 선언 이름 노드
- * @returns 있으면 true
- */
-function hasForeignToken(sourceFile: ts.SourceFile, names: ReadonlySet<string>, own: ReadonlySet<ts.Node>): boolean {
+/** 객체 추상 값인지 본다. */
+function isObjectValue(value: ts.Node): value is ObjectValue {
+  return ts.isClassLike(value) || ts.isObjectLiteralExpression(value);
+}
+
+/** 본문이 있는 호출 가능 선언인지 본다. */
+function isCallableDeclaration(node: ts.Node): node is CallableValue {
+  return (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isMethodDeclaration(node))
+    && node.body !== undefined;
+}
+
+/** 본문이 있는 호출 가능 추상 값인지 본다. */
+function isCallableValue(value: ts.Node): value is CallableValue {
+  return isCallableDeclaration(value);
+}
+
+/** 일반 함수 경계를 넘어가지 않고 본문에서 `this`를 읽는지 본다. */
+function hasThisReference(declaration: ts.FunctionLikeDeclaration): boolean {
+  if (declaration.body === undefined) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
-    const text = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
-    if (text !== undefined && names.has(text) && !own.has(node)) {
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
       found = true;
       return;
     }
+    if (node !== declaration.body && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node))) return;
     ts.forEachChild(node, visit);
   };
-  ts.forEachChild(sourceFile, visit);
+  ts.forEachChild(declaration.body, visit);
   return found;
 }
 
@@ -1322,8 +1466,8 @@ function isThisParameter(parameter: ts.ParameterDeclaration): boolean {
  * @param node 클래스·필드
  * @returns 데코레이터가 있으면 true
  */
-function hasDecorators(node: ts.ClassLikeDeclaration | ts.PropertyDeclaration): boolean {
-  if ((ts.getDecorators(node) ?? []).length > 0) return true;
+function hasDecorators(node: ts.Node): boolean {
+  if (ts.canHaveDecorators(node) && (ts.getDecorators(node) ?? []).length > 0) return true;
   if (!ts.isClassLike(node)) return false;
   return node.members.some((member) => ts.isConstructorDeclaration(member)
     && member.parameters.some((parameter) => (ts.getDecorators(parameter) ?? []).length > 0));
@@ -1360,4 +1504,15 @@ function isPrivateMember(declaration: ts.PropertyDeclaration | ts.ParameterDecla
   if (ts.isPrivateIdentifier(declaration.name)) return true;
   return (ts.getModifiers(declaration) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword
     || modifier.kind === ts.SyntaxKind.ProtectedKeyword);
+}
+
+/** 클래스 멤버가 인스턴스 타입에 nominal 제약(private/protected)을 만드는지 본다. */
+function isNominalMember(member: ts.ClassElement): boolean {
+  const name = (member as ts.NamedDeclaration).name;
+  if (name !== undefined && ts.isPrivateIdentifier(name)) return true;
+  if (ts.canHaveModifiers(member) && (ts.getModifiers(member) ?? []).some((modifier) =>
+    modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword)) return true;
+  return ts.isConstructorDeclaration(member) && member.parameters.some((parameter) =>
+    (ts.getModifiers(parameter) ?? []).some((modifier) =>
+      modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword));
 }
