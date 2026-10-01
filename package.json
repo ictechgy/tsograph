@@ -1,7 +1,7 @@
 {
   "name": "tsograph",
-  "version": "0.1.0",
-  "description": "Static facts for TypeScript/JavaScript (Node) services for the isthmus bridge-facts exchange: OpenAPI route contracts, Next.js and Node backend (Hono, Express, Fastify, Koa, NestJS) route declarations, Prisma/SQL relation uses, and call-graph traversals.",
+  "version": "0.2.0",
+  "description": "Static HTTP server/client and persistence facts for TypeScript/JavaScript, with call-graph traversal for the isthmus exchange.",
   "keywords": [
     "openapi",
     "static-analysis",
