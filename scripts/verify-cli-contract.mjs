@@ -148,7 +148,7 @@ function verifyGraph() {
     verify(document.roots.every((entry) => entry.symbol?.entries === undefined)
       && document.reached.every((entry) => entry.symbol.entries === undefined), `${command} legacy entries omitted`);
     const marked = run([...args, '--entry-points']);
-    verify(marked.status === 0 && JSON.parse(marked.stdout).roots[0].symbol.entries.includes('route-handler'),
+    verify(marked.status === 0 && JSON.parse(marked.stdout).roots[0]?.symbol?.entries?.includes('route-handler'),
       `${command} observed root entry kinds`);
     verify(withoutGeneratedAt(result.stdout) === withoutGeneratedAt(run(args).stdout), `${command} determinism`);
     const unknown = run([command, '--project', graphFixture, 'src/nope.ts#missing', root]);

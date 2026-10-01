@@ -79,7 +79,7 @@ Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error 
 `;
 
 /** reach 명령 사용법이다. */
-export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
+export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols reachable from the given roots (direction "dependencies") as an isthmus
 language-traversal v1 document.
@@ -87,7 +87,7 @@ language-traversal v1 document.
 ${traversalOptions}`;
 
 /** impact 명령 사용법이다. */
-export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
+export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols that reach the given roots (direction "dependents") as an isthmus
 language-traversal v1 document.

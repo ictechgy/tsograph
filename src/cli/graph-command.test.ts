@@ -145,6 +145,21 @@ test('--entry-points는 실제 페이지·액션 표식을 내고 기본 순회�
   const root = JSON.parse(reached.standardOutput).roots[0];
   assert.deepEqual(root.symbol.entries, ['page']);
   assert.equal(root.symbol.location.path, 'src/app/jobs/page.tsx');
+  const plain = await runReachCommand(['--project', fixture, 'src/app/jobs/page.tsx#JobsPage'], environment());
+  assert.equal(plain.exitCode, 0, plain.standardError);
+  assert.deepEqual(JSON.parse(plain.standardOutput).roots[0].symbol, {
+    usr: 'src/app/jobs/page.tsx#JobsPage', qualifiedName: 'src/app/jobs/page.tsx#JobsPage',
+  });
+});
+
+test('실제 cron 핸들러의 두 진입점 종류는 정렬된 목록으로 전달한다', async () => {
+  const id = 'src/app/api/cron/cleanup/route.ts#GET';
+  const result = await runReachCommand(['--project', fixture, '--entry-points', id], environment());
+  assert.equal(result.exitCode, 0, result.standardError);
+  const marked = JSON.parse(result.standardOutput);
+  assert.deepEqual(marked.roots[0].symbol.entries, ['route-handler', 'scheduled']);
+  assert.ok(marked.reached.every((row: any) => row.symbol.entries === undefined ||
+    row.symbol.entries.every((value: string, index: number, all: string[]) => index === 0 || all[index - 1]! < value)));
 });
 
 test('root이기도 한 진입점의 표식은 두 항목에서 같고 해석하지 못한 root는 표식을 지어내지 않는다', async () => {
