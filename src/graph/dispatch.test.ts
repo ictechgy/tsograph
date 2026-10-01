@@ -372,6 +372,83 @@ test('unrelated computed and same-named writes preserve proven receiver calls', 
   assert.deepEqual(overlapGraph.nodes.find((node) => node.id === 'src/main.ts#runOverlap')?.unresolvedCalls, {
     direct: 1, bound: 1, candidates: 1,
   });
+
+  const literalAlias = await graphOf({
+    'src/main.ts': [
+      'function implA() { return "a"; }',
+      'function implB() { return "b"; }',
+      'function implC() { return "c"; }',
+      'class C { run() { return implA(); } }',
+      'const config = { run: () => implB() };',
+      'function main(value: C) { config.run = () => implC(); return value.run(); }',
+      'export const result = main(config);',
+    ].join('\n'),
+  });
+  assert.ok(!calls(literalAlias, 'src/main.ts#main').some(([to, evidence]) => to === 'src/main.ts#C.run' && evidence === 'direct'));
+
+  const genericTarget = await graphOf({
+    'package.json': '{ "dependencies": { "next": "16.2.7" } }',
+    'src/main.ts': [
+      'interface Store { find(): number; }',
+      'export class Repo implements Store { private brand = 1; find() { return 1; } }',
+      'export function lookup(store: Store) { return store.find(); }',
+      'export const result = lookup(new Repo());',
+    ].join('\n'),
+    'app/api/x/route.ts': [
+      'export function POST<T extends object>(target: T, key: keyof T) {',
+      '  target[key] = target[key];',
+      '  return new Response();',
+      '}',
+    ].join('\n'),
+  });
+  assert.deepEqual(calls(genericTarget, 'src/main.ts#lookup').filter(([, evidence]) => evidence === 'bound'), []);
+  assert.ok(calls(genericTarget, 'src/main.ts#lookup').some(([, evidence]) => evidence === 'candidate'));
+});
+
+test('callable property signatures recover only safe fixed receiver targets', async () => {
+  const stable = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run: () => string; }',
+      'function effect() { return "stable"; }',
+      'class Impl { run = effect; }',
+      'const handler: Handler = new Impl();',
+      'export const call = () => handler.run();',
+    ].join('\n'),
+  });
+  const edgesFrom = (graph: CallGraph): [string, string][] => graph.edges
+    .filter((edge) => edge.from === 'src/main.ts#call' && edge.kinds.includes('call')).map((edge) => [edge.to, edge.evidence]);
+  assert.deepEqual(edgesFrom(stable), [['src/main.ts#effect', 'direct']]);
+
+  const mutated = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run: () => string; }',
+      'function first() { return "first"; }',
+      'function second() { return "second"; }',
+      'class Impl { run = first; }',
+      'const handler: Handler = new Impl();',
+      'handler.run = second;',
+      'export const call = () => handler.run();',
+    ].join('\n'),
+  });
+  assert.deepEqual(edgesFrom(mutated), [
+    ['src/main.ts#first', 'bound'],
+    ['src/main.ts#second', 'bound'],
+  ]);
+
+  const deleted = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run?: () => string; }',
+      'function first() { return "first"; }',
+      'class Impl { run = first; }',
+      'const handler: Handler = new Impl();',
+      'delete handler.run;',
+      'export const call = () => handler.run!();',
+    ].join('\n'),
+  });
+  assert.deepEqual(edgesFrom(deleted), []);
+  assert.deepEqual(deleted.nodes.find((node) => node.id === 'src/main.ts#call')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
 });
 
 test('callable value flow: mixed, empty, patched, reflective, and named method paths fail closed', async () => {

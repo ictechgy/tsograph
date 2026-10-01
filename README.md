@@ -901,7 +901,7 @@ What `bound` guarantees, and what it does not:
   that receiver's properties unknown. An unknown reflective target keeps its static type: it is excluded
   only from a closed, non-escaped nominal class family when neither the class nor any project subclass can
   overlap that type. Structurally unrelated types can still overlap through an intersection and therefore
-  remain unknown. A same-named property write that replaces a
+  remain unknown; `any`, `unknown`, and generic/instantiable target types never use this exclusion. A same-named property write that replaces a
   method (monkey patching) blocks `bound` for that method.
 - **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
   `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the

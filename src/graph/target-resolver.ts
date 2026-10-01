@@ -82,8 +82,18 @@ export class TargetResolver {
     const callee = skipWrappers(expression);
     const resolution = this.resolveExpression(callee, 0);
     if (resolution.kind === 'unresolved' && resolution.reason === 'untyped' && this.rootsInMissingPackage(callee)) return missingExternal;
-    if (!ts.isPropertyAccessExpression(callee) || !isInterfaceGap(resolution)) return resolution;
+    if (!ts.isPropertyAccessExpression(callee)) return resolution;
+    const recoverable = isInterfaceGap(resolution)
+      || (resolution.kind === 'unresolved' && resolution.reason === 'indirect' && this.isCallablePropertySignature(callee));
+    if (!recoverable) return resolution;
     return this.proveFromReceiver(callee) ?? resolution;
+  }
+
+  /** 호출 대상 멤버가 메서드가 아니라 callable 값을 담는 property signature인지 본다. */
+  private isCallablePropertySignature(access: ts.PropertyAccessExpression): boolean {
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(access.name));
+    return (symbol?.declarations ?? []).some((declaration) => ts.isPropertySignature(declaration)
+      && this.checker.getNonNullableType(this.checker.getTypeAtLocation(declaration)).getCallSignatures().length > 0);
   }
 
   /**
@@ -449,8 +459,6 @@ export class TargetResolver {
     const rightPrimary = this.expressionIdentity(right);
     if (leftPrimary === undefined || rightPrimary === undefined) return false;
     if (isObjectAllocation(leftPrimary) && isObjectAllocation(rightPrimary)) return leftPrimary !== rightPrimary;
-    if ((isNodeIdentity(leftPrimary) && ts.isObjectLiteralExpression(leftPrimary))
-      || (isNodeIdentity(rightPrimary) && ts.isObjectLiteralExpression(rightPrimary))) return true;
     const leftClass = this.identityClass(leftPrimary);
     const rightClass = this.identityClass(rightPrimary);
     if (leftClass === undefined || rightClass === undefined) return false;

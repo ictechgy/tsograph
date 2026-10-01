@@ -1180,7 +1180,7 @@ export class ValueFlow {
     if (!ts.isClassLike(value) || this.policy.isOpenCallable(value) || this.isEscapedClass(value)
       || !this.hasNominalMember(value)) return false;
     const targetType = this.checker.getTypeAtLocation(target);
-    if ((targetType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false;
+    if ((targetType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Instantiable)) !== 0) return false;
     for (const candidate of this.withSubclasses(value)) {
       if (this.policy.isOpenCallable(candidate) || this.isEscapedClass(candidate)) return false;
       const candidateType = this.valueType(candidate);
