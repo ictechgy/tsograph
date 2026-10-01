@@ -98,6 +98,7 @@ test('잇지 못한 호출은 이유별로 세고 추측하지 않는다', () =>
   assert.equal(graph.statistics.files, 25);
   assert.deepEqual(graph.limitations, [
     'unresolved-calls: 6 call(s) could not be linked to a project declaration and were not guessed (parameter: 1, interface: 1, untyped: 1, computed: 1, indirect: 1, unresolved-import: 1)',
+    'bound-dispatch: 3 call(s) through deferred interface/callable sites are linked by bound edges (followed by reach/impact with --dispatch bound, the default): every observed receiver or callable value within the scanned project is a project implementation or callable declaration; reflective or computed-key writes and values from outside the scan keep affected flows unknown',
     'candidate-dispatch: 1 call(s) whose receiver flows could not all be proven are linked to every project class or object that implements or is assignable to the receiver type (followed only with --dispatch candidates); these edges over-approximate',
     'missing-dependencies: 1 call(s) go through packages whose type declarations could not be resolved (dependencies not installed or untyped); they are treated as external',
     'overridden-methods: 1 call(s) target methods that subclasses override; only the statically resolved declaration is linked',
@@ -105,19 +106,28 @@ test('잇지 못한 호출은 이유별로 세고 추측하지 않는다', () =>
     'entry-points: 1 vercel.json cron path(s) match no GET route handler',
   ]);
   // `saveVia(store: Store)`는 프로젝트 안 호출자가 없는 내보낸 함수라 흐름을 증명하지 못한다: bound 없음, candidate 둘.
-  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 0, boundPartial: 0, candidate: 1, candidatePartial: 0, overBudget: 0 });
+  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 3, boundPartial: 0, candidate: 1, candidatePartial: 0, overBudget: 0 });
   assert.deepEqual(graph.edges.filter((edge) => edge.evidence !== 'direct').map((edge) => `${edge.from} -> ${edge.to} ${edge.evidence}`), [
+    'src/lib/hof.ts#chooseLater -> src/lib/hof.ts#formatA bound',
+    'src/lib/hof.ts#chooseLater -> src/lib/hof.ts#formatB bound',
+    'src/lib/hof.ts#pick -> src/lib/hof.ts#formatA bound',
+    'src/lib/hof.ts#pick -> src/lib/hof.ts#formatB bound',
+    'src/lib/hof.ts#withAuth -> src/app/api/jobs/route.ts#POST.withAuth() bound',
     'src/lib/repository.ts#saveVia -> src/lib/repository.ts#JobStore.save candidate',
     'src/lib/repository.ts#saveVia -> src/lib/repository.ts#MemoryStore.save candidate',
   ]);
   assert.deepEqual(graph.nodes.find((node) => node.id === 'src/lib/repository.ts#saveVia')?.unresolvedCalls, { direct: 1, bound: 1 });
   const byMode = graph.limitationsByMode!;
-  assert.deepEqual(byMode.direct.slice(0, 2), [graph.limitations[0], graph.limitations[2]]);
-  assert.deepEqual(byMode.bound.slice(0, 2), [graph.limitations[0], graph.limitations[2]]);
-  assert.deepEqual(byMode.candidates.slice(0, 3), [
-    'unresolved-calls: 5 call(s) could not be linked to a project declaration and were not guessed (parameter: 1, untyped: 1, computed: 1, indirect: 1, unresolved-import: 1)',
+  assert.deepEqual(byMode.direct.slice(0, 2), [graph.limitations[0], graph.limitations[3]]);
+  assert.deepEqual(byMode.bound.slice(0, 2), [
+    'unresolved-calls: 3 call(s) could not be linked to a project declaration and were not guessed (interface: 1, untyped: 1, unresolved-import: 1)',
+    'bound-dispatch: 3 call(s) through deferred interface/callable sites are linked by bound edges: every observed receiver or callable value within the scanned project is a project implementation or callable declaration; reflective or computed-key writes and values from outside the scan keep affected flows unknown',
+  ]);
+  assert.deepEqual(byMode.candidates.slice(0, 4), [
+    'unresolved-calls: 2 call(s) could not be linked to a project declaration and were not guessed (untyped: 1, unresolved-import: 1)',
+    'bound-dispatch: 3 call(s) through deferred interface/callable sites are linked by bound edges: every observed receiver or callable value within the scanned project is a project implementation or callable declaration; reflective or computed-key writes and values from outside the scan keep affected flows unknown',
     'candidate-dispatch: 1 call(s) whose receiver flows could not all be proven are linked to every project class or object that implements or is assignable to the receiver type; these edges over-approximate',
-    graph.limitations[2],
+    graph.limitations[3],
   ]);
   // 의존성·lib 선언은 노드가 아니다.
   assert.ok(graph.nodes.every((node) => !node.id.includes('node_modules') && !node.location.path.endsWith('.d.ts')));

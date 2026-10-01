@@ -56,7 +56,7 @@ const probes: readonly (readonly [from: string, expected: readonly string[] | 'n
   ['take13', 'none', 'function take13(...stores: Store[]) { return stores[0]!.find("x"); }\nexport const p13 = () => take13(new RemoteStore());'],
   ['take14', 'none', 'function take14(a: string, store: Store) { return store.find(a); }\nconst args14: [string, Store] = ["x", new RemoteStore()];\nexport const p14 = () => take14(...args14);'],
   ['take15', [LOCAL], 'function take15(this: void, store: Store) { return store.find("x"); }\nexport const p15 = () => take15(new LocalStore());'],
-  ['p17', 'none', 'let make17 = (): Store => new RemoteStore();\nexport function reset17() { make17 = () => new LocalStore(); }\nexport function p17() { return make17().find("x"); }'],
+  ['p17', ['src/main.ts#make17', 'src/main.ts#reset17'], 'let make17 = (): Store => new RemoteStore();\nexport function reset17() { make17 = () => new LocalStore(); }\nexport function p17() { return make17().find("x"); }'],
   ['H18.run', 'none', 'function tag18(_value: undefined, _context: unknown) {}\nclass H18 { @tag18 store: Store = new RemoteStore(); run() { return this.store.find("x"); } }\nexport const h18 = new H18();'],
   ['H19.run', 'none', 'class H19 { declare store: Store; run() { return this.store.find("x"); } }\nexport const h19 = new H19();'],
   ['H20.run', 'none', 'class H20 { constructor(private readonly store: Store) {} static make() { return new this(new RemoteStore()); } run() { return this.store.find("x"); } }\nexport const h20 = new H20(new LocalStore());'],
@@ -115,22 +115,38 @@ test('테스트 소스의 목은 운영 호출의 bound를 막지 않고, 테스
   const files = {
     ...support,
     'src/service.ts': 'import type { Store } from "./store";\nexport function lookup(store: Store) { return store.find("a"); }\n',
-    'src/main.ts': 'import { lookup } from "./service";\nimport { RemoteStore } from "./store";\nexport const run = () => lookup(new RemoteStore());\n',
+    'src/main.ts': [
+      'import { lookup } from "./service";',
+      'import { RemoteStore } from "./store";',
+      'function first() { return "first"; }',
+      'export const box = { callback: first };',
+      'export const runDirect = () => box.callback();',
+      'export const run = () => lookup(new RemoteStore());',
+    ].join('\n'),
     'src/service.test.ts': [
       'import { lookup } from "./service";',
+      'import { box } from "./main";',
       'import type { Store } from "./store";',
       'declare function mockFn(): (id: string) => string;',
+      'function mock() { return "mock"; }',
+      'box.callback = mock;',
       'const fake: Store = { find: mockFn() };',
       'export const check = () => lookup(fake);',
       'export const direct = () => fake.find("b");',
+      'export const callBox = () => box.callback();',
     ].join('\n'),
   };
   const graph = await graphOf(files);
   const lines = graph.edges.filter((edge) => edge.evidence !== 'direct').map((edge) => `${edge.from} -> ${edge.to} ${edge.evidence}`);
   assert.deepEqual(lines, [
+    'src/service.test.ts#callBox -> src/main.ts#first bound',
+    'src/service.test.ts#callBox -> src/service.test.ts#mock bound',
     `src/service.test.ts#direct -> ${LOCAL} candidate`,
     `src/service.test.ts#direct -> ${REMOTE} candidate`,
     `src/service.ts#lookup -> ${REMOTE} bound`,
+  ]);
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'src/main.ts#runDirect' && edge.kinds.includes('call')).map((edge) => [edge.to, edge.evidence]), [
+    ['src/main.ts#first', 'direct'],
   ]);
   // 테스트가 아닌 파일이 테스트 소스를 불러오면 둘을 나눌 수 없어 전체 흐름으로 구한다(목 때문에 bound 없음).
   for (const wire of [
@@ -138,7 +154,7 @@ test('테스트 소스의 목은 운영 호출의 bound를 막지 않고, 테스
     'declare const flag: boolean;\nexport const wired = () => import(flag ? "./service.test" : "./main");\n',
   ]) {
     const mixed = await graphOf({ ...files, 'src/wire.ts': wire });
-    assert.deepEqual(mixed.edges.filter((edge) => edge.evidence === 'bound'), [], wire);
+    assert.deepEqual(mixed.edges.filter((edge) => edge.from === 'src/service.ts#lookup' && edge.evidence === 'bound'), [], wire);
   }
 });
 
@@ -394,7 +410,7 @@ test('GLM 지적 C1: 흐름 재귀가 깊어도 예산으로 끝나 모름이 �
   });
   assert.deepEqual(graph.edges.filter((edge) => edge.evidence === 'bound'), []);
   assert.equal(graph.statistics.calls.dispatch.overBudget, 1);
-  assert.ok(graph.limitations.some((line) => line.startsWith('dispatch-budget: 1 interface call(s) exceeded the flow-analysis budget')));
+  assert.ok(graph.limitations.some((line) => line.startsWith('dispatch-budget: 1 deferred interface/callable call(s) exceeded the flow-analysis budget')));
 });
 
 test('GLM 지적 C1: 질의 안의 스택 초과(RangeError)는 모름으로 바꾸고, 다른 예외는 그대로 던진다', () => {

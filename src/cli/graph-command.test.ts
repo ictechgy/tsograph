@@ -104,8 +104,10 @@ test('impact는 dependents 방향이고 비HTTP 진입점을 이 문서 범위�
     '1 src/lib/index.ts#addJob',
     '2 src/app/api/jobs/route.ts#POST',
     '2 src/app/jobs/page.tsx#JobsPage',
+    '2 src/lib/hof.ts#withAuth',
     '3 src/app/api/jobs/route.ts#<module>',
   ]);
+  assert.equal(document.reached.find((entry: { symbol: { usr: string } }) => entry.symbol.usr === 'src/lib/hof.ts#withAuth')?.evidence, 'bound');
   assert.equal(document.truncated, false);
   assert.deepEqual(document.limitations.filter((line: string) => line.startsWith('non-http-entries:')), [
     'non-http-entries: 2 symbol(s) are entry points without a route-decl fact (page: 1, server-action: 1); isthmus cannot reach them through the http join',

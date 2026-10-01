@@ -6,13 +6,14 @@
  *   쓰인(값으로 새어 나간) 함수를 가려내는 데 쓴다. 값 자리의 식별자, 모든 속성 접근 이름(`ns.f`, 파일 안
  *   `namespace App`의 `App.Repo`, `globalThis.f`), 문자열 리터럴 원소 접근(`App["load"]`)을 checker로 풀어 모은다.
  * - 식별자 대입(`x = e`, `x ??= e` …)과 속성 대입(`a.b = e`, `a["b"] = e`)을 대상별로. 구조 분해 대입·
- *   증감·복합 대입처럼 값을 모르는 쓰기는 값 없이 기록한다.
+ *   증감·복합 대입·속성 삭제처럼 값을 모르는 쓰기는 값 없이 기록한다.
  * - `new this()`를 쓰는 클래스, `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·
- *   `Reflect.defineProperty`의 첫 인자(반사적 쓰기 대상), `export { x }`·`export default x`로 내보낸 심볼,
+ *   `Reflect.defineProperty`·`Reflect.deleteProperty`의 첫 인자(반사적 쓰기 대상), `export { x }`·`export default x`로 내보낸 심볼,
  *   동적 `import()`나 값으로 쓰인 네임스페이스 import 때문에 멤버를 추적할 수 없는 모듈, 파일 패턴 로더
  *   (`import.meta.glob`·`require.context`)나 문자열이 아닌 지정자처럼 어느 모듈이든 열 수 있는 호출.
  *
- * 계산된 키 쓰기(`obj[key] = v`)와 프로토타입 조작은 모으지 않는다 — README가 bound의 전제로 밝힌다.
+ * 계산된 키 쓰기·삭제는 이름을 알 수 없으므로 수신자 전체를 반사적 쓰기 대상으로 연다. 프로토타입 조작은
+ * 모으지 않는다 — README가 bound의 전제로 밝힌다.
  */
 
 import ts from 'typescript';
@@ -57,6 +58,8 @@ export interface FlowIndex {
   readonly memberReads: ReadonlyMap<string, readonly ts.Node[]>;
   /** 별칭을 푼 심볼 → 그것을 다른 이름으로 들여온 import·export 별칭의 지역 이름(완전성 검사용) */
   readonly aliasNames: ReadonlyMap<ts.Symbol, readonly string[]>;
+  /** 토큰 텍스트 → 모든 식별자·private 식별자·문자열 리터럴(참조 0개 완전성 검사용) */
+  readonly tokenOccurrences: ReadonlyMap<string, readonly ts.Node[]>;
   /** 색인한 파일 */
   readonly files: readonly ts.SourceFile[];
 }
@@ -75,7 +78,7 @@ const VALUE_ASSIGNMENTS: ReadonlySet<ts.SyntaxKind> = new Set([
 /** 반사적 쓰기 함수(`Object.*`·`Reflect.*`)의 멤버 이름이다. */
 const REFLECTIVE_WRITERS: Readonly<Record<string, ReadonlySet<string>>> = {
   Object: new Set(['assign', 'defineProperty', 'defineProperties']),
-  Reflect: new Set(['set', 'defineProperty']),
+  Reflect: new Set(['set', 'defineProperty', 'deleteProperty']),
 };
 
 /** 색인을 채우는 가변 저장소다. */
@@ -91,6 +94,7 @@ interface MutableIndex {
   subclasses: Map<ts.ClassLikeDeclaration, ts.ClassLikeDeclaration[]>;
   memberReads: Map<string, ts.Node[]>;
   aliasNames: Map<ts.Symbol, string[]>;
+  tokenOccurrences: Map<string, ts.Node[]>;
   files: ts.SourceFile[];
 }
 
@@ -106,7 +110,7 @@ function emptyIndex(): MutableIndex {
   return {
     references: new Map(), identifierWrites: new Map(), propertyWrites: new Map(), newThisClasses: new Set(),
     reflectiveTargets: [], exportedSymbols: new Set(), openModules: new Set(), hasOpaqueImport: false, subclasses: new Map(),
-    memberReads: new Map(), aliasNames: new Map(), files: [],
+    memberReads: new Map(), aliasNames: new Map(), tokenOccurrences: new Map(), files: [],
   };
 }
 
@@ -140,6 +144,7 @@ export function mergeFlowIndexes(parts: Iterable<FlowIndex>): FlowIndex {
     mergeLists(index.subclasses, part.subclasses);
     mergeLists(index.memberReads, part.memberReads);
     mergeLists(index.aliasNames, part.aliasNames);
+    mergeLists(index.tokenOccurrences, part.tokenOccurrences);
     index.files.push(...part.files);
     part.newThisClasses.forEach((value) => index.newThisClasses.add(value));
     part.exportedSymbols.forEach((value) => index.exportedSymbols.add(value));
@@ -187,12 +192,19 @@ class IndexCollector {
    * @param sourceFile 파일
    */
   visitFile(sourceFile: ts.SourceFile): void {
-    const visit = (node: ts.Node): void => {
-      if (isTypeOnly(node) && !ts.isImportDeclaration(node)) return;
-      this.visitNode(node);
-      ts.forEachChild(node, visit);
+    const visit = (node: ts.Node, skipAnalysis = false): void => {
+      this.visitToken(node);
+      const skipChildrenAnalysis = skipAnalysis || (isTypeOnly(node) && !ts.isImportDeclaration(node));
+      if (!skipChildrenAnalysis) this.visitNode(node);
+      ts.forEachChild(node, (child) => visit(child, skipChildrenAnalysis));
     };
     ts.forEachChild(sourceFile, visit);
+  }
+
+  /** 완전성 검사가 쓸 이름 토큰을 타입 자리까지 포함해 한 번 모은다. */
+  private visitToken(node: ts.Node): void {
+    const text = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
+    if (text !== undefined) appendTo(this.index.tokenOccurrences, text, node);
   }
 
   /**
@@ -207,6 +219,7 @@ class IndexCollector {
     if (ts.isIdentifier(node)) this.visitIdentifier(node);
     else if (ts.isShorthandPropertyAssignment(node)) this.addReference(node.name, this.checker.getShorthandAssignmentValueSymbol(node));
     else if (ts.isBinaryExpression(node)) this.visitBinary(node);
+    else if (ts.isDeleteExpression(node)) this.recordWrite(skipWrappers(node.expression), UNKNOWN_WRITE);
     else if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) this.visitUpdate(node);
     else if (ts.isForInStatement(node) || ts.isForOfStatement(node)) this.visitLoopTarget(node.initializer);
     else if (ts.isNewExpression(node)) this.visitNew(node);
@@ -391,14 +404,20 @@ class IndexCollector {
       if (symbol !== undefined) appendTo(this.index.identifierWrites, symbol, value);
       return;
     }
+    const key = ts.isElementAccessExpression(target) ? skipWrappers(target.argumentExpression) : undefined;
     const name = ts.isPropertyAccessExpression(target) ? target.name.text
-      : ts.isElementAccessExpression(target) && ts.isStringLiteralLike(target.argumentExpression) ? target.argumentExpression.text : undefined;
-    if (name === undefined) return;
+      : key !== undefined && (ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)) ? key.text : undefined;
+    if (name === undefined) {
+      if (ts.isElementAccessExpression(target)) this.index.reflectiveTargets.push(target.expression);
+      return;
+    }
     appendTo(this.index.propertyWrites, name, { target: target as PropertyWrite['target'], value });
     // TS `namespace N { export let x }`의 `N.x = e`는 변수 쓰기다.
     const member = ts.isPropertyAccessExpression(target) ? target.name : (target as ts.ElementAccessExpression).argumentExpression;
     const symbol = this.dealias(this.checker.getSymbolAtLocation(member));
-    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Variable) !== 0) appendTo(this.index.identifierWrites, symbol, value);
+    if (symbol !== undefined && (symbol.flags & (ts.SymbolFlags.Variable | ts.SymbolFlags.Function)) !== 0) {
+      appendTo(this.index.identifierWrites, symbol, value);
+    }
   }
 
   /**

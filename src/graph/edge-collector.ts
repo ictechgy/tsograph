@@ -4,8 +4,8 @@
  * 출발 노드는 코드 위치의 스코프 id(`scopeIdOf`)다. 호출·`new`·태그 템플릿·데코레이터·JSX 태그는
  * `TargetResolver.resolveCallee`로, 함수 값 참조(콜백·일반 참조)는 `referenceTargets`로 잇는다.
  * 인라인 콜백(호출 인자로 바로 넘긴 화살표·함수 식)은 담은 노드에서 `contains` 간선으로 잇는다.
- * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다. 인터페이스 공백 메서드 호출(`recv.m()`)은
- * 디스패치 단계(`dispatch.ts`)로 넘기고, 노드별 미해석 계수는 그 단계가 모드별로 센다.
+ * 잇지 못한 호출은 이유별로 세고 간선을 만들지 않는다. 인터페이스 공백 메서드 호출(`recv.m()`)과
+ * 매개변수·간접·계산 호출은 디스패치 단계(`dispatch.ts`)로 넘기고, 노드별 미해석 계수는 그 단계가 모드별로 센다.
  */
 
 import ts from 'typescript';
@@ -20,20 +20,37 @@ import { isInterfaceGap, type Resolution, type TargetResolver } from './target-r
 export interface EdgeGaps {
   /** 일부 대상만 이은 호출 수(이유별) */
   readonly partial: Partial<Record<UnresolvedReason, number>>;
+  /** bound로 완전히 이은 호출 수(원래 공백 이유별) */
+  readonly bound: Partial<Record<UnresolvedReason, number>>;
+  /** direct로 일부만 이은 호출을 bound로 보완한 수(원래 공백 이유별) */
+  readonly boundPartial: Partial<Record<UnresolvedReason, number>>;
+  /** candidate로 이은 호출 수(원래 공백 이유별) */
+  readonly candidate: Partial<Record<UnresolvedReason, number>>;
+  /** direct로 일부만 이은 호출을 candidate로 보완한 수(원래 공백 이유별) */
+  readonly candidatePartial: Partial<Record<UnresolvedReason, number>>;
   /** 하위 클래스가 재정의한 메서드를 기반 타입으로 부른 호출 수 */
   overriddenCalls: number;
 }
 
 /**
- * 디스패치 단계로 넘기는 인터페이스 공백 메서드 호출이다.
+ * 디스패치 단계로 넘기는 공백 메서드·호출 가능 값 호출이다.
  */
-export interface PendingDispatch {
+interface PendingDispatchBase {
+  /** 대기 종류 */
+  readonly kind: 'member' | 'callable';
   /** 호출이 있는 파일의 프로젝트 기준 경로 */
   readonly path: string;
   /** 호출을 감싸는 스코프 노드 id */
   readonly from: string;
   /** 호출식 */
   readonly call: ts.CallExpression;
+  /** 직접 해석이 남긴 원래 공백 이유 */
+  readonly reason: UnresolvedReason;
+}
+
+/** 인터페이스·구조 타입 수신자 메서드의 대기 호출이다. */
+export interface PendingMemberDispatch extends PendingDispatchBase {
+  readonly kind: 'member';
   /** 수신자 식(래퍼를 벗기지 않은 원래 식) */
   readonly receiver: ts.Expression;
   /** 메서드 이름 */
@@ -41,6 +58,16 @@ export interface PendingDispatch {
   /** direct로 이미 이은 대상(union의 구현 부분), 없으면 빈 목록 */
   readonly direct: readonly string[];
 }
+
+/** 호출 가능 값을 통해 해석할 수 있는 대기 호출이다. */
+export interface PendingCallableDispatch extends PendingDispatchBase {
+  readonly kind: 'callable';
+  /** direct로 이미 이은 대상(union의 함수 선언 부분), 없으면 빈 목록 */
+  readonly direct: readonly string[];
+}
+
+/** 디스패치 단계로 넘기는 메서드·호출 가능 값 대기 호출이다. */
+export type PendingDispatch = PendingMemberDispatch | PendingCallableDispatch;
 
 /** 간선 수집 문맥이다. */
 export interface EdgeContext {
@@ -133,7 +160,9 @@ function visitCall(context: EdgeContext, path: string, call: ts.CallExpression):
     return;
   }
   const resolution = context.resolver.resolveCallee(call.expression);
-  const pending = isInterfaceGap(resolution) ? dispatchSite(context.store, path, call, resolution) : undefined;
+  const pending = isDecoratorCall(call) ? undefined : isInterfaceGap(resolution)
+    ? memberDispatchSite(context.store, path, call, resolution)
+    : isCallableGap(resolution) ? callableDispatchSite(context.store, path, call, resolution) : undefined;
   if (pending !== undefined) context.pending.push(pending);
   recordCall(context, path, call, resolution, 'call', pending !== undefined);
   countOverriddenCall(context, call.expression, resolution);
@@ -154,7 +183,7 @@ function addContainsEdge(store: GraphStore, path: string, callback: ts.ArrowFunc
 }
 
 /**
- * 인터페이스 공백 호출이 수신자 있는 메서드 호출(`recv.m()`, `recv["m"]()`)이면 디스패치 대기 항목을 만든다.
+ * 인터페이스 공백 호출이 수신자 있는 메서드 호출(`recv.m()`, `recv["m"]()`)이면 메서드 대기 항목을 만든다.
  *
  * @param store 그래프 저장소
  * @param path 프로젝트 기준 경로
@@ -162,7 +191,7 @@ function addContainsEdge(store: GraphStore, path: string, callback: ts.ArrowFunc
  * @param resolution direct 해석 결과
  * @returns 대기 항목, 메서드 호출이 아니면 undefined
  */
-function dispatchSite(store: GraphStore, path: string, call: ts.CallExpression, resolution: Resolution): PendingDispatch | undefined {
+function memberDispatchSite(store: GraphStore, path: string, call: ts.CallExpression, resolution: Resolution): PendingMemberDispatch | undefined {
   const callee = skipWrappers(call.expression);
   if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return undefined;
   const method = ts.isPropertyAccessExpression(callee) ? callee.name.text
@@ -170,7 +199,30 @@ function dispatchSite(store: GraphStore, path: string, call: ts.CallExpression, 
   if (method === undefined || callee.expression.kind === ts.SyntaxKind.SuperKeyword) return undefined;
   const receiver = callee.expression;
   const direct = resolution.kind === 'nodes' ? resolution.ids : [];
-  return { path, from: ensureScope(store, path, call), call, receiver, method, direct };
+  return { kind: 'member', path, from: ensureScope(store, path, call), call, reason: 'interface', receiver, method, direct };
+}
+
+/** 매개변수·간접·계산 호출을 callable 값 흐름으로 넘길지 본다. */
+function isCallableGap(resolution: Resolution): boolean {
+  const reason = resolution.kind === 'unresolved' ? resolution.reason : resolution.kind === 'nodes' ? resolution.partial : undefined;
+  return reason === 'parameter' || reason === 'indirect' || reason === 'computed';
+}
+
+/** 호출 가능 값 흐름으로 해석할 대기 호출을 만든다. */
+function callableDispatchSite(store: GraphStore, path: string, call: ts.CallExpression, resolution: Resolution): PendingCallableDispatch | undefined {
+  const reason = resolution.kind === 'unresolved' ? resolution.reason : resolution.kind === 'nodes' ? resolution.partial : undefined;
+  if (reason !== 'parameter' && reason !== 'indirect' && reason !== 'computed') return undefined;
+  const direct = resolution.kind === 'nodes' ? resolution.ids : [];
+  return { kind: 'callable', path, from: ensureScope(store, path, call), call, reason, direct };
+}
+
+/** 데코레이터 표현식 안의 호출은 일반 callable 디스패치로 넘기지 않는다. */
+function isDecoratorCall(call: ts.CallExpression): boolean {
+  for (let current: ts.Node | undefined = call.parent; current !== undefined; current = current.parent) {
+    if (ts.isDecorator(current)) return true;
+    if (ts.isFunctionLike(current) || ts.isClassLike(current) || ts.isSourceFile(current)) return false;
+  }
+  return false;
 }
 
 /**

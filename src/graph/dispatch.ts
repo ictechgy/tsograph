@@ -1,12 +1,14 @@
 /**
- * 인터페이스·구조 타입 수신자로 부른 메서드 호출(`this.deps.store.findX()`, `repo.save()`)을 추측 없이 잇는다.
+ * 인터페이스·구조 타입 수신자로 부른 메서드 호출(`this.deps.store.findX()`, `repo.save()`)과
+ * 닫힌 호출 가능 값 호출(`invoke(cb)`, `make()()`)을 추측 없이 잇는다.
  *
- * direct 해석이 인터페이스 공백으로 남긴 호출마다(`edge-collector.ts`의 대기 항목):
+ * direct 해석이 공백으로 남긴 호출마다(`edge-collector.ts`의 대기 항목):
  * 1. **bound**: 수신자 식에 흘러드는 값을 전체 프로그램 흐름(`value-flow.ts`)으로 모두 구하고, 모두 프로젝트
  *    클래스 인스턴스·객체 리터럴이며 각 값에서 메서드가 본문 있는 프로젝트 선언으로 해석되면, 호출을 감싼
  *    스코프에서 그 구현들로 `bound` 간선을 잇는다(구현마다 하나).
- * 2. 흐름 중 하나라도 모르면 bound를 내지 않고, 수신자 타입을 구현하거나 그 타입에 대입 가능한 프로젝트
- *    클래스·객체의 메서드 전부로 `candidate` 간선을 잇는다(`dispatch-candidates.ts`).
+ * 2. 인터페이스 흐름 중 하나라도 모르면 bound를 내지 않고, 수신자 타입을 구현하거나 그 타입에 대입 가능한
+ *    프로젝트 클래스·객체의 메서드 전부로 `candidate` 간선을 잇는다(`dispatch-candidates.ts`). 호출 가능 값
+ *    흐름은 하나라도 모르면 원래 공백을 남기며 candidate를 만들지 않는다.
  * 3. 노드별 미해석 계수를 모드별로 센다(bound로 이었으면 direct 모드에서만, candidate면 direct·bound에서,
  *    끝내 못 이었으면 모든 모드에서).
  *
@@ -25,14 +27,13 @@
 import ts from 'typescript';
 
 import { compareStrings } from '../exchange/sorted-json.ts';
-import { isTestSourcePath } from '../routes/next-routes.ts';
 import { CandidateFinder } from './dispatch-candidates.ts';
-import type { PendingDispatch } from './edge-collector.ts';
-import { buildFileIndex, climbWrappers, type FlowIndex, mergeFlowIndexes, type ModuleResolver, stringLeaves } from './flow-index.ts';
+import type { EdgeGaps, PendingDispatch } from './edge-collector.ts';
+import { climbWrappers, type FlowIndex, type ModuleResolver, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
-import { scopeIdOf } from './symbol-ids.ts';
+import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
-import { type FlowPolicy, ValueFlow } from './value-flow.ts';
+import { type CallableValue, type FlowPolicy, ValueFlow } from './value-flow.ts';
 
 /** 디스패치 단계 입력이다. */
 export interface DispatchContext {
@@ -40,12 +41,21 @@ export interface DispatchContext {
   readonly checker: ts.TypeChecker;
   readonly store: GraphStore;
   readonly resolver: TargetResolver;
+  /** 운영 파일 direct 해석용 resolver(테스트를 분리할 수 없으면 resolver와 같다) */
+  readonly productionResolver: TargetResolver;
+  /** 모든 노드 파일의 합친 값 흐름 색인 */
+  readonly flowIndex: FlowIndex;
+  /** 테스트를 뺀 운영 범위 색인(분리할 수 없으면 flowIndex와 같다) */
+  readonly productionFlowIndex: FlowIndex;
+  readonly testPaths: ReadonlySet<string>;
+  readonly separateTests: boolean;
   /** 노드 파일(프로젝트 기준 경로 → 파일) */
   readonly files: ReadonlyMap<string, ts.SourceFile>;
   /** 기반 메서드 id → 재정의 메서드 id */
   readonly overrides: ReadonlyMap<string, readonly string[]>;
   readonly pending: readonly PendingDispatch[];
   readonly calls: CallStatistics;
+  readonly gaps: EdgeGaps;
   /** 스캔 밖 코드가 내보낸 선언을 부를 수 있다고 볼지(공개 패키지·불완전 스캔) */
   readonly openProgram: boolean;
   /**
@@ -56,25 +66,28 @@ export interface DispatchContext {
 }
 
 /**
- * 대기 중인 인터페이스 공백 호출을 bound·candidate 간선으로 잇고 모드별 미해석 계수를 센다.
+ * 대기 중인 메서드·호출 가능 값 공백 호출을 bound·candidate 간선으로 잇고 모드별 미해석 계수를 센다.
  *
- * @param context 디스패치 입력
+ * @param files 노드 파일
  */
 export function resolveDispatch(context: DispatchContext): void {
   if (context.pending.length === 0) return;
-  const resolveModule = moduleResolver(context.program, context.checker);
-  const indexes = fileIndexCache(context, resolveModule);
-  const testPaths = new Set([...context.files.keys()].filter(isTestSourcePath));
-  const separate = testPaths.size > 0 && !importsTestSources(context, testPaths, resolveModule);
-  const production = lazyView(context, separate ? new Map([...context.files].filter(([path]) => !testPaths.has(path))) : context.files, indexes);
-  const whole = separate ? lazyView(context, context.files, indexes) : production;
+  const productionFiles = context.separateTests
+    ? new Map([...context.files].filter(([path]) => !context.testPaths.has(path))) : context.files;
+  const production = lazyView(context, productionFiles, context.productionFlowIndex, context.productionResolver);
+  const whole = context.separateTests ? lazyView(context, context.files, context.flowIndex, context.resolver) : production;
   for (const site of context.pending) {
-    const view = testPaths.has(site.path) ? whole() : production();
+    const view = context.testPaths.has(site.path) ? whole() : production();
     const before = view.flow.budgetExceededQueries();
-    const bound = boundTargets(context, view.flow, site);
+    const bound = site.kind === 'member' ? boundMemberTargets(view, site) : boundCallableTargets(context, view, site);
     if (view.flow.budgetExceededQueries() > before) context.calls.dispatch.overBudget++;
     if (bound !== undefined) {
       linkSite(context, site, bound, 'bound');
+      continue;
+    }
+    if (site.kind === 'callable') {
+      // 호출 가능 값 흐름은 전부 증명해야 한다. 원래 공백을 남기고 타입 후보를 열거하지 않는다.
+      context.store.countUnresolved(site.from, undefined);
       continue;
     }
     const candidates = view.finder.targetsFor(site.receiver, site.method).filter((id) => !site.direct.includes(id));
@@ -87,6 +100,8 @@ export function resolveDispatch(context: DispatchContext): void {
 interface DispatchView {
   readonly flow: ValueFlow;
   readonly finder: CandidateFinder;
+  readonly resolver: TargetResolver;
+  readonly pathByFile: ReadonlyMap<ts.SourceFile, string>;
 }
 
 /**
@@ -94,16 +109,26 @@ interface DispatchView {
  *
  * @param context 디스패치 입력
  * @param files 범위의 노드 파일
- * @param indexes 파일별 색인(한 번만 만든다)
+ * @param merged 이 범위에 합친 색인
+ * @param resolver 이 범위의 쓰기를 보는 대상 해석기
  * @returns 범위를 돌려주는 함수
  */
-function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.SourceFile>, indexes: (path: string) => FlowIndex): () => DispatchView {
+function lazyView(
+  context: DispatchContext,
+  files: ReadonlyMap<string, ts.SourceFile>,
+  merged: FlowIndex,
+  resolver: TargetResolver,
+): () => DispatchView {
   let view: DispatchView | undefined;
   return () => {
     if (view === undefined) {
-      const index = mergeFlowIndexes([...files.keys()].map(indexes));
-      const flow = new ValueFlow(context.checker, index, new OpenCallablePolicy(context, index, files));
-      view = { flow, finder: new CandidateFinder(context.checker, context.resolver, [...files.values()]) };
+      const flow = new ValueFlow(context.checker, merged, new OpenCallablePolicy(context, merged, files));
+      view = {
+        flow,
+        finder: new CandidateFinder(context.checker, resolver, [...files.values()]),
+        resolver,
+        pathByFile: new Map([...files].map(([path, sourceFile]) => [sourceFile, path])),
+      };
     }
     return view;
   };
@@ -117,9 +142,13 @@ function lazyView(context: DispatchContext, files: ReadonlyMap<string, ts.Source
  * @param resolve 모듈 지정자 해석기
  * @returns 불러오면 true
  */
-function importsTestSources(context: DispatchContext, testPaths: ReadonlySet<string>, resolve: ModuleResolver): boolean {
-  const pathByFile = new Map([...context.files].map(([path, sourceFile]) => [sourceFile, path]));
-  for (const [path, sourceFile] of context.files) {
+export function importsTestSources(
+  files: ReadonlyMap<string, ts.SourceFile>,
+  testPaths: ReadonlySet<string>,
+  resolve: ModuleResolver,
+): boolean {
+  const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
+  for (const [path, sourceFile] of files) {
     if (testPaths.has(path)) continue;
     const loadsTest = moduleSpecifiers(sourceFile).some((specifier) => {
       const declaration = resolve(specifier.text, sourceFile)?.valueDeclaration;
@@ -160,7 +189,7 @@ function moduleSpecifiers(sourceFile: ts.SourceFile): ts.StringLiteralLike[] {
  * @param checker TypeChecker
  * @returns 지정자 → 모듈 심볼(풀리지 않거나 Program 밖 파일이면 undefined)
  */
-function moduleResolver(program: ts.Program, checker: ts.TypeChecker): ModuleResolver {
+export function createModuleResolver(program: ts.Program, checker: ts.TypeChecker): ModuleResolver {
   const cache = ts.createModuleResolutionCache(program.getCurrentDirectory(), (name) => name, program.getCompilerOptions());
   const memo = new Map<string, ts.Symbol | undefined>();
   return (specifier, from) => {
@@ -175,44 +204,51 @@ function moduleResolver(program: ts.Program, checker: ts.TypeChecker): ModuleRes
 }
 
 /**
- * 파일별 흐름 색인을 처음 물을 때 한 번만 만드는 함수를 돌려준다(분석 범위가 둘이어도 파일은 한 번 훑는다).
- *
- * @param context 디스패치 입력
- * @param resolveModule 모듈 지정자 해석기
- * @returns 경로 → 파일 색인
- */
-function fileIndexCache(context: DispatchContext, resolveModule: ModuleResolver): (path: string) => FlowIndex {
-  const cache = new Map<string, FlowIndex>();
-  return (path) => {
-    let index = cache.get(path);
-    if (index === undefined) {
-      index = buildFileIndex(context.checker, context.files.get(path)!, resolveModule);
-      cache.set(path, index);
-    }
-    return index;
-  };
-}
-
-/**
  * bound 대상을 구한다. 수신자 값이 비었거나 하나라도 모르거나, 어느 값에서든 메서드를 프로젝트 본문으로
  * 해석하지 못하면 undefined다.
  *
- * @param context 디스패치 입력
- * @param flow 값 흐름 분석기
+ * @param view 값 흐름·resolver 범위
  * @param site 대기 호출
  * @returns 대상 id(정렬, direct로 이미 이은 것 포함 가능) 또는 undefined
  */
-function boundTargets(context: DispatchContext, flow: ValueFlow, site: PendingDispatch): string[] | undefined {
-  const values = flow.valuesOf(site.receiver);
+function boundMemberTargets(view: DispatchView, site: Extract<PendingDispatch, { kind: 'member' }>): string[] | undefined {
+  const values = view.flow.valuesOf(site.receiver);
   if (values === null || values.size === 0) return undefined;
   const ids = new Set<string>();
   for (const value of values) {
-    const resolution = context.resolver.resolveSymbol(flow.memberSymbol(value, site.method), 0);
+    const resolution = view.resolver.resolveSymbol(view.flow.memberSymbol(value, site.method), 0);
     if (resolution.kind !== 'nodes' || resolution.partial !== undefined) return undefined;
     resolution.ids.forEach((id) => ids.add(id));
   }
   // 대상이 하나도 없으면 이은 것이 아니다(빈 bound로 호출을 해석됨으로 세지 않는다).
   return ids.size === 0 ? undefined : [...ids].sort(compareStrings);
+}
+
+/** 호출 가능 값 흐름을 프로젝트 그래프 노드 id로 바꾼다. */
+function boundCallableTargets(
+  context: DispatchContext,
+  view: DispatchView,
+  site: Extract<PendingDispatch, { kind: 'callable' }>,
+): string[] | undefined {
+  const values = view.flow.callablesOf(site.call.expression);
+  if (values === null || values.size === 0) return undefined;
+  const ids = new Set<string>();
+  for (const value of values) {
+    const id = callableNodeId(context.store, view.pathByFile, value);
+    if (id === undefined) return undefined;
+    ids.add(id);
+  }
+  return ids.size === 0 ? undefined : [...ids].sort(compareStrings);
+}
+
+/** 호출 가능 선언의 본문을 기존 안정 심볼 id로 매핑한다. */
+function callableNodeId(store: GraphStore, pathByFile: ReadonlyMap<ts.SourceFile, string>, value: CallableValue): string | undefined {
+  const path = pathByFile.get(value.getSourceFile());
+  if (path === undefined || value.body === undefined) return undefined;
+  const id = scopeIdOf(value.body, path);
+  // 대입 오른쪽의 이름 없는 함수처럼 자체 안정 id가 없는 값은 모듈 노드로 꾸미지 않는다.
+  if (id === moduleScopeId(path)) return undefined;
+  return store.hasNode(id) ? id : undefined;
 }
 
 /**
@@ -235,6 +271,10 @@ function linkSite(context: DispatchContext, site: PendingDispatch, targets: read
   } else {
     statistics.candidate++;
   }
+  const counts = evidence === 'bound' ? context.gaps.bound : context.gaps.candidate;
+  const partialCounts = evidence === 'bound' ? context.gaps.boundPartial : context.gaps.candidatePartial;
+  const target = site.direct.length > 0 ? partialCounts : counts;
+  target[site.reason] = (target[site.reason] ?? 0) + 1;
   context.store.countUnresolved(site.from, evidence === 'bound' ? 'bound' : 'candidates');
 }
 

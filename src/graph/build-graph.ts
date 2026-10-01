@@ -18,7 +18,7 @@ import type { CommandFileSystem } from '../cli/file-system.ts';
 import type { RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
-import { emptyNextRoutesResult, type NextRoutesResult } from '../routes/next-routes.ts';
+import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
 import { createRouteDocument } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
@@ -26,10 +26,11 @@ import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
 import { isSourceFileName } from '../schema/source-module.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
-import { resolveDispatch } from './dispatch.ts';
+import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
 import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
+import { buildFileIndex, type FlowIndex, mergeFlowIndexes } from './flow-index.ts';
 import {
   type CallGraph,
   type CallStatistics,
@@ -38,6 +39,7 @@ import {
   type GraphNode,
   GraphStore,
   UNRESOLVED_REASONS,
+  type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
 import { createGraphProgram, type ProgramConfigStatus } from './program.ts';
@@ -175,6 +177,12 @@ function readManifestEntry(project: string): 'public-package' | 'unreadable-mani
 interface FileAnalysis {
   readonly store: GraphStore;
   readonly resolver: TargetResolver;
+  readonly productionResolver: TargetResolver;
+  /** 모든 소스 파일 색인을 합친 direct 해석·전체 dispatch 공용 색인 */
+  readonly flowIndex: FlowIndex;
+  readonly productionFlowIndex: FlowIndex;
+  readonly testPaths: ReadonlySet<string>;
+  readonly separateTests: boolean;
   readonly overrides: ReadonlyMap<string, readonly string[]>;
   readonly pending: readonly PendingDispatch[];
   readonly calls: CallStatistics;
@@ -195,17 +203,36 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
   const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
-  const resolver = new TargetResolver(checker, store, (sourceFile) => pathByFile.get(sourceFile), projectSpecifierMatcher(program.getCompilerOptions()));
+  const resolveModule = createModuleResolver(program, checker);
+  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule)]));
+  const flowIndex = mergeFlowIndexes(flowIndexes.values());
+  const testPaths = new Set([...files.keys()].filter(isTestSourcePath));
+  const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
+  const productionFlowIndex = separateTests
+    ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index))
+    : flowIndex;
+  const resolver = new TargetResolver(checker, store, (sourceFile) => pathByFile.get(sourceFile), projectSpecifierMatcher(program.getCompilerOptions()), flowIndex);
+  const productionResolver = separateTests
+    ? new TargetResolver(checker, store, (sourceFile) => pathByFile.get(sourceFile), projectSpecifierMatcher(program.getCompilerOptions()), productionFlowIndex)
+    : resolver;
   const overrides = new Map<string, string[]>();
   for (const [path, declarations] of classes) declarations.forEach((declaration) => addOverrides(overrides, checker, resolver, path, declaration));
   const calls = createCallStatistics();
-  const gaps: EdgeGaps = { partial: {}, overriddenCalls: 0 };
+  const gaps: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
   const pending: PendingDispatch[] = [];
   for (const [path, sourceFile] of files) {
-    collectFileEdges({ checker, store, resolver, overrides, calls, gaps, pending }, path, sourceFile);
+    const edgeResolver = separateTests && !testPaths.has(path) ? productionResolver : resolver;
+    collectFileEdges({ checker, store, resolver: edgeResolver, overrides, calls, gaps, pending }, path, sourceFile);
     classes.get(path)!.forEach((declaration) => addClassEdges(store, resolver, path, declaration));
   }
-  return { store, resolver, overrides, pending, calls, gaps, unresolvedExports: linkExportNodes(store, checker, resolver, pendingExports) };
+  return {
+    store, resolver, productionResolver, flowIndex, productionFlowIndex, testPaths, separateTests,
+    overrides, pending, calls, gaps,
+    unresolvedExports: linkExportNodes(store, checker, (sourceFile) => {
+      const path = pathByFile.get(sourceFile);
+      return separateTests && path !== undefined && !testPaths.has(path) ? productionResolver : resolver;
+    }, pendingExports),
+  };
 }
 
 /**
@@ -386,19 +413,23 @@ function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts, view
   return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts)];
 }
 
-/**
- * 관점에서 아직 잇지 못한 인터페이스 공백 수다(전체 공백, 일부 공백).
- *
- * @param calls 호출 통계
- * @param gaps 부분 해석 계수
- * @param view 관점
- * @returns 남은 전체·부분 인터페이스 공백
- */
-function remainingInterfaceGaps(calls: CallStatistics, gaps: EdgeGaps, view: LimitationView): { full: number; partial: number } {
-  const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
-  const linkedFull = view === 'bound' ? bound : view === 'candidates' ? bound + candidate : 0;
-  const linkedPartial = view === 'bound' ? boundPartial : view === 'candidates' ? boundPartial + candidatePartial : 0;
-  return { full: calls.unresolved.interface - linkedFull, partial: (gaps.partial.interface ?? 0) - linkedPartial };
+/** 관점에서 아직 잇지 못한 호출 공백을 이유별로 계산한다. */
+function remainingDispatchGaps(
+  calls: CallStatistics,
+  gaps: EdgeGaps,
+  view: LimitationView,
+): { readonly unresolved: Record<UnresolvedReason, number>; readonly partial: Partial<Record<UnresolvedReason, number>> } {
+  const unresolved = { ...calls.unresolved };
+  const partial = { ...gaps.partial };
+  for (const reason of UNRESOLVED_REASONS) {
+    const linkedFull = view === 'bound' ? (gaps.bound[reason] ?? 0)
+      : view === 'candidates' ? (gaps.bound[reason] ?? 0) + (gaps.candidate[reason] ?? 0) : 0;
+    const linkedPartial = view === 'bound' ? (gaps.boundPartial[reason] ?? 0)
+      : view === 'candidates' ? (gaps.boundPartial[reason] ?? 0) + (gaps.candidatePartial[reason] ?? 0) : 0;
+    unresolved[reason] = Math.max(0, unresolved[reason] - linkedFull);
+    if (partial[reason] !== undefined) partial[reason] = Math.max(0, partial[reason] - linkedPartial);
+  }
+  return { unresolved, partial };
 }
 
 /**
@@ -412,14 +443,14 @@ function remainingInterfaceGaps(calls: CallStatistics, gaps: EdgeGaps, view: Lim
 function callLimitations(counts: GraphCounts, view: LimitationView): string[] {
   const { calls, gaps, unresolvedExports } = counts;
   const result: string[] = [];
-  const remaining = remainingInterfaceGaps(calls, gaps, view);
-  const unresolved = { ...calls.unresolved, interface: remaining.full };
+  const remaining = remainingDispatchGaps(calls, gaps, view);
+  const unresolved = remaining.unresolved;
   const unresolvedTotal = UNRESOLVED_REASONS.reduce((sum, reason) => sum + unresolved[reason], 0);
   if (unresolvedTotal > 0) {
     const breakdown = UNRESOLVED_REASONS.filter((reason) => unresolved[reason] > 0).map((reason) => `${reason}: ${unresolved[reason]}`);
     result.push(`unresolved-calls: ${unresolvedTotal} call(s) could not be linked to a project declaration and were not guessed (${breakdown.join(', ')})`);
   }
-  const partial = Object.entries({ ...gaps.partial, ...(gaps.partial.interface === undefined ? {} : { interface: remaining.partial }) })
+  const partial = Object.entries(remaining.partial)
     .filter(([, count]) => count > 0);
   if (partial.length > 0) {
     const total = partial.reduce((sum, [, count]) => sum + count, 0);
@@ -451,16 +482,20 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
   const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
   const scope = view === 'snapshot' ? ' (followed by reach/impact with --dispatch bound, the default)' : '';
   if (bound + boundPartial > 0) {
-    result.push(`bound-dispatch: ${bound + boundPartial} call(s) through interface-typed receivers are linked by bound edges${scope}: every value observed flowing into the receiver within the scanned project is a project implementation; reflection, computed-key writes, and code outside the scan are not modeled`);
+    result.push(`bound-dispatch: ${bound + boundPartial} call(s) through deferred interface/callable sites are linked by bound edges${scope}: every observed receiver or callable value within the scanned project is a project implementation or callable declaration; reflective or computed-key writes and values from outside the scan keep affected flows unknown`);
   }
   const hasInterfaceGaps = calls.unresolved.interface + (gaps.partial.interface ?? 0) > 0;
-  if (openProgram !== undefined && hasInterfaceGaps) {
+  const callableReasons = ['parameter', 'computed', 'indirect'] as const;
+  const hasCallableGaps = callableReasons.some((reason) => calls.unresolved[reason] > 0 || (gaps.partial[reason] ?? 0) > 0);
+  if (openProgram !== undefined && (hasInterfaceGaps || hasCallableGaps)) {
     const reason = openProgram === 'public-package' ? 'package.json declares public entry points'
       : openProgram === 'unreadable-manifest' ? 'package.json could not be read as a JSON object within 1 MiB' : 'the scan is incomplete';
-    result.push(`bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`);
+    result.push(hasInterfaceGaps
+      ? `bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`
+      : `bound-dispatch: ${reason}, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound`);
   }
   if (calls.dispatch.overBudget > 0) {
-    result.push(`dispatch-budget: ${calls.dispatch.overBudget} interface call(s) exceeded the flow-analysis budget (steps, nesting, or stack); their flows count as unknown and they are not bound`);
+    result.push(`dispatch-budget: ${calls.dispatch.overBudget} deferred interface/callable call(s) exceeded the flow-analysis budget (steps, nesting, or stack); their flows count as unknown and they are not bound`);
   }
   if (view !== 'bound' && candidate + candidatePartial > 0) {
     const candidateScope = view === 'snapshot' ? ' (followed only with --dispatch candidates)' : '';

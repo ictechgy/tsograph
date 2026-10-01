@@ -13,6 +13,7 @@ import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { templateMatches } from './entry-points.ts';
 import type { CallGraph } from './graph-model.ts';
+import { traverse } from './traversal.ts';
 
 /**
  * 임시 프로젝트의 그래프를 만든다.
@@ -95,6 +96,7 @@ test('콜백·참조는 값 별칭·속성 별칭을 따라가고, 전개 인자
       'function g() { return 1; }',
       'function k() { return 2; }',
       'function m() { return 3; }',
+      'function sideEffect() { return 4; }',
       'declare function register(fn: unknown): void;',
       'declare function emit(...fns: unknown[]): void;',
       'export const h = g;',
@@ -102,6 +104,8 @@ test('콜백·참조는 값 별칭·속성 별칭을 따라가고, 전개 인자
       'const viaProperty = obj.g;',
       'const { k: picked } = obj;',
       'let loop1: unknown = 0;',
+      'let mutable = () => sideEffect();',
+      'export function replace() { mutable = () => 5; }',
       'const cycleA: unknown = cycleB;',
       'const cycleB: unknown = cycleA;',
       'export function wire() {',
@@ -111,6 +115,7 @@ test('콜백·참조는 값 별칭·속성 별칭을 따라가고, 전개 인자
       '  register(picked);',
       '  register(obj.deep.m);',
       '  register(loop1);',
+      '  register(mutable);',
       '  register(cycleA);',
       '  emit(...[m]);',
       '  const local = h;',
@@ -123,7 +128,39 @@ test('콜백·참조는 값 별칭·속성 별칭을 따라가고, 전개 인자
     'src/alias.ts#wire -> src/alias.ts#g callback,reference',
     'src/alias.ts#wire -> src/alias.ts#k callback',
     'src/alias.ts#wire -> src/alias.ts#m callback',
+    'src/alias.ts#wire -> src/alias.ts#mutable callback',
   ]);
+  assert.ok(edges(graph).includes('src/alias.ts#mutable -> src/alias.ts#sideEffect call'));
+});
+
+test('테스트 쓰기는 운영 export binding 별칭을 제거하지 않는다', async () => {
+  const graph = await graphOf({
+    'src/main.ts': 'function handler() { return 1; }\nexport { handler, handler as GET };\n',
+    'src/main.test.ts': [
+      'import { handler } from "./main";',
+      'function replacement() { return 2; }',
+      'handler = replacement;',
+    ].join('\n'),
+  });
+  assert.ok(edges(graph).includes('src/main.ts#GET -> src/main.ts#handler alias'));
+});
+
+test('호출로 초기화한 Next export 별칭에서 초기화 본문까지 도달한다', async () => {
+  const graph = await graphOf({
+    'package.json': '{ "dependencies": { "next": "16.2.7" } }',
+    'app/api/x/route.ts': [
+      'function effect() { return 1; }',
+      'function wrap<T>(value: T): T { return value; }',
+      'const handler = wrap(() => effect());',
+      'export { handler as GET };',
+    ].join('\n'),
+  });
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'app/api/x/route.ts#GET')?.entries, ['route-handler']);
+  const reached = traverse(graph, {
+    rootIds: ['app/api/x/route.ts#GET'], direction: 'dependencies', dispatch: 'bound', maxDepth: 8, maxReached: 100,
+  }).reached.map((row) => row.id);
+  assert.ok(reached.includes('app/api/x/route.ts#handler'), reached.join('\n'));
+  assert.ok(reached.includes('app/api/x/route.ts#effect'), reached.join('\n'));
 });
 
 test('Pages Router 페이지·instrumentation·메타데이터 진입점과 cron 템플릿 매칭', async () => {

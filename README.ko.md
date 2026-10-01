@@ -648,6 +648,9 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 - 하위 클래스가 재정의한 메서드 호출은 정적으로 해석한 선언에만 잇고 `overridden-methods:`로 센다.
 - 매개변수·`any`·계산된 호출 대상·함수가 아닌 값·풀리지 않는 프로젝트 import를 거친 호출은 간선 없이
   `unresolved-calls:`에 이유별로 센다.
+- 닫힌 callback 매개변수, 프로젝트 함수가 반환한 지역 callback, 안전하게 읽은 이름 있는 메서드는
+  호출 가능 값 흐름으로 증명해 `bound` 근거로 잇는다. callable 흐름은 전부 증명해야 하므로 객체와 함수가
+  섞이거나 모르는 값이 있으면 원래 공백을 남기고 타입 후보를 열거하지 않는다.
 - 타입 선언을 찾지 못한 패키지(의존성 미설치, 타입 없는 패키지)를 거친 호출은 외부이고
   `missing-dependencies:`로 센다.
 - 모듈 스코프는 import하는 쪽에서 잇지 않는다(import 시점 부수 효과는 `<module>` 노드에 남는다).
@@ -659,7 +662,7 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 | `evidence` | 뜻 |
 |---|---|
 | `direct` | checker 심볼(또는 위의 수신자 고정 초기값)로 대상을 증명했다. |
-| `bound` | 인터페이스·구조 타입 수신자로 부른 호출(`this.deps.store.findItem()`, `repository.save()`)이고, 스캔한 프로젝트 안에서 **수신자로 흘러드는 것으로 관찰된 값이 모두** 프로젝트 클래스 인스턴스나 프로젝트 객체 리터럴이며, 각 값에서 메서드가 본문 있는 프로젝트 선언으로 해석된다. 구현마다 `bound` 간선 하나(같은 쌍의 더 강한 간선이 이미 덮으면 뺀다 — 스냅샷 규칙). |
+| `bound` | 인터페이스·구조 타입 수신자 호출(`this.deps.store.findItem()`, `repository.save()`)이나 닫힌 callable 값 호출(`invoke(callback)`, `make()()`)이고, 스캔한 프로젝트 안에서 관찰한 수신자·호출 가능 값이 모두 본문 있는 프로젝트 구현·호출 가능 선언으로 해석된다. 대상마다 `bound` 간선 하나(같은 쌍의 더 강한 간선이 이미 덮으면 뺀다 — 스냅샷 규칙). |
 | `candidate` | 흐름을 다 증명하지 못해, 구현할 수 있는 프로젝트 클래스·객체 전부로 잇는다: 수신자 인터페이스를 `implements`로 선언한 클래스(직접, 기반 클래스, 확장 인터페이스를 거쳐), 그리고 타입이 수신자 타입에 대입 가능한 클래스·객체 리터럴(`TypeChecker.isTypeAssignableTo`, 고정한 TypeScript 5.9.3의 공개 API, 타입 매개변수 수신자는 제약 타입). 과대 근사다. |
 
 `bound` 값을 구하는 방법(전체 프로그램, 문맥·경로 비민감): `new C(...)`, 객체 리터럴, `this`(감싼 클래스와
@@ -673,6 +676,11 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 (`this.store = this.store.withCache()`, 재귀 래퍼)는 고정점까지 되풀이한다. `new ItemHandler({ store: new SqlItemStore(client) })`,
 `createLookup({ store })`, `new ItemService(sql)`, 기본 매개변수 DI(`store: ItemStore = new MemoryItemStore()`),
 팩터리로 만든 모듈 싱글턴 같은 조립 지점을 모듈을 넘어 따라간다.
+
+호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수, 함수·getter 반환값,
+생성자 대입·기본값, 안전하게 읽은 객체·클래스 메서드를 따라간다. 함수 객체 속성, 데코레이터·증명할 수 없는 몽키 패치
+메서드, 반사적 쓰기, 열린 export·진입점, 모르는 값은 미해석으로 둔다. callable 증명에 실패하면 원래
+`parameter`·`indirect`·`computed` 이유를 유지하고 candidate 간선을 만들지 않는다.
 
 `bound`가 보장하는 것과 보장하지 않는 것:
 
@@ -705,11 +713,15 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   읽히면(`App.Repo[key]`) 멤버 전부를 연다. 프레임워크 파일(App Router `route`·특수 파일, `pages/` 아래 전부, `proxy`·`middleware`·
   `instrumentation` — `export * from`만 있어도)의 내보내기와 그것이 재내보내는 선언 전부, 그리고 ES 모듈이 아닌 파일
   (스크립트·CommonJS)의 최상위 선언도 열린 자리다. 여러 번 선언한 변수(`var x = a; var x = b;`)는 모든 초기값을 합친다.
-- **모델링하지 않음**(문서화한 공백): 계산된 키 쓰기(`obj[key] = v`), 프로토타입 조작, `eval`, 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
+- **모델링하지 않음**(문서화한 공백): 프로토타입 조작, `eval`, 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
   않으면 그 타입은 오류 타입이라 `any`로 센다. 그 API를 거친 값은 모름이라, 그런 값 위의 같은 이름 쓰기·메서드
   읽기가 관계없는 클래스의 bound를 막을 수 있다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
-  로더(`import.meta.glob`·`require.context`)는 모든 내보내기를 연다. `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·`Reflect.defineProperty`의
-  대상은 보수적으로 다룬다(그 속성·멤버는 모름, 정적으로 해석한 멤버 호출도 포함). 메서드를 바꾸는 같은 이름 속성 쓰기(몽키 패치)가 있으면 그 메서드는
+  로더(`import.meta.glob`·`require.context`)는 모든 내보내기를 연다. `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·`Reflect.defineProperty`·
+  `Reflect.deleteProperty`의 대상은 보수적으로 다룬다(그 속성·멤버는 모름, 정적으로 해석한 멤버 호출도 포함).
+  계산된 키 쓰기·삭제(`obj[key] = v`, `delete obj[key]`)도 그 수신자의 속성을 모름으로 연다. 값을 모르는 반사 대상은
+  정적 타입을 보존하며, 닫혀 있고 밖으로 새지 않은 nominal 클래스 계보에서 그 클래스와 모든 프로젝트 하위 클래스가
+  대상 타입과 겹칠 수 없을 때만 제외한다. 구조적으로 서로 대입할 수 없는 타입도 교차 객체로 겹칠 수 있으므로 계속 모름이다.
+  `any`·`unknown`·generic/instantiable 대상 타입에는 이 제외 규칙을 쓰지 않는다. 메서드를 바꾸는 같은 이름 속성 쓰기(몽키 패치)가 있으면 그 메서드는
   bound하지 않는다.
 - **테스트 소스는 별개 프로그램이다.** 테스트 소스(`*.test.*`·`*.spec.*`·`__tests__/`·`__mocks__/` — `routes`와
   같은 규칙)가 아닌 파일의 호출은 테스트 소스를 뺀 프로그램으로 흐름·후보를 구한다. 그래서 단위 테스트가 주입한
@@ -720,7 +732,7 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
   이름이 예산을 태우지 않는다(같은 이름 쓰기·떼어 낸 읽기가 1,500개인 합성 모듈 1,500개에서 21.7초 → 2.5초).
 
 `unresolvedCalls`는 노드·모드마다, 노드 자신의 호출 위치(호출·`new`·태그 템플릿·데코레이터·JSX) 중 그 모드에서
-간선이 없거나 대상의 일부만 이은 수다: `direct`는 그런 위치 전부, `bound`는 `bound` 간선으로 이은 인터페이스
+간선이 없거나 대상의 일부만 이은 수다: `direct`는 그런 위치 전부, `bound`는 `bound` 간선으로 이은 대기
 호출을 빼고, `candidates`는 `candidate` 간선으로 이은 것도 뺀다. 의존성으로 가는 호출은 외부이지 미해석이 아니다.
 매개변수로 받은 콜백 실행은 호출자 쪽 `callback` 간선이 도달을 덮더라도 센다.
 

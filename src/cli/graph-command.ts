@@ -61,8 +61,9 @@ const traversalOptions = `Options:
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
   --max-reached <n>           Emit at most n reached symbols (default and maximum: ${DEFAULT_MAX_REACHED})
   --dispatch <mode>           Edges to follow: direct (proven by the checker), bound (direct plus
-                              interface calls whose every observed receiver flow is a project
-                              implementation), candidates (bound plus every assignable implementation).
+                              deferred interface/callable calls whose every observed receiver or
+                              callable flow is a project implementation/declaration), candidates
+                              (bound plus every assignable interface implementation).
                               Default: ${DEFAULT_DISPATCH}
   --entry-points              Include observed entry-point kinds on root/reached symbols (requires
                               an isthmus consumer supporting symbol.entries; omitted by default).

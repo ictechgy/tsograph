@@ -92,6 +92,480 @@ test('fixture: 주입 방식별 bound 간선과 증명하지 못한 호출의 ca
   assert.equal(graph.statistics.calls.unresolved.interface, 11);
 });
 
+test('callable value flow: closed callbacks, returned callbacks, and constructor fallback', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function invoke(cb: Clock) { return cb(); }',
+      'function make(): Clock { return () => "made"; }',
+      'class Service {',
+      '  private readonly clock: Clock;',
+      '  constructor(private readonly deps: { clock?: Clock } = {}) { this.clock = deps.clock ?? (() => "inline"); }',
+      '  run() { return invoke(this.clock); }',
+      '}',
+      'const namedClock = () => "named";',
+      'const service = new Service({ clock: namedClock });',
+      'export const named = () => service.run();',
+      'const omitted = new Service();',
+      'export const omittedRun = () => omitted.run();',
+      'const cb = make();',
+      'export const returned = () => cb();',
+      'export const immediate = () => make()();',
+    ].join('\n'),
+  });
+  const bound = (from: string): string[] => graph.edges.filter((edge) => edge.from === from && edge.evidence === 'bound').map((edge) => edge.to);
+  assert.deepEqual(bound('src/main.ts#invoke'), ['src/main.ts#Service.constructor', 'src/main.ts#namedClock']);
+  assert.deepEqual(bound('src/main.ts#make'), []);
+  assert.deepEqual(bound('src/main.ts#Service.run'), []);
+  assert.deepEqual(bound('src/main.ts#returned'), ['src/main.ts#make']);
+  // make()()의 바깥 호출은 반환 화살표를 make 노드로 bound하지만 같은 direct 쌍이 더 강해 간선은 하나만 남는다.
+  assert.deepEqual(bound('src/main.ts#immediate'), []);
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'src/main.ts#immediate')?.unresolvedCalls, { direct: 1 });
+  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 3, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 });
+  assert.deepEqual(graph.statistics.calls.unresolved, {
+    parameter: 1, interface: 0, untyped: 0, computed: 1, indirect: 1, 'unresolved-import': 0,
+  });
+});
+
+test('callable value flow: mutable aliases union every callable write', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function first() { return "first"; }',
+      'function second() { return "second"; }',
+      'let callback: Clock = first;',
+      'callback = second;',
+      'export function run() { return callback(); }',
+    ].join('\n'),
+  });
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'src/main.ts#run' && edge.evidence === 'bound').map((edge) => edge.to), [
+    'src/main.ts#first',
+    'src/main.ts#second',
+  ]);
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'src/main.ts#run' && edge.evidence === 'candidate'), []);
+  assert.deepEqual(graph.statistics.calls.unresolved, {
+    parameter: 0, interface: 0, untyped: 0, computed: 0, indirect: 1, 'unresolved-import': 0,
+  });
+});
+
+test('callable value flow: reassigned declarations and callback members union every observed write', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function first() { return "first"; }',
+      'function second() { return "second"; }',
+      'function reassignedDeclaration() { return "declaration"; }',
+      'reassignedDeclaration = second;',
+      'export function runDeclaration() { return reassignedDeclaration(); }',
+      'class Holder {',
+      '  readonly callback: Clock = first;',
+      '  constructor() { this.callback = second; }',
+      '  run() { return this.callback(); }',
+      '}',
+      'const holder = new Holder();',
+      'export const runHolder = () => holder.run();',
+      'const callbacks = { callback: first };',
+      'callbacks.callback = second;',
+      'export const runObject = () => callbacks.callback();',
+      'const immutable = () => "immutable";',
+      'export const runImmutable = () => immutable();',
+      'function makeCallback(): Clock { return first; }',
+      'function otherMaker(): Clock { return second; }',
+      'makeCallback = otherMaker;',
+      'export const runReturnedWrite = () => makeCallback()();',
+    ].join('\n'),
+  });
+  const targets = (from: string, evidence: 'direct' | 'bound'): string[] => graph.edges
+    .filter((edge) => edge.from === from && edge.evidence === evidence).map((edge) => edge.to);
+  assert.deepEqual(targets('src/main.ts#runDeclaration', 'bound'), ['src/main.ts#reassignedDeclaration', 'src/main.ts#second']);
+  assert.deepEqual(targets('src/main.ts#Holder.run', 'bound'), ['src/main.ts#first', 'src/main.ts#second']);
+  assert.deepEqual(targets('src/main.ts#runObject', 'bound'), ['src/main.ts#first', 'src/main.ts#second']);
+  assert.deepEqual(targets('src/main.ts#runImmutable', 'direct'), ['src/main.ts#immutable']);
+  assert.deepEqual(targets('src/main.ts#runImmutable', 'bound'), []);
+  assert.deepEqual(targets('src/main.ts#runReturnedWrite', 'bound'), [
+    'src/main.ts#first', 'src/main.ts#makeCallback', 'src/main.ts#otherMaker', 'src/main.ts#second',
+  ]);
+});
+
+test('callable value flow: unknown destructuring, loop, and reflective writes fail closed in every mode', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function first() { return "first"; }',
+      'function second() { return "second"; }',
+      'let destructured: Clock = first;',
+      '({ callback: destructured } = { callback: second });',
+      'export const runDestructured = () => destructured();',
+      'let looped: Clock = first;',
+      'for (looped of [second]) { break; }',
+      'export const runLooped = () => looped();',
+      'const reflected = { callback: first };',
+      'const reflectedAlias = reflected;',
+      'Object.assign(reflectedAlias, { callback: second });',
+      'export const runReflected = () => reflected.callback();',
+      'const deleted: { callback?: Clock } = { callback: first };',
+      'delete deleted.callback;',
+      'export const runDeleted = () => deleted.callback!();',
+      'declare const dynamicKey: string;',
+      'const computedDeleted: { callback?: Clock } = { callback: first };',
+      'delete computedDeleted[dynamicKey];',
+      'export const runComputedDeleted = () => computedDeleted.callback!();',
+      'const reflectDeleted: { callback?: Clock } = { callback: first };',
+      'Reflect.deleteProperty(reflectDeleted, "callback");',
+      'export const runReflectDeleted = () => reflectDeleted.callback!();',
+      'const assigned = { callback: first };',
+      'Object.assign(assigned, { callback: second });',
+      'const assignedCallback: Clock = assigned.callback;',
+      'export const runAssignedAlias = () => assignedCallback();',
+      'const defined = { callback: first };',
+      'Object.defineProperty(defined, "callback", { value: second });',
+      'const definedCallback: Clock = defined.callback;',
+      'export const runDefinedAlias = () => definedCallback();',
+      'const { callback: assignedDestructured } = assigned;',
+      'export const runAssignedDestructured = () => assignedDestructured();',
+      'class PatchedMethod { run() { return "old"; } }',
+      'const patchedMethod = new PatchedMethod();',
+      'patchedMethod.run = second;',
+      'const patchedAlias: Clock = patchedMethod.run;',
+      'const { run: patchedDestructured } = patchedMethod;',
+      'export const runPatchedAlias = () => patchedAlias();',
+      'export const runPatchedDestructured = () => patchedDestructured();',
+    ].join('\n'),
+  });
+  for (const from of [
+    'runDestructured', 'runLooped', 'runReflected', 'runDeleted', 'runComputedDeleted', 'runReflectDeleted',
+    'runAssignedAlias', 'runDefinedAlias',
+    'runAssignedDestructured', 'runPatchedAlias', 'runPatchedDestructured',
+  ]) {
+    assert.deepEqual(graph.edges.filter((edge) => edge.from === `src/main.ts#${from}` && edge.kinds.includes('call')), [], from);
+    assert.deepEqual(graph.nodes.find((node) => node.id === `src/main.ts#${from}`)?.unresolvedCalls, {
+      direct: 1, bound: 1, candidates: 1,
+    });
+  }
+});
+
+test('callable value flow: getter values bind returned callbacks while decorators fail closed', async () => {
+  const graph = await graphOf({
+    'tsconfig.json': '{ "compilerOptions": { "strict": true, "experimentalDecorators": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function first() { return "first"; }',
+      'function marker(..._args: any[]) {}',
+      'class PlainGetter { get callback(): Clock { return first; } }',
+      'const plainCallback: Clock = new PlainGetter().callback;',
+      'export const runPlainGetter = () => plainCallback();',
+      '@marker class ClassDecorated {',
+      '  callback: Clock = first;',
+      '  method() { return "method"; }',
+      '  get getter(): Clock { return first; }',
+      '  make(): Clock { return first; }',
+      '}',
+      'const classField: Clock = new ClassDecorated().callback;',
+      'const classMethod: Clock = new ClassDecorated().method;',
+      'const classGetter: Clock = new ClassDecorated().getter;',
+      'export const runClassField = () => classField();',
+      'export const runClassMethod = () => classMethod();',
+      'export const runClassGetter = () => classGetter();',
+      'export const runClassReturn = () => new ClassDecorated().make()();',
+      'class MemberDecorated {',
+      '  @marker callback: Clock = first;',
+      '  @marker method() { return "method"; }',
+      '  @marker get getter(): Clock { return first; }',
+      '}',
+      'const memberField: Clock = new MemberDecorated().callback;',
+      'const memberMethod: Clock = new MemberDecorated().method;',
+      'const memberGetter: Clock = new MemberDecorated().getter;',
+      'export const runMemberField = () => memberField();',
+      'export const runMemberMethod = () => memberMethod();',
+      'export const runMemberGetter = () => memberGetter();',
+    ].join('\n'),
+  });
+  const plain = graph.edges.filter((edge) => edge.from === 'src/main.ts#runPlainGetter' && edge.kinds.includes('call'));
+  assert.deepEqual(plain.map((edge) => [edge.to, edge.evidence]), [
+    ['src/main.ts#PlainGetter.callback', 'direct'],
+    ['src/main.ts#first', 'bound'],
+  ]);
+  for (const from of [
+    'runClassField', 'runClassMethod', 'runClassGetter', 'runClassReturn',
+    'runMemberField', 'runMemberMethod', 'runMemberGetter',
+  ]) {
+    assert.deepEqual(graph.edges.filter((edge) => edge.from === `src/main.ts#${from}` && edge.kinds.includes('call')), [], from);
+    assert.ok((graph.nodes.find((node) => node.id === `src/main.ts#${from}`)?.unresolvedCalls?.candidates ?? 0) > 0, from);
+  }
+});
+
+test('callable value flow: class and accessor decorators keep extracted callbacks unknown', async () => {
+  const graph = await graphOf({
+    'tsconfig.json': '{ "compilerOptions": { "strict": true, "experimentalDecorators": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function invoke(cb: Clock) { return cb(); }',
+      'function replace<T extends new (...args: any[]) => any>(target: T): T { return class extends target { run() { return "replacement"; } } as T; }',
+      '@replace class Decorated { field = () => "field"; get getter(): Clock { return () => "getter"; } run() { return "old"; } }',
+      'function marker(_value: unknown, _context: unknown) {}',
+      'class AccessorDecorated { @marker get callback(): Clock { return () => "accessor"; } }',
+      'function use() { invoke(new Decorated().field); invoke(new Decorated().getter); invoke(new AccessorDecorated().callback); return invoke(new Decorated().run); }',
+      'export const run = () => use();',
+    ].join('\n'),
+  });
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'src/main.ts#invoke' && edge.evidence === 'bound'), []);
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'src/main.ts#invoke' && edge.evidence === 'candidate'), []);
+});
+
+test('dispatch limitations retain a separate partial gap when another full gap is bound', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'interface Runner { run(): string; }',
+      'class First { run() { return "first"; } }',
+      'class Second { run() { return "second"; } }',
+      'function makeComplete(): Runner { return new First(); }',
+      'const complete: Runner = makeComplete();',
+      'declare function unknown(): Runner;',
+      'const partial: First | Runner = unknown();',
+      'export const runComplete = () => complete.run();',
+      'export const runPartial = () => partial.run();',
+    ].join('\n'),
+  });
+  assert.ok(graph.limitationsByMode.bound.some((line) => line.startsWith('partial-dispatch: 1 call(s)')));
+  assert.ok(!graph.limitationsByMode.bound.some((line) => line.includes('unresolved-calls:') && line.includes('interface:')));
+  assert.ok(!graph.limitationsByMode.candidates.some((line) => line.startsWith('partial-dispatch:')));
+  assert.deepEqual(graph.statistics.calls.dispatch, { bound: 1, boundPartial: 0, candidate: 0, candidatePartial: 1, overBudget: 0 });
+});
+
+test('unrelated computed and same-named writes preserve proven receiver calls', async () => {
+  const calls = (graph: CallGraph, from: string): [string, string][] => graph.edges
+    .filter((edge) => edge.from === from && edge.kinds.includes('call')).map((edge) => [edge.to, edge.evidence]);
+  const nominal = await graphOf({
+    'src/main.ts': [
+      'interface Store { find(): number; }',
+      'class Repo implements Store { private brand = 1; find() { return 1; } }',
+      'function lookup(store: Store) { return store.find(); }',
+      'declare const style: CSSStyleDeclaration;',
+      'declare const key: string;',
+      'style[key] = "x";',
+      'export const result = lookup(new Repo());',
+    ].join('\n'),
+  });
+  assert.deepEqual(calls(nominal, 'src/main.ts#lookup'), [['src/main.ts#Repo.find', 'bound']]);
+
+  const distinct = await graphOf({
+    'src/main.ts': [
+      'class DirectRepo { find() { return 2; } }',
+      'class Other { private readonly find: () => number; constructor() { this.find = () => 0; } }',
+      'export function runDirect() { return new DirectRepo().find(); }',
+      'new Other();',
+    ].join('\n'),
+  });
+  assert.deepEqual(calls(distinct, 'src/main.ts#runDirect'), [['src/main.ts#DirectRepo.find', 'direct']]);
+
+  const overlapGraph = await graphOf({
+    'src/main.ts': [
+      'class StructuralRepo { find() { return 3; } }',
+      'declare const maybeRepo: StructuralRepo;',
+      'declare const overlap: { other: number };',
+      'declare const key: string;',
+      'overlap[key] = 1;',
+      'export function runOverlap() { return maybeRepo.find(); }',
+    ].join('\n'),
+  });
+  assert.deepEqual(calls(overlapGraph, 'src/main.ts#runOverlap'), []);
+  assert.deepEqual(overlapGraph.nodes.find((node) => node.id === 'src/main.ts#runOverlap')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
+
+  const literalAlias = await graphOf({
+    'src/main.ts': [
+      'function implA() { return "a"; }',
+      'function implB() { return "b"; }',
+      'function implC() { return "c"; }',
+      'class C { run() { return implA(); } }',
+      'const config = { run: () => implB() };',
+      'function main(value: C) { config.run = () => implC(); return value.run(); }',
+      'export const result = main(config);',
+    ].join('\n'),
+  });
+  assert.ok(!calls(literalAlias, 'src/main.ts#main').some(([to, evidence]) => to === 'src/main.ts#C.run' && evidence === 'direct'));
+
+  const genericTarget = await graphOf({
+    'package.json': '{ "dependencies": { "next": "16.2.7" } }',
+    'src/main.ts': [
+      'interface Store { find(): number; }',
+      'export class Repo implements Store { private brand = 1; find() { return 1; } }',
+      'export function lookup(store: Store) { return store.find(); }',
+      'export const result = lookup(new Repo());',
+    ].join('\n'),
+    'app/api/x/route.ts': [
+      'export function POST<T extends object>(target: T, key: keyof T) {',
+      '  target[key] = target[key];',
+      '  return new Response();',
+      '}',
+    ].join('\n'),
+  });
+  assert.deepEqual(calls(genericTarget, 'src/main.ts#lookup').filter(([, evidence]) => evidence === 'bound'), []);
+  assert.ok(calls(genericTarget, 'src/main.ts#lookup').some(([, evidence]) => evidence === 'candidate'));
+});
+
+test('callable property signatures recover only safe fixed receiver targets', async () => {
+  const stable = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run: () => string; }',
+      'function effect() { return "stable"; }',
+      'class Impl { run = effect; }',
+      'const handler: Handler = new Impl();',
+      'export const call = () => handler.run();',
+    ].join('\n'),
+  });
+  const edgesFrom = (graph: CallGraph): [string, string][] => graph.edges
+    .filter((edge) => edge.from === 'src/main.ts#call' && edge.kinds.includes('call')).map((edge) => [edge.to, edge.evidence]);
+  assert.deepEqual(edgesFrom(stable), [['src/main.ts#effect', 'direct']]);
+
+  const mutated = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run: () => string; }',
+      'function first() { return "first"; }',
+      'function second() { return "second"; }',
+      'class Impl { run = first; }',
+      'const handler: Handler = new Impl();',
+      'handler.run = second;',
+      'export const call = () => handler.run();',
+    ].join('\n'),
+  });
+  assert.deepEqual(edgesFrom(mutated), [
+    ['src/main.ts#first', 'bound'],
+    ['src/main.ts#second', 'bound'],
+  ]);
+
+  const deleted = await graphOf({
+    'src/main.ts': [
+      'interface Handler { run?: () => string; }',
+      'function first() { return "first"; }',
+      'class Impl { run = first; }',
+      'const handler: Handler = new Impl();',
+      'delete handler.run;',
+      'export const call = () => handler.run!();',
+    ].join('\n'),
+  });
+  assert.deepEqual(edgesFrom(deleted), []);
+  assert.deepEqual(deleted.nodes.find((node) => node.id === 'src/main.ts#call')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
+});
+
+test('callable value flow: mixed, empty, patched, reflective, and named method paths fail closed', async () => {
+  const aliases = Array.from({ length: 300 }, (_, index) => `const c${index + 1}: Clock = c${index};`).join('\n');
+  const graph = await graphOf({
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function invokeNamed(cb: Clock) { return cb(); }',
+      'const namedObject = { run() { return "named"; } };',
+      'function namedMethod() { return invokeNamed(namedObject.run); }',
+      'export const runNamed = () => namedMethod();',
+      'function invokeMixed(cb: Clock) { return cb(); }',
+      'declare const unknownClock: Clock;',
+      'function mixedFallback() { return invokeMixed(unknownClock ?? (() => "fallback")); }',
+      'export const runMixed = () => mixedFallback();',
+      'function invokeMixedObject(cb: Clock) { return cb(); }',
+      'declare const mixedFlag: boolean;',
+      'const mixedObject = mixedFlag ? (() => "callable") : { run() { return "object"; } };',
+      'function mixedObjectMethod() { return invokeMixedObject(mixedObject as Clock); }',
+      'export const runMixedObject = () => mixedObjectMethod();',
+      'function invokeReassigned(cb: Clock) { return cb(); }',
+      'let reassigned: Clock = () => "first";',
+      'reassigned = unknownClock;',
+      'function reassignedMethod() { return invokeReassigned(reassigned); }',
+      'export const runReassigned = () => reassignedMethod();',
+      'function invokeFunctionObject(cb: Clock) { return cb(); }',
+      'const callableObject = (() => "callable") as Clock & { marker: Clock };',
+      'function functionObjectProperty() { return invokeFunctionObject(callableObject.marker); }',
+      'export const runFunctionObjectProperty = () => functionObjectProperty();',
+      'function invokeDetached(cb: Clock) { return cb(); }',
+      'class Detached { value = "detached"; run() { return this.value; } }',
+      'function detachedMethod() { return invokeDetached(new Detached().run); }',
+      'export const runDetached = () => detachedMethod();',
+      'function invokeEmpty(cb: Clock) { return cb(); }',
+      'export const runEmpty = () => 1;',
+      'function invokePatched(cb: Clock) { return cb(); }',
+      'const patchedObject = { run() { return "original"; } };',
+      'patchedObject.run = () => "patched";',
+      'function patchedMethod() { return invokePatched(patchedObject.run); }',
+      'export const runPatched = () => patchedMethod();',
+      'function invokeReflective(cb: Clock) { return cb(); }',
+      'class ReflectiveHolder { run() { return "original"; } }',
+      'const reflectiveObject = new ReflectiveHolder();',
+      'Object.assign(reflectiveObject, { run: () => "patched" });',
+      'function reflectiveMethod() { return invokeReflective(reflectiveObject.run); }',
+      'export const runReflective = () => reflectiveMethod();',
+      'function invokeBudget(cb: Clock) { return cb(); }',
+      'const c0: Clock = () => "budget";',
+      aliases,
+      'function budgetMethod() { return invokeBudget(c300); }',
+      'export const runBudget = () => budgetMethod();',
+    ].join('\n'),
+  });
+  const edges = (from: string, evidence: 'bound' | 'candidate'): string[] => graph.edges
+    .filter((edge) => edge.from === from && edge.evidence === evidence).map((edge) => edge.to);
+  assert.deepEqual(edges('src/main.ts#invokeNamed', 'bound'), ['src/main.ts#namedObject.run']);
+  for (const id of ['invokeMixed', 'invokeMixedObject', 'invokeReassigned', 'invokeFunctionObject', 'invokeDetached', 'invokeEmpty', 'invokePatched', 'invokeReflective', 'invokeBudget']) {
+    assert.deepEqual(edges(`src/main.ts#${id}`, 'bound'), [], id);
+    assert.deepEqual(edges(`src/main.ts#${id}`, 'candidate'), [], id);
+    assert.deepEqual(graph.edges.filter((edge) => edge.from === `src/main.ts#${id}` && edge.kinds.includes('call')), [], id);
+    assert.deepEqual(graph.nodes.find((node) => node.id === `src/main.ts#${id}`)?.unresolvedCalls, {
+      direct: 1, bound: 1, candidates: 1,
+    }, id);
+  }
+  assert.equal(graph.statistics.calls.dispatch.candidate, 0);
+  assert.equal(graph.statistics.calls.dispatch.overBudget, 1);
+  assert.ok(graph.limitations.some((line) => line.startsWith('dispatch-budget: 1 deferred interface/callable call(s)')));
+  assert.ok(graph.nodes.find((node) => node.id === 'src/main.ts#invokeMixed')?.unresolvedCalls?.direct === 1);
+  assert.ok(graph.nodes.find((node) => node.id === 'src/main.ts#invokeEmpty')?.unresolvedCalls?.direct === 1);
+});
+
+test('callable value flow: exported/open callback and decorated method remain unbound', async () => {
+  const open = await graphOf({
+    'package.json': '{ "name": "callable-open", "exports": "./src/main.ts" }',
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'export function invokeOpen(cb: Clock) { return cb(); }',
+      'export const runOpen = () => invokeOpen(() => "open");',
+    ].join('\n'),
+  });
+  assert.deepEqual(open.edges.filter((edge) => edge.from === 'src/main.ts#invokeOpen' && edge.evidence === 'bound'), []);
+  assert.deepEqual(open.edges.filter((edge) => edge.from === 'src/main.ts#invokeOpen' && edge.evidence === 'candidate'), []);
+  assert.deepEqual(open.nodes.find((node) => node.id === 'src/main.ts#invokeOpen')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
+  assert.ok(open.limitations.some((line) => line.startsWith('bound-dispatch: package.json declares public entry points')));
+
+  const decorated = await graphOf({
+    'tsconfig.json': '{ "compilerOptions": { "strict": true, "experimentalDecorators": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+    'src/main.ts': [
+      'type Clock = () => string;',
+      'function invokeDecorated(cb: Clock) { return cb(); }',
+      'function marker(_value: unknown, _context: unknown) {}',
+      'class Decorated { @marker run() { return "decorated"; } }',
+      'function decoratedMethod() { return invokeDecorated(new Decorated().run); }',
+      'export const runDecorated = () => decoratedMethod();',
+    ].join('\n'),
+  });
+  assert.deepEqual(decorated.edges.filter((edge) => edge.from === 'src/main.ts#invokeDecorated' && edge.evidence === 'bound'), []);
+  assert.deepEqual(decorated.edges.filter((edge) => edge.from === 'src/main.ts#invokeDecorated' && edge.evidence === 'candidate'), []);
+  assert.deepEqual(decorated.nodes.find((node) => node.id === 'src/main.ts#invokeDecorated')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
+
+  const entry = await graphOf({
+    'package.json': '{ "dependencies": { "next": "16.2.7" } }',
+    'app/api/x/route.ts': [
+      'type Clock = () => string;',
+      'export function GET(callback: Clock = () => "default") { return callback(); }',
+    ].join('\n'),
+  });
+  assert.deepEqual(entry.nodes.find((node) => node.id === 'app/api/x/route.ts#GET')?.entries, ['route-handler']);
+  assert.deepEqual(entry.nodes.find((node) => node.id === 'app/api/x/route.ts#GET')?.unresolvedCalls, {
+    direct: 1, bound: 1, candidates: 1,
+  });
+});
+
 test('fixture: 노드별 미해석 계수는 모드마다 다르다', () => {
   const counts = Object.fromEntries(graph.nodes.filter((node) => node.unresolvedCalls !== undefined).map((node) => [node.id, node.unresolvedCalls]));
   assert.deepEqual(counts['src/lib/handler.ts#ItemHandler.get'], { direct: 1 });
