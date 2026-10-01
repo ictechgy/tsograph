@@ -64,6 +64,8 @@ const traversalOptions = `Options:
                               interface calls whose every observed receiver flow is a project
                               implementation), candidates (bound plus every assignable implementation).
                               Default: ${DEFAULT_DISPATCH}
+  --entry-points              Include observed entry-point kinds on root/reached symbols (requires
+                              an isthmus consumer supporting symbol.entries; omitted by default).
   --generated-at <timestamp>  Fixed generatedAt (YYYY-MM-DDTHH:mm:ss.sssZ) for byte-identical output
   --format json               Output format (json is the only format)
 
@@ -77,7 +79,7 @@ Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error 
 `;
 
 /** reach 명령 사용법이다. */
-export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
+export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols reachable from the given roots (direction "dependencies") as an isthmus
 language-traversal v1 document.
@@ -85,7 +87,7 @@ language-traversal v1 document.
 ${traversalOptions}`;
 
 /** impact 명령 사용법이다. */
-export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--generated-at <timestamp>] [--format json] <id>...
+export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols that reach the given roots (direction "dependents") as an isthmus
 language-traversal v1 document.
@@ -152,6 +154,7 @@ interface TraversalArguments {
   readonly maxReached: number;
   readonly dispatch: DispatchMode;
   readonly generatedAt: Date | undefined;
+  readonly entryPoints: boolean;
 }
 
 /**
@@ -181,6 +184,7 @@ async function runTraversalCommand(
     header: loaded.header,
     direction,
     dispatch: parsed.dispatch,
+    entryPoints: parsed.entryPoints,
     roots,
     result: traverseResolvedRoots(loaded.graph, parsed, direction, roots),
   }));
@@ -210,7 +214,7 @@ function traverseResolvedRoots(graph: CallGraph, parsed: TraversalArguments, dir
  * @returns 검증한 인자, 'help', 또는 사용법 오류 이유
  */
 function parseTraversalArguments(arguments_: readonly string[]): TraversalArguments | 'help' | string {
-  const parsed = parseArguments(arguments_, ['--project', '--format', '--max-depth', '--max-reached', '--dispatch', '--generated-at'], ['--help']);
+  const parsed = parseArguments(arguments_, ['--project', '--format', '--max-depth', '--max-reached', '--dispatch', '--generated-at'], ['--help', '--entry-points']);
   if (parsed === undefined) return 'unknown, repeated, or empty option.';
   if (parsed.booleanFlags.has('--help')) return 'help';
   const format = formatProblem(parsed.valueFlags.get('--format'));
@@ -232,7 +236,7 @@ function parseTraversalArguments(arguments_: readonly string[]): TraversalArgume
   if (generatedAt === null) return '--generated-at takes a UTC timestamp such as 2026-09-27T00:00:00.000Z.';
   return {
     project, rootIds, maxDepth: maxDepth ?? MAX_TRAVERSAL_DEPTH, maxReached: maxReached ?? DEFAULT_MAX_REACHED,
-    dispatch: dispatch as DispatchMode, generatedAt,
+    dispatch: dispatch as DispatchMode, generatedAt, entryPoints: parsed.booleanFlags.has('--entry-points'),
   };
 }
 

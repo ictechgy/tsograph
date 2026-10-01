@@ -145,6 +145,11 @@ function verifyGraph() {
     const document = JSON.parse(result.stdout);
     verify(document.format === 'language-traversal' && document.version === 1 && document.direction === direction, `${command} envelope`);
     verify(document.graphRevision === snapshot.graphRevision, `${command} graphRevision`);
+    verify(document.roots.every((entry) => entry.symbol?.entries === undefined)
+      && document.reached.every((entry) => entry.symbol.entries === undefined), `${command} legacy entries omitted`);
+    const marked = run([...args, '--entry-points']);
+    verify(marked.status === 0 && JSON.parse(marked.stdout).roots[0]?.symbol?.entries?.includes('route-handler'),
+      `${command} observed root entry kinds`);
     verify(withoutGeneratedAt(result.stdout) === withoutGeneratedAt(run(args).stdout), `${command} determinism`);
     const unknown = run([command, '--project', graphFixture, 'src/nope.ts#missing', root]);
     verify(unknown.status === 64, `${command} unknown id exit code`);

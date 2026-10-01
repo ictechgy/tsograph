@@ -740,6 +740,11 @@ isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impa
 진입점을 `non-http-entries:`로 세어, isthmus `trace`가 route 누락 대신 `non-http-entry` gap으로 보고할 수
 있게 한다.
 
+`reach`·`impact --entry-points`는 root·도달 심볼에 관찰한 `symbol.entries`를 추가하고, 표시된 root의 위치도 싣는다.
+지원하는 isthmus 소비자는 relation·심볼·파일 선택에서 비HTTP 진입점을 API 영향과 함께 보고한다. page 표식에는
+layout·특수 파일도 들어 전부 RSC라는 뜻이 아니다. 기본 옵션은 꺼져 있어 출력 호환을 유지한다. 발행된
+isthmus-cli 0.11.0은 `symbol.entries`를 거부하므로 소비자를 먼저 업그레이드한다.
+
 ### language-traversal 출력
 
 - `dispatch`: 쓴 모드(`--dispatch`, 기본 `bound`). `direct`는 `direct` 간선만(디스패치 이전 동작), `bound`는
