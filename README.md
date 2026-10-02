@@ -842,6 +842,25 @@ and method-parameter bivariance let an instance reach any typed slot without a c
 default-parameter DI (`store: ItemStore = new MemoryItemStore()`), and module singletons created by a
 factory are followed across modules.
 
+There is one narrow identity proof for returned dependency containers: an object literal returned by one
+named, stable, closed, synchronous, non-generator project `FunctionDeclaration` may be separated from an
+unknown reflective target when it contains only plain static own-data properties (no spread, computed key,
+method/accessor, `__proto__`, or `then`). Every factory use must either destructure the call result directly
+with a simple one-level object binding or pass the factory as an exact argument to a direct identifier call
+whose stable wrapper parameter performs only that same projection. Prefix spreads, optional/default/rest or
+written parameters, forwarding, whole-object aliases/returns/passes, lexical `arguments`, open properties,
+opaque imports, and async/generator factories keep the literal unknown. A known reflective target always
+blocks, and this exception does not use structural type disjointness. The proof accepts named imports but
+intentionally defers namespace/member and parenthesized-function factory calls.
+
+The proof also covers a private cache literal in the same external-module source file: one top-level `let`
+slot with an absent, `null`, or unshadowed global `undefined` initializer may receive the literal exactly once
+through a discarded direct `memo =` or `memo ??=` expression statement. Stable closed named functions may
+return that slot, while every other slot read must be a narrow condition guard (`memo`, `!memo`, or an equality
+against `null`/global `undefined`). Discarded `memo = null`/global `undefined` resets are allowed; exports,
+whole-object uses, member reads, setters, compound/logical writes, and additional object writes keep the value
+unknown.
+
 Callable values use the same flow engine: function declarations and function-valued initializers plus
 their observed assignments, closed callback parameters, direct invocations of anonymous inline
 callbacks, function and getter return values, constructor assignments/defaults, and safely readable
@@ -907,8 +926,10 @@ What `bound` guarantees, and what it does not:
   `Object.defineProperty(ies)`, `Reflect.set`, `Reflect.defineProperty`, and `Reflect.deleteProperty`
   targets are handled
   conservatively (their properties and members become unknown, including for statically resolved member
-  calls). A write or delete through a computed key (`obj[key] = v`, `delete obj[key]`) likewise makes
-  that receiver's properties unknown. An unknown reflective target keeps its static type: it is excluded
+  calls). The returned-literal identity proof above is the only exception, and applies only to an unknown
+  target; a known reflective target still blocks the literal. A write or delete through a computed key
+  (`obj[key] = v`, `delete obj[key]`) likewise makes that receiver's properties unknown. An unknown reflective
+  target keeps its static type: it is excluded
   only from a closed, non-escaped nominal class family when neither the class nor any project subclass can
   overlap that type. Structurally unrelated types can still overlap through an intersection and therefore
   remain unknown; `any`, `unknown`, and generic/instantiable target types never use this exclusion. A same-named property write that replaces a

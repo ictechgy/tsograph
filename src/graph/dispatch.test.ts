@@ -912,6 +912,312 @@ test('몽키 패치·반사적 쓰기·데코레이터·동적 import·값으로
   assert.deepEqual(dispatchEdges(escaped).filter((line) => line.endsWith(' bound')), []);
 });
 
+test('고립된 반환 객체 리터럴은 무관한 반사 대상과 분리해 bound 디스패치한다', async () => {
+  const result = await graphOf({
+    'src/main.ts': [
+      'interface Service { run(): string; }',
+      'type Maker = (config: Service) => { service: Service };',
+      'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+      'const live: Service = new LiveService();',
+      'declare const unknownRecord: Record<string, unknown>;',
+      'Object.assign(unknownRecord, { unrelated: true });',
+      'Reflect.set(unknownRecord, "other", true);',
+      'function deps(_config: Service): { service: Service } { return { service: live }; }',
+      'const { service } = deps(live);',
+      'export const direct = () => service.run();',
+      'function wrap(make: Maker, config: Service, callback: (service: Service) => string) {',
+      '  function nestedNormal() { return arguments.length; } nestedNormal();',
+      '  return () => { const { service } = make(config); callback(service); };',
+      '}',
+      'async function asyncWrap(make: Maker, config: Service, callback: (service: Service) => string) {',
+      '  const { service } = make(config); callback(service);',
+      '}',
+      'function* generatorWrap(make: Maker, config: Service, callback: (service: Service) => string) {',
+      '  const { service } = make(config); callback(service); yield 0;',
+      '}',
+      'export const handler = wrap(deps, live, (service) => service.run());',
+      'export const asyncHandler = asyncWrap(deps, live, (service) => service.run());',
+      'export const generatorHandler = generatorWrap(deps, live, (service) => service.run());',
+    ].join('\n'),
+  });
+  const bound = result.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound');
+  assert.ok(bound.some((edge) => edge.from === 'src/main.ts#direct'));
+  assert.ok(bound.some((edge) => edge.from.includes('.wrap(')));
+  assert.ok(bound.some((edge) => edge.from.includes('.asyncWrap(')));
+  assert.ok(bound.some((edge) => edge.from.includes('.generatorWrap(')));
+});
+
+test('private memo가 재할당하는 반환 리터럴도 discarded ??=와 안전한 guard만 있으면 bound한다', async () => {
+  const result = await graphOf({
+    'src/main.ts': [
+      'interface Service { run(): string; }',
+      'type Maker = () => { service: Service };',
+      'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+      'const live: Service = new LiveService();',
+      'declare const unknownRecord: Record<string, unknown>;',
+      'Object.assign(unknownRecord, { unrelated: true });',
+      'Reflect.set(unknownRecord, "other", true);',
+      'let memo: { service: Service } | null;',
+      'function deps(): { service: Service } { if (!memo) memo ??= { service: live }; return memo; }',
+      'function clear() { memo = null; }',
+      'const { service } = deps();',
+      'export const direct = () => service.run();',
+      'function wrap(make: Maker, callback: (service: Service) => string) {',
+      '  return () => { const { service } = make(); callback(service); };',
+      '}',
+      'export const handler = wrap(deps, (service) => service.run());',
+      'clear();',
+      'const { service: afterClear } = deps();',
+      'export const afterClearRun = () => afterClear.run();',
+    ].join('\n'),
+  });
+  const bound = result.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound');
+  assert.ok(bound.some((edge) => edge.from === 'src/main.ts#direct'));
+  assert.ok(bound.some((edge) => edge.from.includes('.wrap(')));
+  assert.ok(bound.some((edge) => edge.from === 'src/main.ts#afterClearRun'));
+});
+
+test('private memo는 bare truthy return과 global undefined reset도 고립된 literal로 증명한다', async () => {
+  const result = await graphOf({
+    'src/main.ts': [
+      'interface Service { run(): string; }',
+      'type Container = { service: Service };',
+      'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+      'const live: Service = new LiveService();',
+      'declare const unknownRecord: Record<string, unknown>;',
+      'Object.assign(unknownRecord, { unrelated: true });',
+      'Reflect.set(unknownRecord, "other", true);',
+      'let memo: Container | null | undefined = null;',
+      'function deps() { if (memo) return memo; memo = { service: live }; return memo; }',
+      'export function clear() { memo = undefined; }',
+      'const { service } = deps();',
+      'export const direct = () => service.run();',
+      'clear();',
+      'const { service: afterClear } = deps();',
+      'export const afterClearRun = () => afterClear.run();',
+    ].join('\n'),
+  });
+  const bound = result.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound');
+  assert.ok(bound.some((edge) => edge.from === 'src/main.ts#direct'));
+  assert.ok(bound.some((edge) => edge.from === 'src/main.ts#afterClearRun'));
+});
+
+test('private memo identity proof는 소비·export·setter·탈출·coercion·중첩 함수와 known write를 닫는다', async () => {
+  const result = await graphOf({
+    'src/main.ts': [
+      'interface Service { run(): string; }',
+      'type Container = { service: Service };',
+      'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+      'const live: Service = new LiveService();',
+      'declare const unknownRecord: Record<string, unknown>;',
+      'declare const unknownService: Service;',
+      'Object.assign(unknownRecord, { unrelated: true });',
+      'Reflect.set(unknownRecord, "other", true);',
+      'let consumedMemo: Container | null;',
+      'function consumedDeps() { const leaked = (consumedMemo ??= { service: live }); return consumedMemo; }',
+      'const { service: consumedService } = consumedDeps();',
+      'export const consumedRun = () => consumedService.run();',
+      'export let exportedMemo: Container | null;',
+      'function exportedDeps() { exportedMemo ??= { service: live }; return exportedMemo; }',
+      'const { service: exportedService } = exportedDeps();',
+      'export const exportedRun = () => exportedService.run();',
+      'let namedMemo: Container | null;',
+      'let defaultMemo: Container | null;',
+      'export { namedMemo };',
+      'export default defaultMemo;',
+      'function namedExportDeps() { namedMemo ??= { service: live }; return namedMemo; }',
+      'function defaultExportDeps() { defaultMemo ??= { service: live }; return defaultMemo; }',
+      'const { service: namedExportService } = namedExportDeps();',
+      'const { service: defaultExportService } = defaultExportDeps();',
+      'export const exportStyleRun = () => namedExportService.run() + defaultExportService.run();',
+      'let setterMemo: Container | null;',
+      'function setMemo(value: Container) { setterMemo = value; }',
+      'function setterDeps() { setterMemo ??= { service: live }; return setterMemo; }',
+      'setMemo({ service: unknownService });',
+      'const { service: setterService } = setterDeps();',
+      'export const setterRun = () => setterService.run();',
+      'let wholeMemo: Container | null;',
+      'function wholeDeps() { wholeMemo ??= { service: live }; return wholeMemo; }',
+      'const wholeValue = wholeDeps();',
+      'export const wholeRun = () => wholeValue.service.run();',
+      'let memberMemo: Container | null;',
+      'function memberDeps() { memberMemo ??= { service: live }; return memberMemo; }',
+      'export const memberRun = () => memberDeps().service.run();',
+      'let coercionMemo: Container | null;',
+      'function coercionDeps() { coercionMemo ??= { service: live }; if (coercionMemo + "") return coercionMemo; return coercionMemo; }',
+      'const { service: coercionService } = coercionDeps();',
+      'export const coercionRun = () => coercionService.run();',
+      'let arrowMemo: Container | null;',
+      'function arrowDeps() { arrowMemo ??= { service: live }; const read = () => arrowMemo; return arrowMemo; }',
+      'const { service: arrowService } = arrowDeps();',
+      'export const arrowRun = () => arrowService.run();',
+      'let resetMemo: Container | null;',
+      'function resetDeps() { resetMemo ??= { service: live }; resetMemo ??= null; return resetMemo; }',
+      'const { service: resetService } = resetDeps();',
+      'export const resetRun = () => resetService.run();',
+      'let knownMemo: Container | null;',
+      'function knownDeps() { knownMemo ??= { service: live }; return knownMemo; }',
+      'const { service: knownService } = knownDeps();',
+      'Object.assign(knownDeps(), { service: live });',
+      'export const knownRun = () => knownService.run();',
+      'let resetShadowMemo: Container | null;',
+      'function shadowReset(undefined: unknown) { resetShadowMemo = undefined; }',
+      'function resetShadowDeps() { resetShadowMemo ??= { service: live }; return resetShadowMemo; }',
+      'shadowReset(unknownService);',
+      'const { service: resetShadowService } = resetShadowDeps();',
+      'export const resetShadowRun = () => resetShadowService.run();',
+      'function localMemoDeps() { let localMemo: Container | null; localMemo ??= { service: live }; return localMemo; }',
+      'const { service: localMemoService } = localMemoDeps();',
+      'export const localMemoRun = () => localMemoService.run();',
+      'let multiMemo: Container | null;',
+      'function multiDeps() { multiMemo ??= { service: live }; multiMemo = { service: live }; return multiMemo; }',
+      'const { service: multiService } = multiDeps();',
+      'export const multiRun = () => multiService.run();',
+    ].join('\n'),
+  });
+  assert.deepEqual(result.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound'), []);
+});
+
+test('반환 리터럴 identity proof는 탈출·위험한 투영·열린 consumer를 모두 닫는다', async () => {
+  const result = await graphOf({
+    'tsconfig.json': '{ "compilerOptions": { "strict": true, "experimentalDecorators": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+    'src/main.ts': [
+      'interface Service { run(): string; }',
+      'type Maker = () => { service: Service };',
+      'type Callback = (service: Service) => string;',
+      'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+      'const live: Service = new LiveService();',
+      'declare const unknownRecord: Record<string, unknown>;',
+      'declare const flag: boolean;',
+      'declare const unknownMaker: Maker;',
+      'declare const unknownService: Service;',
+      'Object.assign(unknownRecord, { unrelated: true });',
+      'Reflect.set(unknownRecord, "other", true);',
+      'function badWholeStore(): { service: Service } { return { service: live }; }',
+      'const badWholeStoreValue = badWholeStore();',
+      'export const badWholeStoreRun = () => badWholeStoreValue.service.run();',
+      'function consumeWhole(value: { service: Service }) { return value.service.run(); }',
+      'function badWholePass(): { service: Service } { return { service: live }; }',
+      'export const badWholePassRun = () => consumeWhole(badWholePass());',
+      'function badWholeReturn(): { service: Service } { return { service: live }; }',
+      'function forwardWhole(): { service: Service } { return badWholeReturn(); }',
+      'const badWholeReturnValue = forwardWhole();',
+      'export const badWholeReturnRun = () => badWholeReturnValue.service.run();',
+      'function badWholeAlias(): { service: Service } { return { service: live }; }',
+      'const badWholeAliasValue = badWholeAlias();',
+      'const badWholeAliasCopy = badWholeAliasValue;',
+      'export const badWholeAliasRun = () => badWholeAliasCopy.service.run();',
+      'function badWholeReflection(): { service: Service } { return { service: live }; }',
+      'Object.assign(unknownRecord, badWholeReflection());',
+      'export const badWholeReflectionRun = () => badWholeReflection().service.run();',
+      'function badKnownReflection(): { service: Service } { return { service: live }; }',
+      'Object.assign(badKnownReflection(), { service: live });',
+      'export const badKnownReflectionRun = () => badKnownReflection().service.run();',
+      'function badMethod(): { service: Service } { return { service: live, method() { return "method"; } }; }',
+      'const { service: badMethodService } = badMethod();',
+      'export const badMethodRun = () => badMethodService.run();',
+      'function badGetter(): { service: Service } { return { get service() { return live; } }; }',
+      'const { service: badGetterService } = badGetter();',
+      'export const badGetterRun = () => badGetterService.run();',
+      'function badSpread(): { service: Service } { return { ...{ service: live } }; }',
+      'const { service: badSpreadService } = badSpread();',
+      'export const badSpreadRun = () => badSpreadService.run();',
+      'function badComputed(): { service: Service } { return { ["service"]: live }; }',
+      'const { service: badComputedService } = badComputed();',
+      'export const badComputedRun = () => badComputedService.run();',
+      'function badProto(): { service: Service } { return { __proto__: {}, service: live }; }',
+      'const { service: badProtoService } = badProto();',
+      'export const badProtoRun = () => badProtoService.run();',
+      'function badThen(): { service: Service } { return { service: live, then: live }; }',
+      'const { service: badThenService } = badThen();',
+      'export const badThenRun = () => badThenService.run();',
+      'function badDefaultProjection(): { service: Service } { return { service: live }; }',
+      'const { service: badDefaultService = live } = badDefaultProjection();',
+      'export const badDefaultRun = () => badDefaultService.run();',
+      'function prefixWrap(_prefix: unknown, make: Maker, callback: Callback) { const { service } = make(); callback(service); }',
+      'function badPrefix(): { service: Service } { return { service: live }; }',
+      'declare const prefixArgs: unknown[];',
+      'export const badPrefixRun = () => prefixWrap(...prefixArgs, badPrefix, (service) => service.run());',
+      'function argumentsWrap(make: Maker, callback: Callback) { const invoke = () => { const { service } = make(); callback(service); return arguments; }; return invoke(); }',
+      'function badArguments(): { service: Service } { return { service: live }; }',
+      'export const badArgumentsRun = () => argumentsWrap(badArguments, (service) => service.run());',
+      'function shorthandArgumentsWrap(make: Maker, callback: Callback) { const invoke = () => { const leaked = { arguments }; const { service } = make(); callback(service); return leaked; }; return invoke(); }',
+      'function badShorthandArguments(): { service: Service } { return { service: live }; }',
+      'export const badShorthandArgumentsRun = () => shorthandArgumentsWrap(badShorthandArguments, (service) => service.run());',
+      'function defaultArgumentsWrap(make: Maker, callback: Callback = arguments[0] as Callback) { const { service } = make(); callback(service); }',
+      'function badDefaultArguments(): { service: Service } { return { service: live }; }',
+      'export const badDefaultArgumentsRun = () => defaultArgumentsWrap(badDefaultArguments, (service) => service.run());',
+      'function computedMethodWrap(make: Maker, callback: Callback) { const value = { [keyFrom(arguments[0])]() { return "key"; } }; const { service } = make(live); callback(service); return value; }',
+      'function keyFrom(_value: unknown) { return "key"; }',
+      'function badComputedMethod(): { service: Service } { return { service: live }; }',
+      'export const badComputedMethodRun = () => computedMethodWrap(badComputedMethod, (service) => service.run());',
+      'function heritageWrap(make: Maker, callback: Callback) { class Derived extends baseFrom(arguments[0]) {} const { service } = make(live); callback(service); return Derived; }',
+      'function baseFrom(_value: unknown) { return class Base {}; }',
+      'function badHeritage(): { service: Service } { return { service: live }; }',
+      'export const badHeritageRun = () => heritageWrap(badHeritage, (service) => service.run());',
+      'function classComputedWrap(make: Maker, callback: Callback) { class Computed { [keyFrom(arguments[0])]() { return "key"; } } const { service } = make(live); callback(service); return Computed; }',
+      'function badClassComputed(): { service: Service } { return { service: live }; }',
+      'export const badClassComputedRun = () => classComputedWrap(badClassComputed, (service) => service.run());',
+      'function decoratorWrap(make: Maker, callback: Callback) { @mark(arguments[0]) class Decorated {} const { service } = make(live); callback(service); return Decorated; }',
+      'function mark(_value: unknown) { return () => {}; }',
+      'function badDecorator(): { service: Service } { return { service: live }; }',
+      'export const badDecoratorRun = () => decoratorWrap(badDecorator, (service) => service.run());',
+      'function assignedParam(make: Maker, callback: Callback) { make = unknownMaker; const { service } = make(); callback(service); }',
+      'function badAssigned(): { service: Service } { return { service: live }; }',
+      'export const badAssignedRun = () => assignedParam(badAssigned, (service) => service.run());',
+      'function defaultParam(make: Maker = badAssigned, callback: Callback) { const { service } = make(); callback(service); }',
+      'export const badParamDefaultRun = () => defaultParam(badAssigned, (service) => service.run());',
+      'function restParam(...makes: Maker[]) { const make = makes[0]!; const { service } = make(); return service.run(); }',
+      'export const badParamRestRun = () => restParam(badAssigned);',
+      'function optionalParam(make?: Maker, callback?: Callback) { const { service } = make!(); callback!(service); }',
+      'export const badParamOptionalRun = () => optionalParam(badAssigned, (service) => service.run());',
+      'function forwardedParam(make: Maker, callback: Callback) { return prefixWrap(0, make, callback); }',
+      'export const badParamForwardedRun = () => forwardedParam(badAssigned, (service) => service.run());',
+      'function zeroParam(_make: Maker, callback: Callback) { callback(unknownService); }',
+      'export const badParamZeroRun = () => zeroParam(badAssigned, (service) => service.run());',
+      'function badMixed(): { service: Service } { return { service: live }; }',
+      'const { service: badMixedService } = badMixed();',
+      'const badMixedValue = badMixed();',
+      'export const badMixedRun = () => badMixedService.run();',
+      'function badRecursive(): { service: Service } { if (flag) { const { service } = badRecursive(); return { service }; } return { service: live }; }',
+      'const { service: badRecursiveService } = badRecursive();',
+      'export const badRecursiveRun = () => badRecursiveService.run();',
+    ].join('\n'),
+  });
+  assert.deepEqual(result.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound'), []);
+});
+
+test('반환 리터럴 identity proof는 공개·opaque·async·generator 범위에서 열려 있다', async () => {
+  const source = [
+    'interface Service { run(): string; }',
+    'class LiveService implements Service { private readonly brand = true; run() { return "live"; } }',
+    'const live: Service = new LiveService();',
+    'declare const unknownRecord: Record<string, unknown>;',
+    'Object.assign(unknownRecord, { unrelated: true });',
+    'function factory(): { service: Service } { return { service: live }; }',
+    'const { service } = factory();',
+    'export const run = () => service.run();',
+  ].join('\n');
+  const open = await graphOf({
+    'package.json': '{ "name": "public-package", "exports": "./src/main.ts" }',
+    'src/main.ts': source,
+  });
+  assert.deepEqual(open.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound'), []);
+
+  const opaqueAsyncGenerator = await graphOf({
+    'src/main.ts': [
+      source,
+      'declare const moduleName: string;',
+      'const opaque = import(moduleName);',
+      'async function asyncFactory(): Promise<{ service: Service }> { return { service: live }; }',
+      'export const asyncRun = () => asyncFactory().then((value) => value.service.run());',
+      'function* generatorFactory(): Generator<never, { service: Service }> { return { service: live }; }',
+      'export const generatorRun = () => generatorFactory().return(undefined);',
+    ].join('\n'),
+  });
+  assert.deepEqual(opaqueAsyncGenerator.edges.filter((edge) => edge.to === 'src/main.ts#LiveService.run' && edge.evidence === 'bound'), []);
+});
+
 test('하위 클래스 생성·super 인자·this 필드·재대입 변수·구조 분해·getter·조건식·async 팩터리를 따라간다', async () => {
   const result = await graphOf({
     'src/store.ts': storeModule,
