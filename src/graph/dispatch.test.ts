@@ -127,6 +127,246 @@ test('callable value flow: closed callbacks, returned callbacks, and constructor
   });
 });
 
+test('callable value flow: anonymous inline callback arguments use closed direct invocation sites', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'interface Service { run: () => string; }',
+      'function effect() { return "effect"; }',
+      'class ServiceImpl implements Service { run = effect; }',
+      'type Callback = (service: Service) => string;',
+      'function useService(callback: Callback) { return callback(new ServiceImpl()); }',
+      'export const direct = () => useService((service) => service.run());',
+      'function wrapService(callback: Callback) { return () => callback(new ServiceImpl()); }',
+      'export const returned = () => wrapService((service) => service.run())();',
+    ].join('\n'),
+  });
+  const calls = (from: string): [string, string][] => graph.edges
+    .filter((edge) => edge.from === `src/main.ts#${from}` && edge.kinds.includes('call'))
+    .map((edge) => [edge.to, edge.evidence]);
+  const callbackTarget = (factory: string): string => {
+    const target = calls(factory).find(([to, evidence]) => to.includes(`${factory}(`) && evidence === 'bound')?.[0];
+    assert.ok(target);
+    return target;
+  };
+  for (const factory of ['useService', 'wrapService']) {
+    const target = callbackTarget(factory);
+    assert.ok(graph.edges.some((edge) => edge.from === target && edge.to === 'src/main.ts#effect' && edge.evidence === 'bound'));
+    assert.deepEqual(graph.nodes.find((node) => node.id === target)?.unresolvedCalls, { direct: 1 });
+    assert.deepEqual(graph.nodes.find((node) => node.id === `src/main.ts#${factory}`)?.unresolvedCalls, { direct: 1 });
+  }
+});
+
+test('callable value flow: returned closures follow a closed callable factory parameter', async () => {
+  const graph = await graphOf({
+    'src/main.ts': [
+      'interface Service { run: () => string; }',
+      'function effect() { return "effect"; }',
+      'class ServiceImpl implements Service { run = effect; }',
+      'type Maker = () => Service;',
+      'type Callback = (service: Service) => string;',
+      'function makeService(): Service { return new ServiceImpl(); }',
+      'function wrap(make: Maker, callback: Callback) { return () => callback(make()); }',
+      'export const handler = wrap(makeService, (service) => service.run());',
+    ].join('\n'),
+  });
+  const callback = graph.nodes.find((node) => node.id.includes('.wrap('));
+  assert.ok(callback);
+  assert.ok(graph.edges.some((edge) => edge.from === callback.id && edge.to === 'src/main.ts#effect' && edge.evidence === 'bound'));
+  assert.deepEqual(callback.unresolvedCalls, { direct: 1 });
+});
+
+test('callable value flow: callable factory parameters fail closed for mixed, mutated, open, and external makers', async () => {
+  const cases: Record<string, Record<string, string>> = {
+    mixed: {
+      'src/main.ts': [
+        'interface Service { run: () => string; }',
+        'function effect() { return "effect"; }',
+        'class ServiceImpl implements Service { run = effect; }',
+        'type Maker = () => Service;',
+        'type Callback = (service: Service) => string;',
+        'function makeService(): Service { return new ServiceImpl(); }',
+        'function wrap(make: Maker, callback: Callback) { return () => callback(make()); }',
+        'declare const unknownMaker: Maker;',
+        'export const known = wrap(makeService, (service) => service.run());',
+        'export const unknown = wrap(unknownMaker, (service) => service.run());',
+      ].join('\n'),
+    },
+    mutated: {
+      'src/main.ts': [
+        'interface Service { run: () => string; }',
+        'function effect() { return "effect"; }',
+        'class ServiceImpl implements Service { run = effect; }',
+        'type Maker = () => Service;',
+        'type Callback = (service: Service) => string;',
+        'function makeService(): Service { return new ServiceImpl(); }',
+        'declare const unknownMaker: Maker;',
+        'function wrap(make: Maker, callback: Callback) { make = unknownMaker; return () => callback(make()); }',
+        'export const handler = wrap(makeService, (service) => service.run());',
+      ].join('\n'),
+    },
+    open: {
+      'package.json': '{ "name": "open-callable-factory", "main": "src/main.ts" }',
+      'src/main.ts': [
+        'interface Service { run: () => string; }',
+        'function effect() { return "effect"; }',
+        'class ServiceImpl implements Service { run = effect; }',
+        'type Maker = () => Service;',
+        'type Callback = (service: Service) => string;',
+        'function makeService(): Service { return new ServiceImpl(); }',
+        'export function wrap(make: Maker, callback: Callback) { return () => callback(make()); }',
+        'export const handler = wrap(makeService, (service) => service.run());',
+      ].join('\n'),
+    },
+    external: {
+      'src/main.ts': [
+        'interface Service { run: () => string; }',
+        'function effect() { return "effect"; }',
+        'class ServiceImpl implements Service { run = effect; }',
+        'type Maker = () => Service;',
+        'type Callback = (service: Service) => string;',
+        'declare function externalMaker(): Service;',
+        'function wrap(make: Maker, callback: Callback) { return () => callback(make()); }',
+        'export const handler = wrap(externalMaker, (service) => service.run());',
+      ].join('\n'),
+    },
+  };
+  for (const [name, files] of Object.entries(cases)) {
+    const graph = await graphOf(files);
+    const callbackNodes = graph.nodes.filter((node) => node.id.includes('.wrap('));
+    assert.ok(callbackNodes.length > 0, name);
+    assert.deepEqual(graph.edges.filter((edge) => edge.to === 'src/main.ts#effect' && edge.evidence === 'bound'
+      && edge.from.includes('.wrap(')), [], name);
+    for (const node of callbackNodes) assert.deepEqual(node.unresolvedCalls, { direct: 1, bound: 1, candidates: 1 }, name);
+  }
+});
+
+test('callable value flow: inline callback gaps remain unresolved on escapes, writes, open factories, unknowns, spreads, and named expressions', async () => {
+  const cases: Record<string, { files: Record<string, string>; factory: string }> = {
+    escape: {
+      factory: 'escape',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'function escape(callback: Callback) { const saved = callback; return saved(new ServiceImpl()); }',
+          'export const run = () => escape((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    reassign: {
+      factory: 'invoke',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'function replacement(_service: Service) { return "replacement"; }',
+          'function invoke(callback: Callback) { callback = replacement; return callback(new ServiceImpl()); }',
+          'export const run = () => invoke((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    open: {
+      factory: 'invoke',
+      files: {
+        'package.json': '{ "name": "open-inline-callback", "main": "src/main.ts" }',
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'export function invoke(callback: Callback) { callback(new ServiceImpl()); }',
+          'export const run = () => invoke((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    unknown: {
+      factory: 'invoke',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'declare const unknownService: Service;',
+          'function invoke(callback: Callback) { callback(unknownService); }',
+          'export const run = () => invoke((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    spread: {
+      factory: 'invoke',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'declare const services: Service[];',
+          'function invoke(callback: Callback) { callback(...services); }',
+          'export const run = () => invoke((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    named: {
+      factory: 'invoke',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'function invoke(callback: Callback) { callback(new ServiceImpl()); }',
+          'export const run = () => invoke(function named(service) { return service.run(); });',
+        ].join('\n'),
+      },
+    },
+    mutated: {
+      factory: 'first',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'function first(callback: Callback) { callback(new ServiceImpl()); }',
+          'function second(callback: Callback) { return callback; }',
+          'first = second;',
+          'export const run = () => first((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+    'mutated-alias': {
+      factory: 'alias',
+      files: {
+        'src/main.ts': [
+          'interface Service { run: () => string; }',
+          'function effect() { return "effect"; }',
+          'class ServiceImpl implements Service { run = effect; }',
+          'type Callback = (service: Service) => string;',
+          'function first(callback: Callback) { callback(new ServiceImpl()); }',
+          'function second(callback: Callback) { return callback; }',
+          'first = second;',
+          'const alias = first;',
+          'export const run = () => alias((service) => service.run());',
+        ].join('\n'),
+      },
+    },
+  };
+  for (const [name, entry] of Object.entries(cases)) {
+    const graph = await graphOf(entry.files);
+    const callbackEdges = graph.edges.filter((edge) => edge.from.includes(`.${entry.factory}(`));
+    assert.deepEqual(callbackEdges.filter((edge) => edge.to === 'src/main.ts#effect' && edge.evidence === 'bound'), [], name);
+    assert.deepEqual(callbackEdges.filter((edge) => edge.evidence === 'candidate'), [], name);
+    assert.deepEqual(graph.nodes.find((node) => node.id.includes(`.${entry.factory}(`))?.unresolvedCalls, {
+      direct: 1, bound: 1, candidates: 1,
+    }, name);
+  }
+});
+
 test('callable value flow: mutable aliases union every callable write', async () => {
   const graph = await graphOf({
     'src/main.ts': [

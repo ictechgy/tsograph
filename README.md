@@ -804,8 +804,12 @@ Nothing is guessed:
   project imports get no edge and are counted by reason under `unresolved-calls:`.
 - Calls through a closed callback parameter, a local callback returned by a project function, or a
   safely readable named method can be proven with callable value flow and linked with `bound`
-  evidence. Callable flow is all-or-nothing: mixed object/function or unknown values keep the
-  original gap and do not expand to type candidates.
+  evidence. An anonymous arrow or function-expression callback passed directly to a closed,
+  single-body project function declaration can also receive values from that function's direct
+  callback invocations, including an invocation inside a returned closure. The factory's callback
+  parameter must be a simple identifier with no default/rest, writes, or escaping references;
+  argument spreads that obscure positions keep the flow unresolved. Callable flow is all-or-nothing:
+  mixed object/function or unknown values keep the original gap and do not expand to type candidates.
 - Calls through packages whose type declarations cannot be resolved (dependencies not installed,
   untyped packages) are external and counted under `missing-dependencies:`.
 - Module scopes are not linked from importers (import-time side effects stay on the `<module>` node).
@@ -839,11 +843,17 @@ default-parameter DI (`store: ItemStore = new MemoryItemStore()`), and module si
 factory are followed across modules.
 
 Callable values use the same flow engine: function declarations and function-valued initializers plus
-their observed assignments, closed callback parameters, function and getter return values, constructor
-assignments/defaults, and safely readable object/class methods are followed. Function-object properties,
-decorated or unprovably monkey-patched methods, reflective writes, open exports/entry points, and unknown values stay unresolved. A callable
-failure keeps its original `parameter`, `indirect`, or `computed` reason and never emits candidate
-edges.
+their observed assignments, closed callback parameters, direct invocations of anonymous inline
+callbacks, function and getter return values, constructor assignments/defaults, and safely readable
+object/class methods are followed. Inline callback binding is limited to a direct call argument and
+a closed project function declaration with exactly one body; named function expressions, callback
+parameter writes or escapes, spreads, open or external factories, and unknown invocation arguments
+stay unresolved. Function-object properties, decorated or unprovably monkey-patched methods,
+reflective writes, open exports/entry points, and unknown values stay unresolved. A callable failure
+keeps its original `parameter`, `indirect`, or `computed` reason and never emits candidate edges.
+Within that boundary, a closed wrapper may call a callable parameter such as `make()` when its full
+flow resolves to project function bodies; mixed known/unknown, reassigned-to-unknown, open, and
+external maker values remain unresolved.
 
 What `bound` guarantees, and what it does not:
 
