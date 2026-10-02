@@ -8,7 +8,7 @@
  * 따라가는 흐름:
  * - `new C(...)`(프로젝트 클래스), 객체 리터럴, `this`(감싼 클래스와 프로젝트 하위 클래스).
  * - 변수: 초기값 + 모든 대입. 매개변수: 기본값 + 모든 호출 위치의 같은 자리 인자(함수 선언·`const` 함수·
- *   생성자만 — 메서드·콜백은 호출자를 다 알 수 없어 모름). 구조 분해 바인딩: 원본 값의 같은 이름 속성.
+ *   생성자와 닫힌 인라인 콜백 — 메서드·외부 콜백은 호출자를 다 알 수 없어 모름). 구조 분해 바인딩: 원본 값의 같은 이름 속성.
  * - 속성 `a.b`: `a`의 각 객체 값에서 — 객체 리터럴이면 그 속성 초기값·메서드, 클래스 인스턴스면 필드 초기값·매개변수
  *   속성·getter 반환값·메서드 — 에 이름이 같은 모든 속성 쓰기(`x.b = e`, 관계없는 클래스의 필드 쓰기는 제외)를 더한다.
  * - 호출 `f(...)`: 호출 대상 함수(인터페이스 메서드면 수신자 값의 구현)의 모든 `return` 값. `await`는 통과.
@@ -743,15 +743,16 @@ export class ValueFlow {
   }
 
   /**
-   * 함수 선언·`const` 함수 값의 호출 위치다. 호출 대상이 아닌 자리의 참조(값으로 새어 나감)가 있거나,
-   * 밖에서 부를 수 있는 함수면 null이다.
+   * 함수 선언·`const` 함수 값과 직접 호출 인자로 넘긴 익명 인라인 콜백의 호출 위치다. 호출 대상이 아닌
+   * 자리의 참조(값으로 새어 나감)가 있거나, 밖에서 부를 수 있는 함수면 null이다.
    *
    * @param owner 함수 계열
    * @returns 인자 목록들 또는 null
    */
   private functionSites(owner: ts.SignatureDeclaration): CallSites {
     const symbol = this.functionSymbol(owner);
-    if (symbol === undefined || this.policy.isOpenCallable(owner as ts.FunctionLikeDeclaration)) return null;
+    if (symbol === undefined) return this.inlineCallbackSites(owner);
+    if (this.policy.isOpenCallable(owner as ts.FunctionLikeDeclaration)) return null;
     const sites: ts.Expression[][] = [];
     for (const reference of this.index.references.get(symbol) ?? []) {
       const outer = referenceSite(reference);
@@ -761,6 +762,63 @@ export class ValueFlow {
     // 색인된 호출이 없으면, 참조 색인이 그 심볼에 대해 완전함을 증명할 때만 "호출 없음"으로 본다. 아니면 기본값만
     // 흐른다고 추측하지 않고 모름이다.
     return sites.length === 0 && !this.hasCompleteReferences(symbol) ? null : sites;
+  }
+
+  /**
+   * 직접 호출 인자로 넘긴 익명 인라인 콜백의 호출 위치다. 콜백을 받는 프로젝트 함수가 하나의 안정한 본문을
+   * 가지고, 그 콜백 매개변수의 모든 참조가 직접 호출 자리일 때만 그 인자 목록을 돌려준다.
+   *
+   * @param owner 익명 화살표·함수 식
+   * @returns 인자 목록들 또는 증명 실패 시 null
+   */
+  private inlineCallbackSites(owner: ts.SignatureDeclaration): CallSites {
+    if ((!ts.isArrowFunction(owner) && !ts.isFunctionExpression(owner)) || owner.name !== undefined) return null;
+    const outer = climbWrappers(owner);
+    const call = outer.parent;
+    if (!ts.isCallExpression(call)) return null;
+    const callback = skipWrappers(owner);
+    const callbackPosition = call.arguments.findIndex((argument) => skipWrappers(argument) === callback);
+    if (callbackPosition < 0 || call.expression === callback) return null;
+    if (call.arguments.slice(0, callbackPosition + 1).some(ts.isSpreadElement)) return null;
+
+    const factory = this.inlineCallbackFactory(call);
+    if (factory === undefined) return null;
+    const parameters = factory.parameters.filter((parameter) => !isThisParameter(parameter));
+    const wrapper = parameters[callbackPosition];
+    if (wrapper === undefined || !ts.isIdentifier(wrapper.name) || wrapper.dotDotDotToken !== undefined
+      || wrapper.initializer !== undefined || isThisParameter(wrapper)) return null;
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(wrapper.name));
+    if (symbol === undefined || (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) return null;
+
+    const sites: ts.Expression[][] = [];
+    for (const reference of this.index.references.get(symbol) ?? []) {
+      const invocation = referenceSite(reference);
+      if (!ts.isCallExpression(invocation.parent) || invocation.parent.expression !== invocation) return null;
+      const argumentsList = [...invocation.parent.arguments];
+      if (argumentsList.slice(0, callbackPosition + 1).some(ts.isSpreadElement)) return null;
+      sites.push(argumentsList);
+    }
+    return sites.length === 0 ? null : sites;
+  }
+
+  /**
+   * 인라인 콜백을 받는 직접 호출의 안정한 프로젝트 함수 본문이다. 식별자·import 별칭을 좁게 따라가고, 대입된
+   * 호출 대상이나 여러 본문·열린 함수를 거부한다.
+   *
+   * @param call 콜백을 인자로 가진 호출
+   * @returns 함수 본문 또는 증명 실패 시 undefined
+   */
+  private inlineCallbackFactory(call: ts.CallExpression): ts.FunctionLikeDeclaration | undefined {
+    const callee = skipWrappers(call.expression);
+    if (!ts.isIdentifier(callee)) return undefined;
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(callee));
+    if (symbol === undefined || (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) return undefined;
+    const declarations = symbol.declarations ?? [];
+    const functionDeclarations = declarations.filter(ts.isFunctionDeclaration);
+    if (functionDeclarations.length !== declarations.length) return undefined;
+    const bodies = functionDeclarations.filter((declaration) => declaration.body !== undefined);
+    if (bodies.length !== 1 || !this.policy.isProjectFile(bodies[0]!.getSourceFile()) || this.policy.isOpenCallable(bodies[0]!)) return undefined;
+    return bodies[0];
   }
 
   /**
@@ -985,6 +1043,12 @@ export class ValueFlow {
     const symbol = this.dealias(this.calleeSymbol(callee));
     if (symbol === undefined) return null;
     const declarations = symbol.declarations ?? [];
+    // 함수 매개변수 호출은 타입 시그니처가 아니라 매개변수의 닫힌 callable 흐름으로만 푼다. 흐름에
+    // 모르는 값이나 객체가 하나라도 섞이면 기존의 미해석을 유지한다.
+    if (ts.isIdentifier(callee) && declarations.length > 0 && declarations.every(ts.isParameter)) {
+      const values = this.callablesOnly(this.symbolValues(symbol));
+      return values === null || values.size === 0 ? null : [...values];
+    }
     if (declarations.some(ts.isFunctionDeclaration) && (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) {
       const values = this.callablesOnly(this.symbolValues(symbol));
       return values === null || values.size === 0 ? null : [...values];
