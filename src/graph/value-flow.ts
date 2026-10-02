@@ -145,6 +145,20 @@ export class ValueFlow {
   private readonly sitesMemo = new Map<ts.Node, CallSites>();
   /** 반사적 쓰기 대상 값과 타입 보존 대상(지연 계산) */
   private reflective: ReflectiveState | undefined;
+  /** 반환 객체 리터럴의 정적 own-data 키(완료한 AST 계산만 메모) */
+  private readonly literalOwnKeys = new Map<ts.ObjectLiteralExpression, ReadonlySet<string> | undefined>();
+  /** 고립 반환 리터럴의 증명 결과(완료한 AST 계산만 메모) */
+  private readonly isolatedLiteralMemo = new Map<ts.ObjectLiteralExpression, boolean>();
+  /** factory 심볼의 모든 안전한 소비가 읽는 투영 키(완료한 AST 계산만 메모) */
+  private readonly factoryProjectionKeys = new Map<ts.FunctionDeclaration, ReadonlySet<string> | undefined>();
+  /** 함수 매개변수의 동일한 객체 구조 분해 투영 키(완료한 AST 계산만 메모) */
+  private readonly parameterProjectionKeys = new Map<ts.ParameterDeclaration, ReadonlySet<string> | undefined>();
+  /** 팩터리 심볼의 고립 반환 증명 중 재진입을 끊는다. */
+  private readonly isolatedFactoryPending = new Set<ts.FunctionDeclaration>();
+  /** private memo 심볼의 고립 반환 증명 결과(완료한 AST 계산만 메모) */
+  private readonly isolatedMemoSymbols = new Map<ts.Symbol, boolean>();
+  /** private memo 심볼 증명 중 재진입을 끊는다. */
+  private readonly isolatedMemoPending = new Set<ts.Symbol>();
 
   /**
    * @param checker TypeChecker
@@ -812,7 +826,18 @@ export class ValueFlow {
     const callee = skipWrappers(call.expression);
     if (!ts.isIdentifier(callee)) return undefined;
     const symbol = this.dealias(this.checker.getSymbolAtLocation(callee));
-    if (symbol === undefined || (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) return undefined;
+    return symbol === undefined ? undefined : this.stableFunctionDeclaration(symbol);
+  }
+
+  /**
+   * 직접 식별자 호출에 쓸 수 있는 안정한 함수 선언을 구한다. 기존 인라인 콜백 흐름과 반환 리터럴
+   * identity proof가 공유하는 순수 선언 guard다.
+   *
+   * @param symbol 호출 대상 심볼
+   * @returns 프로젝트 함수 구현 하나 또는 undefined
+   */
+  private stableFunctionDeclaration(symbol: ts.Symbol): ts.FunctionDeclaration | undefined {
+    if ((this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) return undefined;
     const declarations = symbol.declarations ?? [];
     const functionDeclarations = declarations.filter(ts.isFunctionDeclaration);
     if (functionDeclarations.length !== declarations.length) return undefined;
@@ -1204,7 +1229,480 @@ export class ValueFlow {
   private isReflectivelyWritten(value: AbstractValue): boolean {
     if (this.reflective === undefined) return false;
     if (this.reflective.values.has(value)) return true;
-    return this.reflective.unknownTargets.some((target) => !this.unknownReflectiveTargetIsDisjoint(target, value));
+    if (this.reflective.unknownTargets.length === 0) return false;
+    // 알려진 반사 대상은 위에서 항상 막는다. 아래 증명은 값 흐름을 모르는 대상에만 적용한다.
+    const isolatedLiteral = ts.isObjectLiteralExpression(value) && this.isIsolatedReturnedLiteral(value);
+    for (const target of this.reflective.unknownTargets) {
+      this.step();
+      if (isolatedLiteral) continue;
+      if (!this.unknownReflectiveTargetIsDisjoint(target, value)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 모르는 반사 대상과 객체 리터럴의 identity가 겹치지 않음을 제한된 AST 계약으로 증명한다.
+   * 값 흐름 계산을 재귀 호출하지 않고, 반환 리터럴·직접 호출·한 단계 구조 분해 투영만 검사한다.
+   *
+   * @param literal 객체 리터럴
+   * @returns 고립됨을 증명하면 true
+   */
+  private isIsolatedReturnedLiteral(literal: ts.ObjectLiteralExpression): boolean {
+    const cached = this.isolatedLiteralMemo.get(literal);
+    if (cached !== undefined) return cached;
+    const ownKeys = this.literalOwnDataKeys(literal);
+    const factory = this.returnLiteralFactory(literal);
+    let result = false;
+    if (ownKeys !== undefined && ownKeys.size > 0) {
+      if (factory !== undefined) {
+        const projectedKeys = this.proveIsolatedFactory(factory);
+        result = projectedKeys !== undefined && [...projectedKeys].every((key) => ownKeys.has(key));
+      } else {
+        const memo = this.memoSymbolForLiteral(literal);
+        result = memo !== undefined && this.proveIsolatedMemoLiteral(memo, literal, ownKeys);
+      }
+    }
+    this.isolatedLiteralMemo.set(literal, result);
+    return result;
+  }
+
+  /** 반환식이 직접 객체 리터럴인 named FunctionDeclaration인지 본다. */
+  private returnLiteralFactory(literal: ts.ObjectLiteralExpression): ts.FunctionDeclaration | undefined {
+    const outer = climbWrappers(literal);
+    const parent = outer.parent;
+    if (!ts.isReturnStatement(parent) || parent.expression === undefined || skipWrappers(parent.expression) !== literal) return undefined;
+    for (let current: ts.Node | undefined = parent.parent; current !== undefined; current = current.parent) {
+      if (!ts.isFunctionLike(current)) continue;
+      return ts.isFunctionDeclaration(current) && current.name !== undefined ? current : undefined;
+    }
+    return undefined;
+  }
+
+  /** 직접 discarded 대입으로 객체 리터럴에 도달하는 private memo 심볼을 구한다. */
+  private memoSymbolForLiteral(literal: ts.ObjectLiteralExpression): ts.Symbol | undefined {
+    const outer = climbWrappers(literal);
+    const assignment = outer.parent;
+    if (!ts.isBinaryExpression(assignment) || assignment.right !== outer
+      || (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+        && assignment.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionEqualsToken)) return undefined;
+    if (!ts.isIdentifier(assignment.left) || skipWrappers(assignment.right) !== literal) return undefined;
+    const statement = climbWrappers(assignment).parent;
+    if (!ts.isExpressionStatement(statement) || skipWrappers(statement.expression) !== assignment) return undefined;
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(assignment.left));
+    return symbol !== undefined && this.isPrivateMemo(symbol, literal.getSourceFile()) ? symbol : undefined;
+  }
+
+  /** 하나의 외부 모듈 최상위 let 선언으로만 만든 private memo인지 본다. */
+  private isPrivateMemo(symbol: ts.Symbol, sourceFile: ts.SourceFile): boolean {
+    if (!ts.isExternalModule(sourceFile) || this.isMemoExported(symbol, sourceFile)) return false;
+    const declarations = symbol.declarations ?? [];
+    this.step();
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration) || isAmbient(declaration)) return false;
+    if (declaration.getSourceFile() !== sourceFile || !ts.isIdentifier(declaration.name)) return false;
+    const list = declaration.parent;
+    const statement = list.parent;
+    if (!ts.isVariableDeclarationList(list) || !ts.isVariableStatement(statement) || statement.parent !== sourceFile
+      || (list.flags & ts.NodeFlags.Let) === 0 || hasExportModifierNode(statement)) return false;
+    const initializer = declaration.initializer;
+    if (initializer === undefined) return true;
+    const value = skipWrappers(initializer);
+    return value.kind === ts.SyntaxKind.NullKeyword || this.isGlobalUndefined(value);
+  }
+
+  /** 직접 export와 export *를 포함해 memo 심볼이 모듈 밖으로 나가는지 본다. */
+  private isMemoExported(symbol: ts.Symbol, sourceFile: ts.SourceFile): boolean {
+    if (this.index.exportedSymbols.has(symbol)) return true;
+    const module = this.checker.getSymbolAtLocation(sourceFile);
+    if (module === undefined) return false;
+    for (const exported of this.checker.getExportsOfModule(module)) {
+      this.step();
+      if (this.dealias(exported) === symbol) return true;
+    }
+    return false;
+  }
+
+  /** memo 심볼이 만드는 literal이 모든 쓰기·읽기 계약을 만족하는지 본다. */
+  private proveIsolatedMemoLiteral(
+    symbol: ts.Symbol,
+    literal: ts.ObjectLiteralExpression,
+    literalKeys: ReadonlySet<string>,
+  ): boolean {
+    if (this.isolatedMemoSymbols.has(symbol)) return this.isolatedMemoSymbols.get(symbol)!;
+    if (this.isolatedMemoPending.has(symbol)) return false;
+    this.isolatedMemoPending.add(symbol);
+    try {
+      if (!this.memoWrites(symbol, literal)) {
+        this.isolatedMemoSymbols.set(symbol, false);
+        return false;
+      }
+      const projectedKeys = new Set<string>();
+      let returnFactories = 0;
+      for (const reference of this.index.references.get(symbol) ?? []) {
+        this.step();
+        const site = referenceSite(reference);
+        const factory = this.memoReturnFactory(reference, site, literal.getSourceFile());
+        if (factory !== undefined) {
+          const factoryKeys = this.proveIsolatedFactory(factory);
+          if (factoryKeys === undefined) {
+            this.isolatedMemoSymbols.set(symbol, false);
+            return false;
+          }
+          returnFactories++;
+          factoryKeys.forEach((key) => projectedKeys.add(key));
+        } else if (!this.isNarrowMemoGuard(reference, site)) {
+          this.isolatedMemoSymbols.set(symbol, false);
+          return false;
+        }
+      }
+      const result = returnFactories > 0 && [...projectedKeys].every((key) => literalKeys.has(key));
+      this.isolatedMemoSymbols.set(symbol, result);
+      return result;
+    } finally {
+      this.isolatedMemoPending.delete(symbol);
+    }
+  }
+
+  /** memo의 모든 식별자 대입이 accepted literal 하나 또는 discarded null/undefined reset인지 본다. */
+  private memoWrites(symbol: ts.Symbol, literal: ts.ObjectLiteralExpression): boolean {
+    let objectWrites = 0;
+    const writes = this.index.identifierWrites.get(symbol) ?? [];
+    for (const value of writes) {
+      this.step();
+      if (value === undefined) return false;
+      const outer = climbWrappers(value);
+      const assignment = outer.parent;
+      if (!ts.isBinaryExpression(assignment) || assignment.right !== outer || !this.isDiscardedMemoAssignment(assignment, symbol)) return false;
+      const rhs = skipWrappers(assignment.right);
+      if (rhs === literal) {
+        if (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+          && assignment.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionEqualsToken) return false;
+        objectWrites++;
+      } else if (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !this.isNullOrUndefinedValue(rhs)) {
+        return false;
+      }
+    }
+    return objectWrites === 1;
+  }
+
+  /** memo 대입이 direct identifier의 discarded ExpressionStatement인지 본다. */
+  private isDiscardedMemoAssignment(assignment: ts.BinaryExpression, symbol: ts.Symbol): boolean {
+    if (!ts.isIdentifier(assignment.left) || this.dealias(this.checker.getSymbolAtLocation(assignment.left)) !== symbol) return false;
+    if (assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+      && assignment.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionEqualsToken) return false;
+    const statement = climbWrappers(assignment).parent;
+    return ts.isExpressionStatement(statement) && skipWrappers(statement.expression) === assignment;
+  }
+
+  /** memo 반환 참조의 nearest enclosing stable named FunctionDeclaration다. */
+  private memoReturnFactory(reference: ts.Node, site: ts.Node, sourceFile: ts.SourceFile): ts.FunctionDeclaration | undefined {
+    if (!ts.isIdentifier(reference) || !ts.isExpression(site) || skipWrappers(site) !== reference) return undefined;
+    const parent = site.parent;
+    if (!ts.isReturnStatement(parent) || parent.expression === undefined || skipWrappers(parent.expression) !== reference) return undefined;
+    for (let current: ts.Node | undefined = parent.parent; current !== undefined; current = current.parent) {
+      this.step();
+      if (!ts.isFunctionLike(current)) continue;
+      if (!ts.isFunctionDeclaration(current) || current.name === undefined || current.getSourceFile() !== sourceFile) return undefined;
+      const symbol = this.dealias(this.checker.getSymbolAtLocation(current.name));
+      return symbol === undefined || this.stableFunctionDeclaration(symbol) !== current ? undefined : current;
+    }
+    return undefined;
+  }
+
+  /** memo 값 참조가 bare/! 조건 또는 null·global undefined 비교인 좁은 guard인지 본다. */
+  private isNarrowMemoGuard(reference: ts.Node, site: ts.Node): boolean {
+    if (!ts.isIdentifier(reference)) return false;
+    let expression: ts.Expression = ts.isExpression(site) && skipWrappers(site) === reference
+      ? site as ts.Expression : reference;
+    expression = climbWrappers(expression) as ts.Expression;
+    const bareRoot = this.memoGuardRoot(expression);
+    if (this.isMemoGuardCondition(bareRoot)) return true;
+    const parent = expression.parent;
+    if (!ts.isBinaryExpression(parent) || parent.left !== expression && parent.right !== expression) return false;
+    const operator = parent.operatorToken.kind;
+    if (operator !== ts.SyntaxKind.EqualsEqualsToken
+      && operator !== ts.SyntaxKind.ExclamationEqualsToken && operator !== ts.SyntaxKind.EqualsEqualsEqualsToken
+      && operator !== ts.SyntaxKind.ExclamationEqualsEqualsToken) return false;
+    const other = parent.left === expression ? parent.right : parent.left;
+    if (!this.isNullOrUndefinedValue(other)) return false;
+    return this.isMemoGuardCondition(this.memoGuardRoot(parent));
+  }
+
+  /** bare memo 또는 equality 전체에서 !와 value-only wrapper를 벗겨 조건식 루트를 구한다. */
+  private memoGuardRoot(expression: ts.Expression): ts.Expression {
+    let current = climbWrappers(expression) as ts.Expression;
+    for (;;) {
+      this.step();
+      const parent = current.parent;
+      if (!ts.isPrefixUnaryExpression(parent) || parent.operand !== current || parent.operator !== ts.SyntaxKind.ExclamationToken) return current;
+      current = climbWrappers(parent) as ts.Expression;
+    }
+  }
+
+  /** guard 식이 if/loop/ternary의 정확한 condition 자리인지 본다. */
+  private isMemoGuardCondition(expression: ts.Expression): boolean {
+    const parent = expression.parent;
+    return (ts.isIfStatement(parent) && parent.expression === expression)
+      || (ts.isWhileStatement(parent) && parent.expression === expression)
+      || (ts.isDoStatement(parent) && parent.expression === expression)
+      || (ts.isForStatement(parent) && parent.condition === expression)
+      || (ts.isConditionalExpression(parent) && parent.condition === expression);
+  }
+
+  /** null 또는 shadow되지 않은 전역 undefined 식인지 본다. */
+  private isNullOrUndefinedValue(expression: ts.Expression): boolean {
+    const value = skipWrappers(expression);
+    return value.kind === ts.SyntaxKind.NullKeyword || this.isGlobalUndefined(value);
+  }
+
+  /** 식별자가 프로젝트 안에서 shadow되지 않은 global undefined인지 본다. */
+  private isGlobalUndefined(expression: ts.Expression): boolean {
+    if (!ts.isIdentifier(expression) || expression.text !== 'undefined') return false;
+    const symbol = this.checker.getSymbolAtLocation(expression);
+    return symbol !== undefined && !this.isProjectSymbol(symbol);
+  }
+
+  /** 객체 리터럴이 plain static own-data 속성만 갖는지 확인한다. */
+  private literalOwnDataKeys(literal: ts.ObjectLiteralExpression): ReadonlySet<string> | undefined {
+    if (this.literalOwnKeys.has(literal)) return this.literalOwnKeys.get(literal);
+    const keys = new Set<string>();
+    for (const property of literal.properties) {
+      this.step();
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+        this.literalOwnKeys.set(literal, undefined);
+        return undefined;
+      }
+      if (ts.isShorthandPropertyAssignment(property) && property.objectAssignmentInitializer !== undefined) {
+        this.literalOwnKeys.set(literal, undefined);
+        return undefined;
+      }
+      const name = property.name;
+      if (name === undefined || ts.isComputedPropertyName(name)) {
+        this.literalOwnKeys.set(literal, undefined);
+        return undefined;
+      }
+      const key = memberName(name);
+      if (key === undefined || key === '__proto__' || key === 'then' || keys.has(key)) {
+        this.literalOwnKeys.set(literal, undefined);
+        return undefined;
+      }
+      keys.add(key);
+    }
+    this.literalOwnKeys.set(literal, keys);
+    return keys;
+  }
+
+  /**
+   * 하나의 반환 리터럴이 만드는 모든 factory 심볼 사용을 검사한다. factory의 재진입은 proof 실패다.
+   */
+  private proveIsolatedFactory(factory: ts.FunctionDeclaration): ReadonlySet<string> | undefined {
+    if (this.factoryProjectionKeys.has(factory)) return this.factoryProjectionKeys.get(factory);
+    const finish = (result: ReadonlySet<string> | undefined): ReadonlySet<string> | undefined => {
+      this.factoryProjectionKeys.set(factory, result);
+      return result;
+    };
+    if (this.policy.openProperties || this.index.hasOpaqueImport || factory.asteriskToken !== undefined
+      || hasAsyncModifier(factory)) return finish(undefined);
+    const symbol = factory.name === undefined ? undefined : this.dealias(this.checker.getSymbolAtLocation(factory.name));
+    if (symbol === undefined || this.stableFunctionDeclaration(symbol) !== factory) return finish(undefined);
+    if (this.hasLexicalArguments(factory)) return finish(undefined);
+    if (this.isolatedFactoryPending.has(factory)) return undefined;
+    this.isolatedFactoryPending.add(factory);
+    try {
+      const references = this.index.references.get(symbol) ?? [];
+      // 참조가 없더라도 색인에 빠진 호출이면 고립을 증명하지 않는다.
+      if (references.length === 0) return finish(undefined);
+      const projectedKeys = new Set<string>();
+      for (const reference of references) {
+        this.step();
+        const site = referenceSite(reference);
+        if (this.isWithinFunction(site, factory)) return finish(undefined);
+        const invocation = this.directFactoryInvocation(reference, site);
+        if (invocation !== undefined) {
+          const projection = this.objectBindingProjection(invocation);
+          if (projection === undefined) return finish(undefined);
+          projection.forEach((key) => projectedKeys.add(key));
+          continue;
+        }
+        const projection = this.factoryArgumentProjection(reference, site, factory);
+        if (projection === undefined) return finish(undefined);
+        projection.forEach((key) => projectedKeys.add(key));
+      }
+      return finish(projectedKeys);
+    } finally {
+      this.isolatedFactoryPending.delete(factory);
+    }
+  }
+
+  /** factory 식별자가 직접 호출 수신자인지 본다. 인자는 반환 리터럴 생성 전에 평가된다. */
+  private directFactoryInvocation(reference: ts.Node, site: ts.Node): ts.CallExpression | undefined {
+    if (!ts.isIdentifier(reference)) return undefined;
+    const call = ts.isCallExpression(site) ? site : ts.isCallExpression(site.parent) ? site.parent : undefined;
+    if (call === undefined || call.expression !== reference || call.questionDotToken !== undefined) return undefined;
+    return call;
+  }
+
+  /** factory 식별자가 안정한 함수의 정확한 인자로 전달되는지 검사한다. */
+  private factoryArgumentProjection(
+    reference: ts.Node,
+    site: ts.Node,
+    factory: ts.FunctionDeclaration,
+  ): ReadonlySet<string> | undefined {
+    if (!ts.isIdentifier(reference) || !ts.isIdentifier(site) || site !== reference) return undefined;
+    const call = site.parent;
+    if (!ts.isCallExpression(call) || call.questionDotToken !== undefined || call.expression.kind !== ts.SyntaxKind.Identifier) return undefined;
+    let position = -1;
+    const spreadPositions: number[] = [];
+    for (let index = 0; index < call.arguments.length; index++) {
+      this.step();
+      const argument = call.arguments[index]!;
+      if (argument === site) position = index;
+      if (ts.isSpreadElement(argument)) spreadPositions.push(index);
+    }
+    if (position < 0 || spreadPositions.some((index) => index <= position)) return undefined;
+    const callee = call.expression as ts.Identifier;
+    const symbol = this.dealias(this.checker.getSymbolAtLocation(callee));
+    const wrapper = symbol === undefined ? undefined : this.stableFunctionDeclaration(symbol);
+    if (wrapper === undefined || wrapper === factory || this.hasLexicalArguments(wrapper)) return undefined;
+    const parameters = runtimeParameters(wrapper);
+    const parameter = parameters[position];
+    if (parameter === undefined || !ts.isIdentifier(parameter.name) || parameter.initializer !== undefined
+      || parameter.questionToken !== undefined || parameter.dotDotDotToken !== undefined) return undefined;
+    const parameterSymbol = this.dealias(this.checker.getSymbolAtLocation(parameter.name));
+    if (parameterSymbol === undefined || (this.index.identifierWrites.get(parameterSymbol)?.length ?? 0) > 0) return undefined;
+    return this.parameterProjection(parameter);
+  }
+
+  /** 직접 호출 결과가 정확히 단순 객체 구조 분해 변수 선언에 쓰였는지 본다. */
+  private objectBindingProjection(call: ts.CallExpression): ReadonlySet<string> | undefined {
+    if (call.questionDotToken !== undefined) return undefined;
+    for (const argument of call.arguments) {
+      this.step();
+    }
+    const initializer = call.parent;
+    if (!ts.isVariableDeclaration(initializer) || initializer.initializer === undefined
+      || skipWrappers(initializer.initializer) !== call) return undefined;
+    return this.objectBindingKeys(initializer.name);
+  }
+
+  /** 단순 객체 구조 분해의 정적 키 집합을 구한다. */
+  private objectBindingKeys(name: ts.BindingName): ReadonlySet<string> | undefined {
+    if (!ts.isObjectBindingPattern(name)) return undefined;
+    const keys = new Set<string>();
+    for (const element of name.elements) {
+      this.step();
+      if (!ts.isBindingElement(element) || element.dotDotDotToken !== undefined || element.initializer !== undefined
+        || !ts.isIdentifier(element.name)) return undefined;
+      const property = element.propertyName ?? element.name;
+      if (ts.isComputedPropertyName(property) || (!ts.isIdentifier(property) && !ts.isStringLiteral(property))) return undefined;
+      const key = property.text;
+      if (key === '__proto__' || key === 'then' || keys.has(key)) return undefined;
+      keys.add(key);
+    }
+    return keys.size === 0 ? undefined : keys;
+  }
+
+  /** 한 매개변수의 모든 참조가 같은 한 단계 구조 분해 호출인지 검사한다. */
+  private parameterProjection(parameter: ts.ParameterDeclaration): ReadonlySet<string> | undefined {
+    if (this.parameterProjectionKeys.has(parameter)) return this.parameterProjectionKeys.get(parameter);
+    let result: ReadonlySet<string> | undefined;
+    const symbol = ts.isIdentifier(parameter.name) ? this.dealias(this.checker.getSymbolAtLocation(parameter.name)) : undefined;
+    if (symbol === undefined || (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) {
+      this.parameterProjectionKeys.set(parameter, undefined);
+      return undefined;
+    }
+    const references = this.index.references.get(symbol) ?? [];
+    if (references.length === 0) {
+      this.parameterProjectionKeys.set(parameter, undefined);
+      return undefined;
+    }
+    for (const reference of references) {
+      this.step();
+      const site = referenceSite(reference);
+      const invocation = this.directFactoryInvocation(reference, site);
+      if (invocation === undefined) {
+        this.parameterProjectionKeys.set(parameter, undefined);
+        return undefined;
+      }
+      const projection = this.objectBindingProjection(invocation);
+      if (projection === undefined || (result !== undefined && !sameStringSet(result, projection))) {
+        this.parameterProjectionKeys.set(parameter, undefined);
+        return undefined;
+      }
+      result = projection;
+    }
+    this.parameterProjectionKeys.set(parameter, result);
+    return result;
+  }
+
+  /** wrapper 내부의 lexical `arguments` 사용을 찾는다. 화살표는 따라가고 일반 함수 경계는 멈춘다. */
+  private hasLexicalArguments(declaration: ts.FunctionDeclaration): boolean {
+    if (declaration.body === undefined) return true;
+    let found = false;
+    const visitDecorators = (node: ts.Node): void => {
+      if (!ts.canHaveDecorators(node)) return;
+      for (const decorator of ts.getDecorators(node) ?? []) visit(decorator.expression);
+    };
+    const visitParameterDecorators = (node: ts.FunctionLikeDeclaration): void => {
+      for (const parameter of node.parameters) visitDecorators(parameter);
+    };
+    const visitFunctionShell = (node: ts.FunctionLikeDeclaration): void => {
+      visitDecorators(node);
+      visitParameterDecorators(node);
+      const name = (node as ts.NamedDeclaration).name;
+      if (name !== undefined && ts.isComputedPropertyName(name)) visit(name.expression);
+    };
+    const visitClassShell = (node: ts.ClassLikeDeclaration): void => {
+      visitDecorators(node);
+      const extendsClause = node.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword);
+      for (const type of extendsClause?.types ?? []) visit(type.expression);
+      for (const member of node.members) {
+        visitDecorators(member);
+        const name = (member as ts.NamedDeclaration).name;
+        if (name !== undefined && ts.isComputedPropertyName(name)) visit(name.expression);
+        if (ts.isMethodDeclaration(member) || ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)
+          || ts.isConstructorDeclaration(member)) visitParameterDecorators(member);
+        if (ts.isPropertyDeclaration(member) && member.initializer !== undefined) visit(member.initializer);
+        if (ts.isClassStaticBlockDeclaration(member)) visit(member.body);
+      }
+    };
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      this.step();
+      if (node !== declaration.body && ts.isClassLike(node)) {
+        visitClassShell(node);
+        return;
+      }
+      if (node !== declaration.body && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+        || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node)
+        || ts.isSetAccessorDeclaration(node))) {
+        visitFunctionShell(node);
+        return;
+      }
+      if (ts.isIdentifier(node) && node.text === 'arguments' && isLexicalArgumentsReference(node)) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visitParameterDecorators(declaration);
+    if (found) return true;
+    for (const parameter of declaration.parameters) {
+      if (parameter.initializer !== undefined) visit(parameter.initializer);
+      if (found) return true;
+    }
+    ts.forEachChild(declaration.body, visit);
+    return found;
+  }
+
+  /** 노드가 주어진 함수 본문 안에 있는지 본다(중첩 함수 포함). */
+  private isWithinFunction(node: ts.Node, declaration: ts.FunctionDeclaration): boolean {
+    for (let current: ts.Node | undefined = node; current !== undefined; current = current.parent) {
+      this.step();
+      if (current === declaration) return true;
+      if (ts.isSourceFile(current)) return false;
+    }
+    return false;
   }
 
   /**
@@ -1512,6 +2010,36 @@ function bindingPropertyName(element: ts.BindingElement): string | undefined {
  */
 function isConstDeclaration(declaration: ts.VariableDeclaration): boolean {
   return (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0;
+}
+
+/** 함수 선언이 async인지 본다. */
+function hasAsyncModifier(declaration: ts.FunctionLikeDeclaration): boolean {
+  return (ts.getModifiers(declaration) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+}
+
+/** 선언·문장에 export 수식어가 있는지 본다. */
+function hasExportModifierNode(node: ts.Node): boolean {
+  return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/** `this` 매개변수를 제거한 런타임 매개변수 목록이다. */
+function runtimeParameters(declaration: ts.SignatureDeclaration): readonly ts.ParameterDeclaration[] {
+  return declaration.parameters.filter((parameter) => !isThisParameter(parameter));
+}
+
+/** 문자열 키 집합이 같은지 본다. */
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+/** `arguments` 식별자가 속성·선언 이름이 아닌 lexical 참조인지 본다. */
+function isLexicalArgumentsReference(identifier: ts.Identifier): boolean {
+  const parent = identifier.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) return false;
+  if (ts.isShorthandPropertyAssignment(parent)) return true;
+  if (ts.isElementAccessExpression(parent) && parent.argumentExpression === identifier) return true;
+  if (ts.isBindingElement(parent) && parent.propertyName === identifier) return false;
+  return (parent as { name?: ts.Node }).name !== identifier;
 }
 
 /**

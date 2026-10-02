@@ -680,6 +680,22 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 `createLookup({ store })`, `new ItemService(sql)`, 기본 매개변수 DI(`store: ItemStore = new MemoryItemStore()`),
 팩터리로 만든 모듈 싱글턴 같은 조립 지점을 모듈을 넘어 따라간다.
 
+반사 대상이 모르는 경우에만 반환 의존성 컨테이너의 identity를 좁게 증명한다. 이름이 있고 안정적이며 닫힌
+프로젝트 `FunctionDeclaration`이 동기·비제너레이터로 반환한 객체 리터럴이 정적 own-data 속성만 가지면
+무관한 모르는 반사 대상과 분리할 수 있다(전개·계산 키·메서드/접근자·`__proto__`·`then`은 거부). 팩터리의
+모든 사용은 호출 결과를 단순한 한 단계 객체 구조 분해로 바로 받거나, 안정한 wrapper의 직접 식별자 호출에
+팩터리를 정확한 인자로 넘겨 그 wrapper 매개변수가 같은 투영만 해야 한다. 앞쪽 전개, optional/default/rest
+또는 대입된 매개변수, 전달·전체 객체 alias/반환/인자 전달, lexical `arguments`, 열린 속성·opaque import,
+async/generator 팩터리는 계속 모름이다. 알려진 반사 대상은 항상 막고, 이 예외는 구조적 타입의 비겹침을
+사용하지 않는다. named import는 허용하지만 namespace/member와 괄호로 감싼 함수 호출은 의도적으로 미룬다.
+
+같은 external-module 파일의 private cache 리터럴도 같은 증명을 쓸 수 있다. 최상위 `let` 슬롯 하나의
+초기값이 없거나 `null`, shadow되지 않은 전역 `undefined`이고, 리터럴을 버리는 직접 `memo =` 또는
+`memo ??=` 표현문 대입으로 정확히 한 번만 만들 때만 허용한다. 안정한 닫힌 named 함수는 그 슬롯을
+반환할 수 있고, 다른 슬롯 읽기는 `memo`, `!memo`, `null`/전역 `undefined`와의 동등·부등 비교인 좁은
+조건 guard여야 한다. 버리는 `memo = null`/전역 `undefined` 초기화는 허용하지만 export, 전체 객체 사용,
+멤버 읽기, setter, 복합·논리 대입, 추가 객체 대입은 계속 모름이다.
+
 호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수와 익명 인라인
 callback의 직접 호출, 함수·getter 반환값, 생성자 대입·기본값, 안전하게 읽은 객체·클래스 메서드를 따라간다. 인라인
 callback은 직접 호출 인자이면서 본문이 하나인 닫힌 프로젝트 함수 선언에서만 연결한다. 이름 있는 함수 식,
@@ -725,6 +741,7 @@ callback 매개변수 대입·탈출, 전개, 열린·프로젝트 밖 팩터리
   읽기가 관계없는 클래스의 bound를 막을 수 있다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
   로더(`import.meta.glob`·`require.context`)는 모든 내보내기를 연다. `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·`Reflect.defineProperty`·
   `Reflect.deleteProperty`의 대상은 보수적으로 다룬다(그 속성·멤버는 모름, 정적으로 해석한 멤버 호출도 포함).
+  위의 반환 리터럴 identity 증명은 모르는 대상에만 적용하는 유일한 예외이며, 알려진 반사 대상은 여전히 리터럴을 막는다.
   계산된 키 쓰기·삭제(`obj[key] = v`, `delete obj[key]`)도 그 수신자의 속성을 모름으로 연다. 값을 모르는 반사 대상은
   정적 타입을 보존하며, 닫혀 있고 밖으로 새지 않은 nominal 클래스 계보에서 그 클래스와 모든 프로젝트 하위 클래스가
   대상 타입과 겹칠 수 없을 때만 제외한다. 구조적으로 서로 대입할 수 없는 타입도 교차 객체로 겹칠 수 있으므로 계속 모름이다.

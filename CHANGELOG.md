@@ -2,6 +2,19 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다.
 
+## [Unreleased]
+
+### Added
+
+- 모르는 반사 대상에 대해, 안정한 닫힌 동기 함수가 반환한 plain object literal이 직접 객체 구조 분해 또는
+  한 단계의 닫힌 factory wrapper 투영으로만 소비되는 경우에 한해 literal identity를 증명한다. 알려진 반사
+  대상, 구조적 타입의 비겹침, 전체 객체 탈출, 전개·계산 키·메서드/접근자·`__proto__`·`then`, spread prefix,
+  lexical `arguments`, optional/default/rest/대입·전달 매개변수, 열린·opaque·async/generator factory 경로는 계속 닫힌다.
+  named import는 지원하지만 namespace/member와 괄호로 감싼 함수 호출은 보수적으로 미룬다.
+- 같은 external-module의 private top-level `let` cache도 직접 버리는 `memo =`/`memo ??=` object write 한 번과
+  안정한 반환 factory, 좁은 null/undefined guard만 있을 때 identity를 증명한다. export, 전체 객체·멤버 사용,
+  setter, 복합·논리 대입, null/undefined 외 reset, 추가 object write는 닫힌다.
+
 ## [0.5.0] - 2026-10-02
 
 ### Added
