@@ -1,5 +1,7 @@
 # tsograph
 
+<img src="https://raw.githubusercontent.com/ictechgy/tsograph/main/icon.png" alt="tsograph's kingfisher mascot" width="112" height="112" align="right">
+
 [한국어](README.ko.md)
 
 Static facts for TypeScript/JavaScript (Node) services, emitted in the
