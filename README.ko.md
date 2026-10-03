@@ -1,5 +1,7 @@
 # tsograph
 
+<img src="https://raw.githubusercontent.com/ictechgy/tsograph/main/icon.png" alt="tsograph의 물총새 마스코트" width="112" height="112" align="right">
+
 [English](README.md)
 
 TypeScript/JavaScript(Node) 서비스의 정적 사실을
