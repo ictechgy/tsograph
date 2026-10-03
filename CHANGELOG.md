@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-03
+
+### Added
+
+- 설치된 Next.js 16.2.7 `next/cache`의 genuine `unstable_cache` wrapper 호출에서 원래 프로젝트 callback으로
+  `bound` 실행 위임 간선을 낸다. named import·직접 namespace 멤버와 bounded immutable const wrapper 별칭만
+  허용하며, SDK 버전·선언 provenance·관찰된 쓰기를 확인한다. cache hit로 실행이 생략될 수 있고, JSON을 거친
+  반환 identity와 callback 매개변수 인자 흐름은 추적하지 않는다. 모르는 callback·변경·shadow·augmentation·
+  optional/spread·open/opaque 경로는 미해석으로 보존하고 같은 이름의 일반 프로젝트 함수 흐름은 유지한다.
+
 ## [0.6.0] - 2026-10-02
 
 ### Added
