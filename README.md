@@ -874,6 +874,17 @@ Within that boundary, a closed wrapper may call a callable parameter such as `ma
 flow resolves to project function bodies; mixed known/unknown, reassigned-to-unknown, open, and
 external maker values remain unresolved.
 
+One SDK-specific model follows callback delegation through `unstable_cache` from the installed
+Next.js **16.2.7** package. The import must resolve to SDK declarations outside project sources:
+a named import (including an import alias) or a direct namespace member, used by a direct factory call
+or an immutable `const` wrapper alias chain of at most 16 links. An inline function, stable project function declaration/import, or immutable identifier alias
+whose callable flow is fully resolved receives a `bound` edge from the wrapper invocation. Cache hits can skip that callback; the edge
+records a possible execution path. Cached return values remain opaque because cache reads deserialize
+JSON, and wrapper arguments do not populate callback parameter flow. Other SDK versions, project
+shadows or augmentations, mutable/property aliases, injected callback parameters, optional/spread
+calls, open programs, opaque imports, namespace value escapes, and observed SDK writes keep the call unresolved. This model
+does not execute the SDK or make network requests.
+
 What `bound` guarantees, and what it does not:
 
 - **Guarantees**, under the assumptions below: no implementation that can run at the call site is

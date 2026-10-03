@@ -31,6 +31,7 @@ import { CandidateFinder } from './dispatch-candidates.ts';
 import type { EdgeGaps, PendingDispatch } from './edge-collector.ts';
 import { climbWrappers, type FlowIndex, type ModuleResolver, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
+import { delegateCallbackExpression, isNextCacheWrapperExpression } from './next-cache-model.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
 import { type CallableValue, type FlowPolicy, ValueFlow } from './value-flow.ts';
@@ -101,7 +102,9 @@ interface DispatchView {
   readonly flow: ValueFlow;
   readonly finder: CandidateFinder;
   readonly resolver: TargetResolver;
+  readonly index: FlowIndex;
   readonly pathByFile: ReadonlyMap<ts.SourceFile, string>;
+  readonly allPathByFile: ReadonlyMap<ts.SourceFile, string>;
 }
 
 /**
@@ -127,7 +130,9 @@ function lazyView(
         flow,
         finder: new CandidateFinder(context.checker, resolver, [...files.values()]),
         resolver,
+        index: merged,
         pathByFile: new Map([...files].map(([path, sourceFile]) => [sourceFile, path])),
+        allPathByFile: new Map([...context.files].map(([path, sourceFile]) => [sourceFile, path])),
       };
     }
     return view;
@@ -230,7 +235,18 @@ function boundCallableTargets(
   view: DispatchView,
   site: Extract<PendingDispatch, { kind: 'callable' }>,
 ): string[] | undefined {
-  const values = view.flow.callablesOf(site.call.expression);
+  const modelContext = {
+    program: context.program,
+    checker: context.checker,
+    pathByFile: view.pathByFile,
+    allPathByFile: view.allPathByFile,
+    index: view.index,
+    openProgram: context.openProgram,
+  };
+  const modeled = isNextCacheWrapperExpression(site.call.expression, modelContext);
+  const callback = modeled ? delegateCallbackExpression(site.call.expression, modelContext, site.call) : undefined;
+  const values = !modeled ? view.flow.callablesOf(site.call.expression)
+    : callback === undefined ? null : view.flow.callablesOf(callback);
   if (values === null || values.size === 0) return undefined;
   const ids = new Set<string>();
   for (const value of values) {

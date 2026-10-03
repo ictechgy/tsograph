@@ -705,6 +705,15 @@ callback 매개변수 대입·탈출, 전개, 열린·프로젝트 밖 팩터리
 닫힌 wrapper가 `make()` 같은 callable 매개변수를 부를 때도 그 흐름이 프로젝트 함수 본문으로 전부 증명되면 따른다.
 알려진 값과 모르는 값의 혼합, 모르는 값으로 재대입, 열린 wrapper, 외부 maker 값은 계속 미해석이다.
 
+설치된 Next.js **16.2.7**의 `unstable_cache`에는 SDK별 callback 실행 위임 모델 하나를 적용한다.
+import가 프로젝트 밖 SDK 선언으로 해석되는 named import(이름 별칭 포함) 또는 직접 namespace 멤버여야 하고,
+직접 factory 호출이나 최대 16단계 immutable `const` wrapper 별칭만 따른다. 인라인 함수·안정한 프로젝트 함수 선언/import·immutable 식별자 별칭의
+callable 흐름이 전부 해석되면 wrapper 호출에서 callback으로 `bound` 간선을 낸다. 캐시 hit는 callback 실행을 건너뛸 수 있으므로 이 간선은
+가능한 실행 경로를 뜻한다. 캐시 읽기는 JSON을 역직렬화하므로 반환 값은 계속 opaque이고, wrapper의 호출 인자를
+callback 매개변수 흐름으로 전달하지 않는다. 다른 SDK 버전, 프로젝트 shadow·augmentation, mutable/속성 별칭,
+주입된 callback 매개변수, optional/spread 호출, 열린 프로그램·opaque import·namespace 값 탈출·관찰된 SDK 쓰기는 미해석으로 둔다.
+SDK 실행이나 네트워크 요청은 하지 않는다.
+
 `bound`가 보장하는 것과 보장하지 않는 것:
 
 - **보장**(아래 전제 아래): 호출 위치에서 실행될 수 있는 구현이 빠지지 않고, 이은 구현은 모두 프로젝트 어딘가에서
