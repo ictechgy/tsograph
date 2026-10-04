@@ -698,6 +698,26 @@ async/generator 팩터리는 계속 모름이다. 알려진 반사 대상은 항
 조건 guard여야 한다. 버리는 `memo = null`/전역 `undefined` 초기화는 허용하지만 export, 전체 객체 사용,
 멤버 읽기, setter, 복합·논리 대입, 추가 객체 대입은 계속 모름이다.
 
+관찰한 mutation은 연산·수신자·키·값/source/descriptor·prototype 인자를 내부 색인에 보존한다.
+`Object.setPrototypeOf`, `Reflect.setPrototypeOf`, `__proto__` 쓰기는 해당 수신자의 증명을 무효화한다.
+mutator 값 탈출·불완전한 별칭과 `__defineGetter__`/`__defineSetter__`는 opaque mutation으로 남긴다.
+declaration file이나 무관한 키 이름만으로 부수효과가 없다고 판단하지 않는다.
+
+좁은 생성자 carrier 증명은 정확한 의존성 객체 리터럴을 모르는 반사 대상과 분리할 수 있다. 닫힌 프로젝트 클래스,
+private readonly 매개변수 속성, 모든 instance 사용·투영 감사, 부수효과를 분리할 수 있는 mutation 범위가 필요하다.
+생략된 optional Date callback은 genuine `new Date()`의 정확한 기본값과 깨끗한 prototype 범위를 요구하며,
+instance 필드의 setter 위험은 compiler emit 옵션에 의존하지 않고 검사한다. 전체 instance/bag 탈출·별칭·접근자·
+상속·decorator·위험한 callback·증명하지 못한 수신자는 미해석이다. private primitive object/array literal도 기존
+own-data 슬롯과 모든 사용을 감사한 경우에만 무관한 mutation 수신자로 인정한다. 배열 타입·전개 배열·임의 factory와
+`map().sort().map()` 형태만으로는 증명하지 않는다.
+
+private 최상위 `const registry = new Map()`은 실제 TypeScript default library의 생성자/API 선언과 mutation 범위를
+확인한 경우 `get`으로 프로젝트 factory 값을 전달한다. 직접 `get/set/has/delete/clear/keys`와 readonly `size`만
+허용하고 `set` 결과는 버려야 한다. 별칭·export·인자 전달·반사·computed/detached/optional 호출·chaining·`forEach`·
+`values`·`entries`는 opaque다. 모르는 키는 모든 등록 값을 포함하며, 정확한 primitive literal·immutable const 별칭·
+조건식 합집합만 키 일치를 좁힌다. Map은 primitive 종류를 구분하고 `-0`과 `0`을 같게 본다. symbol/object/enum/call
+유래 키는 추측하지 않는다. delete/clear 후에도 문맥 비민감 분석의 가능한 값은 보존하고 iterator 결과는 opaque다.
+
 호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수와 익명 인라인
 callback의 직접 호출, 함수·getter 반환값, 생성자 대입·기본값, 안전하게 읽은 객체·클래스 메서드를 따라간다. 인라인
 callback은 직접 호출 인자이면서 본문이 하나인 닫힌 프로젝트 함수 선언에서만 연결한다. 이름 있는 함수 식,
@@ -747,12 +767,12 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
   읽히면(`App.Repo[key]`) 멤버 전부를 연다. 프레임워크 파일(App Router `route`·특수 파일, `pages/` 아래 전부, `proxy`·`middleware`·
   `instrumentation` — `export * from`만 있어도)의 내보내기와 그것이 재내보내는 선언 전부, 그리고 ES 모듈이 아닌 파일
   (스크립트·CommonJS)의 최상위 선언도 열린 자리다. 여러 번 선언한 변수(`var x = a; var x = b;`)는 모든 초기값을 합친다.
-- **모델링하지 않음**(문서화한 공백): 프로토타입 조작, `eval`, 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
+- **모델링하지 않음**(문서화한 공백): 색인하지 못한 prototype API, `eval`, 라이브러리 코드로 나갔다 돌아오는 값, 라이브러리 코드가 바꾸는 속성. 의존성이 설치되지
   않으면 그 타입은 오류 타입이라 `any`로 센다. 그 API를 거친 값은 모름이라, 그런 값 위의 같은 이름 쓰기·메서드
   읽기가 관계없는 클래스의 bound를 막을 수 있다(bound가 줄 뿐 틀리지 않는다). 지정자가 문자열이 아닌 동적 `import()`/`require()`와 파일 패턴
   로더(`import.meta.glob`·`require.context`)는 모든 내보내기를 연다. `Object.assign`·`Object.defineProperty(ies)`·`Reflect.set`·`Reflect.defineProperty`·
   `Reflect.deleteProperty`의 대상은 보수적으로 다룬다(그 속성·멤버는 모름, 정적으로 해석한 멤버 호출도 포함).
-  위의 반환 리터럴 identity 증명은 모르는 대상에만 적용하는 유일한 예외이며, 알려진 반사 대상은 여전히 리터럴을 막는다.
+  위의 좁은 반환 리터럴·생성자 carrier identity 증명은 모르는 대상에만 적용하는 예외이며, 알려진 반사 대상은 여전히 리터럴을 막는다.
   계산된 키 쓰기·삭제(`obj[key] = v`, `delete obj[key]`)도 그 수신자의 속성을 모름으로 연다. 값을 모르는 반사 대상은
   정적 타입을 보존하며, 닫혀 있고 밖으로 새지 않은 nominal 클래스 계보에서 그 클래스와 모든 프로젝트 하위 클래스가
   대상 타입과 겹칠 수 없을 때만 제외한다. 구조적으로 서로 대입할 수 없는 타입도 교차 객체로 겹칠 수 있으므로 계속 모름이다.

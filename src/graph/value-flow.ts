@@ -23,6 +23,9 @@ import ts from 'typescript';
 
 import { memberName } from '../schema/scope-builder.ts';
 import { climbWrappers, type FlowIndex, type PropertyWrite, referenceSite } from './flow-index.ts';
+import { ConstructorCarrierAnalyzer } from './constructor-carrier.ts';
+import { collectNativeMapDescriptors, nativeMapValuesForKey, type NativeMapDescriptor } from './native-map-model.ts';
+import { isIntrinsicDefaultLibraryGlobal, type MutationSafetyContext } from './mutation-safety.ts';
 import { isFunctionValued, skipWrappers } from './node-collector.ts';
 
 /** 객체 값: 프로젝트 클래스의 인스턴스, 또는 객체 리터럴 하나가 만든 객체다. */
@@ -41,6 +44,8 @@ export type Flow = ReadonlySet<AbstractValue> | null;
 export interface FlowPolicy {
   /** 노드 파일(프로젝트 소스)인지 */
   isProjectFile(sourceFile: ts.SourceFile): boolean;
+  /** TypeScript가 제공한 genuine default library 파일인지(없으면 intrinsic 증명을 닫는다). */
+  readonly isDefaultLibraryFile?: (sourceFile: ts.SourceFile) => boolean;
   /** 프로젝트 밖(프레임워크·스캔 밖 코드)이 부를 수 있어 호출 위치를 다 볼 수 없는 함수·클래스인지 */
   isOpenCallable(declaration: ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration): boolean;
   /** 하위 클래스가 재정의한 메서드인지(정적 해석 대상이 실행된다는 보장이 없다) */
@@ -159,6 +164,10 @@ export class ValueFlow {
   private readonly isolatedMemoSymbols = new Map<ts.Symbol, boolean>();
   /** private memo 심볼 증명 중 재진입을 끊는다. */
   private readonly isolatedMemoPending = new Set<ts.Symbol>();
+  /** private constructor DI carrier의 완료·재진입 메모다. */
+  private readonly constructorCarrier: ConstructorCarrierAnalyzer;
+  /** genuine private native Map descriptor를 한 번 수집한 cache다. */
+  private nativeMapDescriptors: ReadonlyMap<ts.Symbol, NativeMapDescriptor> | undefined;
 
   /**
    * @param checker TypeChecker
@@ -169,6 +178,7 @@ export class ValueFlow {
     this.checker = checker;
     this.index = index;
     this.policy = policy;
+    this.constructorCarrier = new ConstructorCarrierAnalyzer({ checker, index, policy });
   }
 
   /**
@@ -334,7 +344,10 @@ export class ValueFlow {
     if (expression.kind === ts.SyntaxKind.ThisKeyword) return this.thisValues(expression);
     if (expression.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(expression)) return EMPTY;
     if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) return this.accessValues(expression);
-    if (ts.isCallExpression(expression)) return this.callValues(expression);
+    if (ts.isCallExpression(expression)) {
+      const nativeMap = this.nativeMapCallValues(expression);
+      return nativeMap === undefined ? this.callValues(expression) : nativeMap;
+    }
     if (ts.isAwaitExpression(expression)) return this.expressionValues(expression.expression);
     if (ts.isConditionalExpression(expression)) return unionFlows(this.expressionValues(expression.whenTrue), this.expressionValues(expression.whenFalse));
     if (ts.isBinaryExpression(expression)) return this.binaryValues(expression);
@@ -1057,6 +1070,74 @@ export class ValueFlow {
     return result;
   }
 
+  /** native Map value-producing call을 모델링한다. `keys` iterator 값은 아직 모름으로 보존한다. */
+  private nativeMapCallValues(call: ts.CallExpression): Flow | undefined {
+    const callee = skipWrappers(call.expression);
+    if (!ts.isPropertyAccessExpression(callee)) return undefined;
+    const operation = callee.name.text;
+    if (operation !== 'get' && operation !== 'set' && operation !== 'has'
+      && operation !== 'delete' && operation !== 'clear' && operation !== 'keys') return undefined;
+    const owner = skipWrappers(callee.expression);
+    if (!ts.isIdentifier(owner)) return undefined;
+    const symbol = this.checker.getSymbolAtLocation(owner);
+    if (symbol === undefined || (symbol.flags & ts.SymbolFlags.Alias) !== 0 || !this.isNativeMapCandidate(owner, symbol)) return undefined;
+    const descriptor = this.nativeMapDescriptor(symbol);
+    if (descriptor === undefined) return undefined;
+    if (operation === 'keys') return null;
+    if (operation !== 'get') return EMPTY;
+    return this.unit(this.keyFor('native-map-get', call), () => {
+      const values = nativeMapValuesForKey(descriptor, call.arguments[0], this.nativeMapSafetyContext());
+      let result: Flow = EMPTY;
+      for (const value of values) {
+        result = unionFlows(result, this.expressionValues(value));
+        if (result === null) return null;
+      }
+      return result;
+    });
+  }
+
+  /** 전역 descriptor 수집 전에 exact private top-level `const new Map()` receiver인지 싸게 거른다. */
+  private isNativeMapCandidate(receiver: ts.Identifier, symbol: ts.Symbol): boolean {
+    if (this.checker.getSymbolAtLocation(receiver) !== symbol || this.index.exportedSymbols.has(symbol)
+      || (this.index.aliasNames.get(symbol)?.length ?? 0) > 0
+      || (this.index.identifierWrites.get(symbol)?.length ?? 0) > 0) return false;
+    const declarations = symbol.declarations ?? [];
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)
+      || this.checker.getSymbolAtLocation(declaration.name) !== symbol || declaration.initializer === undefined
+      || !ts.isVariableDeclarationList(declaration.parent) || (declaration.parent.flags & ts.NodeFlags.Const) === 0) return false;
+    const statement = declaration.parent.parent;
+    if (!ts.isVariableStatement(statement) || !ts.isSourceFile(statement.parent)
+      || statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+        || modifier.kind === ts.SyntaxKind.DefaultKeyword)) return false;
+    const initializer = skipWrappers(declaration.initializer);
+    if (!ts.isNewExpression(initializer) || initializer.arguments === undefined || initializer.arguments.length !== 0) return false;
+    const map = skipWrappers(initializer.expression);
+    return ts.isIdentifier(map) && isIntrinsicDefaultLibraryGlobal(this.nativeMapSafetyContext(), map, 'Map');
+  }
+
+  /** native Map descriptor를 수집하고 symbol별로 index한다. */
+  private nativeMapDescriptor(symbol: ts.Symbol): NativeMapDescriptor | undefined {
+    if (this.nativeMapDescriptors === undefined) {
+      const descriptors = collectNativeMapDescriptors(this.nativeMapSafetyContext());
+      this.nativeMapDescriptors = new Map(descriptors.map((descriptor) => [descriptor.symbol, descriptor]));
+    }
+    return this.nativeMapDescriptors.get(symbol);
+  }
+
+  /** native Map와 primitive key 모델이 공유하는 clean context다. */
+  private nativeMapSafetyContext(): MutationSafetyContext {
+    return {
+      checker: this.checker,
+      index: this.index,
+      isDefaultLibraryFile: this.policy.isDefaultLibraryFile === undefined
+        ? () => false : (sourceFile) => this.policy.isDefaultLibraryFile!(sourceFile),
+      openProgram: this.policy.openProperties,
+      openProperties: this.policy.openProperties,
+      budgetStep: () => this.step(),
+    };
+  }
+
   /**
    * 호출식이 실행할 수 있는 본문 있는 함수들이다. 인터페이스 멤버면 수신자 값의 구현으로 푼다.
    *
@@ -1071,6 +1152,10 @@ export class ValueFlow {
     // 함수 매개변수 호출은 타입 시그니처가 아니라 매개변수의 닫힌 callable 흐름으로만 푼다. 흐름에
     // 모르는 값이나 객체가 하나라도 섞이면 기존의 미해석을 유지한다.
     if (ts.isIdentifier(callee) && declarations.length > 0 && declarations.every(ts.isParameter)) {
+      const values = this.callablesOnly(this.symbolValues(symbol));
+      return values === null || values.size === 0 ? null : [...values];
+    }
+    if (ts.isIdentifier(callee) && declarations.length > 0 && declarations.every(isConstVariableDeclaration)) {
       const values = this.callablesOnly(this.symbolValues(symbol));
       return values === null || values.size === 0 ? null : [...values];
     }
@@ -1227,17 +1312,33 @@ export class ValueFlow {
    * @returns 대상일 수 있으면 true
    */
   private isReflectivelyWritten(value: AbstractValue): boolean {
+    if (this.index.hasOpaqueMutation) return true;
     if (this.reflective === undefined) return false;
     if (this.reflective.values.has(value)) return true;
     if (this.reflective.unknownTargets.length === 0) return false;
     // 알려진 반사 대상은 위에서 항상 막는다. 아래 증명은 값 흐름을 모르는 대상에만 적용한다.
-    const isolatedLiteral = ts.isObjectLiteralExpression(value) && this.isIsolatedReturnedLiteral(value);
+    const isolatedLiteral = ts.isObjectLiteralExpression(value)
+      && (this.isIsolatedReturnedLiteral(value) || this.isConstructorCarrierInnerLiteral(value));
+    const isolatedCarrier = ts.isClassLike(value) && this.constructorCarrier.prove(value) !== undefined;
     for (const target of this.reflective.unknownTargets) {
       this.step();
-      if (isolatedLiteral) continue;
+      if (isolatedLiteral || isolatedCarrier) continue;
       if (!this.unknownReflectiveTargetIsDisjoint(target, value)) return true;
     }
     return false;
+  }
+
+  /** 생성자 carrier가 정확히 소유한 inner bag literal만 unknown target과 분리한다. */
+  private isConstructorCarrierInnerLiteral(literal: ts.ObjectLiteralExpression): boolean {
+    const outer = climbWrappers(literal);
+    const parent = outer.parent;
+    if (!ts.isNewExpression(parent) || !parent.arguments?.some((argument) => skipWrappers(argument) === literal)) return false;
+    const callee = skipWrappers(parent.expression);
+    const declaration = ts.isClassExpression(callee)
+      ? callee : this.classOfSymbol(this.calleeSymbol(callee));
+    if (declaration === undefined) return false;
+    const proof = this.constructorCarrier.prove(declaration);
+    return proof?.innerLiteral === literal;
   }
 
   /**
@@ -1897,6 +1998,12 @@ function isCallableDeclaration(node: ts.Node): node is CallableValue {
 /** 본문이 있는 호출 가능 추상 값인지 본다. */
 function isCallableValue(value: ts.Node): value is CallableValue {
   return isCallableDeclaration(value);
+}
+
+/** const variable declaration인지 확인한다. */
+function isConstVariableDeclaration(declaration: ts.Declaration): declaration is ts.VariableDeclaration {
+  return ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)
+    && ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0;
 }
 
 /** 일반 함수 경계를 넘어가지 않고 본문에서 `this`를 읽는지 본다. */

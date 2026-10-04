@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-04
+
+### Added
+
+- 직접·반사·prototype mutation의 연산·수신자·키·인자 근거를 보존하고, mutator 값 탈출·불완전 별칭·legacy accessor를
+  opaque로 유지한다. visible prototype 변경으로 과거 본문을 직접 확정하던 경로를 무효화한다.
+- 닫힌 생성자 의존성 carrier와 mutation 부수효과 범위를 제한적으로 증명한다. instance/bag 탈출과 setter 위험,
+  Date 기본값·projection 완전성을 확인하며 primitive 배열의 기존 own-index 쓰기도 엄격한 계약 안에서만 분리한다.
+- genuine private native Map registry의 factory 반환값을 추적하고, 정확한 primitive 키만 제한적으로 일치를 좁힌다.
+  모르는 키·iterator·escape·mutation·SDK 값은 불확실성을 보존하고 delete/clear는 가능한 값을 제거하지 않는다.
+
 ## [0.7.0] - 2026-10-03
 
 ### Added

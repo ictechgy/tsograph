@@ -1360,3 +1360,30 @@ test('흔한 멤버 이름의 쓰기·읽기가 모듈 600개에 흩어져도 �
   // 메모 전(18547b7)에는 같은 모양 1,500개 모듈에서 21.7초, 메모 후 2.5초였다.
   assert.ok(elapsed < 30_000, `took ${Math.round(elapsed)} ms`);
 });
+
+
+test('visible prototype replacement invalidates direct and bound immutable receiver proofs', async () => {
+  const prefix = [
+    'interface Port { run(): string; }',
+    'class LivePort implements Port { run() { return "live"; } }',
+    'const receiver: Port = new LivePort();',
+  ];
+  const patches = [
+    'Object.setPrototypeOf(receiver, { run() { return "replacement"; } });',
+    'Reflect.setPrototypeOf(receiver, { run() { return "replacement"; } });',
+    '(receiver as any).__proto__ = { run() { return "replacement"; } };',
+    'const patch = Reflect.setPrototypeOf; patch(receiver, { run() { return "replacement"; } });',
+    'const patch = Object.setPrototypeOf.bind(null, receiver); patch({ run() { return "replacement"; } });',
+  ];
+  for (const patch of patches) {
+    const target = await graphOf({ 'src/main.ts': [...prefix, patch,
+      'export function invoke() { return receiver.run(); }'].join('\n') });
+    assert.ok(!target.edges.some((edge) => edge.from === 'src/main.ts#invoke'
+      && edge.to === 'src/main.ts#LivePort.run' && edge.evidence !== 'candidate'), patch);
+    assert.ok(target.nodes.find((node) => node.id === 'src/main.ts#invoke')?.unresolvedCalls?.bound);
+  }
+  const clean = await graphOf({ 'src/main.ts': [...prefix,
+    'export function invoke() { return receiver.run(); }'].join('\n') });
+  assert.ok(clean.edges.some((edge) => edge.from === 'src/main.ts#invoke'
+    && edge.to === 'src/main.ts#LivePort.run' && edge.evidence === 'direct'));
+});
