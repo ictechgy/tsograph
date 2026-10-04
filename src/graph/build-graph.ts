@@ -211,9 +211,23 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const productionFlowIndex = separateTests
     ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index))
     : flowIndex;
-  const resolver = new TargetResolver(checker, store, (sourceFile) => pathByFile.get(sourceFile), projectSpecifierMatcher(program.getCompilerOptions()), flowIndex);
+  const resolver = new TargetResolver(
+    checker,
+    store,
+    (sourceFile) => pathByFile.get(sourceFile),
+    projectSpecifierMatcher(program.getCompilerOptions()),
+    flowIndex,
+    (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
+  );
   const productionResolver = separateTests
-    ? new TargetResolver(checker, store, (sourceFile) => pathByFile.get(sourceFile), projectSpecifierMatcher(program.getCompilerOptions()), productionFlowIndex)
+    ? new TargetResolver(
+      checker,
+      store,
+      (sourceFile) => pathByFile.get(sourceFile),
+      projectSpecifierMatcher(program.getCompilerOptions()),
+      productionFlowIndex,
+      (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
+    )
     : resolver;
   const overrides = new Map<string, string[]>();
   for (const [path, declarations] of classes) declarations.forEach((declaration) => addOverrides(overrides, checker, resolver, path, declaration));

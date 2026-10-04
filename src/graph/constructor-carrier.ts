@@ -76,6 +76,23 @@ export interface ConstructorCarrierProof {
 export class ConstructorCarrierAnalyzer {
   private readonly completed = new Map<ts.ClassLikeDeclaration, ConstructorCarrierProof | undefined>();
   private readonly pending = new Set<ts.ClassLikeDeclaration>();
+  /** Date fallback carrier 역할의 method-instance flow 허용 여부를 완료한 클래스별로 메모한다. */
+  private readonly instanceFlowCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
+  /** instance-flow 판정 재진입은 carrier flow를 닫힌 쪽으로 실패시킨다. */
+  private readonly instanceFlowPending = new Set<ts.ClassLikeDeclaration>();
+  /** declared-method receiver identity용 constructor/storage 결과를 클래스별로 메모한다. */
+  private readonly receiverCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
+  /** receiver identity 판정 재진입은 보수적으로 닫는다. */
+  private readonly receiverPending = new Set<ts.ClassLikeDeclaration>();
+  /** direct resolver와 ValueFlow가 공유하는 carrier role 판정을 클래스별로 메모한다. */
+  private readonly roleCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
+  /** role 판정 자원 실패는 obligation을 남기되 후속 proof를 실행하지 않는다. */
+  private readonly roleIncomplete = new Set<ts.ClassLikeDeclaration>();
+  /** concrete construction identity 결과와 재진입 guard다. */
+  private readonly identityCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
+  private readonly identityPending = new Set<ts.ClassLikeDeclaration>();
+  /** 자신 또는 기반 class의 carrier role 여부다. */
+  private readonly lineageRoleCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
   private steps = 0;
 
   /**
@@ -113,8 +130,142 @@ export class ConstructorCarrierAnalyzer {
     return result;
   }
 
+  /**
+   * 클래스가 좁은 Date-fallback carrier 역할이면 Stage 0 전체 entry·storage·use 검사를 통과했는지 돌려준다.
+   * optional own-key 존재만 이 판정에서 제외한다. 그 존재 여부와 prototype fallback은 실제 literal property
+   * flow가 별도로 판정한다. 일반 클래스는 carrier proof를 요구하지 않으므로 true다.
+   *
+   * @param declaration 클래스 선언·식
+   * @returns 일반 클래스 또는 안전한 carrier면 true, carrier 역할이지만 검사가 실패하면 false
+   */
+  allowsInstanceFlow(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.instanceFlowCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    if (this.instanceFlowPending.has(declaration)) return false;
+    this.instanceFlowPending.add(declaration);
+    this.steps = 0;
+    try {
+      if (!this.hasCarrierFlowObligation(declaration)) {
+        const allowed = !this.hasCarrierFlowLineage(declaration);
+        this.instanceFlowCompleted.set(declaration, allowed);
+        return allowed;
+      }
+      if (this.roleIncomplete.has(declaration)) {
+        this.instanceFlowCompleted.set(declaration, false);
+        return false;
+      }
+      const allowed = this.proveInstanceFlow(declaration);
+      this.instanceFlowCompleted.set(declaration, allowed);
+      return allowed;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      // flow admission의 자원 실패는 proof 완료가 아니라 고정 분석 문맥의 보수적 negative로만 재사용한다.
+      this.instanceFlowCompleted.set(declaration, false);
+      return false;
+    } finally {
+      this.instanceFlowPending.delete(declaration);
+    }
+  }
+
+  /** source-derived carrier role인지 bounded/cached로 판정한다. 자원 실패는 보수적으로 obligation을 남긴다. */
+  hasCarrierFlowObligation(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.roleCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    this.steps = 0;
+    try {
+      const result = this.isCarrierFlowCandidate(declaration);
+      this.roleCompleted.set(declaration, result);
+      return result;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.roleIncomplete.add(declaration);
+      this.roleCompleted.set(declaration, true);
+      return true;
+    }
+  }
+
+  /** 자신 또는 정적으로 해석 가능한 기반 class가 carrier role인지 본다. */
+  hasCarrierFlowLineage(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.lineageRoleCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    this.steps = 0;
+    try {
+      const seen = new Set<ts.ClassLikeDeclaration>();
+      let current: ts.ClassLikeDeclaration | undefined = declaration;
+      while (current !== undefined && !seen.has(current)) {
+        this.step();
+        seen.add(current);
+        if (this.hasCarrierFlowObligation(current)) {
+          this.lineageRoleCompleted.set(declaration, true);
+          return true;
+        }
+        current = this.directBaseClass(current);
+      }
+      this.lineageRoleCompleted.set(declaration, false);
+      return false;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.lineageRoleCompleted.set(declaration, true);
+      return true;
+    }
+  }
+
+  /**
+   * `new C`가 C instance identity를 만든다는 좁은 witness다. carrier class 자체는 constructor/storage proof를,
+   * carrier 기반 subclass는 별도 subclass proof가 없으므로 보수적 unknown을 돌려준다.
+   */
+  allowsConstructedInstanceIdentity(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.identityCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    if (this.identityPending.has(declaration)) return false;
+    this.identityPending.add(declaration);
+    this.steps = 0;
+    try {
+      let allowed: boolean;
+      if (this.hasCarrierFlowObligation(declaration)) {
+        allowed = !this.roleIncomplete.has(declaration) && this.proveReceiverConstruction(declaration) !== undefined;
+      } else {
+        const base = this.directBaseClass(declaration);
+        allowed = base === undefined || !this.hasCarrierFlowLineage(base);
+      }
+      this.identityCompleted.set(declaration, allowed);
+      return allowed;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.identityCompleted.set(declaration, false);
+      return false;
+    } finally {
+      this.identityPending.delete(declaration);
+    }
+  }
+
+  /**
+   * declared prototype method recovery에 필요한 receiver construction만 증명한다. method body 문법이나
+   * dependency effect는 승인하지 않고, constructor entry/storage/replacement와 exact construction만 검사한다.
+   */
+  allowsDeclaredMethodReceiver(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.receiverCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    if (this.receiverPending.has(declaration)) return false;
+    this.receiverPending.add(declaration);
+    this.steps = 0;
+    try {
+      const proof = this.hasCarrierFlowObligation(declaration) && !this.roleIncomplete.has(declaration)
+        ? this.proveReceiverConstruction(declaration) : undefined;
+      const allowed = proof !== undefined && this.scanDeclaredReceiverUses(declaration, proof.constructions);
+      this.receiverCompleted.set(declaration, allowed);
+      return allowed;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.receiverCompleted.set(declaration, false);
+      return false;
+    } finally {
+      this.receiverPending.delete(declaration);
+    }
+  }
+
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
-  private proveClass(declaration: ts.ClassLikeDeclaration): ConstructorCarrierProof | undefined {
+  private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true): ConstructorCarrierProof | undefined {
     this.step();
     if (!this.context.policy.isProjectFile(declaration.getSourceFile()) || this.context.policy.isOpenCallable(declaration)) return undefined;
     if (hasDecorators(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
@@ -129,7 +280,9 @@ export class ConstructorCarrierAnalyzer {
     if (parameters.length !== 1) return undefined;
     const bagParameter = parameters[0]!;
     if (!isPrivateReadonlyParameterProperty(bagParameter, owner)) return undefined;
-    if (!ts.isIdentifier(bagParameter.name) || bagParameter.initializer !== undefined || bagParameter.dotDotDotToken !== undefined) return undefined;
+    if (hasDecorators(bagParameter) || bagParameter.questionToken !== undefined
+      || !ts.isIdentifier(bagParameter.name) || bagParameter.initializer !== undefined
+      || bagParameter.dotDotDotToken !== undefined || isPrototypeSensitiveSlotName(bagParameter.name.text)) return undefined;
 
     const bagShape = this.bagShape(bagParameter);
     if (bagShape === undefined) return undefined;
@@ -138,7 +291,8 @@ export class ConstructorCarrierAnalyzer {
     const argumentsList = construction.arguments ?? [];
     if (argumentsList.length !== 1 || ts.isSpreadElement(argumentsList[0]!)) return undefined;
     const innerLiteral = skipWrappers(argumentsList[0]!);
-    if (!ts.isObjectLiteralExpression(innerLiteral) || !this.innerLiteralShape(innerLiteral, bagShape)) return undefined;
+    if (!ts.isObjectLiteralExpression(innerLiteral)
+      || !this.innerLiteralShape(innerLiteral, bagShape, requireOptionalOwn)) return undefined;
 
     const fields = this.instanceFields(declaration, bagParameter);
     if (fields === undefined) return undefined;
@@ -167,8 +321,230 @@ export class ConstructorCarrierAnalyzer {
     };
   }
 
+  /**
+   * 일반 DI 클래스와 carrier를 구분하는 bounded 역할 판정이다. private readonly parameter property가 있는
+   * constructor에서 direct genuine Date factory를 nullish fallback으로 선택하면, alias/storage proof와 무관하게
+   * Stage 0 obligation에 들어간다. 명백한 nullish literal source는 bag-derived일 수 없어 제외한다.
+   */
+  private isCarrierFlowCandidate(declaration: ts.ClassLikeDeclaration): boolean {
+    this.step();
+    if (!this.context.policy.isProjectFile(declaration.getSourceFile())) return false;
+    const constructors = declaration.members.filter(
+      (member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member) && member.body !== undefined,
+    );
+    if (constructors.length !== 1) return false;
+    const owner = constructors[0]!;
+    const bagParameters = owner.parameters.filter((parameter) => !isThisParameter(parameter)
+      && isPrivateReadonlyParameterProperty(parameter, owner) && ts.isIdentifier(parameter.name));
+    if (bagParameters.length === 0) return false;
+    let found = false;
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      this.step();
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+        && !this.isDefinitelyIndependentFallbackSource(node.left) && this.isDirectDateFactory(node.right)) {
+        found = true;
+        return;
+      }
+      if (node !== owner.body && (ts.isFunctionLike(node) || ts.isClassLike(node))) return;
+      ts.forEachChild(node, visit);
+    };
+    visit(owner.body!);
+    return found;
+  }
+
+  /** literal/global nullish source는 private parameter bag에서 유래할 수 없으므로 역할 판정에서 제외한다. */
+  private isDefinitelyIndependentFallbackSource(expression: ts.Expression): boolean {
+    const inner = skipWrappers(expression);
+    return inner.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(inner) || isGlobalUndefined(this.context, inner);
+  }
+
+  /** nested callable을 제외한 direct return들이 모두 genuine intrinsic `new Date()`인지 본다. */
+  private isDirectDateFactory(expression: ts.Expression): boolean {
+    const factory = skipWrappers(expression);
+    if ((!ts.isArrowFunction(factory) && !ts.isFunctionExpression(factory))
+      || factory.asteriskToken !== undefined || hasAsyncModifier(factory)) return false;
+    if (!ts.isBlock(factory.body)) return this.isIntrinsicDateConstruction(factory.body);
+    let returns = 0;
+    let valid = true;
+    const visit = (node: ts.Node): void => {
+      if (!valid) return;
+      this.step();
+      if (ts.isReturnStatement(node)) {
+        returns++;
+        if (node.expression === undefined || !this.isIntrinsicDateConstruction(node.expression)) valid = false;
+        return;
+      }
+      if (node !== factory.body && (ts.isFunctionLike(node) || ts.isClassLike(node))) return;
+      ts.forEachChild(node, visit);
+    };
+    visit(factory.body);
+    return valid && returns > 0;
+  }
+
+  /** default-library Date constructor를 직접 zero-argument로 호출하는 식인지 확인한다. */
+  private isIntrinsicDateConstruction(expression: ts.Expression): boolean {
+    const value = skipWrappers(expression);
+    if (!ts.isNewExpression(value) || (value.arguments ?? []).length !== 0) return false;
+    const callee = skipWrappers(value.expression);
+    if (!ts.isIdentifier(callee) || callee.text !== 'Date' || this.context.policy.isDefaultLibraryFile === undefined) return false;
+    const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(callee));
+    const declarations = symbol?.declarations ?? [];
+    return declarations.length > 0
+      && declarations.every((declaration) => defaultLibraryFile(this.context.policy, declaration.getSourceFile()));
+  }
+
+  /**
+   * carrier 역할의 method-instance flow에 필요한 Stage 0 경계만 검사한다. 여러 construction의 평범한 target
+   * union은 유지하며 singleton·export·unknown-reflection isolation 자격은 기존 full proof 소비자에게 맡긴다.
+   */
+  private proveInstanceFlow(declaration: ts.ClassLikeDeclaration): boolean {
+    const receiver = this.proveReceiverConstruction(declaration);
+    if (receiver === undefined) return false;
+    const { bagParameter, bagShape, fields, audit, constructions } = receiver;
+    const serviceUses: ConstructorServiceUse[] = [];
+    for (const member of declaration.members) {
+      this.step();
+      if (!ts.isMethodDeclaration(member)) continue;
+      if (hasDecorators(member) || member.body === undefined || hasStaticModifier(member)
+        || !this.scanMethod(member, bagParameter, bagShape, fields, audit.dateFieldName, serviceUses)) return false;
+    }
+    if (serviceUses.length === 0) return false;
+    for (const construction of constructions) {
+      if (!this.scanInstanceUses(declaration, construction, [])) return false;
+    }
+    return true;
+  }
+
+  /** method grammar와 분리한 exact receiver construction/storage certificate다. */
+  private proveReceiverConstruction(declaration: ts.ClassLikeDeclaration): ConstructorReceiverProof | undefined {
+    if (hasDecorators(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
+    const constructors = declaration.members.filter(ts.isConstructorDeclaration);
+    if (constructors.length !== 1 || constructors[0]!.body === undefined) return undefined;
+    const owner = constructors[0]!;
+    if (hasDecorators(owner) || hasExplicitConstructorReturn(owner)) return undefined;
+    const parameters = owner.parameters.filter((parameter) => !isThisParameter(parameter));
+    if (parameters.length !== 1) return undefined;
+    const bagParameter = parameters[0]!;
+    if (!isPrivateReadonlyParameterProperty(bagParameter, owner) || hasDecorators(bagParameter)
+      || bagParameter.questionToken !== undefined || !ts.isIdentifier(bagParameter.name)
+      || bagParameter.initializer !== undefined || bagParameter.dotDotDotToken !== undefined
+      || isPrototypeSensitiveSlotName(bagParameter.name.text)) return undefined;
+    const bagShape = this.bagShape(bagParameter);
+    if (bagShape === undefined) return undefined;
+    const constructions = this.constructions(declaration);
+    if (constructions === undefined || constructions.length === 0) return undefined;
+    for (const construction of constructions) {
+      this.step();
+      const argumentsList = construction.arguments ?? [];
+      if (argumentsList.length !== 1 || ts.isSpreadElement(argumentsList[0]!)) return undefined;
+      const innerLiteral = skipWrappers(argumentsList[0]!);
+      if (!ts.isObjectLiteralExpression(innerLiteral) || !this.innerLiteralShape(innerLiteral, bagShape, false)) return undefined;
+    }
+    const fields = this.instanceFields(declaration, bagParameter);
+    if (fields === undefined) return undefined;
+    const audit = this.scanConstructor(owner, bagParameter, bagShape, fields, new Set<ts.Node>());
+    if (audit === undefined) return undefined;
+    return { bagParameter, bagShape, fields, audit, constructions };
+  }
+
+  /** declared-method recovery는 inert 인자의 direct method call 외 instance 소비를 허용하지 않는다. */
+  private scanDeclaredReceiverUses(
+    declaration: ts.ClassLikeDeclaration,
+    constructions: readonly ts.NewExpression[],
+  ): boolean {
+    for (const construction of constructions) {
+      const outer = climbWrappers(construction);
+      const parent = outer.parent;
+      if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer
+        && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) {
+        if (!this.directDeclaredMethodCall(parent.parent, declaration)) return false;
+        continue;
+      }
+      if (ts.isPropertyAssignment(parent) && parent.initializer === outer && ts.isObjectLiteralExpression(parent.parent)) {
+        if (!this.scanDeclaredOuterHolder(parent.parent, parent, declaration)) return false;
+        continue;
+      }
+      if (!ts.isVariableDeclaration(parent) || !ts.isIdentifier(parent.name)) return false;
+      const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(parent.name));
+      if (symbol === undefined || this.context.index.exportedSymbols.has(symbol) || hasExportedVariableStatement(parent)) return false;
+      for (const reference of this.context.index.references.get(symbol) ?? []) {
+        this.step();
+        const site = climbWrappers(referenceSite(reference));
+        const access = site.parent;
+        const call = (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access))
+          && access.expression === site ? access.parent : undefined;
+        if (call === undefined || !ts.isCallExpression(call) || call.expression !== access
+          || !this.directDeclaredMethodCall(call, declaration)) return false;
+      }
+    }
+    return true;
+  }
+
+  /** one-level const object holder의 exact static projection method call만 instance 소비로 허용한다. */
+  private scanDeclaredOuterHolder(
+    literal: ts.ObjectLiteralExpression,
+    property: ts.PropertyAssignment,
+    declaration: ts.ClassLikeDeclaration,
+  ): boolean {
+    const keys = literal.properties.map((candidate) => candidate.name === undefined ? undefined : staticPropertyName(candidate.name));
+    const key = staticPropertyName(property.name);
+    if (literal.properties.length !== 1 || key === undefined || keys.some((candidate) => candidate === undefined)
+      || new Set(keys).size !== keys.length || keys.filter((candidate) => candidate === key).length !== 1) return false;
+    const variable = literal.parent;
+    if (!ts.isVariableDeclaration(variable) || variable.initializer !== literal || !ts.isIdentifier(variable.name)
+      || (ts.getCombinedNodeFlags(variable) & ts.NodeFlags.Const) === 0 || hasExportedVariableStatement(variable)) return false;
+    const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(variable.name));
+    if (symbol === undefined || this.context.index.exportedSymbols.has(symbol)) return false;
+    for (const reference of this.context.index.references.get(symbol) ?? []) {
+      this.step();
+      const holder = climbWrappers(referenceSite(reference));
+      const projection = holder.parent;
+      const projectedKey = ts.isPropertyAccessExpression(projection) && projection.expression === holder
+        ? projection.name.text
+        : ts.isElementAccessExpression(projection) && projection.expression === holder
+          && ts.isStringLiteralLike(projection.argumentExpression) ? projection.argumentExpression.text : undefined;
+      if (projectedKey !== key) return false;
+      const access = projection.parent;
+      const call = (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access))
+        && access.expression === projection ? access.parent : undefined;
+      if (call === undefined || !ts.isCallExpression(call) || call.expression !== access
+        || !this.directDeclaredMethodCall(call, declaration)) return false;
+    }
+    return true;
+  }
+
+  /** instance의 known class method를 inert argument로 직접 부르는 자리인지 본다. */
+  private directDeclaredMethodCall(call: ts.CallExpression, declaration: ts.ClassLikeDeclaration): boolean {
+    if (call.questionDotToken !== undefined || call.arguments.some((argument) => ts.isSpreadElement(argument)
+      || !isInertDeclaredMethodArgument(argument))) return false;
+    const callee = skipWrappers(call.expression);
+    if (ts.isPropertyAccessExpression(callee)) {
+      return callee.questionDotToken === undefined && this.knownClassMethod(declaration, callee.name.text);
+    }
+    return ts.isElementAccessExpression(callee) && callee.questionDotToken === undefined
+      && ts.isStringLiteralLike(callee.argumentExpression)
+      && this.knownClassMethod(declaration, callee.argumentExpression.text);
+  }
+
+  /** extends 절의 direct project class를 한 단계 푼다. */
+  private directBaseClass(declaration: ts.ClassLikeDeclaration): ts.ClassLikeDeclaration | undefined {
+    const base = declaration.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+    if (base === undefined) return undefined;
+    const expression = skipWrappers(base);
+    if (ts.isClassExpression(expression)) return expression;
+    const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(expression));
+    return symbol?.declarations?.find(ts.isClassLike);
+  }
+
   /** 유일한 생성자 호출 참조를 찾는다. 클래스 값은 정확히 한 `new`에서만 쓰여야 한다. */
   private singleConstruction(declaration: ts.ClassLikeDeclaration): ts.NewExpression | undefined {
+    const sites = this.constructions(declaration);
+    return sites?.length === 1 ? sites[0] : undefined;
+  }
+
+  /** class value의 모든 직접 construction을 수집한다. 다른 runtime value use가 섞이면 증명하지 않는다. */
+  private constructions(declaration: ts.ClassLikeDeclaration): readonly ts.NewExpression[] | undefined {
     const symbol = classSymbol(this.context.checker, declaration);
     if (symbol === undefined) return undefined;
     const sites: ts.NewExpression[] = [];
@@ -179,7 +555,7 @@ export class ConstructorCarrierAnalyzer {
       if (!ts.isNewExpression(parent) || parent.expression !== site) return undefined;
       sites.push(parent);
     }
-    return sites.length === 1 ? sites[0] : undefined;
+    return sites;
   }
 
   /** parameter-property bag 타입이 same-project simple own-data interface/type literal인지 읽는다. */
@@ -223,7 +599,7 @@ export class ConstructorCarrierAnalyzer {
   }
 
   /** 생성자 인자의 inner object literal이 bag own-data projection과 일치하는지 확인한다. */
-  private innerLiteralShape(literal: ts.ObjectLiteralExpression, shape: BagShape): boolean {
+  private innerLiteralShape(literal: ts.ObjectLiteralExpression, shape: BagShape, requireOptionalOwn: boolean): boolean {
     const seen = new Set<string>();
     for (const property of literal.properties) {
       this.step();
@@ -235,7 +611,10 @@ export class ConstructorCarrierAnalyzer {
       if (ts.isShorthandPropertyAssignment(property) && property.objectAssignmentInitializer !== undefined) return false;
       if (key === shape.optionalDateKey && !this.isInertOrPureDateProperty(property)) return false;
     }
-    for (const key of shape.keys) if (!shape.optional.has(key) && !seen.has(key)) return false;
+    // optional projection도 prototype fallback 없이 정확한 own-data witness를 가져야 한다.
+    for (const key of shape.keys) {
+      if (!seen.has(key) && (requireOptionalOwn || !shape.optional.has(key))) return false;
+    }
     return true;
   }
 
@@ -252,19 +631,23 @@ export class ConstructorCarrierAnalyzer {
     bagParameter: ts.ParameterDeclaration,
   ): ReadonlyMap<string, ts.PropertyDeclaration | ts.ParameterDeclaration> | undefined {
     const fields = new Map<string, ts.PropertyDeclaration | ts.ParameterDeclaration>();
-    fields.set(bagParameter.name.getText(), bagParameter);
+    if (!ts.isIdentifier(bagParameter.name) || isPrototypeSensitiveSlotName(bagParameter.name.text)) return undefined;
+    const slots = new Set<string>([bagParameter.name.text]);
+    fields.set(bagParameter.name.text, bagParameter);
     for (const member of declaration.members) {
       this.step();
       if (ts.isConstructorDeclaration(member)) continue;
       if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member) || ts.isAccessor(member)
         || ts.isClassStaticBlockDeclaration(member)) return undefined;
       if (ts.isMethodDeclaration(member)) {
-        if (member.name === undefined || ts.isComputedPropertyName(member.name) || hasDecorators(member)) return undefined;
+        const key = staticPropertyName(member.name);
+        if (key === undefined || isPrototypeSensitiveSlotName(key) || hasDecorators(member) || slots.has(key)) return undefined;
+        slots.add(key);
         continue;
       }
       if (!ts.isPropertyDeclaration(member) || hasDecorators(member) || hasStaticModifier(member)) return undefined;
       const key = staticPropertyName(member.name);
-      if (key === undefined || key === '__proto__' || key === 'then' || fields.has(key)) return undefined;
+      if (key === undefined || isPrototypeSensitiveSlotName(key) || slots.has(key)) return undefined;
       if (member.initializer !== undefined) return undefined;
       const modifiers = ts.getModifiers(member) ?? [];
       if (!modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword)) return undefined;
@@ -316,30 +699,26 @@ export class ConstructorCarrierAnalyzer {
     dateFieldName: string | undefined,
     serviceUses: ConstructorServiceUse[],
   ): boolean {
-    let valid = true;
-    const visit = (node: ts.Node): void => {
-      if (!valid) return;
-      this.step();
-      if (node !== method.body && (ts.isFunctionLike(node) || ts.isClassLike(node))) {
-        valid = false;
-        return;
-      }
-      if (ts.isCallExpression(node)) {
-        if (!this.scanCall(node, bagParameter, bagShape, fields, dateFieldName, serviceUses)) valid = false;
-        return;
-      }
-      if (ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)) {
-        valid = false;
-        return;
-      }
-      if (node.kind === ts.SyntaxKind.ThisKeyword || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-        if (!this.scanRead(node, bagParameter, bagShape, fields, dateFieldName, serviceUses)) valid = false;
-      }
-      ts.forEachChild(node, visit);
-    };
+    if (!this.isSynchronousZeroRuntimeParameterMethod(method)) return false;
     if (method.body === undefined) return false;
-    visit(method.body);
-    return valid;
+    for (const statement of method.body.statements) {
+      this.step();
+      if (ts.isExpressionStatement(statement)) {
+        const expression = parenthesizedCall(statement.expression);
+        if (expression === undefined
+          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;
+        continue;
+      }
+      if (ts.isReturnStatement(statement)) {
+        if (statement.expression === undefined) continue;
+        const expression = parenthesizedCall(statement.expression);
+        if (expression === undefined
+          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;
+        continue;
+      }
+      return false;
+    }
+    return true;
   }
 
   /** call receiver를 분류해 service method 또는 audited Date fallback field 호출만 허용한다. */
@@ -351,8 +730,10 @@ export class ConstructorCarrierAnalyzer {
     dateFieldName: string | undefined,
     serviceUses: ConstructorServiceUse[],
   ): boolean {
+    if (!isDirectCarrierCall(call)) return false;
     const callee = skipWrappers(call.expression);
-    if (!ts.isPropertyAccessExpression(callee) || ts.isPrivateIdentifier(callee.name)) return false;
+    if (!ts.isPropertyAccessExpression(callee) || ts.isPrivateIdentifier(callee.name)
+      || callee.questionDotToken !== undefined || call.questionDotToken !== undefined) return false;
     const methodName = callee.name.text;
     if (methodName === 'call' || methodName === 'apply' || methodName === 'bind') return false;
     const receiver = skipWrappers(callee.expression);
@@ -476,7 +857,9 @@ export class ConstructorCarrierAnalyzer {
     const outer = climbWrappers(construction);
     const parent = outer.parent;
     if (ts.isPropertyAccessExpression(parent) && parent.expression === outer && ts.isCallExpression(parent.parent)
-      && parent.parent.expression === parent && this.knownClassMethod(declaration, parent.name.text)) return true;
+      && parent.parent.expression === parent && parent.parent.arguments.length === 0
+      && parent.questionDotToken === undefined && parent.parent.questionDotToken === undefined
+      && this.knownClassMethod(declaration, parent.name.text)) return true;
     if (ts.isPropertyAssignment(parent) && parent.initializer === outer && ts.isObjectLiteralExpression(parent.parent)) {
       return this.scanOuterMemo(parent.parent, parent, declaration, projectionBindings);
     }
@@ -580,7 +963,9 @@ export class ConstructorCarrierAnalyzer {
     while (current !== undefined && !ts.isSourceFile(current)) {
       if (ts.isFunctionLike(current)) {
         if (!ts.isFunctionDeclaration(current) || current.name === undefined || current.body === undefined
-          || current.asteriskToken !== undefined || hasAsyncModifier(current) || !ts.isSourceFile(current.parent)) return undefined;
+          || current.asteriskToken !== undefined || hasAsyncModifier(current) || hasDecorators(current)
+          || !ts.isSourceFile(current.parent)
+          || !this.isZeroRuntimeParameterFunction(current)) return undefined;
         const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(current.name));
         return symbol !== undefined && this.stableWrapper(symbol) === current ? current : undefined;
       }
@@ -606,7 +991,7 @@ export class ConstructorCarrierAnalyzer {
       const call = ts.isCallExpression(site) && site.expression === reference ? site
         : ts.isCallExpression(site.parent) && site.parent.expression === site ? site.parent : undefined;
       if (call !== undefined) {
-        if (call.arguments.some(ts.isSpreadElement) || call.arguments.length !== 0) return false;
+        if (call.questionDotToken !== undefined || call.arguments.some(ts.isSpreadElement) || call.arguments.length !== 0) return false;
         const projected = this.objectBindingsForCall(call, key);
         if (projected === undefined) return false;
         for (const binding of projected) {
@@ -629,16 +1014,16 @@ export class ConstructorCarrierAnalyzer {
     declaration: ts.ClassLikeDeclaration,
     bindings: ConstructorProjectionBinding[],
   ): boolean {
+    const callee = skipWrappers(call.expression);
+    if (!ts.isIdentifier(callee)) return false;
+    const wrapperSymbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(callee));
+    const wrapper = wrapperSymbol === undefined ? undefined : this.stableWrapper(wrapperSymbol);
+    if (wrapper === undefined || !this.validWrapperCall(wrapper, call)) return false;
     const factorySymbol = factory.name === undefined ? undefined : this.context.checker.getSymbolAtLocation(factory.name);
     const factoryArguments = call.arguments.filter((argument) => ts.isIdentifier(argument)
       && factorySymbol !== undefined && this.context.checker.getSymbolAtLocation(argument) === factorySymbol);
     if (factoryArguments.length !== 1 || call.arguments.some(ts.isSpreadElement)) return false;
     const argumentPosition = call.arguments.indexOf(factoryArguments[0]!);
-    const callee = skipWrappers(call.expression);
-    if (!ts.isIdentifier(callee)) return false;
-    const wrapperSymbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(callee));
-    const wrapper = wrapperSymbol === undefined ? undefined : this.stableWrapper(wrapperSymbol);
-    if (wrapper === undefined) return false;
     const parameter = wrapper.parameters.filter((candidate) => !isThisParameter(candidate))[argumentPosition];
     if (parameter === undefined || !ts.isIdentifier(parameter.name) || parameter.initializer !== undefined
       || parameter.dotDotDotToken !== undefined) return false;
@@ -658,6 +1043,10 @@ export class ConstructorCarrierAnalyzer {
     const visit = (node: ts.Node): void => {
       if (!valid) return;
       this.step();
+      if (ts.isIdentifier(node) && node.text === 'arguments') {
+        valid = false;
+        return;
+      }
       if (ts.isIdentifier(node) && this.context.checker.getSymbolAtLocation(node) === factoryParameterSymbol) {
         uses++;
         const invocation = node.parent;
@@ -709,10 +1098,11 @@ export class ConstructorCarrierAnalyzer {
 
   /** anonymous inline callback이 class known method 호출만 포함하는지 확인한다. */
   private validInlineCallback(callback: ts.ArrowFunction | ts.FunctionExpression, declaration: ts.ClassLikeDeclaration): boolean {
-    if (callback.parameters.length !== 1 || hasAsyncModifier(callback)
+    if (callback.parameters.length !== 1 || hasAsyncModifier(callback) || hasDecorators(callback)
       || ts.isFunctionExpression(callback) && callback.asteriskToken !== undefined) return false;
     const parameter = callback.parameters[0]!;
-    if (!ts.isIdentifier(parameter.name) || parameter.initializer !== undefined || parameter.dotDotDotToken !== undefined) return false;
+    if (!ts.isIdentifier(parameter.name) || parameter.initializer !== undefined || parameter.dotDotDotToken !== undefined
+      || parameter.questionToken !== undefined || hasDecorators(parameter)) return false;
     const symbol = this.context.checker.getSymbolAtLocation(parameter.name);
     if (symbol === undefined) return false;
     let count = 0;
@@ -720,11 +1110,17 @@ export class ConstructorCarrierAnalyzer {
     const visit = (node: ts.Node): void => {
       if (!valid) return;
       this.step();
+      if (ts.isIdentifier(node) && node.text === 'arguments') {
+        valid = false;
+        return;
+      }
       if (ts.isIdentifier(node) && this.context.checker.getSymbolAtLocation(node) === symbol) {
         count++;
-        const access = node.parent;
-        if (!ts.isPropertyAccessExpression(access) || access.expression !== node || ts.isPrivateIdentifier(access.name)
-          || !ts.isCallExpression(access.parent) || access.parent.expression !== access
+    const access = node.parent;
+    if (!ts.isPropertyAccessExpression(access) || access.expression !== node || ts.isPrivateIdentifier(access.name)
+      || access.questionDotToken !== undefined || !ts.isCallExpression(access.parent) || access.parent.expression !== access
+      || access.parent.questionDotToken !== undefined
+      || access.parent.arguments.length !== 0
           || !this.knownCallbackMethod(access.parent, declaration)) valid = false;
         return;
       }
@@ -740,7 +1136,7 @@ export class ConstructorCarrierAnalyzer {
 
   /** 호출 결과가 정확히 한 단계 객체 구조 분해에 쓰이는지 찾는다. */
   private objectBindingsForCall(call: ts.CallExpression, key: string): readonly { element: ts.BindingElement; symbol: ts.Symbol }[] | undefined {
-    if (call.arguments.length !== 0 || call.arguments.some(ts.isSpreadElement)) return undefined;
+    if (call.questionDotToken !== undefined || call.arguments.length !== 0 || call.arguments.some(ts.isSpreadElement)) return undefined;
     const declaration = call.parent;
     if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== call || !ts.isObjectBindingPattern(declaration.name)) return undefined;
     const bindings: Array<{ element: ts.BindingElement; symbol: ts.Symbol }> = [];
@@ -790,7 +1186,8 @@ export class ConstructorCarrierAnalyzer {
     const access = site.parent;
     if (!ts.isPropertyAccessExpression(access) || access.expression !== site || ts.isPrivateIdentifier(access.name)) return false;
     const call = access.parent;
-    return ts.isCallExpression(call) && call.expression === access && this.knownClassMethod(declaration, access.name.text);
+    return ts.isCallExpression(call) && call.expression === access && call.arguments.length === 0
+      && this.knownClassMethod(declaration, access.name.text);
   }
 
   /** named callback/function 안에서의 capture는 carrier escape로 닫는다. */
@@ -811,7 +1208,7 @@ export class ConstructorCarrierAnalyzer {
     if (!ts.isIdentifier(callee)) return false;
     const wrapperSymbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(callee));
     const wrapper = wrapperSymbol === undefined ? undefined : this.stableWrapper(wrapperSymbol);
-    if (wrapper === undefined) return false;
+    if (wrapper === undefined || !this.validWrapperCall(wrapper, call)) return false;
     const callbacks = call.arguments.map((argument) => skipWrappers(argument))
       .filter((value): value is ts.ArrowFunction | ts.FunctionExpression => ts.isArrowFunction(value) || ts.isFunctionExpression(value));
     if (callbacks.length !== 1) return false;
@@ -831,6 +1228,50 @@ export class ConstructorCarrierAnalyzer {
     return true;
   }
 
+  /** wrapper 호출의 모든 runtime parameter가 실제로 안전하게 공급되는지 확인한다. */
+  private validWrapperCall(wrapper: ts.FunctionDeclaration, call: ts.CallExpression): boolean {
+    const parameters = wrapper.parameters.filter((parameter) => !isThisParameter(parameter));
+    if (call.questionDotToken !== undefined || call.arguments.some(ts.isSpreadElement)
+      || parameters.length !== call.arguments.length) return false;
+    for (const parameter of parameters) {
+      this.step();
+      if (!isRequiredIdentifierParameter(parameter)) return false;
+    }
+    return !this.functionUsesArguments(wrapper.body);
+  }
+
+  /** carrier method의 동기 실행과 zero runtime parameter를 단계 예산 안에서 확인한다. */
+  private isSynchronousZeroRuntimeParameterMethod(method: ts.MethodDeclaration): boolean {
+    return method.asteriskToken === undefined && !hasAsyncModifier(method) && this.isZeroRuntimeParameterFunction(method);
+  }
+
+  /** zero-argument factory의 lexical `arguments` 우회를 단계 예산 안에서 감사한다. */
+  private isZeroRuntimeParameterFunction(functionLike: ts.FunctionLikeDeclaration): boolean {
+    if (hasDecorators(functionLike)) return false;
+    for (const parameter of functionLike.parameters) {
+      this.step();
+      if (!isThisParameter(parameter) || hasDecorators(parameter)) return false;
+    }
+    return !this.functionUsesArguments(functionLike.body);
+  }
+
+  /** 함수 본문의 `arguments` 사용을 기존 carrier 단계 예산으로 센다. */
+  private functionUsesArguments(body: ts.Node | undefined): boolean {
+    if (body === undefined) return false;
+    let found = false;
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      this.step();
+      if (ts.isIdentifier(node) && node.text === 'arguments') {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(body);
+    return found;
+  }
+
   /** wrapper callback과 carrier binding의 모든 참조가 exact one-argument flow인지 확인한다. */
   private closedCallbackFlow(
     wrapper: ts.FunctionDeclaration,
@@ -844,6 +1285,10 @@ export class ConstructorCarrierAnalyzer {
     const visit = (node: ts.Node): void => {
       if (!valid) return;
       this.step();
+      if (ts.isIdentifier(node) && node.text === 'arguments') {
+        valid = false;
+        return;
+      }
       if (ts.isFunctionLike(node)) {
         valid = false;
         return;
@@ -932,6 +1377,15 @@ interface ConstructorAudit {
   readonly dateFieldName: string | undefined;
 }
 
+/** declared-method recovery가 공유하는 constructor/storage 근거다. */
+interface ConstructorReceiverProof {
+  readonly bagParameter: ts.ParameterDeclaration;
+  readonly bagShape: BagShape;
+  readonly fields: ReadonlyMap<string, ts.PropertyDeclaration | ts.ParameterDeclaration>;
+  readonly audit: ConstructorAudit;
+  readonly constructions: readonly ts.NewExpression[];
+}
+
 class CarrierBudgetExceeded extends Error {}
 
 /** parameter-property인지 확인한다. */
@@ -972,6 +1426,40 @@ function hasStaticModifier(node: ts.Node): boolean {
 /** async modifier 유무를 확인한다. */
 function hasAsyncModifier(node: ts.Node): boolean {
   return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+}
+
+/** runtime 인자가 실제 식별자 하나로만 전달되는 required parameter인지 확인한다. */
+function isRequiredIdentifierParameter(parameter: ts.ParameterDeclaration): boolean {
+  return ts.isIdentifier(parameter.name) && parameter.initializer === undefined
+    && parameter.dotDotDotToken === undefined && parameter.questionToken === undefined && !hasDecorators(parameter);
+}
+
+/** declared-method instance 소비에서 평가 자체가 effect-free인 argument 문법이다. */
+function isInertDeclaredMethodArgument(expression: ts.Expression): boolean {
+  const inner = skipWrappers(expression);
+  return ts.isIdentifier(inner) && inner.text !== 'arguments' || ts.isStringLiteralLike(inner)
+    || ts.isNumericLiteral(inner) || ts.isBigIntLiteral(inner) || inner.kind === ts.SyntaxKind.TrueKeyword
+    || inner.kind === ts.SyntaxKind.FalseKeyword || inner.kind === ts.SyntaxKind.NullKeyword;
+}
+
+/** carrier method call이 결과 coercion·인자 평가 없이 직접 실행되는지 확인한다. */
+function isDirectCarrierCall(call: ts.CallExpression): boolean {
+  const outer = climbWrappers(call);
+  const parent = outer.parent;
+  return (ts.isExpressionStatement(parent) && parent.expression === outer)
+    || (ts.isReturnStatement(parent) && parent.expression === outer);
+}
+
+/** inert parentheses만 벗기고 타입·값 래퍼가 붙은 호출은 남긴다. */
+function parenthesizedCall(expression: ts.Expression): ts.CallExpression | undefined {
+  let current = expression;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  return ts.isCallExpression(current) ? current : undefined;
+}
+
+/** parameter-property·field·method가 prototype-sensitive runtime slot을 차지하지 않는지 확인한다. */
+function isPrototypeSensitiveSlotName(name: string): boolean {
+  return name === '__proto__' || name === 'prototype' || name === 'constructor' || name === 'then';
 }
 
 /** variable declaration을 감싼 statement가 직접 export되는지 확인한다. */

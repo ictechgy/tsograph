@@ -870,14 +870,34 @@ writes invalidate affected receiver proofs. Mutator value escapes, incomplete al
 unrelated key name is never proof of a harmless effect.
 
 A narrow constructor carrier proof can separate an exact dependency object literal from unknown
-reflection. It requires a closed project class, a private readonly parameter property, complete
-instance-use and projection audits, and a mutation view whose effects are proved local. Missing
-optional Date callbacks require an exact genuine `new Date()` fallback and a clean prototype view;
-instance-field setter hazards are checked independently of compiler emit options. Whole-instance or
-bag escapes, aliases, accessors, inheritance, decorators, unsafe callbacks, and unproved mutation
-receivers keep the call unresolved. Simple private primitive object/array literals may qualify as
-unrelated mutation receivers only for existing own-data slots and fully audited uses; array types,
-spread arrays, arbitrary factories, and `map().sort().map()` do not establish that proof.
+reflection. It requires a closed, unexported project class, a private readonly parameter property,
+complete instance-use and projection audits, and a mutation view whose effects are proved local.
+Optional Date callbacks must be present as own data properties: genuine `undefined` or `null`
+selects the fallback, while an exact audited Date arrow may be supplied directly. An omitted key remains unproved because inherited
+properties such as `toString` or `constructor` can prevent that fallback from running; casts and
+optional types do not establish absence. Carrier methods initially have no runtime parameters,
+and admitted instance calls must supply no arguments. Audited wrappers retain only their fully
+checked required identifier transfers; default or implicit `arguments` escapes remain unproved.
+Default/rest/destructured parameters, decorators, async/generator execution, and unproved implicit
+or coercing evaluation retain uncertainty. Parameter-property stores, instance fields, and method
+slots are audited for collisions and setter interception independently of class-field emit options;
+TypeScript `private` and `readonly` are not runtime ownership evidence. Whole-instance or bag escapes,
+aliases, accessors, inheritance, unsafe callbacks, and unproved mutation receivers keep the call
+unresolved. Previously admitted omitted-key or unaudited entry cases may therefore become candidate
+or unresolved. Simple private primitive object/array literals may qualify as unrelated mutation
+receivers only for existing own-data slots and fully audited uses; array types, spread arrays,
+arbitrary factories, and `map().sort().map()` do not establish that proof.
+
+Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
+same-class method call with inert entry and arguments can retain its target when it is returned or
+stored in an immutable local, including `const result = await this.method(value); return result`:
+the method lookup occurs before suspension. Receiver construction must also pass its own entry
+and storage audit, with no replacement return or instance escape. Result processing after the call
+does not certify subsequent protected uses. Unknown callbacks, dependency calls, or an earlier
+suspension before a lookup remain unproved; a Date-typed field alone is not an effect certificate.
+Carrier subclasses require a concrete subclass-constructor witness and remain conservative in this
+release. General containing wrappers and factories do not gain isolation; only an exact private
+single-property holder consumed through audited direct calls retains the ordinary receiver path.
 
 A private top-level `const registry = new Map()` can supply project factory values through `get`
 when the constructor and supported API declarations come from the actual TypeScript default

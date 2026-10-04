@@ -703,13 +703,31 @@ async/generator 팩터리는 계속 모름이다. 알려진 반사 대상은 항
 mutator 값 탈출·불완전한 별칭과 `__defineGetter__`/`__defineSetter__`는 opaque mutation으로 남긴다.
 declaration file이나 무관한 키 이름만으로 부수효과가 없다고 판단하지 않는다.
 
-좁은 생성자 carrier 증명은 정확한 의존성 객체 리터럴을 모르는 반사 대상과 분리할 수 있다. 닫힌 프로젝트 클래스,
-private readonly 매개변수 속성, 모든 instance 사용·투영 감사, 부수효과를 분리할 수 있는 mutation 범위가 필요하다.
-생략된 optional Date callback은 genuine `new Date()`의 정확한 기본값과 깨끗한 prototype 범위를 요구하며,
-instance 필드의 setter 위험은 compiler emit 옵션에 의존하지 않고 검사한다. 전체 instance/bag 탈출·별칭·접근자·
-상속·decorator·위험한 callback·증명하지 못한 수신자는 미해석이다. private primitive object/array literal도 기존
-own-data 슬롯과 모든 사용을 감사한 경우에만 무관한 mutation 수신자로 인정한다. 배열 타입·전개 배열·임의 factory와
-`map().sort().map()` 형태만으로는 증명하지 않는다.
+좁은 생성자 carrier 증명은 정확한 의존성 객체 리터럴을 모르는 반사 대상과 분리할 수 있다. 닫힌 비내보내기
+프로젝트 클래스, private readonly 매개변수 속성, 완전한 instance 소비·projection 감사와 로컬로 증명한
+mutation 효과가 필요하다. optional Date callback도 명시적인 own data 속성으로 있어야 한다. genuine
+`undefined`·`null`은 기본값 선택을 증명하며, 정확히 감사한 Date 화살표도 직접 공급할 수 있다. 누락된 키는 `toString`·
+`constructor` 같은 상속 속성이 기본값 호출을 막을 수 있어 미해석으로 남긴다. cast와 optional 타입은
+런타임 부재의 근거가 아니다. 초기 carrier 메서드는 runtime 매개변수가 없어야 하며, 허용하는 instance 호출도
+인자가 없어야 한다. 감사한 wrapper의 필수 identifier 전달만 유지하고, default나 암묵적 `arguments` 누출은
+증명하지 않는다. default/rest/구조 분해
+매개변수·decorator·async/generator 실행 및 증명하지 못한 암묵적·coercion 평가도 불확실성을 유지한다.
+매개변수 속성의 저장·인스턴스 필드·메서드 slot의 충돌과 setter 가로채기는 class-field emit 옵션과 독립적으로
+감사한다. TypeScript private/readonly 자체는 런타임 소유권 근거가 아니다. instance/bag 탈출, 별칭, accessor,
+상속, 위험한 callback과 증명하지 못한 mutation 수신자는 계속 미해석이다. 과거 허용했던 optional 누락이나
+감사하지 않은 진입 효과도 candidate 또는 미해석으로 바뀔 수 있다. private primitive object/array literal의
+기존 own data slot 쓰기만 완전한 사용 감사 안에서 무관한 mutation으로 분리할 수 있다. 배열 타입·spread 배열·
+임의 factory·`map().sort().map()`은 이 증명이 아니다.
+
+일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
+직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.
+`const result = await this.method(value); return result`도 메서드 조회가 suspension보다 먼저 일어난다.
+수신자 생성도 교체 객체 반환·instance 탈출 없이 별도 진입·저장 감사를 통과해야 한다.
+호출 뒤의 결과 처리는 이후의 보호된 사용을 인증하지 않는다. 조회 전에 모르는 callback·의존성 호출·
+이전 suspension이 있으면 계속 미해석이며, Date 타입 필드 자체는 부수효과가 없다는 증명이 아니다.
+carrier 상속 클래스는 실제 subclass 생성자 증명이 필요해 이번 릴리스에서 보수적으로 남긴다.
+일반 wrapper·factory에 격리 자격을 주지 않으며, 정확한 비공개 단일 속성 holder를 감사한 직접 호출로만
+소비하는 경우에만 기존 일반 수신자 경로를 유지한다.
 
 private 최상위 `const registry = new Map()`은 실제 TypeScript default library의 생성자/API 선언과 mutation 범위를
 확인한 경우 `get`으로 프로젝트 factory 값을 전달한다. 직접 `get/set/has/delete/clear/keys`와 readonly `size`만

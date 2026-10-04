@@ -213,6 +213,8 @@ export class ValueFlow {
    */
   memberSymbol(value: ObjectValue, name: string): ts.Symbol | undefined {
     this.ensureReflective();
+    if (ts.isClassLike(value) && this.constructorCarrier.hasCarrierFlowLineage(value)
+      && !this.constructorCarrier.allowsDeclaredMethodReceiver(value)) return undefined;
     // 본문 검증은 속성 쓰기 수신자의 흐름을 구하므로 질의 예산 안에서 돌린다(넘으면 증명 실패).
     let body: ts.FunctionLikeDeclaration | undefined;
     const proven = this.query(() => {
@@ -377,9 +379,10 @@ export class ValueFlow {
    */
   private newValues(expression: ts.NewExpression): Flow {
     const callee = skipWrappers(expression.expression);
-    if (ts.isClassExpression(callee)) return new Set([callee]);
-    const declaration = this.classOfSymbol(this.calleeSymbol(callee));
-    return declaration === undefined ? null : new Set([declaration]);
+    const declaration = ts.isClassExpression(callee) ? callee : this.classOfSymbol(this.calleeSymbol(callee));
+    if (declaration === undefined) return null;
+    if (!this.constructorCarrier.allowsConstructedInstanceIdentity(declaration)) return null;
+    return new Set([declaration]);
   }
 
   /**
@@ -420,6 +423,11 @@ export class ValueFlow {
   private thisValues(node: ts.Node): Flow {
     const owner = thisOwner(node);
     if (owner === undefined || this.policy.isOpenCallable(owner.declaration)) return null;
+    // Date-fallback carrier 역할의 instance member body는 entry·storage·모든 invocation이 Stage 0을 통과해야만
+    // `this`에서 bag service로 이어진다. 일반 클래스는 이 좁은 gate의 대상이 아니다.
+    if (!owner.inConstructor && !this.constructorCarrier.allowsInstanceFlow(owner.declaration)
+      && !(this.constructorCarrier.allowsDeclaredMethodReceiver(owner.declaration)
+        && this.isSafeDeclaredSelfMethodUse(node, owner.method, owner.declaration))) return null;
     const classes = this.withSubclasses(owner.declaration);
     if (classes.some((declaration) => this.isEscapedClass(declaration))) return null;
     const method = owner.method;
@@ -427,6 +435,90 @@ export class ValueFlow {
     // 떼어 내기 판정은 메서드 자신을 읽는 `this.m`의 흐름을 구하므로(`setTimeout(this.tick.bind(this))`)
     // 메서드별 메모 단위로 감싼다. 재진입하면 빈 잠정값이 "닿을 수 있음"이 되어 보수적으로 끝난다.
     return this.unit(this.thisKey(method), () => (this.isDetachable(method, owner.declaration) ? null : new Set(classes)));
+  }
+
+  /**
+   * carrier gate가 field/bag flow를 닫아도, inert entry의 전체 본문인 declared prototype method 호출은 target
+   * identity를 별도로 보존한다. default/rest/destructure/generator entry와 effectful call arguments는 허용하지 않는다.
+   */
+  private isSafeDeclaredSelfMethodUse(
+    node: ts.Node,
+    owner: ts.MethodDeclaration | undefined,
+    declaration: ts.ClassLikeDeclaration,
+  ): boolean {
+    if (owner === undefined || owner.body === undefined || owner.asteriskToken !== undefined || hasDecorators(owner)) return false;
+    for (const parameter of runtimeParameters(owner)) {
+      if (!ts.isIdentifier(parameter.name) || parameter.initializer !== undefined || parameter.dotDotDotToken !== undefined
+        || parameter.questionToken !== undefined || hasDecorators(parameter)) return false;
+    }
+    const receiver = climbWrappers(node);
+    const access = receiver.parent;
+    if ((!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access))
+      || access.expression !== receiver || access.questionDotToken !== undefined || accessName(access) === undefined) return false;
+    const call = access.parent;
+    if (!ts.isCallExpression(call) || call.expression !== access || call.questionDotToken !== undefined
+      || call.arguments.some((argument) => ts.isSpreadElement(argument) || !isInertSelfMethodArgument(argument))
+      || !this.isSafeDeclaredSelfMethodSequence(owner, call)) return false;
+    const member = ts.isPropertyAccessExpression(access) ? access.name : access.argumentExpression;
+    const symbol = this.checker.getSymbolAtLocation(member);
+    const declarations = symbol?.declarations ?? [];
+    if (declarations.length !== 1) return false;
+    const target = declarations[0]!;
+    return ts.isMethodDeclaration(target) && target.parent === declaration && target.body !== undefined
+      && !isStatic(target) && !hasDecorators(target) && !target.parameters.some(hasDecorators)
+      && this.hasUniqueDeclaredMethodSlot(declaration, target);
+  }
+
+  /** direct return 또는 inert const prefix 뒤의 captured `[await] this.method()` 한 번만 허용한다. */
+  private isSafeDeclaredSelfMethodSequence(owner: ts.MethodDeclaration, call: ts.CallExpression): boolean {
+    const body = owner.body!;
+    let top: ts.Node = call;
+    while (top.parent !== body) {
+      if (top.parent === undefined || ts.isFunctionLike(top.parent) || ts.isClassLike(top.parent)) return false;
+      top = top.parent;
+    }
+    const index = body.statements.indexOf(top as ts.Statement);
+    if (index < 0) return false;
+    for (let position = 0; position < index; position++) {
+      if (!isInertSelfMethodPrefix(body.statements[position]!)) return false;
+    }
+    const statement = body.statements[index]!;
+    if (ts.isReturnStatement(statement) && statement.expression !== undefined) {
+      return selfMethodCallExpression(statement.expression) === call;
+    }
+    if (!ts.isVariableStatement(statement)
+      || (statement.declarationList.flags & ts.NodeFlags.Const) === 0
+      || statement.declarationList.declarations.length !== 1) return false;
+    const result = statement.declarationList.declarations[0]!;
+    return isSafeSelfMethodResultBinding(result.name) && result.initializer !== undefined
+      && selfMethodCallExpression(result.initializer) === call;
+  }
+
+  /** target 이름을 차지할 수 있는 모든 instance runtime slot이 정확히 그 method 하나인지 확인한다. */
+  private hasUniqueDeclaredMethodSlot(
+    declaration: ts.ClassLikeDeclaration,
+    target: ts.MethodDeclaration,
+  ): boolean {
+    const name = memberName(target.name);
+    if (name === undefined) return false;
+    let matches = 0;
+    for (const member of declaration.members) {
+      if (ts.isConstructorDeclaration(member)) {
+        for (const parameter of member.parameters) {
+          if (!ts.isParameterPropertyDeclaration(parameter, member) || !ts.isIdentifier(parameter.name)) continue;
+          if (parameter.name.text === name) return false;
+        }
+        continue;
+      }
+      if (isStatic(member)) continue;
+      const memberWithName = member as ts.ClassElement & { readonly name?: ts.PropertyName };
+      if (memberWithName.name === undefined) continue;
+      if (ts.isComputedPropertyName(memberWithName.name) && memberName(memberWithName.name) === undefined) return false;
+      if (memberName(memberWithName.name) !== name) continue;
+      matches++;
+      if (member !== target) return false;
+    }
+    return matches === 1;
   }
 
   /**
@@ -588,17 +680,30 @@ export class ValueFlow {
   private literalProperty(literal: ts.ObjectLiteralExpression, name: string): Flow {
     if (this.policy.openProperties || this.isReflectivelyWritten(literal)) return null;
     let result: Flow = EMPTY;
+    let hasExplicitOwnMember = false;
     for (const property of literal.properties) {
       if (ts.isSpreadAssignment(property)) {
         result = unionFlows(result, this.propertyValues(this.expressionValues(property.expression), name));
       } else if (property.name !== undefined && ts.isComputedPropertyName(property.name)) {
         return null;
       } else if (property.name !== undefined && memberName(property.name) === name) {
+        hasExplicitOwnMember = true;
         result = this.literalMemberValues(property);
       }
       if (result === null) return null;
     }
+    // own member가 없고 genuine Object prototype member가 보이면 EMPTY(없는 값)로 축약할 수 없다.
+    // 실제 lookup은 prototype 값을 읽으므로 fallback 분기만 남기는 false bound edge가 생긴다.
+    if (!hasExplicitOwnMember && this.hasDefaultLibraryPrototypeMember(literal, name)) return null;
     return unionFlows(result, this.foreignWrites(name, literal));
+  }
+
+  /** object literal의 빠진 key가 표준 prototype에서 실제로 제공되는지를 checker 선언으로 판정한다. */
+  private hasDefaultLibraryPrototypeMember(literal: ts.ObjectLiteralExpression, name: string): boolean {
+    if (this.policy.isDefaultLibraryFile === undefined) return false;
+    const symbol = this.checker.getPropertyOfType(this.checker.getTypeAtLocation(literal), name);
+    const declarations = symbol?.declarations ?? [];
+    return declarations.some((declaration) => this.policy.isDefaultLibraryFile!(declaration.getSourceFile()));
   }
 
   /**
@@ -2028,16 +2133,24 @@ function hasThisReference(declaration: ts.FunctionLikeDeclaration): boolean {
  * 초기값) 안이 아니면 undefined다.
  *
  * @param node this 키워드
- * @returns 클래스 또는 undefined
+ * @returns 클래스·메서드·constructor 경계 또는 undefined
  */
-function thisOwner(node: ts.Node): { declaration: ts.ClassLikeDeclaration; method: ts.MethodDeclaration | undefined } | undefined {
+function thisOwner(node: ts.Node): {
+  declaration: ts.ClassLikeDeclaration;
+  method: ts.MethodDeclaration | undefined;
+  inConstructor: boolean;
+} | undefined {
   for (let current: ts.Node | undefined = node.parent; current !== undefined; current = current.parent) {
     if (ts.isArrowFunction(current)) continue;
     const isMember = ts.isMethodDeclaration(current) || ts.isConstructorDeclaration(current) || ts.isGetAccessorDeclaration(current)
       || ts.isSetAccessorDeclaration(current) || ts.isPropertyDeclaration(current);
     if (isMember) {
       if (!ts.isClassLike(current.parent) || isStatic(current as ts.ClassElement)) return undefined;
-      return { declaration: current.parent, method: ts.isMethodDeclaration(current) ? current : undefined };
+      return {
+        declaration: current.parent,
+        method: ts.isMethodDeclaration(current) ? current : undefined,
+        inConstructor: ts.isConstructorDeclaration(current),
+      };
     }
     if (ts.isFunctionLike(current) || ts.isClassStaticBlockDeclaration(current) || ts.isSourceFile(current)) return undefined;
   }
@@ -2132,6 +2245,38 @@ function hasExportModifierNode(node: ts.Node): boolean {
 /** `this` 매개변수를 제거한 런타임 매개변수 목록이다. */
 function runtimeParameters(declaration: ts.SignatureDeclaration): readonly ts.ParameterDeclaration[] {
   return declaration.parameters.filter((parameter) => !isThisParameter(parameter));
+}
+
+/** declared self-method target를 고르기 전에 평가해도 effect가 없는 좁은 argument 문법이다. */
+function isInertSelfMethodArgument(expression: ts.Expression): boolean {
+  const inner = skipWrappers(expression);
+  return ts.isIdentifier(inner) && inner.text !== 'arguments' || ts.isStringLiteralLike(inner) || ts.isNumericLiteral(inner)
+    || ts.isBigIntLiteral(inner) || inner.kind === ts.SyntaxKind.TrueKeyword || inner.kind === ts.SyntaxKind.FalseKeyword
+    || inner.kind === ts.SyntaxKind.NullKeyword;
+}
+
+/** self-method lookup 전에는 immutable identifier/literal local 선언만 effect-free prefix로 허용한다. */
+function isInertSelfMethodPrefix(statement: ts.Statement): boolean {
+  if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
+  return statement.declarationList.declarations.every((declaration) => ts.isIdentifier(declaration.name)
+    && declaration.initializer !== undefined && isInertSelfMethodArgument(declaration.initializer));
+}
+
+/** call result를 받는 local은 identifier 또는 default/rest/computed 없는 한 단계 object binding만 허용한다. */
+function isSafeSelfMethodResultBinding(name: ts.BindingName): boolean {
+  if (ts.isIdentifier(name)) return true;
+  if (!ts.isObjectBindingPattern(name)) return false;
+  return name.elements.length > 0 && name.elements.every((element) => element.dotDotDotToken === undefined
+    && element.initializer === undefined && ts.isIdentifier(element.name)
+    && (element.propertyName === undefined || ts.isIdentifier(element.propertyName)
+      || ts.isStringLiteralLike(element.propertyName) || ts.isNumericLiteral(element.propertyName)));
+}
+
+/** wrappers와 target call 자체에 걸린 await만 벗겨 self-method call을 읽는다. */
+function selfMethodCallExpression(expression: ts.Expression): ts.CallExpression | undefined {
+  let inner = skipWrappers(expression);
+  if (ts.isAwaitExpression(inner)) inner = skipWrappers(inner.expression);
+  return ts.isCallExpression(inner) ? inner : undefined;
 }
 
 /** 문자열 키 집합이 같은지 본다. */

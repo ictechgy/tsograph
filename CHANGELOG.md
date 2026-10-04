@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-04
+
+### Fixed
+
+- 생성자 carrier의 optional callback은 명시적인 own data 속성일 때만 기본값 선택을 증명한다. 상속된
+  `toString`·`constructor`를 읽는 누락 키를 Date fallback으로 확정하던 경로를 미해석으로 보존한다.
+- carrier 메서드의 매개변수 진입·암묵적 평가를 본문보다 먼저 감사해 default에서 instance가 외부로 전달되는
+  경로를 막는다. 초기 runtime 매개변수·async/generator 및 증명하지 못한 평가를 보수적으로 거부한다.
+- parameter-property·필드·메서드의 runtime slot 충돌과 prototype-sensitive 저장을 emit 방식에 기대지 않고 감사한다.
+- 일반 선언 메서드의 target 조회는 carrier 필드·bag 격리와 분리해, inert한 직접 호출의 반환·지역 저장 및 호출 이후 await에서 기존 target을 보존한다. 조회 전의 모르는 효과는 계속 미해석이다.
+
 ## [0.8.0] - 2026-10-04
 
 ### Added
