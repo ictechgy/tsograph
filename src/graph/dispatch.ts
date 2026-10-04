@@ -338,6 +338,11 @@ class OpenCallablePolicy implements FlowPolicy {
     return this.pathByFile.has(sourceFile);
   }
 
+  /** SDK 선언 파일과 구분해 Program이 실제 default library로 읽은 파일만 인정한다. */
+  isDefaultLibraryFile(sourceFile: ts.SourceFile): boolean {
+    return this.context.program.isSourceFileDefaultLibrary(sourceFile);
+  }
+
   /**
    * 스캔 밖 코드가 부를 수 있는 함수·클래스인지 본다.
    *

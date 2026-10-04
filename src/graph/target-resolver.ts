@@ -47,7 +47,7 @@ export class TargetResolver {
   private readonly store: GraphStore;
   private readonly pathOf: (sourceFile: ts.SourceFile) => string | undefined;
   private readonly isProjectSpecifier: (specifier: string) => boolean;
-  private readonly writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'>;
+  private readonly writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> & Partial<Pick<FlowIndex, 'hasOpaqueMutation'>>;
 
   /**
    * @param checker TypeChecker
@@ -61,7 +61,7 @@ export class TargetResolver {
     store: GraphStore,
     pathOf: (sourceFile: ts.SourceFile) => string | undefined,
     isProjectSpecifier: (specifier: string) => boolean,
-    writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> = {
+    writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> & Partial<Pick<FlowIndex, 'hasOpaqueMutation'>> = {
       identifierWrites: new Map(), propertyWrites: new Map(), reflectiveTargets: [],
     },
   ) {
@@ -445,6 +445,7 @@ export class TargetResolver {
    * dispatch 값 흐름이 실제 수신자와 겹치지 않음을 증명할 때만 bound로 복구한다.
    */
   private isReflectivelyMutable(receiver: ts.Expression): boolean {
+    if (this.writes.hasOpaqueMutation === true) return true;
     if (this.writes.reflectiveTargets.length === 0) return false;
     return this.writes.reflectiveTargets.some((target) => !this.expressionsProvablyDisjoint(receiver, target));
   }

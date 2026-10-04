@@ -863,6 +863,32 @@ against `null`/global `undefined`). Discarded `memo = null`/global `undefined` r
 whole-object uses, member reads, setters, compound/logical writes, and additional object writes keep the value
 unknown.
 
+Visible mutations retain their operation, receiver, key, value/source/descriptor, and prototype
+arguments in an internal index. `Object.setPrototypeOf`, `Reflect.setPrototypeOf`, and `__proto__`
+writes invalidate affected receiver proofs. Mutator value escapes, incomplete aliases, and legacy
+`__defineGetter__`/`__defineSetter__` uses retain opaque mutation state. A declaration file or an
+unrelated key name is never proof of a harmless effect.
+
+A narrow constructor carrier proof can separate an exact dependency object literal from unknown
+reflection. It requires a closed project class, a private readonly parameter property, complete
+instance-use and projection audits, and a mutation view whose effects are proved local. Missing
+optional Date callbacks require an exact genuine `new Date()` fallback and a clean prototype view;
+instance-field setter hazards are checked independently of compiler emit options. Whole-instance or
+bag escapes, aliases, accessors, inheritance, decorators, unsafe callbacks, and unproved mutation
+receivers keep the call unresolved. Simple private primitive object/array literals may qualify as
+unrelated mutation receivers only for existing own-data slots and fully audited uses; array types,
+spread arrays, arbitrary factories, and `map().sort().map()` do not establish that proof.
+
+A private top-level `const registry = new Map()` can supply project factory values through `get`
+when the constructor and supported API declarations come from the actual TypeScript default
+libraries and the mutation view is clean. Only direct `get/set/has/delete/clear/keys` calls and
+readonly `size` reads are admitted; `set` results must be discarded. Aliases, exports, argument
+passes, reflection, computed/detached/optional calls, chaining, `forEach`, `values`, and `entries`
+keep it opaque. Unknown keys include all observed registrations; exact primitive literals, immutable
+const aliases, and conditional unions can narrow key matches. Primitive kinds remain distinct for
+Map, and `-0` matches `0`. Symbol/object/enum/call-derived keys are not guessed. Delete and clear do
+not remove possible values from this context-insensitive analysis, and iterator results remain opaque.
+
 Callable values use the same flow engine: function declarations and function-valued initializers plus
 their observed assignments, closed callback parameters, direct invocations of anonymous inline
 callbacks, function and getter return values, constructor assignments/defaults, and safely readable
@@ -930,7 +956,7 @@ What `bound` guarantees, and what it does not:
   declaration they re-export are open, as are top-level declarations of files that are not ES
   modules (scripts and CommonJS files). A variable declared more than once (`var x = a; var x = b;`)
   unions every initializer.
-- **Not modeled** (documented gaps): prototype mutation, `eval`, values that leave the
+- **Not modeled** (documented gaps): unindexed prototype APIs, `eval`, values that leave the
   project through library code and come back, and properties that library code mutates. When
   dependencies are not installed, values that pass through their APIs are unknown, so same-named
   writes and method reads on such values elsewhere in the project can block `bound` for unrelated
@@ -939,7 +965,7 @@ What `bound` guarantees, and what it does not:
   `Object.defineProperty(ies)`, `Reflect.set`, `Reflect.defineProperty`, and `Reflect.deleteProperty`
   targets are handled
   conservatively (their properties and members become unknown, including for statically resolved member
-  calls). The returned-literal identity proof above is the only exception, and applies only to an unknown
+  calls). The narrow returned-literal and constructor-carrier identity proofs above are the exceptions, and applies only to an unknown
   target; a known reflective target still blocks the literal. A write or delete through a computed key
   (`obj[key] = v`, `delete obj[key]`) likewise makes that receiver's properties unknown. An unknown reflective
   target keeps its static type: it is excluded

@@ -1,6 +1,6 @@
 {
   "name": "tsograph",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Static HTTP server/client and persistence facts for TypeScript/JavaScript, with call-graph traversal for the isthmus exchange.",
   "keywords": [
     "openapi",
