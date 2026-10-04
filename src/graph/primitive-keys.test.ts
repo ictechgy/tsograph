@@ -16,7 +16,8 @@ interface KeySource {
 }
 
 function keySource(source: string): KeySource {
-  const options: ts.CompilerOptions = { strict: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext };
+  // fixture는 ECMAScript 표준 라이브러리만 사용하며 호스트의 ambient @types를 읽지 않는다.
+  const options: ts.CompilerOptions = { strict: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, types: [], lib: ['lib.es2022.d.ts'] };
   const host = ts.createCompilerHost(options);
   const original = host.getSourceFile;
   host.getSourceFile = (name, version, onError, shouldCreateNewSourceFile) => name === 'main.ts'

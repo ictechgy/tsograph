@@ -26,7 +26,7 @@ async function graphOf(files: Record<string, string>) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-constructor-carrier-')));
   try {
     const all = {
-      'tsconfig.json': '{ "compilerOptions": { "strict": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+      'tsconfig.json': '{ "compilerOptions": { "strict": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
       ...files,
     };
     for (const [path, content] of Object.entries(all)) {
@@ -42,6 +42,9 @@ async function graphOf(files: Record<string, string>) {
 function indexedSource(source: string): IndexedSource {
   const options: ts.CompilerOptions = {
     strict: true,
+    // 표준 Map·Date 근거를 유지하되 무관한 DOM·호스트 ambient 선언은 로드하지 않는다.
+    types: [],
+    lib: ['lib.es2022.d.ts'],
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
