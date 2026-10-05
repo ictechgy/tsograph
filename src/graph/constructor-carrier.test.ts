@@ -201,7 +201,7 @@ test('정확히 한 번 생성된 private readonly bag carrier와 Date fallback�
   assert.ok(proof.serviceUses.some((use) => use.methodName === 'run'));
 });
 
-test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fail closed로 관리한다', () => {
+test('analyzer는 완료 결과·재진입·예산 경계를 분리하고 내부 stack failure를 전파한다', () => {
   const { context, runner } = contextOf(positive);
   const analyzer = new ConstructorCarrierAnalyzer(context);
   const proof = analyzer.prove(runner);
@@ -221,7 +221,7 @@ test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fai
   });
   assert.equal(rejected.prove(runner), undefined);
   assert.equal(rejected.prove(runner), undefined);
-  assert.equal(projectChecks, 1);
+  assert.equal(projectChecks, 2);
 
   let reentered: ReturnType<ConstructorCarrierAnalyzer['prove']> | null = null;
   let firstProjectCheck = true;
@@ -246,7 +246,7 @@ test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fai
     ...context,
     policy: { ...context.policy, isProjectFile: () => { throw new RangeError('bounded recursion'); } },
   });
-  assert.equal(rangeError.prove(runner), undefined);
+  assert.throws(() => rangeError.prove(runner), RangeError);
   const unexpected = new ConstructorCarrierAnalyzer({
     ...context,
     policy: { ...context.policy, isProjectFile: () => { throw new Error('unexpected analyzer failure'); } },
@@ -294,7 +294,7 @@ test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fai
   assert.equal(exhaustedFlow.allowsInstanceFlow(runner), false);
   const firstExhaustedChecks = exhaustedFlowChecks;
   assert.equal(exhaustedFlow.allowsInstanceFlow(runner), false);
-  assert.equal(exhaustedFlowChecks, firstExhaustedChecks);
+  assert.ok(exhaustedFlowChecks > firstExhaustedChecks);
 
   let rangeFlowChecks = 0;
   const rangeFlow = new ConstructorCarrierAnalyzer({
@@ -307,9 +307,9 @@ test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fai
       },
     },
   });
-  assert.equal(rangeFlow.allowsInstanceFlow(runner), false);
-  assert.equal(rangeFlow.allowsInstanceFlow(runner), false);
-  assert.equal(rangeFlowChecks, 1);
+  assert.throws(() => rangeFlow.allowsInstanceFlow(runner), RangeError);
+  assert.throws(() => rangeFlow.allowsInstanceFlow(runner), RangeError);
+  assert.equal(rangeFlowChecks, 2);
 
   const unexpectedFlow = new ConstructorCarrierAnalyzer({
     ...context,
@@ -977,4 +977,70 @@ test('typed, spread and factory array provenance stay unresolved', async () => {
     assert.equal(graph.edges.some((edge) => edge.from === 'src/main.ts#Runner.run'
       && edge.to === 'src/main.ts#RepoImpl.run' && edge.evidence === 'bound'), false, setup.join('\n'));
   }
+});
+
+test('stage2 carrier certificates reject foreign context, forged allocation and invalidated cached entry', () => {
+  const { context, runner } = contextOf(positive);
+  const analyzer = new ConstructorCarrierAnalyzer(context); const proof = analyzer.prove(runner); assert.ok(proof);
+  assert.equal(analyzer.accepts(proof, runner, proof.innerLiteral), true);
+  assert.equal(analyzer.isolatesBag(runner, proof.innerLiteral), true);
+  assert.equal(analyzer.allowsExtendedInstanceIsolation(runner), false);
+  assert.equal(analyzer.isolatesExtendedBag(runner, proof.innerLiteral), false);
+  assert.equal(new ConstructorCarrierAnalyzer(context).accepts(proof, runner), false);
+  const other = contextOf(positive); assert.equal(new ConstructorCarrierAnalyzer(other.context).accepts(proof, other.runner), false);
+  const otherProof = new ConstructorCarrierAnalyzer(other.context).prove(other.runner); assert.ok(otherProof);
+  assert.equal(analyzer.isolatesBag(runner, otherProof.innerLiteral), false);
+  assert.equal(analyzer.isolatesBag(other.runner, proof.innerLiteral), false);
+  const fake = ts.factory.createObjectLiteralExpression();
+  assert.equal(analyzer.accepts({ ...proof, innerLiteral: fake }, runner, fake), false);
+  const { certificate: _certificate, ...uncertified } = proof;
+  assert.equal(analyzer.accepts(uncertified, runner), false);
+  const old = context.policy.isProjectFile;
+  context.policy.isProjectFile = () => false;
+  assert.equal(analyzer.outcome(runner).kind, 'incomplete');
+  assert.equal(analyzer.accepts(proof, runner), false);
+  context.policy.isProjectFile = old;
+  assert.equal(analyzer.outcome(runner).kind, 'proved');
+});
+
+test('stage2 actual carrier cold/warm and reversed consumer order replay the same caller work', () => {
+  const { context, runner } = contextOf(positive);
+  let steps = 0; let depth = 0; let frames = 0;
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+    step: () => { steps++; }, check: (d, f) => { depth = Math.max(depth, d); frames = Math.max(frames, f); },
+  } });
+  const run = (reverse = false) => {
+    steps = 0; depth = 0; frames = 0; analyzer.beginQuery();
+    const consumers = [() => analyzer.allowsInstanceFlow(runner), () => analyzer.allowsConstructedInstanceIdentity(runner),
+      () => analyzer.allowsDeclaredMethodReceiver(runner), () => analyzer.prove(runner) !== undefined];
+    try {
+      const results = (reverse ? consumers.reverse() : consumers).map((consume) => consume());
+      assert.deepEqual(reverse ? results.reverse() : results, [true, true, false, true]);
+      return [steps, depth, frames];
+    }
+    finally { analyzer.endQuery(); }
+  };
+  const cold = run(); assert.deepEqual(run(), cold); assert.deepEqual(run(true), cold);
+});
+
+test('stage2 syntax, missing mutation coverage, and interrupted caller work have distinct outcomes', () => {
+  const { context, runner } = contextOf(positive);
+  const syntax = contextOf(positive.replace('clock: undefined', ''));
+  assert.equal(new ConstructorCarrierAnalyzer(syntax.context).outcome(syntax.runner).kind, 'rejected');
+  const incomplete = new ConstructorCarrierAnalyzer({ ...context, index: { ...context.index, hasIncompleteMutations: true } });
+  assert.deepEqual(incomplete.outcome(runner), { kind: 'incomplete', reason: 'coverage' });
+  assert.deepEqual(incomplete.outcome(runner), { kind: 'incomplete', reason: 'coverage' });
+  let remaining = 20; let interrupt = true;
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: { step: () => {
+    if (interrupt && --remaining === 0) throw new TypeError('caller interruption');
+  }, check: () => {} } });
+  assert.throws(() => analyzer.prove(runner), /caller interruption/); interrupt = false;
+  assert.ok(analyzer.prove(runner)); assert.ok(analyzer.prove(runner));
+});
+
+
+test('stage2 missing config coverage retains the inventory limitation without redefining legacy as ambient proof', async () => {
+  const graph = await graphOf({ 'tsconfig.json': '{ invalid', 'src/main.ts': positive });
+  assert.ok(graph.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
+  assert.equal(graph.limitations.some((line) => line.startsWith('dispatch-budget:')), false);
 });

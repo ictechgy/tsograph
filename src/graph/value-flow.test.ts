@@ -413,7 +413,7 @@ test('GLM 지적 C1: 흐름 재귀가 깊어도 예산으로 끝나 모름이 �
   assert.ok(graph.limitations.some((line) => line.startsWith('dispatch-budget: 1 deferred interface/callable call(s) exceeded the flow-analysis budget')));
 });
 
-test('GLM 지적 C1: 질의 안의 스택 초과(RangeError)는 모름으로 바꾸고, 다른 예외는 그대로 던진다', () => {
+test('stage2: 예상 밖 RangeError는 내부 실패로 전파하고 budget diagnostic을 만들지 않는다', () => {
   const host = ts.createCompilerHost({ strict: true });
   const source = 'interface S { f(): void }\nclass A implements S { f() {} }\nconst a: S = new A();\nexport const x = a;\n';
   const original = host.getSourceFile;
@@ -432,8 +432,8 @@ test('GLM 지적 C1: 질의 안의 스택 초과(RangeError)는 모름으로 바
   });
   const index = buildFileIndex(checker, file, () => undefined);
   const flow = new ValueFlow(checker, index, policy(new RangeError('Maximum call stack size exceeded')));
-  assert.equal(flow.valuesOf(receiver), null);
-  assert.equal(flow.budgetExceededQueries(), 1);
+  assert.throws(() => flow.valuesOf(receiver), RangeError);
+  assert.equal(flow.budgetExceededQueries(), 0);
   assert.throws(() => new ValueFlow(checker, index, policy(new TypeError('bug'))).valuesOf(receiver), TypeError);
 });
 

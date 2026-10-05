@@ -178,7 +178,12 @@ export class ValueFlow {
     this.checker = checker;
     this.index = index;
     this.policy = policy;
-    this.constructorCarrier = new ConstructorCarrierAnalyzer({ checker, index, policy });
+    this.constructorCarrier = new ConstructorCarrierAnalyzer({ checker, index, policy, ...(index.proofProgram === undefined ? {} : { program: index.proofProgram }), caller: {
+      step: () => this.step(),
+      check: (depth, frames) => {
+        if (this.depth + depth > MAX_DEPTH || this.frames + frames > MAX_FRAMES) throw new BudgetExceeded();
+      },
+    } });
   }
 
   /**
@@ -213,12 +218,12 @@ export class ValueFlow {
    */
   memberSymbol(value: ObjectValue, name: string): ts.Symbol | undefined {
     this.ensureReflective();
-    if (ts.isClassLike(value) && this.constructorCarrier.hasCarrierFlowLineage(value)
-      && !this.constructorCarrier.allowsInstanceFlow(value)
-      && !this.constructorCarrier.allowsDeclaredMethodReceiver(value)) return undefined;
     // 본문 검증은 속성 쓰기 수신자의 흐름을 구하므로 질의 예산 안에서 돌린다(넘으면 증명 실패).
     let body: ts.FunctionLikeDeclaration | undefined;
     const proven = this.query(() => {
+      if (ts.isClassLike(value) && this.constructorCarrier.hasCarrierFlowLineage(value)
+        && !this.constructorCarrier.allowsInstanceFlow(value)
+        && !this.constructorCarrier.allowsDeclaredMethodReceiver(value)) return null;
       body = this.memberBody(value, name);
       return body === undefined ? null : EMPTY;
     });
@@ -242,23 +247,30 @@ export class ValueFlow {
    */
   private ensureReflective(): void {
     if (this.reflective !== undefined) return;
-    this.reflective = { values: EMPTY, unknownTargets: [] };
-    if (this.index.reflectiveTargets.length === 0) return;
-    const first = this.computeReflectiveState();
-    // 빈 가정으로 빈 집합을 얻었으면 가정이 곧 답이라 메모를 버릴 필요가 없다.
-    if (first.values.size === 0 && first.unknownTargets.length === 0) return;
-    this.memo.clear();
-    this.reflective = first;
-    const second = this.computeReflectiveState();
-    this.memo.clear();
-    if (sameReflectiveState(first, second)) {
+    try {
+      this.reflective = { values: EMPTY, unknownTargets: [] };
+      if (this.index.reflectiveTargets.length === 0) return;
+      const first = this.computeReflectiveState();
+      // 빈 가정으로 빈 집합을 얻었으면 가정이 곧 답이라 메모를 버릴 필요가 없다.
+      if (first.values.size === 0 && first.unknownTargets.length === 0) return;
+      this.memo.clear();
       this.reflective = first;
-      return;
+      const second = this.computeReflectiveState();
+      this.memo.clear();
+      if (sameReflectiveState(first, second)) {
+        this.reflective = first;
+        return;
+      }
+      this.reflective = {
+        values: new Set([...first.values, ...second.values]),
+        unknownTargets: this.index.reflectiveTargets,
+      };
+    } catch (error) {
+      // 중단된 반사 census의 빈 provisional 상태는 다음 질의의 완결된 사실이 아니다.
+      this.reflective = undefined;
+      this.memo.clear();
+      throw error;
     }
-    this.reflective = {
-      values: new Set([...first.values, ...second.values]),
-      unknownTargets: this.index.reflectiveTargets,
-    };
   }
 
   /**
@@ -271,17 +283,24 @@ export class ValueFlow {
     this.steps = 0;
     this.depth = 0;
     this.frames = 0;
+    this.constructorCarrier.beginQuery();
     try {
       return run();
     } catch (error) {
-      // 예산 초과와 스택 초과(RangeError)는 증명 실패다(모름). 메모에는 완결된 단위만 남아 있다.
-      if (!(error instanceof BudgetExceeded) && !(error instanceof RangeError)) throw error;
+      // 자원 예산만 diagnostic으로 집계한다. 예상 밖 RangeError는 내부 실패로 전파한다.
+      if (!(error instanceof BudgetExceeded)) throw error;
       this.overBudget++;
       this.active.clear();
       this.provisional.clear();
       this.reentered.clear();
       this.lowestOpen = Number.POSITIVE_INFINITY;
       return null;
+    } finally {
+      this.constructorCarrier.endQuery();
+      this.active.clear();
+      this.provisional.clear();
+      this.reentered.clear();
+      this.lowestOpen = Number.POSITIVE_INFINITY;
     }
   }
 
@@ -1426,7 +1445,10 @@ export class ValueFlow {
     // 알려진 반사 대상은 위에서 항상 막는다. 아래 증명은 값 흐름을 모르는 대상에만 적용한다.
     const isolatedLiteral = ts.isObjectLiteralExpression(value)
       && (this.isIsolatedReturnedLiteral(value) || this.isConstructorCarrierInnerLiteral(value));
-    const isolatedCarrier = ts.isClassLike(value) && this.constructorCarrier.prove(value) !== undefined;
+    // Unknown-reflection isolation is an existing legacy consumer; it must not be
+    // mistaken for ambient/effect ownership authority.
+    const isolatedCarrier = ts.isClassLike(value)
+      && this.constructorCarrier.allowsLegacyUnknownReflectionIsolation(value);
     for (const target of this.reflective.unknownTargets) {
       this.step();
       if (isolatedLiteral || isolatedCarrier) continue;
@@ -1444,8 +1466,9 @@ export class ValueFlow {
     const declaration = ts.isClassExpression(callee)
       ? callee : this.classOfSymbol(this.calleeSymbol(callee));
     if (declaration === undefined) return false;
-    const proof = this.constructorCarrier.prove(declaration);
-    return proof?.innerLiteral === literal;
+    // Exact bag confinement is a new Stage2 capability and therefore requires the
+    // explicit extended certificate and authoritative inventory coverage.
+    return this.constructorCarrier.isolatesExtendedBag(declaration, literal);
   }
 
   /**

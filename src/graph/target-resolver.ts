@@ -76,6 +76,7 @@ export class TargetResolver {
     this.constructorCarrier = index === undefined ? undefined : new ConstructorCarrierAnalyzer({
       checker,
       index,
+      ...(index.proofProgram === undefined ? {} : { program: index.proofProgram }),
       policy: {
         isProjectFile: (sourceFile) => pathOf(sourceFile) !== undefined,
         isOpenCallable: () => false,
