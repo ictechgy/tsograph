@@ -1101,6 +1101,37 @@ test('stage2 legacy bag probes do not cache a foreign declaration rejection for 
   }
 });
 
+test('stage2 extended certificates reject a foreign SourceFile with a matching Program checker', () => {
+  const a = contextOf(positive); const b = contextOf(positive);
+  const literal = new ConstructorCarrierAnalyzer(b.context).prove(b.runner)?.innerLiteral; assert.ok(literal);
+  assert.notEqual(a.source.file, b.source.file);
+  assert.equal(a.source.program.getTypeChecker(), a.source.checker);
+  const analyzer = new ConstructorCarrierAnalyzer({ ...b.context,
+    program: a.source.program, checker: a.source.checker,
+    index: { ...b.context.index, effectInventory: completeInventory(b.source) },
+  });
+  assert.equal(analyzer.isolatesExtendedBag(b.runner, literal), false);
+  assert.equal(analyzer.allowsExtendedInstanceIsolation(b.runner), false);
+});
+
+test('stage2 extended cache rechecks an open-callable closure without changing its identity', () => {
+  const { source, context, runner } = contextOf(positive);
+  let open = false;
+  const callable = () => open;
+  const policy = { ...context.policy, isOpenCallable: callable };
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, policy,
+    index: { ...context.index, effectInventory: completeInventory(source) },
+  });
+  const literal = analyzer.prove(runner)?.innerLiteral; assert.ok(literal);
+  assert.equal(analyzer.isolatesExtendedBag(runner, literal), true);
+  assert.equal(analyzer.allowsExtendedInstanceIsolation(runner), true);
+  open = true;
+  assert.equal(policy.isOpenCallable, callable);
+  assert.deepEqual(analyzer.outcome(runner), { kind: 'incomplete', reason: 'entry' });
+  assert.equal(analyzer.isolatesExtendedBag(runner, literal), false);
+  assert.equal(analyzer.allowsExtendedInstanceIsolation(runner), false);
+});
+
 test('stage2 preserves entry versus coverage reasons in carrier diagnostics', () => {
   const { context, runner } = contextOf(positive);
   const diagnostics = new Set<string>();

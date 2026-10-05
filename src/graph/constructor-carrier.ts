@@ -214,10 +214,12 @@ export class ConstructorCarrierAnalyzer {
           && this.context.index.effectInventory === inventory && this.context.policy === policy
           && this.context.program === program && this.context.checker === checker
           && program !== undefined && program.getTypeChecker() === checker
+          && program.getSourceFile(source.fileName) === source
           && this.context.policy.isProjectFile === project
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
           && this.context.policy.isDefaultLibraryFile === intrinsic
+          && policy.isProjectFile(source) && !policy.isOpenCallable(declaration)
           && this.context.index.references === references && references.size === referenceCount
           && this.context.index.mutations === mutations && mutations.length === mutationCount
           && this.context.index.hasOpaqueMutation === opaque
@@ -281,10 +283,12 @@ export class ConstructorCarrierAnalyzer {
           && this.context.index.effectInventory === inventory && this.context.policy === policy
           && this.context.program === program && this.context.checker === checker
           && program !== undefined && program.getTypeChecker() === checker
+          && program.getSourceFile(source.fileName) === source
           && this.context.policy.isProjectFile === project
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
           && this.context.policy.isDefaultLibraryFile === intrinsic
+          && policy.isProjectFile(source) && !policy.isOpenCallable(declaration)
           && this.context.index.references === references && references.size === referenceCount
           && this.context.index.mutations === mutations && mutations.length === mutationCount
           && this.context.index.hasOpaqueMutation === opaque
