@@ -30,6 +30,12 @@ export interface EffectBuildBudget {
   requireDeclarationScans?: Map<ts.Symbol, RequireDeclarationScan>;
   /** loader origin도 usage source별로만 재사용해 script 전역 충돌을 숨기지 않는다. */
   loaderOriginScopes?: Map<ts.SourceFile, Map<ts.Symbol, LoaderOrigin | null>>;
+  /** computed loader key의 직접 const literal만 bounded하게 재사용한다. */
+  staticStringScopes?: Map<ts.SourceFile, Map<ts.Symbol, string | null>>;
+  /** intrinsic globalThis를 가리는 실제 runtime binding의 scope별 census다. */
+  platformShadowScopes?: Map<ts.Node, Map<string, boolean>>;
+  /** function parameter shadow census도 function boundary별로 한 번만 한다. */
+  platformParameterScopes?: Map<ts.FunctionLikeDeclaration, boolean>;
 }
 /** 실행식 하나의 관찰이다. unknown은 안전하거나 비어 있다는 뜻이 아니다. */
 export interface EffectRecord {
@@ -124,6 +130,13 @@ function erased(node: ts.Node): boolean {
 type RequireBindingKind = 'loader' | 'ordinary' | 'opaque';
 type LoaderOrigin = 'loader' | 'factory' | 'platform';
 
+const PLATFORM_ROOT_NAMES = new Set(['module', 'globalThis', 'process', 'global', 'Reflect']);
+const PLATFORM_TRANSITION_NAMES = new Set(['mainModule', 'parent', 'constructor', 'getBuiltinModule',
+  'module', 'globalThis', 'process', 'global', 'Reflect', 'prototype']);
+const LOADER_MEMBER_NAMES = new Set(['require', 'eval', '_load']);
+const MAX_PLATFORM_DECLARATIONS = 1_024;
+const MAX_PLATFORM_STATEMENTS = 4_096;
+
 interface RequireDeclarationScan {
   readonly runtime: readonly ts.Declaration[];
   readonly sources: readonly ts.SourceFile[];
@@ -193,6 +206,7 @@ interface RequireClassifier {
   readonly classify: (identifier: ts.Identifier) => RequireBindingKind;
   /** module.require/globalThis.require/createRequire와 그 정적 alias의 origin이다. */
   readonly loaderOrigin: (expression: ts.Expression) => LoaderOrigin | undefined;
+  readonly checker: ts.TypeChecker | undefined;
   readonly capped: () => boolean;
 }
 
@@ -321,6 +335,219 @@ function ambientDeclaration(
   return false;
 }
 
+/** computed loader key에서 실제 same-file const string initializer만 읽는다. */
+function staticStringValue(
+  expression: ts.Expression,
+  checker: ts.TypeChecker | undefined,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+  depth = 0,
+  seen = new Set<ts.Symbol>(),
+): string | undefined {
+  if (depth > 4) return undefined;
+  const inner = skipExpressionWrappers(expression);
+  if (ts.isStringLiteralLike(inner)) return inner.text;
+  if (!ts.isIdentifier(inner) || checker === undefined) return undefined;
+  const symbol = checker.getSymbolAtLocation(inner);
+  if (symbol === undefined || seen.has(symbol)) return undefined;
+  budget.staticStringScopes ??= new Map();
+  let scoped = budget.staticStringScopes.get(inner.getSourceFile());
+  if (scoped === undefined) {
+    scoped = new Map();
+    budget.staticStringScopes.set(inner.getSourceFile(), scoped);
+  }
+  const cached = scoped.get(symbol);
+  if (cached !== undefined) return cached === null ? undefined : cached;
+  seen.add(symbol);
+  let result: string | undefined;
+  let complete = true;
+  const declarations = symbol.declarations ?? [];
+  const declarationCount = Math.min(declarations.length, MAX_PLATFORM_DECLARATIONS);
+  if (declarations.length > MAX_PLATFORM_DECLARATIONS) {
+    complete = false;
+    markCapped();
+  }
+  for (let declarationIndex = 0; declarationIndex < declarationCount; declarationIndex++) {
+    const declaration = declarations[declarationIndex]!;
+    if (declaration.getSourceFile() !== inner.getSourceFile()) continue;
+    const ambient = ambientDeclaration(declaration, budget, limits);
+    if (ambient === undefined) {
+      complete = false;
+      markCapped();
+      break;
+    }
+    if (ambient || !ts.isVariableDeclaration(declaration) || declaration.initializer === undefined
+      || !ts.isVariableDeclarationList(declaration.parent)
+      || (declaration.parent.flags & ts.NodeFlags.Const) === 0) continue;
+    result = staticStringValue(declaration.initializer, checker, budget, limits, markCapped, depth + 1, seen);
+    if (result !== undefined) break;
+  }
+  seen.delete(symbol);
+  if (complete) scoped.set(symbol, result ?? null);
+  return result;
+}
+
+/** binding name에서 실제 runtime shadow를 bounded work로 찾는다. */
+function bindingNameMatches(
+  name: ts.BindingName | ts.Identifier,
+  text: string,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+): boolean | undefined {
+  const stack: Array<{ readonly name: ts.BindingName | ts.Identifier; readonly depth: number }> = [{ name, depth: 0 }];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current.depth > MAX_BINDING_ANCESTORS || !chargeBindingWork(current.name.getSourceFile(), budget, limits)) {
+      markCapped();
+      return undefined;
+    }
+    if (ts.isIdentifier(current.name)) {
+      if (current.name.text === text) return true;
+      continue;
+    }
+    for (let index = current.name.elements.length - 1; index >= 0; index--) {
+      const element = current.name.elements[index];
+      if (element !== undefined && ts.isBindingElement(element)) stack.push({ name: element.name, depth: current.depth + 1 });
+    }
+  }
+  return false;
+}
+
+/** 하나의 lexical scope statement에서 runtime root shadow를 bounded하게 census한다. */
+function scopeHasRuntimeBinding(
+  scope: ts.SourceFile | ts.Block,
+  text: string,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+): boolean | undefined {
+  budget.platformShadowScopes ??= new Map();
+  let scoped = budget.platformShadowScopes.get(scope);
+  if (scoped === undefined) {
+    scoped = new Map();
+    budget.platformShadowScopes.set(scope, scoped);
+  }
+  const cached = scoped.get(text);
+  if (cached !== undefined) return cached;
+  let result = false;
+  let complete = true;
+  const statementCount = Math.min(scope.statements.length, MAX_PLATFORM_STATEMENTS);
+  if (scope.statements.length > MAX_PLATFORM_STATEMENTS) {
+    complete = false;
+    markCapped();
+  }
+  for (let statementIndex = 0; statementIndex < statementCount; statementIndex++) {
+    const statement = scope.statements[statementIndex]!;
+    if (!chargeBindingWork(scope.getSourceFile(), budget, limits)) {
+      complete = false;
+      markCapped();
+      break;
+    }
+    const declarations: ts.Declaration[] = [];
+    if (ts.isVariableStatement(statement)) {
+      const declarationCount = Math.min(statement.declarationList.declarations.length, MAX_PLATFORM_DECLARATIONS);
+      if (statement.declarationList.declarations.length > MAX_PLATFORM_DECLARATIONS) markCapped();
+      for (let index = 0; index < declarationCount; index++) declarations.push(statement.declarationList.declarations[index]!);
+    }
+    else if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) declarations.push(statement);
+    else if (ts.isClassDeclaration(statement) && statement.name !== undefined) declarations.push(statement);
+    else if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      if (clause?.name !== undefined && !clause.isTypeOnly) declarations.push(clause);
+      if (clause?.namedBindings !== undefined) {
+        if (ts.isNamespaceImport(clause.namedBindings)) declarations.push(clause.namedBindings);
+        else {
+          const elementCount = Math.min(clause.namedBindings.elements.length, MAX_PLATFORM_DECLARATIONS);
+          if (clause.namedBindings.elements.length > MAX_PLATFORM_DECLARATIONS) markCapped();
+          for (let index = 0; index < elementCount; index++) {
+            const element = clause.namedBindings.elements[index]!;
+            if (!element.isTypeOnly && !clause.isTypeOnly) declarations.push(element);
+          }
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(statement) && !statement.isTypeOnly) declarations.push(statement);
+    for (const declaration of declarations) {
+      const name: ts.BindingName | undefined = ts.isVariableDeclaration(declaration)
+        || ts.isFunctionDeclaration(declaration) || ts.isClassDeclaration(declaration)
+        ? declaration.name : ts.isImportClause(declaration) || ts.isNamespaceImport(declaration)
+          || ts.isImportSpecifier(declaration) || ts.isImportEqualsDeclaration(declaration) ? declaration.name : undefined;
+      if (name === undefined) continue;
+      const matches = bindingNameMatches(name, text, budget, limits, markCapped);
+      if (matches === undefined) {
+        complete = false;
+        continue;
+      }
+      if (!matches) continue;
+      const ambient = ambientDeclaration(declaration, budget, limits);
+      if (ambient === undefined) {
+        complete = false;
+        markCapped();
+        continue;
+      }
+      if (!ambient) result = true;
+    }
+    if (result) break;
+  }
+  if (complete) scoped.set(text, result);
+  return result;
+}
+
+/** function parameter 전체를 한 번만 조사해 globalThis shadow를 cache한다. */
+function functionHasGlobalThisParameter(
+  functionLike: ts.FunctionLikeDeclaration,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+): boolean | undefined {
+  budget.platformParameterScopes ??= new Map();
+  const cached = budget.platformParameterScopes.get(functionLike);
+  if (cached !== undefined) return cached;
+  for (let index = 0; index < functionLike.parameters.length; index++) {
+    const parameter = functionLike.parameters[index]!;
+    const matches = bindingNameMatches(parameter.name, 'globalThis', budget, limits, markCapped);
+    if (matches === undefined) return undefined;
+    if (matches) {
+      budget.platformParameterScopes.set(functionLike, true);
+      return true;
+    }
+  }
+  budget.platformParameterScopes.set(functionLike, false);
+  return false;
+}
+
+/** intrinsic globalThis를 가리는 실제 runtime binding을 enclosing scope별로 분리한다. */
+function intrinsicGlobalThis(
+  identifier: ts.Identifier,
+  checker: ts.TypeChecker | undefined,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+): boolean | undefined {
+  if (checker === undefined) return true;
+  let reachedSource = false;
+  for (let depth = 0, current: ts.Node | undefined = identifier.parent;
+    current !== undefined && depth <= MAX_BINDING_ANCESTORS; depth++, current = current.parent) {
+    if (ts.isFunctionLike(current)) {
+      const parameterShadow = functionHasGlobalThisParameter(current as ts.FunctionLikeDeclaration, budget, limits, markCapped);
+      if (parameterShadow === undefined) return undefined;
+      if (parameterShadow) return false;
+    }
+    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+      const shadow = scopeHasRuntimeBinding(current, 'globalThis', budget, limits, markCapped);
+      if (shadow === undefined) return undefined;
+      if (shadow) return false;
+      if (ts.isSourceFile(current)) {
+        reachedSource = true;
+        break;
+      }
+    }
+  }
+  if (!reachedSource) markCapped();
+  return true;
+}
+
 /** expression이 module/globalThis require 또는 createRequire로 이어지는 정적 origin인지 판정한다. */
 function directLoaderOrigin(
   expression: ts.Expression,
@@ -334,20 +561,51 @@ function directLoaderOrigin(
 ): LoaderOrigin | undefined {
   if (depth > 8) return undefined;
   const inner = skipExpressionWrappers(expression);
+  if (ts.isAwaitExpression(inner)) {
+    return directLoaderOrigin(inner.expression, checker, classify, budget, limits, markCapped, depth + 1, seen);
+  }
   if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
     const owner = inner.expression;
+    const elementAccess = ts.isElementAccessExpression(inner);
+    const dynamicKey = elementAccess && !ts.isStringLiteralLike(skipExpressionWrappers(inner.argumentExpression));
     const key = ts.isPropertyAccessExpression(inner) ? inner.name.text
-      : (() => { const argument = skipExpressionWrappers(inner.argumentExpression); return ts.isStringLiteralLike(argument) ? argument.text : undefined; })();
-    if (key !== 'require' && key !== 'createRequire') return undefined;
+      : staticStringValue(inner.argumentExpression, checker, budget, limits, markCapped);
+    if (!LOADER_MEMBER_NAMES.has(key ?? '') && key !== 'createRequire' && !PLATFORM_TRANSITION_NAMES.has(key ?? '')
+      && !dynamicKey) return undefined;
     const ownerOrigin = directLoaderOrigin(owner, checker, classify, budget, limits, markCapped, depth + 1, seen);
-    if (key === 'require' && ownerOrigin === 'platform') return 'loader';
+    if (LOADER_MEMBER_NAMES.has(key ?? '') && ownerOrigin === 'platform') return 'loader';
     if (key === 'createRequire' && ownerOrigin === 'platform') return 'factory';
+    // const initializer가 달라도 동적 key의 실제 변경 여부를 증명하지 않는다.
+    if (dynamicKey && ownerOrigin === 'platform') return 'loader';
+    if (ownerOrigin === 'platform' && PLATFORM_TRANSITION_NAMES.has(key ?? '')) return 'platform';
     return undefined;
   }
   if (ts.isCallExpression(inner)) {
+    const callee = skipExpressionWrappers(inner.expression);
+    const argument = inner.arguments[0] === undefined ? undefined : skipExpressionWrappers(inner.arguments[0]);
+    if (callee.kind === ts.SyntaxKind.ImportKeyword && argument !== undefined && ts.isStringLiteralLike(argument)
+      && (argument.text === 'node:module' || argument.text === 'module')) return 'platform';
+    const calleeKey = ts.isPropertyAccessExpression(callee) ? callee.name.text
+      : ts.isElementAccessExpression(callee) ? staticStringValue(callee.argumentExpression, checker, budget, limits, markCapped) : undefined;
+    if (calleeKey === 'get' && (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))) {
+      const owner = callee.expression;
+      const ownerOrigin = directLoaderOrigin(owner, checker, classify, budget, limits, markCapped, depth + 1, seen);
+      const target = inner.arguments[0] === undefined ? undefined : inner.arguments[0];
+      const targetOrigin = target === undefined
+        ? undefined : directLoaderOrigin(target, checker, classify, budget, limits, markCapped, depth + 1, seen);
+      const keyArgument = inner.arguments[1] === undefined ? undefined
+        : staticStringValue(inner.arguments[1]!, checker, budget, limits, markCapped);
+      if (ownerOrigin === 'platform' && targetOrigin === 'platform'
+        && (keyArgument === 'require' || keyArgument === undefined)) return 'loader';
+    }
     const calleeOrigin = directLoaderOrigin(inner.expression, checker, classify, budget, limits, markCapped, depth + 1, seen);
     if (calleeOrigin === 'factory') return 'loader';
     if (calleeOrigin === 'loader') {
+      const argument = inner.arguments[0] === undefined ? undefined : skipExpressionWrappers(inner.arguments[0]);
+      if (argument !== undefined && ts.isStringLiteralLike(argument)
+        && (argument.text === 'node:module' || argument.text === 'module')) return 'platform';
+    }
+    if (calleeOrigin === 'platform') {
       const argument = inner.arguments[0] === undefined ? undefined : skipExpressionWrappers(inner.arguments[0]);
       if (argument !== undefined && ts.isStringLiteralLike(argument)
         && (argument.text === 'node:module' || argument.text === 'module')) return 'platform';
@@ -356,17 +614,31 @@ function directLoaderOrigin(
   }
   if (!ts.isIdentifier(inner)) return undefined;
   if (checker === undefined) {
-    if (inner.text === 'module' || inner.text === 'globalThis') return 'platform';
+    if (PLATFORM_ROOT_NAMES.has(inner.text)) return 'platform';
     if (inner.text === 'createRequire') return 'factory';
-    if (inner.text === 'require') return 'loader';
+    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
     return undefined;
   }
-  const symbol = checker.getSymbolAtLocation(inner);
+  const symbol = ts.isExportSpecifier(inner.parent)
+    ? checker.getExportSpecifierLocalTargetSymbol(inner.parent) : checker.getSymbolAtLocation(inner);
   if (symbol === undefined) {
-    if (inner.text === 'module' || inner.text === 'globalThis') return 'platform';
+    if (PLATFORM_ROOT_NAMES.has(inner.text)) {
+      const intrinsic = inner.text === 'globalThis' ? intrinsicGlobalThis(inner, checker, budget, limits, markCapped) : true;
+      if (intrinsic === undefined) return undefined;
+      if (intrinsic) return 'platform';
+    }
     if (inner.text === 'createRequire') return 'factory';
-    if (inner.text === 'require') return 'loader';
+    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
     return undefined;
+  }
+  if ((symbol.declarations?.length ?? 0) === 0) {
+    if (PLATFORM_ROOT_NAMES.has(inner.text)) {
+      const intrinsic = inner.text === 'globalThis' ? intrinsicGlobalThis(inner, checker, budget, limits, markCapped) : true;
+      if (intrinsic === undefined) return undefined;
+      if (intrinsic) return 'platform';
+    }
+    if (inner.text === 'createRequire') return 'factory';
+    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
   }
   budget.loaderOriginScopes ??= new Map();
   let scoped = budget.loaderOriginScopes.get(inner.getSourceFile());
@@ -380,17 +652,29 @@ function directLoaderOrigin(
   seen.add(symbol);
   let result: LoaderOrigin | undefined;
   let complete = true;
-  for (const declaration of symbol.declarations ?? []) {
+  const declarations = symbol.declarations ?? [];
+  const declarationCount = Math.min(declarations.length, MAX_PLATFORM_DECLARATIONS);
+  if (declarations.length > MAX_PLATFORM_DECLARATIONS) {
+    complete = false;
+    markCapped();
+  }
+  for (let declarationIndex = 0; declarationIndex < declarationCount; declarationIndex++) {
+    const declaration = declarations[declarationIndex]!;
     const ambient = ambientDeclaration(declaration, budget, limits);
     if (ambient === undefined) {
       complete = false;
       markCapped();
       break;
     }
-    if (inner.text === 'module' || inner.text === 'globalThis') {
-      if (ambient || nodeModuleBinding(declaration)) result = 'platform';
+    if (PLATFORM_ROOT_NAMES.has(inner.text)) {
+      const runtime = hasRuntimeBinding(declaration, budget, limits);
+      if (runtime === undefined) { complete = false; markCapped(); break; }
+      if (ambient || nodeModuleBinding(declaration) || !runtime
+        || declaration.getSourceFile() !== inner.getSourceFile()) result = 'platform';
     } else if (inner.text === 'createRequire') {
       if (ambient || nodeModuleImport(declaration, 'createRequire')) result = 'factory';
+    } else if (inner.text === 'eval') {
+      if (ambient) result = 'loader';
     } else if (nodeModuleImport(declaration, 'createRequire')) {
       result = 'factory';
     } else if (ts.isImportSpecifier(declaration) && nodeModuleImport(declaration, 'require')) {
@@ -414,10 +698,55 @@ function directLoaderOrigin(
         if (memberName === 'createRequire') result = 'factory';
       } else if (origin !== undefined) result = origin;
     }
+    if (ts.isParameter(declaration)) {
+      const functionLike = ts.findAncestor(declaration, ts.isFunctionLike) as ts.FunctionLikeDeclaration | undefined;
+      const called = functionLike === undefined ? undefined : climbWrappers(functionLike);
+      if (functionLike !== undefined && called !== undefined && ts.isCallExpression(called.parent)
+        && called.parent.expression === called) {
+        const index = functionLike.parameters.indexOf(declaration);
+        const argument = index >= 0 && index < 32 ? called.parent.arguments[index] : undefined;
+        if (argument !== undefined) {
+          const origin = directLoaderOrigin(argument, checker, classify, budget, limits, markCapped, depth + 1, seen);
+          if (origin === 'platform') result = origin;
+        }
+      }
+    }
   }
   seen.delete(symbol);
   if (complete) scoped.set(symbol, result ?? null);
   return result;
+}
+
+/** call 인자 중 bounded platform root escape 후보만 origin 조사를 한다. */
+function platformArgumentCandidate(
+  expression: ts.Expression,
+  checker: ts.TypeChecker | undefined,
+  depth = 0,
+  seen = new Set<ts.Symbol>(),
+): boolean {
+  if (depth > 4) return false;
+  const inner = skipExpressionWrappers(expression);
+  if (ts.isIdentifier(inner) && PLATFORM_ROOT_NAMES.has(inner.text)) return true;
+  if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
+    const owner = skipExpressionWrappers(inner.expression);
+    if (ts.isIdentifier(owner) && PLATFORM_ROOT_NAMES.has(owner.text)) return true;
+    return checker !== undefined && ts.isIdentifier(owner)
+      && platformArgumentCandidate(owner, checker, depth + 1, seen);
+  }
+  if (checker !== undefined && ts.isIdentifier(inner)) {
+    const symbol = checker.getSymbolAtLocation(inner);
+    if (symbol === undefined || seen.has(symbol)) return false;
+    seen.add(symbol);
+    const declarations = symbol.declarations ?? [];
+    const count = Math.min(declarations.length, 8);
+    for (let index = 0; index < count; index++) {
+      const declaration = declarations[index]!;
+      if (ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined
+        && platformArgumentCandidate(declaration.initializer, checker, depth + 1, seen)) return true;
+    }
+    seen.delete(symbol);
+  }
+  return false;
 }
 
 /** require 식별자를 runtime alias target과 bounded binding-write 증거로 분류한다. */
@@ -515,6 +844,7 @@ function createRequireClassifier(
     classify,
     loaderOrigin: (expression) => directLoaderOrigin(expression, checker, classify, budget, limits,
       () => { capped = true; }),
+    checker,
     capped: () => capped,
   };
 }
@@ -528,7 +858,9 @@ function runtimeModuleLoadKind(call: ts.CallExpression, classifier: RequireClass
     return binding === 'loader' ? 'direct' : binding === 'opaque' ? 'opaque' : undefined;
   }
   const origin = classifier.loaderOrigin(callee);
-  return origin === 'loader' || origin === 'factory' ? 'opaque' : undefined;
+  if (origin === 'loader' || origin === 'factory' || origin === 'platform') return 'opaque';
+  return call.arguments.some((argument) => platformArgumentCandidate(argument, classifier.checker)
+    && classifier.loaderOrigin(argument) === 'platform') ? 'opaque' : undefined;
 }
 
 /** loader alias가 값으로 저장·반환·내보내지는 위치만 origin 조사를 허용한다. */
@@ -536,6 +868,9 @@ function loaderValueUse(identifier: ts.Identifier): boolean {
   const outer = climbWrappers(identifier);
   const parent = outer.parent;
   return ts.isVariableDeclaration(parent) && parent.initializer === outer
+    || ts.isBinaryExpression(parent) && parent.right === outer
+      && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     || ts.isReturnStatement(parent) && parent.expression === outer
     || ts.isExportAssignment(parent) && parent.expression === outer
     || ts.isPropertyAssignment(parent) && parent.initializer === outer
@@ -549,9 +884,13 @@ function loaderValueUse(identifier: ts.Identifier): boolean {
 function opaqueRequireValueRead(identifier: ts.Identifier, classifier: RequireClassifier): boolean {
   if (identifier.text === 'require' && classifier.classify(identifier) === 'ordinary') return false;
   if (identifier.text !== 'require') {
-    if (identifier.text !== 'createRequire' && !loaderValueUse(identifier)) return false;
+    const outer = climbWrappers(identifier);
+    const parent = outer.parent;
+    const rootValue = (PLATFORM_ROOT_NAMES.has(identifier.text) || identifier.text === 'eval')
+      && !((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer);
+    if (identifier.text !== 'createRequire' && !loaderValueUse(identifier) && !rootValue) return false;
     const origin = classifier.loaderOrigin(identifier);
-    if (origin !== 'loader' && origin !== 'factory') return false;
+    if (origin !== 'loader' && origin !== 'factory' && origin !== 'platform') return false;
   }
   const valuePosition = referencePosition(identifier) || ts.isShorthandPropertyAssignment(identifier.parent)
     || ts.isExportAssignment(identifier.parent) && identifier.parent.expression === identifier;
@@ -587,7 +926,8 @@ function runtimeEdges(
     const declaration = node.parent.parent;
     const local = node.propertyName ?? node.name;
     if (ts.isExportDeclaration(declaration) && !declaration.isTypeOnly && declaration.moduleSpecifier === undefined
-      && ts.isIdentifier(local) && local.text === 'require' && classifier.classify(local) !== 'ordinary') {
+      && ts.isIdentifier(local) && (local.text === 'require' && classifier.classify(local) !== 'ordinary'
+        || classifier.loaderOrigin(local) !== undefined)) {
       return [{ site: node, specifier: undefined, target: undefined }];
     }
   }
@@ -604,11 +944,9 @@ function runtimeEdges(
     return [{ site: node, specifier, target: specifier === undefined ? undefined : resolve(specifier, source) }];
   }
   if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-    const key = ts.isPropertyAccessExpression(node) ? node.name.text : (() => {
-      const argument = skipExpressionWrappers(node.argumentExpression);
-      return ts.isStringLiteralLike(argument) ? argument.text : undefined;
-    })();
-    if (key !== 'require' && key !== 'createRequire') return [];
+    const key = ts.isPropertyAccessExpression(node) ? node.name.text : undefined;
+    if (ts.isPropertyAccessExpression(node) && !LOADER_MEMBER_NAMES.has(key ?? '') && key !== 'createRequire'
+      && !PLATFORM_TRANSITION_NAMES.has(key ?? '')) return [];
     const origin = classifier.loaderOrigin(node);
     if (origin !== undefined) {
       const outer = climbWrappers(node);
@@ -926,6 +1264,58 @@ export function selectEffectManifest(
 
 interface ReconciliationBudget { remaining: number; exhausted: boolean }
 
+/** proxy/forged 배열 길이는 한 번만 읽고 이후 indexed access만 허용한다. */
+function snapshotArrayLength(value: { readonly length: number }): number | undefined {
+  try {
+    const length = value.length;
+    return Number.isSafeInteger(length) && length >= 0 ? length : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface EffectPartSnapshot {
+  readonly source: ts.SourceFile;
+  readonly revision: string;
+  readonly records: readonly EffectRecord[];
+  readonly moduleEdges: readonly RuntimeModuleEdge[];
+  readonly visited: number;
+  readonly retained: number;
+  readonly status: EffectPart['status'];
+  readonly emitPolicy: EffectEmitPolicy;
+  readonly closure: EffectClosureWitness;
+}
+
+/** supplied part의 getter는 경계에서 한 번만 읽고 malformed 입력은 거부한다. */
+function snapshotEffectPart(part: EffectPart): EffectPartSnapshot | undefined {
+  try {
+    const closure = part.closure;
+    const policy = part.emitPolicy;
+    if (closure == null || policy == null) return undefined;
+    const unresolved = closure.unresolved;
+    const preserveTypeOnlySpecifiers = policy.preserveTypeOnlySpecifiers;
+    if (typeof unresolved !== 'boolean' || typeof preserveTypeOnlySpecifiers !== 'boolean') return undefined;
+    return {
+      source: part.source,
+      revision: part.revision,
+      records: part.records,
+      moduleEdges: part.moduleEdges,
+      visited: part.visited,
+      retained: part.retained,
+      status: part.status,
+      emitPolicy: { preserveTypeOnlySpecifiers },
+      closure: {
+        references: closure.references,
+        aliases: closure.aliases,
+        tokens: closure.tokens,
+        unresolved,
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** supplied 길이를 순회하기 전에 고정 reconciliation 한도에 청구한다. */
 function chargeReconciliation(budget: ReconciliationBudget, amount: number): boolean {
   if (!Number.isSafeInteger(amount) || amount < 0 || amount > budget.remaining) {
@@ -954,13 +1344,20 @@ function sameEdges(
   expected: readonly RuntimeModuleEdge[],
   actual: readonly RuntimeModuleEdge[],
   budget: ReconciliationBudget,
+  lengths?: readonly [number, number],
 ): boolean {
-  if (expected.length !== actual.length) return false;
-  if (!chargeReconciliation(budget, expected.length) || !chargeReconciliation(budget, actual.length)) return false;
-  for (let index = 0; index < expected.length; index++) {
-    const left = expected[index]!;
-    const right = actual[index]!;
-    if (left.site !== right.site || left.specifier !== right.specifier || left.target !== right.target) return false;
+  const expectedLength = lengths?.[0] ?? snapshotArrayLength(expected);
+  const actualLength = lengths?.[1] ?? snapshotArrayLength(actual);
+  if (expectedLength === undefined || actualLength === undefined || expectedLength !== actualLength) return false;
+  if (!chargeReconciliation(budget, expectedLength) || !chargeReconciliation(budget, actualLength)) return false;
+  try {
+    for (let index = 0; index < expectedLength; index++) {
+      const left = expected[index]!;
+      const right = actual[index]!;
+      if (left.site !== right.site || left.specifier !== right.specifier || left.target !== right.target) return false;
+    }
+  } catch {
+    return false;
   }
   return true;
 }
@@ -973,14 +1370,23 @@ function sameRecords(
   budget: ReconciliationBudget,
   ambient: { safe: boolean },
 ): boolean {
-  if (expected.length !== actual.length) return false;
-  if (!chargeReconciliation(budget, expected.length) || !chargeReconciliation(budget, actual.length)) return false;
-  for (let index = 0; index < expected.length; index++) {
-    const left = expected[index]!;
-    const right = actual[index]!;
-    if (left.site !== right.site || left.operation !== right.operation) return false;
-    records.push(right);
-    ambient.safe &&= right.operation === 'primitive';
+  const expectedLength = snapshotArrayLength(expected);
+  const actualLength = snapshotArrayLength(actual);
+  if (expectedLength === undefined || actualLength === undefined || expectedLength !== actualLength) return false;
+  if (!chargeReconciliation(budget, expectedLength) || !chargeReconciliation(budget, actualLength)) return false;
+  try {
+    for (let index = 0; index < expectedLength; index++) {
+      const left = expected[index]!;
+      const right = actual[index]!;
+      const site = right.site;
+      const operation = right.operation;
+      if (left.site !== site || left.operation !== operation) return false;
+      // supplied getter를 다음 판정에서 다시 실행하지 않도록 검증된 값만 보존한다.
+      records.push({ site, operation });
+      ambient.safe &&= operation === 'primitive';
+    }
+  } catch {
+    return false;
   }
   return true;
 }
@@ -991,28 +1397,37 @@ function sameClosure(
   actual: EffectClosureWitness,
   budget: ReconciliationBudget,
 ): boolean {
-  if (expected.unresolved !== actual.unresolved
-    || expected.references.length !== actual.references.length
-    || expected.aliases.length !== actual.aliases.length
-    || expected.tokens.length !== actual.tokens.length) return false;
-  for (const length of [expected.references.length, actual.references.length, expected.aliases.length,
-    actual.aliases.length, expected.tokens.length, actual.tokens.length]) {
+  const expectedReferences = snapshotArrayLength(expected.references);
+  const actualReferences = snapshotArrayLength(actual.references);
+  const expectedAliases = snapshotArrayLength(expected.aliases);
+  const actualAliases = snapshotArrayLength(actual.aliases);
+  const expectedTokens = snapshotArrayLength(expected.tokens);
+  const actualTokens = snapshotArrayLength(actual.tokens);
+  if (expectedReferences === undefined || actualReferences === undefined || expectedAliases === undefined
+    || actualAliases === undefined || expectedTokens === undefined || actualTokens === undefined
+    || expected.unresolved !== actual.unresolved || expectedReferences !== actualReferences
+    || expectedAliases !== actualAliases || expectedTokens !== actualTokens) return false;
+  for (const length of [expectedReferences, actualReferences, expectedAliases, actualAliases, expectedTokens, actualTokens]) {
     if (!chargeReconciliation(budget, length)) return false;
   }
-  for (let index = 0; index < expected.references.length; index++) {
-    const left = expected.references[index]!;
-    const right = actual.references[index]!;
-    if (left.site !== right.site || left.target !== right.target) return false;
-  }
-  for (let index = 0; index < expected.aliases.length; index++) {
-    const left = expected.aliases[index]!;
-    const right = actual.aliases[index]!;
-    if (left.name !== right.name || left.target !== right.target) return false;
-  }
-  for (let index = 0; index < expected.tokens.length; index++) {
-    const left = expected.tokens[index]!;
-    const right = actual.tokens[index]!;
-    if (left.text !== right.text || left.site !== right.site) return false;
+  try {
+    for (let index = 0; index < expectedReferences; index++) {
+      const left = expected.references[index]!;
+      const right = actual.references[index]!;
+      if (left.site !== right.site || left.target !== right.target) return false;
+    }
+    for (let index = 0; index < expectedAliases; index++) {
+      const left = expected.aliases[index]!;
+      const right = actual.aliases[index]!;
+      if (left.name !== right.name || left.target !== right.target) return false;
+    }
+    for (let index = 0; index < expectedTokens; index++) {
+      const left = expected.tokens[index]!;
+      const right = actual.tokens[index]!;
+      if (left.text !== right.text || left.site !== right.site) return false;
+    }
+  } catch {
+    return false;
   }
   return true;
 }
@@ -1027,16 +1442,12 @@ function containsExpected<K, V>(
     let supplied: readonly V[] | undefined;
     try {
       supplied = actual.get(key);
+      if (!Array.isArray(supplied)) return false;
     } catch {
       return false;
     }
-    if (!Array.isArray(supplied)) return false;
-    let count: number;
-    try {
-      count = supplied.length;
-    } catch {
-      return false;
-    }
+    const count = snapshotArrayLength(supplied);
+    if (count === undefined) return false;
     if (!chargeReconciliation(budget, count)) return false;
     let values: ReadonlySet<V>;
     try {
@@ -1071,14 +1482,37 @@ function closureMapsContain(
   for (const source of sources) {
     const closure = manifest.closures.get(source);
     if (closure === undefined || closure.unresolved) return { contained: false, exhausted: budget.exhausted };
-    for (const witness of closure.references) if (!append(references, witness.target, witness.site)) return { contained: false, exhausted: budget.exhausted };
-    for (const witness of closure.aliases) if (!append(aliases, witness.target, witness.name)) return { contained: false, exhausted: budget.exhausted };
-    for (const witness of closure.tokens) if (!append(tokens, witness.text, witness.site)) return { contained: false, exhausted: budget.exhausted };
+    const referenceCount = snapshotArrayLength(closure.references);
+    const aliasCount = snapshotArrayLength(closure.aliases);
+    const tokenCount = snapshotArrayLength(closure.tokens);
+    if (referenceCount === undefined || aliasCount === undefined || tokenCount === undefined) {
+      return { contained: false, exhausted: budget.exhausted };
+    }
+    try {
+      for (let index = 0; index < referenceCount; index++) {
+        const witness = closure.references[index]!;
+        if (!append(references, witness.target, witness.site)) return { contained: false, exhausted: budget.exhausted };
+      }
+      for (let index = 0; index < aliasCount; index++) {
+        const witness = closure.aliases[index]!;
+        if (!append(aliases, witness.target, witness.name)) return { contained: false, exhausted: budget.exhausted };
+      }
+      for (let index = 0; index < tokenCount; index++) {
+        const witness = closure.tokens[index]!;
+        if (!append(tokens, witness.text, witness.site)) return { contained: false, exhausted: budget.exhausted };
+      }
+    } catch {
+      return { contained: false, exhausted: budget.exhausted };
+    }
   }
-  const contained = containsExpected(actual.references, references, budget)
-    && containsExpected(actual.aliasNames, aliases, budget)
-    && containsExpected(actual.tokenOccurrences, tokens, budget);
-  return { contained, exhausted: budget.exhausted };
+  try {
+    const contained = containsExpected(actual.references, references, budget)
+      && containsExpected(actual.aliasNames, aliases, budget)
+      && containsExpected(actual.tokenOccurrences, tokens, budget);
+    return { contained, exhausted: budget.exhausted };
+  } catch {
+    return { contained: false, exhausted: budget.exhausted };
+  }
 }
 
 /** 기대 파일마다 정확히 하나의 part가 필요하다. 열거 성공에서 unknown 효과를 제거하지 않는다. */
@@ -1094,19 +1528,32 @@ export function reconcileEffectInventory(
   if (view !== manifest.view) reasons.add('view-mismatch');
   const expectedCount = manifest.revisions.size;
   if (expectedCount !== manifest.files.size) reasons.add('manifest-file-mismatch');
-  if (expectedCount > EFFECT_BUILD_CAPS.visited || parts.length !== expectedCount || parts.length > EFFECT_BUILD_CAPS.visited) {
+  const partCount = snapshotArrayLength(parts);
+  if (partCount === undefined) {
     reasons.add('part-count-mismatch');
-    if (expectedCount > EFFECT_BUILD_CAPS.visited || parts.length > EFFECT_BUILD_CAPS.visited) reasons.add('build-cap');
+    return incompleteInventory(manifest, reasons);
+  }
+  if (expectedCount > EFFECT_BUILD_CAPS.visited || partCount !== expectedCount || partCount > EFFECT_BUILD_CAPS.visited) {
+    reasons.add('part-count-mismatch');
+    if (expectedCount > EFFECT_BUILD_CAPS.visited || partCount > EFFECT_BUILD_CAPS.visited) reasons.add('build-cap');
   }
   if (reasons.size > 0) return incompleteInventory(manifest, reasons);
 
   const sources = [...manifest.revisions.keys()];
-  const partBySource = new Map<ts.SourceFile, EffectPart>();
-  for (let index = 0; index < parts.length; index++) {
-    const part = parts[index];
-    if (part === undefined || !manifest.revisions.has(part.source)) { reasons.add('unexpected-part'); continue; }
-    if (partBySource.has(part.source)) reasons.add('duplicate-part');
-    else partBySource.set(part.source, part);
+  const partBySource = new Map<ts.SourceFile, EffectPartSnapshot>();
+  for (let index = 0; index < partCount; index++) {
+    let part: EffectPart | undefined;
+    try {
+      part = parts[index];
+    } catch {
+      reasons.add('unexpected-part');
+      continue;
+    }
+    if (part === undefined) { reasons.add('unexpected-part'); continue; }
+    const snapshot = snapshotEffectPart(part);
+    if (snapshot === undefined || !manifest.revisions.has(snapshot.source)) { reasons.add('unexpected-part'); continue; }
+    if (partBySource.has(snapshot.source)) reasons.add('duplicate-part');
+    else partBySource.set(snapshot.source, snapshot);
   }
   for (const source of sources) if (!partBySource.has(source)) reasons.add('missing-part');
   if (reasons.size > 0) return incompleteInventory(manifest, reasons);
@@ -1120,8 +1567,10 @@ export function reconcileEffectInventory(
     if (manifest.statuses.get(source) !== 'complete' || part.status !== 'complete') reasons.add('build-cap');
     if (!Number.isSafeInteger(expectedVisited) || !Number.isSafeInteger(part.visited)
       || expectedVisited === undefined || expectedVisited <= 0 || part.visited <= 0
-      || expectedVisited !== part.visited || expectedVisited + part.visited > EFFECT_BUILD_CAPS.perFile) reasons.add('visit-mismatch');
-    else aggregateVisited += expectedVisited + part.visited;
+      || expectedVisited !== part.visited) reasons.add('visit-mismatch');
+    else if (expectedVisited + part.visited > EFFECT_BUILD_CAPS.perFile) {
+      reasons.add('build-cap');
+    } else aggregateVisited += expectedVisited + part.visited;
     if (!Number.isSafeInteger(expectedRetained) || !Number.isSafeInteger(part.retained)
       || expectedRetained === undefined || expectedRetained < 0 || part.retained < 0
       || expectedRetained !== part.retained) reasons.add('retained-mismatch');
@@ -1130,7 +1579,9 @@ export function reconcileEffectInventory(
     if (part.revision !== expectedRevision || revision(source) !== expectedRevision) reasons.add('stale-part');
     if (part.emitPolicy.preserveTypeOnlySpecifiers !== manifest.emitPolicy.preserveTypeOnlySpecifiers) reasons.add('emit-policy-mismatch');
   }
-  if (aggregateVisited > EFFECT_BUILD_CAPS.visited) reasons.add('visit-mismatch');
+  if (aggregateVisited > EFFECT_BUILD_CAPS.visited) {
+    reasons.add('build-cap');
+  }
   if (aggregateRetained > EFFECT_BUILD_CAPS.records) reasons.add('build-cap');
   if (reasons.size > 0) return incompleteInventory(manifest, reasons);
 
@@ -1142,16 +1593,45 @@ export function reconcileEffectInventory(
   for (const source of sources) {
     const part = partBySource.get(source)!;
     const expectedEdges = manifest.moduleEdges.get(source) ?? [];
-    if (!sameEdges(expectedEdges, part.moduleEdges, reconciliationBudget)) reasons.add('module-edge-mismatch');
-    for (const edge of expectedEdges) {
+    const actualEdges = part.moduleEdges;
+    const expectedEdgeCount = snapshotArrayLength(expectedEdges);
+    const actualEdgeCount = snapshotArrayLength(actualEdges);
+    if (expectedEdgeCount === undefined || actualEdgeCount === undefined) {
+      reasons.add('module-edge-mismatch');
+      coveredEdges = false;
+      continue;
+    }
+    if (!sameEdges(expectedEdges, actualEdges, reconciliationBudget, [expectedEdgeCount, actualEdgeCount])) reasons.add('module-edge-mismatch');
+    for (let edgeIndex = 0; edgeIndex < expectedEdgeCount; edgeIndex++) {
+      let edge: RuntimeModuleEdge | undefined;
+      try {
+        edge = expectedEdges[edgeIndex];
+      } catch {
+        coveredEdges = false;
+        reasons.add('module-edge-mismatch');
+        break;
+      }
+      if (edge === undefined) {
+        coveredEdges = false;
+        reasons.add('module-edge-mismatch');
+        continue;
+      }
       const declarations = edge.target?.declarations;
-      if (declarations === undefined || !chargeReconciliation(reconciliationBudget, declarations.length)) {
+      const declarationCount = declarations === undefined ? undefined : snapshotArrayLength(declarations);
+      if (declarationCount === undefined || !chargeReconciliation(reconciliationBudget, declarationCount)) {
         coveredEdges = false;
         continue;
       }
       let inside = false;
-      for (const declaration of declarations) {
-        if (ts.isSourceFile(declaration) && manifest.runtimeModules.has(declaration)) { inside = true; break; }
+      try {
+        const declarationArray = declarations!;
+        for (let declarationIndex = 0; declarationIndex < declarationCount; declarationIndex++) {
+          const declaration = declarationArray[declarationIndex]!;
+          if (ts.isSourceFile(declaration) && manifest.runtimeModules.has(declaration)) { inside = true; break; }
+        }
+      } catch {
+        coveredEdges = false;
+        continue;
       }
       coveredEdges &&= inside;
     }

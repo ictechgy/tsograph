@@ -1013,7 +1013,9 @@ What `bound` guarantees, and what it does not:
   file. Repeated collection passes share these limits; counts include the work of each pass and
   retained reference, alias, and token witnesses. Initialization coverage describes module-load
   coverage; initialization order requires a separate proof. Runtime CJS import-equals loader
-  evaluation remains unknown. A build cap produces `effect-inventory: incomplete(build-cap)`; it does not consume a flow
+  evaluation remains unknown. Dynamic access to genuine platform loaders and exposure of their
+  platform roots retain opaque module-load evidence. Malformed supplied index parts cannot certify
+  coverage. A build cap produces `effect-inventory: incomplete(build-cap)`; it does not consume a flow
   query's budget or certify a partial inventory as safe. Other missing or mismatched coverage is
   reported as `effect-inventory: incomplete(coverage)`. These effect-inventory limitations report whole-view
   enumeration coverage. Future effect certificates must check the selected view's reference closure and module-load

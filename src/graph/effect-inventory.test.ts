@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { buildFileIndex, mergeFlowIndexes } from './flow-index.ts';
 import { EFFECT_BUILD_CAPS, createEffectManifest, collectEffectPart, reconcileEffectInventory, selectEffectManifest,
-  type EffectBuildBudget } from './effect-inventory.ts';
+  type EffectBuildBudget, type EffectPart } from './effect-inventory.ts';
 
 /** AST 정체성이 보존되는 합성 입력이다. */
 function fixture(text = 'export const value = 1;') {
@@ -322,6 +322,139 @@ test('manifest 경로·part visited·aggregate cap은 공급 필드를 신뢰하
     const inventory = reconcileEffectInventory(manifest, [{ ...part, visited }]);
     assert.equal(inventory.enumeration, 'incomplete', String(visited));
     assert.equal(inventory.ambientSafety, 'unknown', String(visited));
+  }
+  const perFileOverflowManifest = { ...manifest, visited: new Map([[actual, 60_000]]) };
+  const perFileOverflow = reconcileEffectInventory(perFileOverflowManifest, [{ ...part, visited: 60_000 }]);
+  assert.equal(perFileOverflow.enumeration, 'incomplete');
+  assert.ok(perFileOverflow.reasons.includes('build-cap'));
+
+  const manySources = new Map(Array.from({ length: 11 }, (_, index) => {
+    const file = ts.createSourceFile(`many-${index}.ts`, 'export const value = 1;', ts.ScriptTarget.Latest, true);
+    return [`many-${index}.ts`, file] as const;
+  }));
+  const manyManifest = createEffectManifest(manySources, 'whole', resolve);
+  const manyParts = [...manySources.values()].map((file) => collectEffectPart(file, resolve));
+  const aggregateManifest = { ...manyManifest, visited: new Map([...manyManifest.visited].map(([file]) => [file, 50_000] as const)) };
+  const aggregateParts = manyParts.map((candidate) => ({ ...candidate, visited: 50_000 }));
+  const aggregateOverflow = reconcileEffectInventory(aggregateManifest, aggregateParts);
+  assert.equal(aggregateOverflow.enumeration, 'incomplete');
+  assert.ok(aggregateOverflow.reasons.includes('build-cap'));
+});
+
+test('reconcile는 parts와 nested effect 배열의 length를 한 번만 읽는다', () => {
+  const source = ts.createSourceFile('a.ts', 'export const value = 1;', ts.ScriptTarget.Latest, true);
+  const files = new Map([['a.ts', source]]);
+  const resolve = () => undefined;
+  const manifest = createEffectManifest(files, 'whole', resolve);
+  const part = collectEffectPart(source, resolve);
+  const poisonLength = <T extends object>(value: T): T => {
+    let reads = 0;
+    return new Proxy(value, {
+      get(target, property, receiver) {
+        if (property === 'length' && ++reads === 2) throw new Error('second length read');
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  };
+  const poisonedParts = new Proxy([part], {
+    get(target, property, receiver) {
+      if (property === 'length') {
+        const current = Reflect.get(target, property, receiver);
+        return current;
+      }
+      if (property === Symbol.iterator) throw new Error('iterator must not be required');
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  for (const candidate of [
+    { ...part, moduleEdges: poisonLength(part.moduleEdges) },
+    { ...part, records: poisonLength(part.records) },
+    { ...part, closure: { ...part.closure, references: poisonLength(part.closure.references) } },
+    { ...part, closure: { ...part.closure, aliases: poisonLength(part.closure.aliases) } },
+    { ...part, closure: { ...part.closure, tokens: poisonLength(part.closure.tokens) } },
+  ]) {
+    let inventory: ReturnType<typeof reconcileEffectInventory> | undefined;
+    assert.doesNotThrow(() => { inventory = reconcileEffectInventory(manifest, [candidate]); });
+    assert.equal(inventory?.enumeration, 'complete');
+  }
+  let partsInventory: ReturnType<typeof reconcileEffectInventory> | undefined;
+  assert.doesNotThrow(() => { partsInventory = reconcileEffectInventory(manifest, poisonedParts); });
+  assert.equal(partsInventory?.enumeration, 'complete');
+
+  for (const field of ['source', 'moduleEdges', 'records', 'closure', 'emitPolicy'] as const) {
+    const supplied = { ...part } as EffectPart;
+    Object.defineProperty(supplied, field, { get() { throw new Error(`malformed ${field}`); } });
+    let malformed: ReturnType<typeof reconcileEffectInventory> | undefined;
+    assert.doesNotThrow(() => { malformed = reconcileEffectInventory(manifest, [supplied]); });
+    assert.equal(malformed?.enumeration, 'incomplete', field);
+  }
+});
+
+test('중첩 supplied closure·emit policy의 잘못된 접근도 인증을 만들지 않는다', () => {
+  const { file, manifest, resolve } = fixture();
+  const part = collectEffectPart(file, resolve);
+  const throwing = <T extends object>(value: T): T => new Proxy(value, {
+    get() { throw new Error('malformed nested field'); },
+  });
+  for (const field of ['closure', 'emitPolicy'] as const) {
+    for (const value of [undefined, throwing(part[field])]) {
+      const supplied = { ...part, [field]: value } as unknown as EffectPart;
+      let inventory: ReturnType<typeof reconcileEffectInventory> | undefined;
+      assert.doesNotThrow(() => { inventory = reconcileEffectInventory(manifest, [supplied]); });
+      assert.equal(inventory?.enumeration, 'incomplete', field);
+      assert.equal(inventory?.ambientSafety, 'unknown', field);
+    }
+  }
+});
+
+test('supplied record getter는 모르는 호출 효과를 primitive로 바꿔 인증하지 못한다', () => {
+  const checked = checkedSources({ '/getter.ts': 'declare function observe(): void; export const value = observe();' },
+    { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const file = checked.files.get('/getter.ts')!;
+  const resolve = () => undefined;
+  const policy = { preserveTypeOnlySpecifiers: false };
+  const part = collectEffectPart(file, resolve, undefined, undefined, checked.checker, policy);
+  const manifest = createEffectManifest(new Map([['/getter.ts', file]]), 'whole', resolve,
+    true, undefined, checked.checker, policy);
+  const records = part.records.map((record) => {
+    let reads = 0;
+    return { site: record.site, get operation() { return ++reads === 1 ? record.operation : 'primitive' as const; } };
+  });
+  const inventory = reconcileEffectInventory(manifest, [{ ...part, records }]);
+  assert.equal(inventory.referenceAliases, 'complete');
+  assert.equal(inventory.ambientSafety, 'unknown');
+  assert.deepEqual(inventory.records.map((record) => record.operation), part.records.map((record) => record.operation));
+});
+
+test('supplied closure map의 revoked 값·필드 getter·invalid length는 mismatch로 닫힌다', () => {
+  const checked = checkedSources({ '/maps.ts': 'const local = () => 1; const holder = { local }; export { local as alias };' },
+    { noLib: true, types: [], module: ts.ModuleKind.ESNext });
+  const file = checked.files.get('/maps.ts')!;
+  const resolve = () => undefined;
+  const manifest = createEffectManifest(new Map([['/maps.ts', file]]), 'whole', resolve, true, undefined, checked.checker);
+  const index = buildFileIndex(checked.checker, file, resolve);
+  for (const field of ['references', 'aliasNames', 'tokenOccurrences'] as const) {
+    const supplied = { references: index.references, aliasNames: index.aliasNames, tokenOccurrences: index.tokenOccurrences };
+    Object.defineProperty(supplied, field, { get() { throw new Error('malformed supplied map'); } });
+    let inventory: ReturnType<typeof reconcileEffectInventory> | undefined;
+    assert.doesNotThrow(() => { inventory = reconcileEffectInventory(manifest, index.effectParts, 'whole', supplied); });
+    assert.equal(inventory?.referenceAliases, 'incomplete', field);
+  }
+  const key = partToken(index.tokenOccurrences);
+  const revoked = Proxy.revocable([...index.tokenOccurrences.get(key)!], {});
+  revoked.revoke();
+  const invalidLength = new Proxy([...index.tokenOccurrences.get(key)!], {
+    get(target, property, receiver) { return property === 'length' ? -1 : Reflect.get(target, property, receiver); },
+  });
+  for (const value of [revoked.proxy, invalidLength]) {
+    const supplied = new Map(index.tokenOccurrences);
+    supplied.set(key, value);
+    let inventory: ReturnType<typeof reconcileEffectInventory> | undefined;
+    assert.doesNotThrow(() => { inventory = reconcileEffectInventory(manifest, index.effectParts, 'whole', {
+      references: index.references, aliasNames: index.aliasNames, tokenOccurrences: supplied,
+    }); });
+    assert.equal(inventory?.referenceAliases, 'incomplete');
+    assert.equal(inventory?.reasons.includes('build-cap'), false);
   }
 });
 
@@ -674,7 +807,13 @@ test('Node loader origin은 정적 alias까지 opaque closure로 남기고 일�
     platformChecked.checker, { preserveTypeOnlySpecifiers: false });
   const ordinary = collectEffectPart(ordinaryChecked.files.get('/ordinary.ts')!, resolve, undefined, undefined,
     ordinaryChecked.checker, { preserveTypeOnlySpecifiers: false });
-  assert.ok(platform.moduleEdges.filter((edge) => edge.specifier === undefined && edge.target === undefined).length >= 7);
+  const opaqueSites = new Set(platform.moduleEdges.filter((edge) => edge.specifier === undefined && edge.target === undefined)
+    .map((edge) => edge.site.getText()));
+  for (const site of ['module.require', "createRequire('base')", "module.require('module-pkg')",
+    "globalThis.require('global-pkg')", "localModuleLoader('alias-pkg')", "localFactoryLoader('factory-pkg')",
+    "createRequire('inline-base')", "createRequire('inline-base')('inline-pkg')"]) {
+    assert.ok(opaqueSites.has(site), site);
+  }
   assert.deepEqual(ordinary.moduleEdges, []);
   assert.equal(platform.closure.unresolved, true);
 
@@ -692,6 +831,159 @@ test('Node loader origin은 정적 alias까지 opaque closure로 남기고 일�
   const inventory = reconcileEffectInventory(manifest, [platform]);
   assert.equal(inventory.initialization, 'incomplete');
   assert.equal(inventory.referenceAliases, 'incomplete');
+});
+
+test('platform root 노출·computed·reflection·eval은 각 site를 opaque coverage로 닫는다', () => {
+  const fixtures = [
+    ['computed const key', "declare const module: { require: (id: string) => unknown }; const key = 'require'; export const x = (module as any)[key]('plugin');"],
+    ['computed unknown key', "declare const module: { require: (id: string) => unknown }; declare const key: string; export const x = (module as any)[key]('plugin');"],
+    ['inline parameter root', "declare const module: { require: (id: string) => unknown }; export const x = ((m: any) => m.require('plugin'))(module);"],
+    ['root alias escape', "declare const module: { require: (id: string) => unknown }; const m = module; export const x = use(m); function use(value: any) { return value; }"],
+    ['globalThis root', "export const x = (globalThis as any).require('plugin');"],
+    ['global root', "declare const global: any; export const x = global.require('plugin');"],
+    ['process mainModule', "declare const process: any; export const x = process.mainModule.require('plugin');"],
+    ['module parent', "declare const module: any; export const x = module.parent.require('plugin');"],
+    ['module constructor', "declare const module: any; export const x = module.constructor.createRequire('x')('plugin');"],
+    ['getBuiltinModule', "declare const process: any; export const x = process.getBuiltinModule('node:module').createRequire('x')('plugin');"],
+    ['Reflect.get', "declare const module: any; export const x = Reflect.get(module, 'require')('plugin');"],
+    ['direct eval', "eval('module.require(\"plugin\")');"],
+  ] as const;
+  for (const [label, text] of fixtures) {
+    const checked = checkedSources({ '/platform.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/platform.ts')!;
+    const resolve = () => undefined;
+    const part = collectEffectPart(file, resolve, undefined, undefined, checked.checker,
+      { preserveTypeOnlySpecifiers: false });
+    const manifest = createEffectManifest(new Map([['/platform.ts', file]]), 'whole', resolve,
+      true, undefined, checked.checker, { preserveTypeOnlySpecifiers: false });
+    const inventory = reconcileEffectInventory(manifest, [part]);
+    assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined && edge.target === undefined), label);
+    assert.equal(part.closure.unresolved, true, label);
+    assert.equal(inventory.initialization, 'incomplete', label);
+    assert.equal(inventory.referenceAliases, 'incomplete', label);
+  }
+});
+
+test('platform root의 대입·반환·named export는 원래 노출 자리에 opaque 근거를 남긴다', () => {
+  const fixtures = [
+    "declare const module: any; let m: any; m = module; export const x = ((q: any) => q.require('pkg'))(m);",
+    "declare const module: any; export function get() { return module; } export const x = get().require('pkg');",
+    "declare const module: any; export { module };",
+    "declare const module: any; export { module as root };",
+    "declare const module: any; const m = module; export { m as root };",
+    "declare const global: any; export { global as root };",
+    "declare const module: any; export const x = (0, module).require('pkg');",
+    "declare const module: any; class W { m = module; } export const x = new W().m.require('pkg');",
+    "declare const module: any; class W { constructor(public m: any) {} } export const x = new W(module).m.require('pkg');",
+    "declare const module: any; function f(m: any = module) { return m.require('pkg'); } f();",
+    "declare function eval(code: string): any; (0, eval)(\"require('pkg')\");",
+    "export const x = (globalThis as any).process.mainModule.require('pkg');",
+    "export const x = (globalThis as any).eval(\"require('pkg')\");",
+  ];
+  for (const text of fixtures) {
+    const checked = checkedSources({ '/exposed.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/exposed.ts')!;
+    const resolve = () => undefined;
+    const policy = { preserveTypeOnlySpecifiers: false };
+    const part = collectEffectPart(file, resolve, undefined, undefined, checked.checker, policy);
+    const manifest = createEffectManifest(new Map([['/exposed.ts', file]]), 'whole', resolve,
+      true, undefined, checked.checker, policy);
+    const inventory = reconcileEffectInventory(manifest, [part]);
+    assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined && edge.target === undefined), text);
+    assert.equal(inventory.initialization, 'incomplete', text);
+    assert.equal(inventory.referenceAliases, 'incomplete', text);
+    assert.equal(inventory.ambientSafety, 'unknown', text);
+  }
+});
+
+test('computed platform key의 const 표기는 runtime key 불변성 근거가 아니다', () => {
+  const checked = checkedSources({ '/key.ts': "declare const module: any; const key = 'other'; (key as any) = 'require'; export const x = module[key]('pkg');" },
+    { noLib: true, types: [], module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES5 });
+  const file = checked.files.get('/key.ts')!;
+  const policy = { preserveTypeOnlySpecifiers: false };
+  const part = collectEffectPart(file, () => undefined, undefined, undefined, checked.checker, policy);
+  const manifest = createEffectManifest(new Map([['/key.ts', file]]), 'whole', () => undefined,
+    true, undefined, checked.checker, policy);
+  assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined));
+  assert.equal(reconcileEffectInventory(manifest, [part]).initialization, 'incomplete');
+});
+
+test('다른 script의 platform 동명 helper는 사용 파일의 runtime root를 증명하지 못한다', () => {
+  for (const name of ['module', 'process']) {
+    const checked = checkedSources({
+      '/helper.ts': `const ${name} = { require: (id: string) => id };`,
+      '/consumer.ts': `${name}.require('pkg');`,
+    }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/consumer.ts')!;
+    const policy = { preserveTypeOnlySpecifiers: false };
+    const part = collectEffectPart(file, () => undefined, undefined, undefined, checked.checker, policy);
+    assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined), name);
+    assert.equal(part.closure.unresolved, true, name);
+  }
+});
+
+test('await builtin module의 loader factory도 opaque alias 근거를 남긴다', () => {
+  const checked = checkedSources({
+    '/node-module.d.ts': "declare module 'node:module' { export function createRequire(url: string): (id: string) => unknown; }",
+    '/awaited.ts': "const { createRequire } = await import('node:module'); export const value = createRequire('entry')('pkg');",
+  }, { noLib: true, types: [], module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler });
+  const file = checked.files.get('/awaited.ts')!;
+  const part = collectEffectPart(file, () => undefined, undefined, undefined, checked.checker,
+    { preserveTypeOnlySpecifiers: false });
+  assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined));
+  assert.equal(part.closure.unresolved, true);
+});
+
+test('실제 기본 lib·Node 선언을 읽은 platform loader도 opaque로 남는다', () => {
+  for (const text of [
+    "export const value = globalThis.eval(\"require('pkg')\");",
+    "import { createRequire } from 'node:module'; export const value = createRequire('entry')('pkg');",
+  ]) {
+    const checked = checkedSources({ '/lib-root.ts': text }, { types: ['node'], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/lib-root.ts')!;
+    const part = collectEffectPart(file, () => undefined, undefined, undefined, checked.checker,
+      { preserveTypeOnlySpecifiers: false });
+    assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined), text);
+    assert.equal(part.closure.unresolved, true, text);
+  }
+});
+
+test('platform 이름의 실제 local helper는 loader로 승격하지 않는다', () => {
+  const fixtures = [
+    "const global = { require: (id: string) => id }; global.require('plugin');",
+    "const globalThis = { require: (id: string) => id }; globalThis.require('plugin');",
+    "const process = { mainModule: { require: (id: string) => id } }; process.mainModule.require('plugin');",
+    "const module = { parent: { require: (id: string) => id }, require: (id: string) => id }; module.parent.require('plugin');",
+    "const Reflect = { get: (object: any, key: string) => object[key] }; const module = { require: (id: string) => id }; Reflect.get(module, 'require')('plugin');",
+    "function eval(value: string) { return value; } eval('module.require(\"plugin\")');",
+    "const module = { require: (id: string) => id }; let m: typeof module; m = module; export { module };",
+    "const module = { require: (id: string) => id }; function get() { return module; } get().require('pkg');",
+  ] as const;
+  for (const text of fixtures) {
+    const checked = checkedSources({ '/ordinary.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/ordinary.ts')!;
+    const resolve = () => undefined;
+    const part = collectEffectPart(file, resolve, undefined, undefined, checked.checker,
+      { preserveTypeOnlySpecifiers: false });
+    const manifest = createEffectManifest(new Map([['/ordinary.ts', file]]), 'whole', resolve,
+      true, undefined, checked.checker, { preserveTypeOnlySpecifiers: false });
+    const inventory = reconcileEffectInventory(manifest, [part]);
+    assert.deepEqual(part.moduleEdges, [], text);
+    assert.equal(inventory.initialization, 'complete', text);
+  }
+});
+
+test('globalThis root census는 큰 parameter 목록에서도 function boundary별로 한 번만 청구한다', () => {
+  const parameterCount = 4_000;
+  const parameters = Array.from({ length: parameterCount }, (_, index) => `p${index}: any`).join(', ');
+  const checked = checkedSources({ '/large.ts': `export function f(${parameters}) { globalThis.require('plugin'); }` },
+    { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const budget: EffectBuildBudget = { visited: 0, records: 0 };
+  const part = collectEffectPart(checked.files.get('/large.ts')!, () => undefined, undefined, budget,
+    checked.checker, { preserveTypeOnlySpecifiers: false });
+  assert.equal(part.status, 'complete');
+  assert.equal(part.moduleEdges.length, 1);
+  assert.ok(budget.visited < 25_000);
 });
 
 test('require classifier는 overload declaration work를 한 번만 청구하고 두 번째 분류를 cache한다', () => {
