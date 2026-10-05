@@ -39,7 +39,7 @@ async function graphOf(files: Record<string, string>) {
   }
 }
 
-function indexedSource(source: string): IndexedSource {
+function indexedSource(source: string, compilerOptions: ts.CompilerOptions = {}): IndexedSource {
   const options: ts.CompilerOptions = {
     strict: true,
     // 표준 Map·Date 근거를 유지하되 무관한 DOM·호스트 ambient 선언은 로드하지 않는다.
@@ -48,6 +48,7 @@ function indexedSource(source: string): IndexedSource {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    ...compilerOptions,
   };
   const host = ts.createCompilerHost(options);
   const original = host.getSourceFile;
@@ -61,8 +62,8 @@ function indexedSource(source: string): IndexedSource {
   return { program, file, checker, index: buildFileIndex(checker, file, () => undefined) };
 }
 
-function contextOf(source: string): { source: IndexedSource; context: ConstructorCarrierContext; runner: ts.ClassLikeDeclaration } {
-  const indexed = indexedSource(source);
+function contextOf(source: string, compilerOptions: ts.CompilerOptions = {}): { source: IndexedSource; context: ConstructorCarrierContext; runner: ts.ClassLikeDeclaration } {
+  const indexed = indexedSource(source, compilerOptions);
   let runner: ts.ClassLikeDeclaration | undefined;
   const visit = (node: ts.Node): void => {
     if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name?.text === 'Runner') runner = node;
@@ -89,6 +90,11 @@ function carrierResult(source: string) {
   return proveConstructorCarrier(context, runner);
 }
 
+function carrierResultWithOptions(source: string, compilerOptions: ts.CompilerOptions) {
+  const { context, runner } = contextOf(source, compilerOptions);
+  return proveConstructorCarrier(context, runner);
+}
+
 const positive = [
   'interface Repo { run(): string; }',
   'interface RunnerDeps { repo: Repo; clock?: () => Date; }',
@@ -99,9 +105,92 @@ const positive = [
   '  run() { this.clock(); return this.deps.repo.run(); }',
   '}',
   'const live: Repo = new RepoImpl();',
-  'const runner = new Runner({ repo: live });',
+  'const runner = new Runner({ repo: live, clock: undefined });',
   'export const run = () => runner.run();',
 ].join('\n');
+
+function optionalKeyCarrier(key: string, value: string | undefined, cast = false): string {
+  const argument = value === undefined ? '{ repo: live }' : `{ repo: live, ${key}: ${value} }`;
+  const typedArgument = cast ? `${argument} as RunnerDeps` : argument;
+  return [
+    'interface Repo { run(): string; }',
+    `interface RunnerDeps { repo: Repo; ${key}?: () => Date; }`,
+    'class RepoImpl implements Repo { private readonly brand = true; run() { return "ok"; } }',
+    'class Runner {',
+    '  private readonly clock: () => Date;',
+    `  constructor(private readonly deps: RunnerDeps) { this.clock = deps.${key} ?? (() => new Date()); }`,
+    '  run() { this.clock(); return this.deps.repo.run(); }',
+    '}',
+    'const live: Repo = new RepoImpl();',
+    `const runner = new Runner(${typedArgument});`,
+    'export const run = () => runner.run();',
+  ].join('\n');
+}
+
+test('stage0 requires an explicitly present own optional value, including inherited-name collisions', () => {
+  for (const key of ['toString', 'constructor']) {
+    assert.equal(carrierResult(optionalKeyCarrier(key, undefined)) === undefined, true, `${key} omission`);
+    assert.equal(carrierResult(optionalKeyCarrier(key, undefined, true)) === undefined, true, `${key} cast omission`);
+    assert.ok(carrierResult(optionalKeyCarrier(key, 'undefined')), `${key} own undefined`);
+    assert.ok(carrierResult(optionalKeyCarrier(key, 'null')), `${key} own null`);
+    assert.ok(carrierResult(optionalKeyCarrier(key, '() => new Date()')), `${key} own pure Date`);
+  }
+});
+
+test('stage0 audits carrier method entry and rejects unproved body coercion', () => {
+  const method = '  run() { this.clock(); return this.deps.repo.run(); }';
+  const entryCases = [
+    positive.replace(method, '  run(value: unknown) { this.clock(); return this.deps.repo.run(); }'),
+    `${positive}\ndeclare function observe(value: Runner): unknown;`.replace(method, '  run(value = observe(this)) { this.clock(); return this.deps.repo.run(); }'),
+    positive.replace(method, '  run(...values: unknown[]) { this.clock(); return this.deps.repo.run(); }'),
+    positive.replace(method, '  run({ value }: { value: unknown }) { this.clock(); return this.deps.repo.run(); }'),
+    positive.replace(method, '  async run() { this.clock(); return this.deps.repo.run(); }'),
+    positive.replace(method, '  *run() { this.clock(); return this.deps.repo.run(); }'),
+    positive.replace('export const run = () => runner.run();', 'export const run = () => runner.run(1);'),
+    positive.replace('export const run = () => runner.run();', 'export const run = () => new Runner({ repo: live, clock: undefined }).run(1);'),
+    `${positive}\nfunction wrap(value: Runner, callback: (value: Runner) => string) { return callback(value); }\nexport const wrapped = wrap(runner, (value) => value.run(1));`,
+    positive.replace('return this.deps.repo.run();', 'return this.deps.repo.run() + "";'),
+    positive.replace('return this.deps.repo.run();', 'const value = this.deps.repo.run(); return value;'),
+    positive.replace('return this.deps.repo.run();', 'return this.deps.repo.run() as unknown as string;'),
+  ];
+  for (const source of entryCases) assert.equal(carrierResult(source) === undefined, true, source);
+  assert.ok(carrierResult(positive.replace(
+    method,
+    '  run() { (this.clock()); return (this.deps.repo.run()); }',
+  )));
+  assert.equal(carrierResult(positive.replace(
+    method,
+    '  run() { (this.clock() as unknown); return this.deps.repo.run(); }',
+  )) === undefined, true);
+  assert.ok(carrierResult(positive));
+});
+
+test('stage0 normalizes parameter, field, and prototype-sensitive runtime slots', () => {
+  const parameterPrototypeSlot = positive
+    .replace('private readonly deps', 'private readonly __proto__')
+    .replace('deps.clock', '__proto__.clock')
+    .replace('this.deps', 'this.__proto__');
+  const methodFieldCollision = positive.replace('class Runner {', 'class Runner {\n  clock() {}');
+  const parameterMethodCollision = positive.replace('class Runner {', 'class Runner {\n  deps() {}');
+  const optionalBagParameter = positive.replace(
+    'constructor(private readonly deps: RunnerDeps)',
+    'constructor(private readonly deps?: RunnerDeps)',
+  );
+  const decoratedBagParameter = positive.replace(
+    'constructor(private readonly deps: RunnerDeps)',
+    'constructor(@inject private readonly deps: RunnerDeps)',
+  );
+  for (const useDefineForClassFields of [false, true]) {
+    const options = { useDefineForClassFields };
+    const indexed = contextOf(positive, options);
+    assert.ok(proveConstructorCarrier(indexed.context, indexed.runner));
+    assert.equal(carrierResultWithOptions(parameterPrototypeSlot, options) === undefined, true, `__proto__ / ${useDefineForClassFields}`);
+    assert.equal(carrierResultWithOptions(methodFieldCollision, options) === undefined, true, `field/method / ${useDefineForClassFields}`);
+    assert.equal(carrierResultWithOptions(parameterMethodCollision, options) === undefined, true, `parameter/method / ${useDefineForClassFields}`);
+    assert.equal(carrierResultWithOptions(optionalBagParameter, options) === undefined, true, `optional bag / ${useDefineForClassFields}`);
+    assert.equal(carrierResultWithOptions(decoratedBagParameter, options) === undefined, true, `decorated bag / ${useDefineForClassFields}`);
+  }
+});
 
 test('정확히 한 번 생성된 private readonly bag carrier와 Date fallback을 증명한다', () => {
   const { context, runner } = contextOf(positive);
@@ -173,6 +262,92 @@ test('analyzer는 완료 결과·재진입·예산·stack overflow 경계를 fai
   references.set(classSymbol, Array.from({ length: 20_050 }, () => originalReference));
   const exhausted = new ConstructorCarrierAnalyzer({ ...context, index: { ...context.index, references } });
   assert.equal(exhausted.prove(runner), undefined);
+
+  let instanceFlowChecks = 0;
+  const instanceFlow = new ConstructorCarrierAnalyzer({
+    ...context,
+    policy: {
+      ...context.policy,
+      isProjectFile: (file) => {
+        instanceFlowChecks++;
+        return context.policy.isProjectFile(file);
+      },
+    },
+  });
+  assert.equal(instanceFlow.allowsInstanceFlow(runner), true);
+  const completedChecks = instanceFlowChecks;
+  assert.equal(instanceFlow.allowsInstanceFlow(runner), true);
+  assert.equal(instanceFlowChecks, completedChecks);
+
+  let exhaustedFlowChecks = 0;
+  const exhaustedFlow = new ConstructorCarrierAnalyzer({
+    ...context,
+    index: { ...context.index, references },
+    policy: {
+      ...context.policy,
+      isProjectFile: (file) => {
+        exhaustedFlowChecks++;
+        return context.policy.isProjectFile(file);
+      },
+    },
+  });
+  assert.equal(exhaustedFlow.allowsInstanceFlow(runner), false);
+  const firstExhaustedChecks = exhaustedFlowChecks;
+  assert.equal(exhaustedFlow.allowsInstanceFlow(runner), false);
+  assert.equal(exhaustedFlowChecks, firstExhaustedChecks);
+
+  let rangeFlowChecks = 0;
+  const rangeFlow = new ConstructorCarrierAnalyzer({
+    ...context,
+    policy: {
+      ...context.policy,
+      isProjectFile: () => {
+        rangeFlowChecks++;
+        throw new RangeError('bounded instance-flow recursion');
+      },
+    },
+  });
+  assert.equal(rangeFlow.allowsInstanceFlow(runner), false);
+  assert.equal(rangeFlow.allowsInstanceFlow(runner), false);
+  assert.equal(rangeFlowChecks, 1);
+
+  const unexpectedFlow = new ConstructorCarrierAnalyzer({
+    ...context,
+    policy: { ...context.policy, isProjectFile: () => { throw new TypeError('unexpected instance-flow failure'); } },
+  });
+  assert.throws(() => unexpectedFlow.allowsInstanceFlow(runner), /unexpected instance-flow failure/);
+});
+
+test('declared-method receiver certificate excludes constructor replacement, entry escape, effects and shadowing', () => {
+  const receiverAllowed = (source: string): boolean => {
+    const { context, runner } = contextOf(source);
+    return new ConstructorCarrierAnalyzer(context).allowsDeclaredMethodReceiver(runner);
+  };
+  const safeReceiver = positive.replace(
+    '  run() { this.clock(); return this.deps.repo.run(); }',
+    '  run() { return "ok"; }',
+  );
+  assert.equal(receiverAllowed(safeReceiver), true);
+  const cases = [
+    safeReceiver.replace(
+      'this.clock = deps.clock ?? (() => new Date()); }',
+      'this.clock = deps.clock ?? (() => new Date()); return {} as Runner; }',
+    ),
+    `${safeReceiver}\ndeclare function observeInputs(value: unknown): RunnerDeps;`.replace(
+      'constructor(private readonly deps: RunnerDeps)',
+      'constructor(private readonly deps: RunnerDeps = observeInputs(this))',
+    ),
+    `${safeReceiver}\ndeclare function observe(value: unknown): void;`.replace(
+      '{ this.clock = deps.clock ?? (() => new Date()); }',
+      '{ observe(this); this.clock = deps.clock ?? (() => new Date()); }',
+    ),
+    safeReceiver.replace(
+      'this.clock = deps.clock ?? (() => new Date());',
+      '(this as { run: () => string }).run = () => "patched"; this.clock = deps.clock ?? (() => new Date());',
+    ),
+    safeReceiver.replace('class Runner {', 'class Runner {\n  private run = () => "field";'),
+  ];
+  for (const source of cases) assert.equal(receiverAllowed(source), false, source);
 });
 
 test('private module memo outer literal의 one-level projection binding도 전체 소비를 확인한다', () => {
@@ -187,7 +362,7 @@ test('private module memo outer literal의 one-level projection binding도 전�
     '}',
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
     'const { runner } = deps();',
     'export const run = () => runner.run();',
     'function wrap(make: () => { runner: Runner }, callback: (runner: Runner) => string) { const { runner } = make(); return callback(runner); }',
@@ -203,16 +378,16 @@ test('private module memo outer literal의 one-level projection binding도 전�
   const equalityGuard = source.replace('if (!memo)', 'if (memo === null)');
   assert.ok(carrierResult(equalityGuard));
   const guardedFactories = [
-    'function deps() { if (memo) {} else memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; memo ? undefined : undefined; return memo; }',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; !memo ? undefined : undefined; return memo; }',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; while (memo === null) { break; } return memo; }',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; do {} while (memo === null); return memo; }',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; for (; memo === null;) { break; } return memo; }',
-    'function deps() { if (memo !== null) {} else memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (memo) {} else memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; memo ? undefined : undefined; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; !memo ? undefined : undefined; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; while (memo === null) { break; } return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; do {} while (memo === null); return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; for (; memo === null;) { break; } return memo; }',
+    'function deps() { if (memo !== null) {} else memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
   ];
   for (const factory of guardedFactories) assert.ok(carrierResult(source.replace(
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
     factory,
   )), factory);
   const duplicateFactory = source.replace(
@@ -235,7 +410,7 @@ test('별칭·전체 인자 전달·computed this와 순환 생성은 닫힌 증
     `${positive}\nfunction consume(_runner: Runner) {} consume(runner);`,
     `${positive}\nfunction namedCallback() { return runner.run(); } export const namedRun = () => namedCallback();`,
     positive.replace('return this.deps.repo.run();', 'return this["deps"].repo.run();'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({ repo: live });\nnew Runner({ repo: runner as unknown as Repo });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({ repo: live, clock: undefined });\nnew Runner({ repo: runner as unknown as Repo });'),
   ];
   for (const source of cases) {
     const { context, runner } = contextOf(source);
@@ -254,7 +429,7 @@ test('bag·optional Date key·instance fallback field 이름은 고정되지 않
     '  run() { this.timeSource(); return this.resources.data.run(); }',
     '}',
     'const port: Port = new PortImpl();',
-    'const runner = new Runner({ data: port });',
+    'const runner = new Runner({ data: port, timestamp: undefined });',
     'export const run = () => runner.run();',
   ].join('\n');
   const { context, runner } = contextOf(source);
@@ -273,8 +448,8 @@ test('carrier의 구조·bag·constructor 경계를 모두 닫고 immediate know
   }, indexed.runner) === undefined, true);
 
   const immediate = positive.replace(
-    'const runner = new Runner({ repo: live });\nexport const run = () => runner.run();',
-    'export const run = () => new Runner({ repo: live }).run();',
+    'const runner = new Runner({ repo: live, clock: undefined });\nexport const run = () => runner.run();',
+    'export const run = () => new Runner({ repo: live, clock: undefined }).run();',
   );
   assert.ok(carrierResult(immediate));
   assert.ok(carrierResult(positive.replace(
@@ -297,7 +472,7 @@ test('carrier의 구조·bag·constructor 경계를 모두 닫고 immediate know
     positive.replace('class Runner {', 'export class Runner {'),
     positive.replace('class Runner {', '@sealed\nclass Runner {'),
     positive.replace('  run() { this.clock(); return this.deps.repo.run(); }', '  @logged run() { this.clock(); return this.deps.repo.run(); }'),
-    positive.replace('const runner = new Runner({ repo: live });', 'export const runner = new Runner({ repo: live });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'export const runner = new Runner({ repo: live, clock: undefined });'),
     `${positive}\nexport { runner };`,
     classExpression.replace('const Runner =', 'export const Runner ='),
     classExpression.replace('const Runner = class Runner', 'const holder = { Runner: class Runner')
@@ -328,10 +503,10 @@ test('carrier의 구조·bag·constructor 경계를 모두 닫고 immediate know
     positive.replace('interface RunnerDeps { repo: Repo; clock?: () => Date; }', 'interface RunnerDeps { __proto__: Repo; clock?: () => Date; }'),
     positive.replace('interface RunnerDeps { repo: Repo; clock?: () => Date; }', 'interface RunnerDeps { then: Repo; clock?: () => Date; }'),
     positive.replace('interface RunnerDeps { repo: Repo; clock?: () => Date; }', 'declare const field: unique symbol; interface RunnerDeps { [field]: Repo; clock?: () => Date; }'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({ repo: live, ...{} });'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({ repo: live, repo: live });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({ repo: live, ...{} });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({ repo: live, repo: live });'),
     positive.replace(
-      'const runner = new Runner({ repo: live });',
+      'const runner = new Runner({ repo: live, clock: undefined });',
       'const clock = () => new Date(); const runner = new Runner({ repo: live, clock });',
     ),
     positive.replace('  private readonly clock: () => Date;', '  private clock: () => Date;'),
@@ -403,9 +578,9 @@ test('type aliases and optional Date property forms are checked as real bag cont
   const unsupported = [
     positive.replace('interface RunnerDeps { repo: Repo; clock?: () => Date; }', 'type RunnerDeps = Readonly<{ repo: Repo; clock?: () => Date }>;'),
     positive.replace('interface RunnerDeps { repo: Repo; clock?: () => Date; }', 'type RunnerDeps = string;'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({});'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({ repo: live, extra: true });'),
-    positive.replace('const runner = new Runner({ repo: live });', 'const runner = new Runner({ ["repo"]: live });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({});'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({ repo: live, extra: true });'),
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', 'const runner = new Runner({ ["repo"]: live });'),
     positive.replace('class Runner {', 'const fieldName = "secret"; class Runner {').replace(
       '  private readonly clock: () => Date;',
       '  private readonly [fieldName]: () => Date;',
@@ -465,7 +640,7 @@ test('cycle guards close recursive carrier factories', () => {
     '}',
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return deps(); }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return deps(); }',
     'const { runner } = deps();',
     'export const run = () => runner.run();',
   ].join('\n');
@@ -484,7 +659,7 @@ test('independent review counterexamples remain unresolved until carrier-flow re
     '}',
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
     'function consume(_value: Runner) {}',
     'const { runner, runner: leaked } = deps();',
     'consume(leaked);',
@@ -504,7 +679,7 @@ test('independent review counterexamples remain unresolved until carrier-flow re
   if (carrierResult(positive.replace('return this.deps.repo.run();', 'return this.deps.repo.run(this);')) !== undefined) failures.push('service call receives this');
 
   const suppliedClock = [
-    positive.replace('const runner = new Runner({ repo: live });', [
+    positive.replace('const runner = new Runner({ repo: live, clock: undefined });', [
       'const evil: (this: Runner) => Date = function() { return this as unknown as Date; };',
       'const runner = new Runner({ repo: live, clock: evil });',
     ].join('\n')),
@@ -522,7 +697,7 @@ test('independent review counterexamples remain unresolved until carrier-flow re
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
     'function deps() {',
-    '  if (!memo) memo ??= { runner: new Runner({ repo: live }) };',
+    '  if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) };',
     '  const leak = () => { return memo; };',
     '  consume(leak);',
     '  return memo;',
@@ -537,7 +712,7 @@ test('independent review counterexamples remain unresolved until carrier-flow re
 
 test('optional Date 공급값은 inert 값 또는 pure intrinsic arrow만 허용한다', () => {
   const explicit = (value: string) => positive.replace(
-    'const runner = new Runner({ repo: live });',
+    'const runner = new Runner({ repo: live, clock: undefined });',
     `const runner = new Runner({ repo: live, clock: ${value} });`,
   );
   assert.ok(carrierResult(explicit('undefined')));
@@ -613,18 +788,30 @@ test('memo 반환 factory와 wrapper는 가장 가까운 stable synchronous func
     '}',
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
     'const { runner } = deps();',
     'export const run = () => runner.run();',
   ].join('\n');
   assert.ok(carrierResult(memo));
   assert.equal(carrierResult(memo.replace('function deps()', 'async function deps()')) === undefined, true);
   assert.equal(carrierResult(memo.replace('function deps()', 'function* deps()')) === undefined, true);
+  for (const parameter of [
+    'value: unknown',
+    'value = observe()',
+    '...values: unknown[]',
+    '{ value }: { value: unknown }',
+  ]) assert.equal(carrierResult(memo.replace('function deps()', `function deps(${parameter})`)) === undefined, true, parameter);
 
   const wrapper = `${positive}\nfunction wrap(value: Runner, callback: (value: Runner) => string) { return callback(value); }\nexport const wrapped = wrap(runner, (value) => value.run());`;
   assert.ok(carrierResult(wrapper));
   assert.equal(carrierResult(wrapper.replace('function wrap(', 'async function wrap(')) === undefined, true);
   assert.equal(carrierResult(wrapper.replace('function wrap(', 'function* wrap(')) === undefined, true);
+  const extraDefault = `${positive}\nfunction wrap(value: Runner, callback: (value: Runner) => string, extra = expose(value)) { return callback(value); }\nexport const wrapped = wrap(runner, (value) => value.run());`;
+  assert.equal(carrierResult(extraDefault) === undefined, true);
+  const wrapperArguments = `${positive}\nfunction wrap(value: Runner, callback: (value: Runner) => string) { const leaked = arguments; return callback(value); }\nexport const wrapped = wrap(runner, (value) => value.run());`;
+  assert.equal(carrierResult(wrapperArguments) === undefined, true);
+  const callbackArguments = `${positive}\nfunction wrap(value: Runner, callback: (value: Runner) => string) { return callback(value); }\nexport const wrapped = wrap(runner, function(value) { const leaked = arguments; return value.run(); });`;
+  assert.equal(carrierResult(callbackArguments) === undefined, true);
 });
 
 test('memo factory는 모든 projection binding과 가장 가까운 function boundary를 감사한다', () => {
@@ -638,7 +825,7 @@ test('memo factory는 모든 projection binding과 가장 가까운 function bou
     '}',
     'const live: Repo = new RepoImpl();',
     'let memo: { runner: Runner } | null = null;',
-    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
+    'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
   ].join('\n');
 
   const duplicate = `${memo}\nconst { runner, runner: twin, missing } = deps();\nexport const run = () => runner.run() + twin.run();`;
@@ -664,17 +851,17 @@ test('memo factory는 모든 projection binding과 가장 가까운 function bou
     `${memo}\nconst { runner } = deps(...[]);\nexport const run = () => runner.run();`,
     memo,
     memo.replace(
-      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
-      'memo ??= { runner: new Runner({ repo: live }) }; return memo;',
+      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
+      'memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo;',
     ),
     memo.replace('return memo; }', 'void memo; return memo; }') + '\nconst { runner } = deps();\nexport const run = () => runner.run();',
     memo.replace(
-      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
-      '{ function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; } const { runner } = deps(); runner.run(); }',
+      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
+      '{ function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; } const { runner } = deps(); runner.run(); }',
     ),
     memo.replace(
-      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; return memo; }',
-      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live }) }; function nested() { return memo; } nested(); return memo; }',
+      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }',
+      'function deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; function nested() { return memo; } nested(); return memo; }',
     ) + '\nconst { runner } = deps();\nexport const run = () => runner.run();',
     `${memo}\nfunction consume(_value: unknown) {}\nfunction wrap(make: () => { runner: Runner }, callback: (runner: Runner) => string) { consume(make); const { runner } = make(); return callback(runner); }\nexport const run = wrap(deps, (runner) => runner.run());`,
     `${memo}\nfunction wrap(make: () => { runner: Runner }, callback: (runner: Runner) => string) { function nested() { return make(); } const { runner } = nested(); return callback(runner); }\nexport const run = wrap(deps, (runner) => runner.run());`,
@@ -741,7 +928,7 @@ test('unrelated private array own-index write preserves the carrier bound edge',
       'const scratch = [0];',
       'const key = 0;',
       'scratch[key] = 1;',
-      'const runner = new Runner({ repo: live });',
+      'const runner = new Runner({ repo: live, timestamp: undefined });',
       'export const read = () => runner.run();',
     ].join('\n'),
   });
@@ -783,7 +970,7 @@ test('typed, spread and factory array provenance stay unresolved', async () => {
         '}',
         'const live: Repo = new RepoImpl();',
         ...setup,
-        'const runner = new Runner({ repo: live });',
+        'const runner = new Runner({ repo: live, timestamp: undefined });',
         'export const read = () => runner.run();',
       ].join('\n'),
     });
