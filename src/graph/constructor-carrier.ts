@@ -85,6 +85,15 @@ type CarrierOperation = 'proof' | 'role' | 'lineage' | 'instance' | 'identity' |
 /** 생성자 carrier 분석기다. 완료한 AST 결과만 메모하고 재진입은 실패시킨다. */
 export class ConstructorCarrierAnalyzer {
   private readonly context: ConstructorCarrierContext;
+  /** 늦게 생성한 recipe도 analyzer 생성 당시의 동일한 문맥·manifest에 묶는다. */
+  private readonly origin: {
+    readonly program: ts.Program | undefined;
+    readonly checker: ts.TypeChecker;
+    readonly index: FlowIndex;
+    readonly policy: FlowPolicy;
+    readonly inventory: FlowIndex['effectInventory'];
+    readonly manifest: object | undefined;
+  };
   private readonly dag: ProofDag;
   private readonly recipes = new Map<ts.ClassLikeDeclaration, Map<CarrierOperation, ProofRecipe<unknown>>>();
   private readonly bagRecipes = new Map<ts.ObjectLiteralExpression, Map<ts.ClassLikeDeclaration, ProofRecipe<ConstructorCarrierProof>>>();
@@ -102,6 +111,8 @@ export class ConstructorCarrierAnalyzer {
 
   constructor(context: ConstructorCarrierContext) {
     this.context = context;
+    this.origin = { program: context.program, checker: context.checker, index: context.index,
+      policy: context.policy, inventory: context.index.effectInventory, manifest: context.index.effectInventory?.manifest };
     this.files = new Set(context.index.files);
     this.dag = new ProofDag({ program: context.program ?? context.checker, checker: context.checker,
       view: context.index.effectInventory?.manifest.view ?? 'whole', manifest: context.index.effectInventory?.manifest,
@@ -361,7 +372,14 @@ export class ConstructorCarrierAnalyzer {
   }
   /** entry는 cache hit에도 현재 source/view/manifest/policy에 대조한다. */
   private validEntry(declaration: ts.ClassLikeDeclaration): boolean {
-    return this.files.has(declaration.getSourceFile());
+    return this.validContext() && this.files.has(declaration.getSourceFile());
+  }
+  /** recipe 생성 순서와 무관하게 DAG issuer의 초기 결합을 대조한다. */
+  private validContext(): boolean {
+    return this.context.program === this.origin.program && this.context.checker === this.origin.checker
+      && this.context.index === this.origin.index && this.context.policy === this.origin.policy
+      && this.context.index.effectInventory === this.origin.inventory
+      && this.context.index.effectInventory?.manifest === this.origin.manifest;
   }
   /** 서로 공유하는 AST-only obligation을 정적 recipe로 나눈다. */
   private recipe(declaration: ts.ClassLikeDeclaration, kind: CarrierOperation): ProofRecipe<unknown> {
@@ -391,7 +409,7 @@ export class ConstructorCarrierAnalyzer {
       capability: kind === 'construction' ? 'descriptor'
         : kind === 'identity' || kind === 'instance' || kind === 'consumption' || kind === 'receiver' ? 'concrete-dispatch' : 'legacy',
       identity: declaration,
-      valid: () => (this.validEntry(declaration)
+      valid: () => this.validContext() && (this.validEntry(declaration)
         || (kind === 'role' || kind === 'lineage') && !this.files.has(source)) && source.text === text
         && this.context.program === program && this.context.checker === checker
         && (this.context.program === undefined || this.context.program.getTypeChecker() === this.context.checker)

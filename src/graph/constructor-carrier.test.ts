@@ -1315,6 +1315,24 @@ test('stage2 legacy certificate remains bound to its original Program and checke
   assert.equal(analyzer.accepts(proof, a.runner), false);
 });
 
+test('stage2 newly created recipes reject a replaced analyzer policy or Program binding', () => {
+  const a = contextOf(positive); const b = contextOf(positive);
+  const supplied = { ...a.context, index: { ...a.context.index, effectInventory: completeInventory(a.source) } };
+  const analyzer = new ConstructorCarrierAnalyzer(supplied);
+  const proof = analyzer.prove(a.runner); assert.ok(proof);
+  supplied.policy = { ...supplied.policy, isOpenCallable: () => true };
+  assert.equal(analyzer.allowsExtendedInstanceIsolation(a.runner), false);
+  assert.equal(analyzer.isolatesExtendedBag(a.runner, proof.innerLiteral), false);
+  assert.equal(analyzer.allowsInstanceFlow(a.runner), false);
+
+  const otherSupplied = { ...a.context };
+  const otherAnalyzer = new ConstructorCarrierAnalyzer(otherSupplied);
+  assert.ok(otherAnalyzer.prove(a.runner));
+  otherSupplied.program = b.source.program; otherSupplied.checker = b.source.checker;
+  assert.equal(otherAnalyzer.allowsInstanceFlow(a.runner), false);
+  assert.equal(otherAnalyzer.allowsConstructedInstanceIdentity(a.runner), false);
+});
+
 test('stage2 public accepts charges current policy validation and rejects stale entry state', () => {
   const { context, runner } = contextOf(positive);
   let steps = 0;
