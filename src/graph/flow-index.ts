@@ -21,6 +21,7 @@
 import ts from 'typescript';
 
 import { isTypeOnly, skipWrappers } from './node-collector.ts';
+import { collectEffectPart, reconcileEffectInventory, type EffectBuildBudget, type EffectEmitPolicy, type EffectInventory, type EffectManifest, type EffectPart } from './effect-inventory.ts';
 
 /** 값을 모르는 쓰기를 나타내는 표식이다. */
 export const UNKNOWN_WRITE = undefined;
@@ -90,6 +91,10 @@ export interface MutationRecord {
 
 /** 모은 색인이다. */
 export interface FlowIndex {
+  /** 파일별 실행 관찰이다. 이것만으로 완전성이나 안전을 주장하지 않는다. */
+  readonly effectParts: readonly EffectPart[];
+  /** 독립 기대 매니페스트와 대조한 결과다. 매니페스트 없는 legacy 병합은 인증되지 않는다. */
+  readonly effectInventory: EffectInventory | undefined;
   /** 별칭을 푼 함수·클래스·변수 심볼 → 값 참조 토큰(식별자, 원소 접근의 문자열 리터럴). `referenceSite`로 식을 얻는다. */
   readonly references: ReadonlyMap<ts.Symbol, readonly ts.Node[]>;
   /** 별칭을 푼 변수·매개변수 심볼 → 대입한 값(모르면 undefined) */
@@ -162,6 +167,8 @@ interface ReflectiveAliasResult {
 
 /** 색인을 채우는 가변 저장소다. */
 interface MutableIndex {
+  effectParts: EffectPart[];
+  effectInventory: EffectInventory | undefined;
   references: Map<ts.Symbol, ts.Node[]>;
   identifierWrites: Map<ts.Symbol, (ts.Expression | undefined)[]>;
   propertyWrites: Map<string, PropertyWrite[]>;
@@ -189,6 +196,7 @@ export type ModuleResolver = (specifier: string, from: ts.SourceFile) => ts.Symb
  */
 function emptyIndex(): MutableIndex {
   return {
+    effectParts: [], effectInventory: undefined,
     references: new Map(), identifierWrites: new Map(), propertyWrites: new Map(), newThisClasses: new Set(),
     reflectiveTargets: [], mutations: [], hasOpaqueMutation: false, exportedSymbols: new Set(), openModules: new Set(), hasOpaqueImport: false, subclasses: new Map(),
     memberReads: new Map(), aliasNames: new Map(), tokenOccurrences: new Map(), files: [],
@@ -201,12 +209,21 @@ function emptyIndex(): MutableIndex {
  * @param checker TypeChecker
  * @param sourceFile 노드 파일
  * @param resolveModule 조건식 안 문자열 지정자(`import(a ? "./x" : "./y")`)를 모듈 심볼로 푸는 함수
+ * @param effectBudget 전체 inventory build가 공유하는 별도 상한
+ * @param effectEmitPolicy Program compiler options에 고정한 type-only 지정자 emit 결정
  * @returns 파일 색인
  */
-export function buildFileIndex(checker: ts.TypeChecker, sourceFile: ts.SourceFile, resolveModule: ModuleResolver): FlowIndex {
+export function buildFileIndex(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  resolveModule: ModuleResolver,
+  effectBudget?: EffectBuildBudget,
+  effectEmitPolicy?: EffectEmitPolicy,
+): FlowIndex {
   const index = emptyIndex();
   new IndexCollector(checker, index, resolveModule).visitFile(sourceFile);
   index.files.push(sourceFile);
+  index.effectParts.push(collectEffectPart(sourceFile, resolveModule, undefined, effectBudget, checker, effectEmitPolicy));
   return index;
 }
 
@@ -216,9 +233,12 @@ export function buildFileIndex(checker: ts.TypeChecker, sourceFile: ts.SourceFil
  * @param parts 파일 색인
  * @returns 합친 색인
  */
-export function mergeFlowIndexes(parts: Iterable<FlowIndex>): FlowIndex {
+export function mergeFlowIndexes(parts: Iterable<FlowIndex>, manifest?: EffectManifest): FlowIndex {
   const index = emptyIndex();
+  let validParts = true;
   for (const part of parts) {
+    validParts &&= part.files.length === 1 && part.effectParts.length === 1 && part.effectParts[0]?.source === part.files[0];
+    index.effectParts.push(...part.effectParts);
     mergeLists(index.references, part.references);
     mergeLists(index.identifierWrites, part.identifierWrites);
     mergeLists(index.propertyWrites, part.propertyWrites);
@@ -234,6 +254,23 @@ export function mergeFlowIndexes(parts: Iterable<FlowIndex>): FlowIndex {
     index.mutations.push(...part.mutations);
     index.hasOpaqueMutation ||= part.hasOpaqueMutation;
     index.hasOpaqueImport ||= part.hasOpaqueImport;
+  }
+  if (manifest) {
+    const inventory = reconcileEffectInventory(manifest, index.effectParts, manifest.view, {
+      references: index.references,
+      aliasNames: index.aliasNames,
+      tokenOccurrences: index.tokenOccurrences,
+    });
+    const aliasesSafe = !index.hasOpaqueImport && !index.hasOpaqueMutation && index.openModules.size === 0;
+    index.effectInventory = validParts ? inventory : {
+      ...inventory, enumeration: 'incomplete', referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
+      reasons: [...inventory.reasons, 'index-part-mismatch'],
+    };
+    if (index.effectInventory !== undefined && !aliasesSafe) index.effectInventory = {
+      ...index.effectInventory,
+      referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
+      reasons: [...new Set([...index.effectInventory.reasons, 'reference-alias-open'])].sort(),
+    };
   }
   return index;
 }

@@ -64,6 +64,7 @@ test('작은 프로젝트: 깨진 설정·구문 오류·과대 파일·깨진 v
       'parse-errors: 1 source file(s) have syntax errors; their calls may be incomplete',
       'oversized-sources: 1 file(s) larger than 4 MiB were skipped',
       'entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown',
+      'effect-inventory: incomplete(coverage); coverage cannot certify ambient safety.',
     ]);
     const edges = graph.edges.map((edge) => `${edge.from} -> ${edge.to} ${edge.kinds.join(',')}`);
     // 이름 없는 CommonJS 할당과 계산된 이름 멤버 안의 코드는 모듈 스코프에 속하고, static 필드는 모듈이 초기화한다.

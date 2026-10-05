@@ -9,13 +9,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
+import { createModuleResolver } from './dispatch.ts';
+import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
+import { buildFileIndex, mergeFlowIndexes } from './flow-index.ts';
 import { computeGraphRevision } from './graph-document.ts';
 import type { CallGraph } from './graph-model.ts';
+import { createGraphProgram } from './program.ts';
 import { traverse } from './traversal.ts';
 
 const fixtures = fileURLToPath(new URL('../../fixtures/', import.meta.url));
@@ -278,4 +283,96 @@ test('프로젝트 import 판정: 상대·절대 경로와 paths 패턴', () => 
     true, true, true, true, true, true, false, false, false, false,
   ]);
   assert.equal(projectSpecifierMatcher({})('next/server'), false);
+});
+
+test('실제 그래프의 inventory build-cap은 기존 간선을 보존하고 query exhaustion과 구분한다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-inventory-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'src/main.ts'), 'function target() { return 1; } export function run() { return target(); }');
+    const baseline = await buildCallGraph(project, fileSystem);
+    assert.ok(edgeLines(baseline).has('src/main.ts#run -> src/main.ts#target call'));
+    assert.ok(!baseline.limitations.some((limitation) => limitation.startsWith('effect-inventory:')));
+    writeFileSync(join(project, 'src/padding.ts'), Array.from({ length: 26_000 }, (_, index) => `const v${index} = 1;`).join('\n'));
+    const capped = await buildCallGraph(project, fileSystem);
+    assert.ok(edgeLines(capped).has('src/main.ts#run -> src/main.ts#target call'));
+    assert.ok(capped.limitations.some((limitation) => limitation.includes('effect-inventory: incomplete(build-cap)')));
+    assert.equal(capped.statistics.calls.dispatch.overBudget, 0);
+    for (const mode of ['direct', 'bound', 'candidates'] as const) {
+      assert.equal(capped.limitationsByMode![mode].filter((limitation) => limitation.startsWith('effect-inventory:')).length, 1);
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('실제 Program emit policy와 relative test view가 whole/production inventory를 독립적으로 닫는다', () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-__tests__-inventory-policy-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    const relativeFiles = new Map([
+      ['src/dep.ts', 'export interface Shape { value: number } export const dep = 1;'],
+      ['src/main.ts', 'import { type Shape } from "./dep"; export { type Shape as PublicShape } from "./dep"; export const value = undefined;'],
+      ['src/normal.ts', 'import { dep } from "./dep"; export const value = dep;'],
+      ['src/main.test.ts', 'export const external = import("untyped-pkg");'],
+    ]);
+    for (const [path, text] of relativeFiles) writeFileSync(join(project, path), text);
+
+    const inspect = (verbatimModuleSyntax: boolean) => {
+      writeFileSync(join(project, 'tsconfig.json'), JSON.stringify({ compilerOptions: {
+        target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', verbatimModuleSyntax,
+      } }));
+      const absolutePaths = new Map([...relativeFiles.keys()].map((path) => [path, join(project, path)]));
+      const { program, checker } = createGraphProgram(project, [...absolutePaths.values()]);
+      const files = new Map([...absolutePaths].map(([path, absolute]) => [path, program.getSourceFile(absolute)!]));
+      const expected = new Map([...absolutePaths].map(([path, absolute]) => [absolute, files.get(path)]));
+      const resolveModule = createModuleResolver(program, checker);
+      const policy = effectEmitPolicy(program.getCompilerOptions());
+      const budget = { visited: 0, records: 0 };
+      const wholeManifest = createEffectManifest(expected, 'whole', resolveModule, true, budget, checker, policy);
+      const productionExpected = new Map([...absolutePaths]
+        .filter(([path]) => !path.endsWith('.test.ts'))
+        .map(([path, absolute]) => [absolute, files.get(path)]));
+      const productionManifest = selectEffectManifest(wholeManifest, productionExpected, 'production');
+      const indexes = new Map([...files].map(([path, file]) => [path,
+        buildFileIndex(checker, file, resolveModule, budget, policy)]));
+      const whole = mergeFlowIndexes(indexes.values(), wholeManifest).effectInventory!;
+      const production = mergeFlowIndexes([...indexes]
+        .filter(([path]) => !path.endsWith('.test.ts')).map(([, index]) => index), productionManifest).effectInventory!;
+      return { files, indexes, whole, production };
+    };
+
+    const preserved = inspect(true);
+    assert.deepEqual(preserved.indexes.get('src/main.ts')!.effectParts[0]!.moduleEdges.map((edge) => edge.specifier), ['./dep', './dep']);
+    assert.deepEqual(preserved.indexes.get('src/normal.ts')!.effectParts[0]!.moduleEdges.map((edge) => edge.specifier), ['./dep']);
+    assert.equal(preserved.whole.initialization, 'incomplete');
+    assert.equal(preserved.production.initialization, 'complete');
+    assert.equal(preserved.production.referenceAliases, 'complete');
+    assert.equal(preserved.production.manifest.files.size, 3);
+
+    const erased = inspect(false);
+    assert.deepEqual(erased.indexes.get('src/main.ts')!.effectParts[0]!.moduleEdges, []);
+    assert.deepEqual(erased.indexes.get('src/normal.ts')!.effectParts[0]!.moduleEdges.map((edge) => edge.specifier), ['./dep']);
+    assert.equal(erased.production.initialization, 'complete');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('읽을 수 없는 compiler config는 ordinary graph를 보존하되 inventory coverage를 열어 둔다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-inventory-config-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'tsconfig.json'), '{ broken');
+    writeFileSync(join(project, 'src/main.ts'), 'export const value = 1;');
+    const target = await buildCallGraph(project, fileSystem);
+    assert.ok(target.nodes.some((node) => node.id === 'src/main.ts#value'));
+    assert.ok(target.limitations.some((limitation) => limitation.startsWith('graph-config: tsconfig.json could not be parsed;')));
+    assert.ok(target.limitations.some((limitation) => limitation.includes('effect-inventory: incomplete(coverage)')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
 });

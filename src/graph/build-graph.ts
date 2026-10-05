@@ -28,6 +28,7 @@ import { isSourceFileName } from '../schema/source-module.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
+import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
 import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
 import { buildFileIndex, type FlowIndex, mergeFlowIndexes } from './flow-index.ts';
@@ -76,6 +77,7 @@ interface RouteInputs {
 
 /** limitation을 만드는 데 필요한 계수다. */
 interface GraphCounts {
+  readonly flowIndex: FlowIndex;
   readonly calls: CallStatistics;
   readonly gaps: EdgeGaps;
   readonly config: ProgramConfigStatus;
@@ -104,7 +106,10 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   const { program, checker, status } = createGraphProgram(project, [...inputs.sources.values(), ...inputs.declarations]);
   const files = nodeFiles(program, inputs.sources);
-  const analysis = analyzeFiles(program, checker, files);
+  const walk = inputs.walk;
+  const coverageComplete = !status.configUnreadable && !walk.truncated && inputs.oversized === 0
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
+  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
     routeFacts: routes.facts,
@@ -196,20 +201,31 @@ interface FileAnalysis {
  * @param program Program
  * @param checker TypeChecker
  * @param files 노드 파일
+ * @param expectedPaths 프로젝트 상대 경로 → authoritative 절대 입력 경로
+ * @param coverageComplete 파일 걷기와 compiler 설정을 빠짐없이 해석했는지
  * @returns 저장소와 계수
  */
-function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>): FileAnalysis {
+function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean): FileAnalysis {
   const store = new GraphStore();
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
   const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
   const resolveModule = createModuleResolver(program, checker);
-  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule)]));
-  const flowIndex = mergeFlowIndexes(flowIndexes.values());
   const testPaths = new Set([...files.keys()].filter(isTestSourcePath));
   const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
+  const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, files.get(path)]));
+  const effectBudget = { visited: 0, records: 0 };
+  const emitPolicy = effectEmitPolicy(program.getCompilerOptions());
+  const wholeManifest = createEffectManifest(expectedFiles, 'whole', resolveModule, coverageComplete, effectBudget, checker, emitPolicy);
+  const productionManifest = separateTests
+    ? selectEffectManifest(wholeManifest, new Map([...expectedPaths]
+      .filter(([path]) => !testPaths.has(path))
+      .map(([path, absolute]) => [absolute, files.get(path)])), 'production')
+    : wholeManifest;
+  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy)]));
+  const flowIndex = mergeFlowIndexes(flowIndexes.values(), wholeManifest);
   const productionFlowIndex = separateTests
-    ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index))
+    ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest)
     : flowIndex;
   const resolver = new TargetResolver(
     checker,
@@ -424,7 +440,10 @@ type LimitationView = DispatchMode | 'snapshot';
  * @returns limitation 목록(고정 순서)
  */
 function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts, view: LimitationView): string[] {
-  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts)];
+  const inventory = counts.flowIndex.effectInventory;
+  const coverage = inventory?.enumeration === 'incomplete'
+    ? [`effect-inventory: incomplete(${inventory.reasons.includes('build-cap') ? 'build-cap' : 'coverage'}); coverage cannot certify ambient safety.`] : [];
+  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts), ...coverage];
 }
 
 /** 관점에서 아직 잇지 못한 호출 공백을 이유별로 계산한다. */

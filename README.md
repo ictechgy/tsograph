@@ -1004,6 +1004,24 @@ What `bound` guarantees, and what it does not:
   program without test sources, so mocks injected by unit tests do not block production edges. Call
   sites inside test sources use the whole project. If a non-test file imports a test source, the whole
   project is used everywhere.
+- An independent effect inventory reconciles the expected whole or production sources with their
+  file indexes, source revisions, runtime module edges, and executable operations. Enumeration,
+  runtime reference/alias closure, initialization coverage, and ambient safety are separate checks;
+  complete enumeration can still contain unknown effects. Incomplete coverage prevents new effect
+  certificates while existing dispatch capabilities retain their own checks. Inventory construction
+  is bounded by 1,000,000 visited nodes, 1,000,000 retained records, and 100,000 additional nodes per
+  file. Repeated collection passes share these limits; counts include the work of each pass and
+  retained reference, alias, and token witnesses. Initialization coverage describes module-load
+  coverage for static edges and recognized loader origins; initialization order requires a separate
+  proof. General reflection and arbitrary factories retain unknown call/property effects, so this
+  verdict does not certify their runtime module loads or ambient safety. Runtime CJS import-equals loader
+  evaluation remains unknown. Dynamic access to genuine platform loaders and exposure of their
+  platform roots retain opaque module-load evidence. Malformed supplied index parts cannot certify
+  coverage. A build cap produces `effect-inventory: incomplete(build-cap)`; it does not consume a flow
+  query's budget or certify a partial inventory as safe. Other missing or mismatched coverage is
+  reported as `effect-inventory: incomplete(coverage)`. These effect-inventory limitations report whole-view
+  enumeration coverage. Future effect certificates must check the selected view's reference closure and module-load
+  coverage directly; a complete enumeration does not certify either verdict or initialization order.
 - Each flow query has a budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
   budget, or one that overflows the JavaScript stack, is unknown, and the count appears under
   `dispatch-budget:`. Property writes, member reads, and receiver flows looked up by name are memoized
