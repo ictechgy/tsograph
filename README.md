@@ -898,6 +898,12 @@ suspension before a lookup remain unproved; a Date-typed field alone is not an e
 Carrier subclasses require a concrete subclass-constructor witness and remain conservative in this
 release. General containing wrappers and factories do not gain isolation; only an exact private
 single-property holder consumed through audited direct calls retains the ordinary receiver path.
+Receiver proofs still require exact constructor bag literals and audited class-value uses; a bag
+variable or an additional `instanceof` use remains unproved. Completed carrier proofs preserve
+their admitted memo projections and wrapper-callback method targets. Declared-method recovery
+also audits protected `this` uses across the entire class, including the current method after its
+lookup: a later escape can change the target on a subsequent invocation. Post-call processing that
+does not receive protected `this` remains supported.
 
 A private top-level `const registry = new Map()` can supply project factory values through `get`
 when the constructor and supported API declarations come from the actual TypeScript default

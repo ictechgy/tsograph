@@ -728,6 +728,11 @@ mutation 효과가 필요하다. optional Date callback도 명시적인 own data
 carrier 상속 클래스는 실제 subclass 생성자 증명이 필요해 이번 릴리스에서 보수적으로 남긴다.
 일반 wrapper·factory에 격리 자격을 주지 않으며, 정확한 비공개 단일 속성 holder를 감사한 직접 호출로만
 소비하는 경우에만 기존 일반 수신자 경로를 유지한다.
+수신자 증명은 여전히 정확한 생성자 bag 리터럴과 class 값의 전체 사용 감사를 요구하므로, bag 변수나
+추가 `instanceof` 사용은 미해석으로 남긴다. 완료된 carrier 증명이 인정한 memo 투영·wrapper callback의
+메서드 target은 유지한다. 일반 메서드 복구는 현재 메서드의 조회 뒤를 포함해 클래스 전체의 보호된
+`this` 소비를 감사한다. 뒤의 탈출도 다음 호출의 target을 바꿀 수 있기 때문이다. 보호된 `this`를 받지 않는
+호출 뒤 결과 처리는 계속 지원한다.
 
 private 최상위 `const registry = new Map()`은 실제 TypeScript default library의 생성자/API 선언과 mutation 범위를
 확인한 경우 `get`으로 프로젝트 factory 값을 전달한다. 직접 `get/set/has/delete/clear/keys`와 readonly `size`만

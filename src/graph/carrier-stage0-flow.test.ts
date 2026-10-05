@@ -589,7 +589,7 @@ test('declared self-method exception rejects unsafe entry, call arguments and pr
     const graph = await graphOf(escaped);
     assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.echo'), false);
   });
-  await t.test('later protected uses are occurrence-specific', async () => {
+  await t.test('later protected uses invalidate repeated recovery', async () => {
     const graph = await graphOf(source(
       [
         'async serve(value: string) {',
@@ -602,9 +602,39 @@ test('declared self-method exception rejects unsafe entry, call arguments and pr
       ].join(' '),
       'consumer.serve("value")',
     ));
-    assert.ok(evidence(graph, 'Consumer.serve', 'Consumer.echo').some((item) => item === 'direct' || item === 'bound'));
+    assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.echo'), false);
     assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.after'), false);
     assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'LocalPort.send'), false);
+  });
+});
+
+test('whole-owner protected this effects invalidate repeated self-method recovery', async (t) => {
+  const source = (serve: string, declarations: readonly string[] = []): string => [
+    'interface Inputs { stamp?: () => Date; }',
+    ...declarations,
+    'class Consumer {',
+    '  private readonly tick: () => Date;',
+    '  constructor(private readonly inputs: Inputs) { this.tick = inputs.stamp ?? (() => new Date()); }',
+    `  ${serve}`,
+    '  private echo(value: string) { return value; }',
+    '}',
+    'const consumer = new Consumer({ stamp: undefined });',
+    'consumer.serve("first");',
+    'export const read = () => consumer.serve("second");',
+  ].join('\n');
+  await t.test('post-call this escape affects later invocation', async () => {
+    const graph = await graphOf(source(
+      'serve(value: string) { const result = this.echo(value); observe(this); return result; }',
+      ['declare function observe(value: unknown): void;'],
+    ));
+    assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.echo'), false);
+  });
+  await t.test('recursive tail has effectful this argument', async () => {
+    const graph = await graphOf(source(
+      'serve(value: string) { const result = this.echo(value); return this.serve(patch(this)); }',
+      ['declare function patch(value: unknown): string;'],
+    ));
+    assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.echo'), false);
   });
 });
 
@@ -788,4 +818,132 @@ test('known allocation identity rejects disjoint cast member owners', async () =
   }
   assert.equal(hasStrongEvidence(graph, 'readSame', 'Consumer.serve'), true);
   assert.equal(hasStrongEvidence(graph, 'readBase', 'PlainBase.serve'), true);
+});
+
+test('member-owner compatibility is asymmetric for downcasts and mixed descendants', async () => {
+  const graph = await graphOf([
+    'class Base { serve(value: string) { return "base:" + value; } }',
+    'class Sub extends Base { override serve(value: string) { return "sub:" + value; } subOnly() { return "sub"; } }',
+    'const base = new Base();',
+    'const sub = new Sub();',
+    'export const readDowncast = () => (base as Sub).serve("x");',
+    'export const readDowncastElement = () => (base as Sub)["serve"]("x");',
+    'export const readDescendantOnly = () => (base as Sub).subOnly();',
+    'export const readUnion = () => (base as Base | Sub).serve("x");',
+    'export const readUnionElement = () => (base as Base | Sub)["serve"]("x");',
+    'export const readUpcast = () => (sub as Base).serve("x");',
+    'export const readUpcastElement = () => (sub as Base)["serve"]("x");',
+    'const typedBase: Base = new Sub();',
+    'export const readTypedBase = () => typedBase.serve("x");',
+    'export const readTypedBaseElement = () => typedBase["serve"]("x");',
+    'class BaseNoOverride { serve(value: string) { return value; } }',
+    'class SubNoOverride extends BaseNoOverride {}',
+    'const noOverride = new SubNoOverride();',
+    'export const readNoOverride = () => (noOverride as BaseNoOverride).serve("x");',
+  ].join('\n'));
+  for (const from of ['readDowncast', 'readDowncastElement', 'readUnion', 'readUnionElement']) {
+    assert.equal(hasStrongEvidence(graph, from, 'Sub.serve'), false, from);
+    assert.equal(hasStrongEvidence(graph, from, 'Base.serve'), true, from);
+  }
+  assert.equal(hasStrongEvidence(graph, 'readDescendantOnly', 'Sub.subOnly'), false);
+  for (const from of ['readUpcast', 'readUpcastElement', 'readTypedBase', 'readTypedBaseElement']) {
+    assert.equal(hasStrongEvidence(graph, from, 'Sub.serve'), true, `${from} -> Sub.serve`);
+    assert.equal(hasStrongEvidence(graph, from, 'Base.serve'), false, `${from} -> Base.serve`);
+  }
+  assert.equal(hasStrongEvidence(graph, 'readNoOverride', 'BaseNoOverride.serve'), true);
+});
+
+test('sibling instance effects cannot authorize later declared self-method lookup', async () => {
+  const graph = await graphOf([
+    'interface Inputs { stamp?: () => Date; }',
+    'declare function observe(value: unknown): void;',
+    'declare function patch(value: unknown): string;',
+    'class Consumer {',
+    '  private readonly tick: () => Date;',
+    '  constructor(private readonly inputs: Inputs) { this.tick = inputs.stamp ?? (() => new Date()); }',
+    '  prime() { observe(this); }',
+    '  other(value: string) { return this.serve(patch(this)); }',
+    '  serve(value: string) { return this.echo(value); }',
+    '  private echo(value: string) { return value; }',
+    '}',
+    'const consumer = new Consumer({ stamp: undefined });',
+    'consumer.prime();',
+    'export const read = () => consumer.serve("x");',
+    'export const readOther = () => consumer.other("x");',
+  ].join('\n'));
+  assert.equal(hasStrongEvidence(graph, 'Consumer.serve', 'Consumer.echo'), false);
+  assert.equal(hasStrongEvidence(graph, 'Consumer.other', 'Consumer.serve'), false);
+});
+
+test('full carrier proof restores memo and wrapper method identity', async (t) => {
+  const header = [
+    'interface Repo { run(): string; }',
+    'interface Inputs { repo: Repo; clock?: () => Date; }',
+    'class RepoImpl implements Repo { private readonly brand = true; run() { return "ok"; } }',
+    'class Runner {',
+    '  private readonly clock: () => Date;',
+    '  constructor(private readonly inputs: Inputs) { this.clock = inputs.clock ?? (() => new Date()); }',
+    '  run() { this.clock(); return this.inputs.repo.run(); }',
+    '}',
+    'const live: Repo = new RepoImpl();',
+    'const scratch = [0];',
+    'const key = 0;',
+    'scratch[key] = 1;',
+  ].join('\n');
+  const cases = [
+    ['memo', `${header}\nlet memo: { runner: Runner } | null = null;\nfunction deps() { if (!memo) memo ??= { runner: new Runner({ repo: live, clock: undefined }) }; return memo; }\nconst { runner } = deps();\nexport const read = () => runner.run();`],
+    ['wrapper', `${header}\nconst runner = new Runner({ repo: live, clock: undefined });\nfunction wrap(value: Runner, callback: (value: Runner) => string) { return callback(value); }\nexport const read = () => wrap(runner, (value) => value.run());`],
+  ] as const;
+  for (const [label, source] of cases) {
+    await t.test(label, async () => {
+      const graph = await graphOf(source);
+      assert.ok(graph.edges.some((edge) => edge.to === 'src/main.ts#Runner.run' && edge.evidence === 'bound'), label);
+      assert.deepEqual(evidence(graph, 'Runner.run', 'RepoImpl.run'), ['bound']);
+    });
+  }
+  const unsafe = [
+    ['entry', `${header.replace('  run() { this.clock();', '  run(value = observe(this)) { this.clock();')}\ndeclare function observe(value: unknown): unknown;\nconst runner = new Runner({ repo: live, clock: undefined });\nexport const read = () => runner.run();`],
+    ['wrapper arguments', `${header}\nconst runner = new Runner({ repo: live, clock: undefined });\nfunction wrap(value: Runner, callback: (value: Runner) => string) { void arguments; return callback(value); }\nexport const read = () => wrap(runner, (value) => value.run());`],
+    ['escape', `${header}\ndeclare function consume(value: unknown): void;\nconst runner = new Runner({ repo: live, clock: undefined });\nconsume(runner);\nexport const read = () => runner.run();`],
+  ] as const;
+  for (const [label, source] of unsafe) {
+    await t.test(`unsafe ${label}`, async () => {
+      const graph = await graphOf(source);
+      if (label === 'entry') {
+        assert.equal(hasStrongEvidence(graph, 'Runner.run', 'RepoImpl.run'), false,
+          `${label}: ${JSON.stringify(evidence(graph, 'Runner.run', 'RepoImpl.run'))}`);
+      } else {
+        assert.equal(graph.edges.some((edge) => edge.to === 'src/main.ts#Runner.run'
+          && edge.kinds.includes('call') && (edge.evidence === 'direct' || edge.evidence === 'bound')), false, label);
+      }
+    });
+  }
+});
+
+test('nonliteral carrier bags and instanceof class uses remain conservative', async () => {
+  const graph = await graphOf([
+    'interface Inputs { stamp?: () => Date; }',
+    'class Consumer {',
+    '  private readonly tick: () => Date;',
+    '  constructor(private readonly inputs: Inputs) { this.tick = inputs.stamp ?? (() => new Date()); }',
+    '  serve(value: string) { return value; }',
+    '}',
+    'const inputs: Inputs = { stamp: undefined };',
+    'const aliased = new Consumer(inputs);',
+    'export const readAliased = () => aliased.serve("x");',
+    'const checked = new Consumer({ stamp: undefined });',
+    'export const isConsumer = checked instanceof Consumer;',
+    'export const readChecked = () => checked.serve("x");',
+    'class Plain { constructor(readonly value: string) {} serve() { return this.value; } }',
+    'const plainValue = "plain";',
+    'const plainAliased = new Plain(plainValue);',
+    'export const readPlainAliased = () => plainAliased.serve();',
+    'const plainChecked = new Plain("checked");',
+    'export const isPlain = plainChecked instanceof Plain;',
+    'export const readPlainChecked = () => plainChecked.serve();',
+  ].join('\n'));
+  assert.equal(hasStrongEvidence(graph, 'readAliased', 'Consumer.serve'), false);
+  assert.equal(hasStrongEvidence(graph, 'readChecked', 'Consumer.serve'), false);
+  assert.equal(hasStrongEvidence(graph, 'readPlainAliased', 'Plain.serve'), true);
+  assert.equal(hasStrongEvidence(graph, 'readPlainChecked', 'Plain.serve'), true);
 });

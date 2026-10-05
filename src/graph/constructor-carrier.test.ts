@@ -323,25 +323,29 @@ test('declared-method receiver certificate excludes constructor replacement, ent
     const { context, runner } = contextOf(source);
     return new ConstructorCarrierAnalyzer(context).allowsDeclaredMethodReceiver(runner);
   };
-  assert.equal(receiverAllowed(positive), true);
+  const safeReceiver = positive.replace(
+    '  run() { this.clock(); return this.deps.repo.run(); }',
+    '  run() { return "ok"; }',
+  );
+  assert.equal(receiverAllowed(safeReceiver), true);
   const cases = [
-    positive.replace(
+    safeReceiver.replace(
       'this.clock = deps.clock ?? (() => new Date()); }',
       'this.clock = deps.clock ?? (() => new Date()); return {} as Runner; }',
     ),
-    `${positive}\ndeclare function observeInputs(value: unknown): RunnerDeps;`.replace(
+    `${safeReceiver}\ndeclare function observeInputs(value: unknown): RunnerDeps;`.replace(
       'constructor(private readonly deps: RunnerDeps)',
       'constructor(private readonly deps: RunnerDeps = observeInputs(this))',
     ),
-    `${positive}\ndeclare function observe(value: unknown): void;`.replace(
+    `${safeReceiver}\ndeclare function observe(value: unknown): void;`.replace(
       '{ this.clock = deps.clock ?? (() => new Date()); }',
       '{ observe(this); this.clock = deps.clock ?? (() => new Date()); }',
     ),
-    positive.replace(
+    safeReceiver.replace(
       'this.clock = deps.clock ?? (() => new Date());',
       '(this as { run: () => string }).run = () => "patched"; this.clock = deps.clock ?? (() => new Date());',
     ),
-    positive.replace('class Runner {', 'class Runner {\n  private run = () => "field";'),
+    safeReceiver.replace('class Runner {', 'class Runner {\n  private run = () => "field";'),
   ];
   for (const source of cases) assert.equal(receiverAllowed(source), false, source);
 });

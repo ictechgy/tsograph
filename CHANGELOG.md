@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-10-04
+## [0.8.1] - 2026-10-05
 
 ### Fixed
 
@@ -14,6 +14,7 @@
   경로를 막는다. 초기 runtime 매개변수·async/generator 및 증명하지 못한 평가를 보수적으로 거부한다.
 - parameter-property·필드·메서드의 runtime slot 충돌과 prototype-sensitive 저장을 emit 방식에 기대지 않고 감사한다.
 - 일반 선언 메서드의 target 조회는 carrier 필드·bag 격리와 분리해, inert한 직접 호출의 반환·지역 저장 및 호출 이후 await에서 기존 target을 보존한다. 조회 전의 모르는 효과는 계속 미해석이다.
+- 다른 메서드의 수신자 탈출과 내부 호출 인자를 함께 감사하고, 이미 완료된 carrier 증명의 memo·wrapper 메서드 target을 보존한다. 실제 allocation의 계층·가장 가까운 runtime 멤버와 모순된 직접 target도 값 흐름으로 넘긴다.
 
 ## [0.8.0] - 2026-10-04
 

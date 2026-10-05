@@ -214,6 +214,7 @@ export class ValueFlow {
   memberSymbol(value: ObjectValue, name: string): ts.Symbol | undefined {
     this.ensureReflective();
     if (ts.isClassLike(value) && this.constructorCarrier.hasCarrierFlowLineage(value)
+      && !this.constructorCarrier.allowsInstanceFlow(value)
       && !this.constructorCarrier.allowsDeclaredMethodReceiver(value)) return undefined;
     // 본문 검증은 속성 쓰기 수신자의 흐름을 구하므로 질의 예산 안에서 돌린다(넘으면 증명 실패).
     let body: ts.FunctionLikeDeclaration | undefined;
@@ -426,7 +427,8 @@ export class ValueFlow {
     // Date-fallback carrier 역할의 instance member body는 entry·storage·모든 invocation이 Stage 0을 통과해야만
     // `this`에서 bag service로 이어진다. 일반 클래스는 이 좁은 gate의 대상이 아니다.
     if (!owner.inConstructor && !this.constructorCarrier.allowsInstanceFlow(owner.declaration)
-      && !(this.constructorCarrier.allowsDeclaredMethodReceiver(owner.declaration)
+      && !(owner.method !== undefined
+        && this.constructorCarrier.allowsDeclaredMethodReceiver(owner.declaration)
         && this.isSafeDeclaredSelfMethodUse(node, owner.method, owner.declaration))) return null;
     const classes = this.withSubclasses(owner.declaration);
     if (classes.some((declaration) => this.isEscapedClass(declaration))) return null;

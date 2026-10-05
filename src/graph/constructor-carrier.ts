@@ -84,6 +84,9 @@ export class ConstructorCarrierAnalyzer {
   private readonly receiverCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
   /** receiver identity 판정 재진입은 보수적으로 닫는다. */
   private readonly receiverPending = new Set<ts.ClassLikeDeclaration>();
+  /** constructor identity + observed instance consumption 결과다. */
+  private readonly consumptionCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
+  private readonly consumptionPending = new Set<ts.ClassLikeDeclaration>();
   /** direct resolver와 ValueFlow가 공유하는 carrier role 판정을 클래스별로 메모한다. */
   private readonly roleCompleted = new Map<ts.ClassLikeDeclaration, boolean>();
   /** role 판정 자원 실패는 obligation을 남기되 후속 proof를 실행하지 않는다. */
@@ -250,9 +253,8 @@ export class ConstructorCarrierAnalyzer {
     this.receiverPending.add(declaration);
     this.steps = 0;
     try {
-      const proof = this.hasCarrierFlowObligation(declaration) && !this.roleIncomplete.has(declaration)
-        ? this.proveReceiverConstruction(declaration) : undefined;
-      const allowed = proof !== undefined && this.scanDeclaredReceiverUses(declaration, proof.constructions);
+      const allowed = this.allowsDeclaredMethodConsumption(declaration)
+        && this.scanDeclaredMethodInstanceSafety(declaration);
       this.receiverCompleted.set(declaration, allowed);
       return allowed;
     } catch (error) {
@@ -263,6 +265,29 @@ export class ConstructorCarrierAnalyzer {
       this.receiverPending.delete(declaration);
     }
   }
+
+  /** constructor/storage identity와 observed instance consumption만 검사한다. method body effect는 별도 capability다. */
+  allowsDeclaredMethodConsumption(declaration: ts.ClassLikeDeclaration): boolean {
+    const cached = this.consumptionCompleted.get(declaration);
+    if (cached !== undefined) return cached;
+    if (this.consumptionPending.has(declaration)) return false;
+    this.consumptionPending.add(declaration);
+    this.steps = 0;
+    try {
+      const proof = this.hasCarrierFlowObligation(declaration) && !this.roleIncomplete.has(declaration)
+        ? this.proveReceiverConstruction(declaration) : undefined;
+      const allowed = proof !== undefined && this.scanDeclaredReceiverUses(declaration, proof.constructions);
+      this.consumptionCompleted.set(declaration, allowed);
+      return allowed;
+    } catch (error) {
+      if (!(error instanceof CarrierBudgetExceeded) && !(error instanceof RangeError)) throw error;
+      this.consumptionCompleted.set(declaration, false);
+      return false;
+    } finally {
+      this.consumptionPending.delete(declaration);
+    }
+  }
+
 
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
   private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true): ConstructorCarrierProof | undefined {
@@ -525,6 +550,47 @@ export class ConstructorCarrierAnalyzer {
     return ts.isElementAccessExpression(callee) && callee.questionDotToken === undefined
       && ts.isStringLiteralLike(callee.argumentExpression)
       && this.knownClassMethod(declaration, callee.argumentExpression.text);
+  }
+
+  /**
+   * narrower declared-method capability에서는 모든 instance method의 `this`가 inert direct same-class method
+   * receiver로만 쓰여야 한다. `this` escape/field access/unknown argument는 막되, this를 받지 않는 post-call
+   * effect는 현재 method target을 바꾸지 않으므로 일반 effect engine처럼 추적하지 않는다.
+   */
+  private scanDeclaredMethodInstanceSafety(declaration: ts.ClassLikeDeclaration): boolean {
+    for (const member of declaration.members) {
+      if (!ts.isMethodDeclaration(member) || hasStaticModifier(member)) continue;
+      if (member.body === undefined || hasDecorators(member)
+        || member.parameters.filter((parameter) => !isThisParameter(parameter)).some((parameter) =>
+          !isRequiredIdentifierParameter(parameter))) return false;
+      let valid = true;
+      const visit = (node: ts.Node): void => {
+        if (!valid) return;
+        this.step();
+        if (node !== member.body && (ts.isFunctionLike(node) || ts.isClassLike(node))) {
+          valid = false;
+          return;
+        }
+        if (node.kind === ts.SyntaxKind.ThisKeyword) {
+          const receiver = climbWrappers(node);
+          const access = receiver.parent;
+          const call = (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access))
+            && access.expression === receiver ? access.parent : undefined;
+          if (call === undefined || !ts.isCallExpression(call) || call.expression !== access
+            || !this.directDeclaredMethodCall(call, declaration)) valid = false;
+          return;
+        }
+        if (ts.isIdentifier(node) && node.text === 'arguments'
+          && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) {
+          valid = false;
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(member.body);
+      if (!valid) return false;
+    }
+    return true;
   }
 
   /** extends 절의 direct project class를 한 단계 푼다. */

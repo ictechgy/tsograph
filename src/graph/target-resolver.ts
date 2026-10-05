@@ -112,6 +112,9 @@ export class TargetResolver {
     const allocationClass = identity === undefined ? undefined : this.identityClass(identity);
     const allocationLineage = allocationClass === undefined ? undefined : this.classLineage(allocationClass);
     if (allocationLineage === undefined) return false;
+    const name = ts.isPropertyAccessExpression(access) ? access.name.text
+      : ts.isStringLiteralLike(access.argumentExpression) ? access.argumentExpression.text : undefined;
+    if (name === undefined) return false;
     const location = ts.isPropertyAccessExpression(access) ? access.name
       : ts.isStringLiteralLike(access.argumentExpression) ? access.argumentExpression : undefined;
     if (location === undefined) return false;
@@ -124,10 +127,36 @@ export class TargetResolver {
       if (ts.isParameter(declaration) && ts.isConstructorDeclaration(declaration.parent)
         && ts.isClassLike(declaration.parent.parent)) owners.add(declaration.parent.parent);
     }
-    return [...owners].some((owner) => {
-      const ownerLineage = this.classLineage(owner);
-      return ownerLineage !== undefined && !ownerLineage.some((candidate) => allocationLineage.includes(candidate));
-    });
+    return [...owners].some((owner) => !this.isNearestRuntimeMemberOwner(allocationLineage, owner, name));
+  }
+
+  /** owner는 actual allocation class 또는 같은 이름 runtime slot을 더 가까운 subclass가 차지하지 않은 ancestor여야 한다. */
+  private isNearestRuntimeMemberOwner(
+    allocationLineage: readonly ts.ClassLikeDeclaration[],
+    owner: ts.ClassLikeDeclaration,
+    name: string,
+  ): boolean {
+    const ownerIndex = allocationLineage.indexOf(owner);
+    if (ownerIndex < 0) return false;
+    for (const declaration of allocationLineage.slice(0, ownerIndex)) {
+      for (const member of declaration.members) {
+        if (ts.isConstructorDeclaration(member)) {
+          for (const parameter of member.parameters) {
+            if (ts.isParameterPropertyDeclaration(parameter, member) && ts.isIdentifier(parameter.name)
+              && parameter.name.text === name) return false;
+          }
+          continue;
+        }
+        if ((ts.canHaveModifiers(member) ? ts.getModifiers(member) ?? [] : [])
+          .some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)) continue;
+        const runtimeName = (member as ts.ClassElement & { readonly name?: ts.PropertyName }).name;
+        if (runtimeName === undefined || ts.isPrivateIdentifier(runtimeName)) continue;
+        const resolved = memberName(runtimeName);
+        if (ts.isComputedPropertyName(runtimeName) && resolved === undefined) return false;
+        if (resolved === name) return false;
+      }
+    }
+    return true;
   }
 
   /** carrier role의 same-class method는 receiver/entry proof가 실패하면 direct 대신 dispatch로 넘긴다. */
