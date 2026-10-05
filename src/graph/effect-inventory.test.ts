@@ -44,6 +44,25 @@ function checkedSources(entries: Readonly<Record<string, string>>, options: ts.C
   };
 }
 
+/** 실제 IndexCollector의 map을 공급하며 manifest의 기대 witness를 복사하지 않는다. */
+function actualReferenceMaps(files: readonly ts.SourceFile[], resolve: () => ts.Symbol | undefined = () => undefined,
+  checker = ts.createProgram([], { noLib: true, types: [] }).getTypeChecker()) {
+  return mergeFlowIndexes(files.map((file) => buildFileIndex(checker, file, resolve)));
+}
+
+test('실제 reference map 없는 part 대조는 열거·초기화만 검사하고 폐쇄·안전을 인증하지 않는다', () => {
+  const { file, manifest, resolve } = fixture();
+  const part = collectEffectPart(file, resolve);
+  const missing = reconcileEffectInventory(manifest, [part]);
+  assert.equal(missing.enumeration, 'complete');
+  assert.equal(missing.initialization, 'complete');
+  assert.equal(missing.referenceAliases, 'incomplete');
+  assert.equal(missing.ambientSafety, 'unknown');
+  const supplied = reconcileEffectInventory(manifest, [part], 'whole', actualReferenceMaps([file], resolve));
+  assert.equal(supplied.referenceAliases, 'complete');
+  assert.equal(supplied.ambientSafety, 'safe');
+});
+
 test('독립 기대 집합은 누락·중복·예상 밖·stale·view 불일치를 거부한다', () => {
   const { file, manifest, resolve } = fixture();
   const part = collectEffectPart(file, resolve);
@@ -115,7 +134,8 @@ test('runtime 모듈 집합·간선은 erased import와 구분하고 대상까�
   const declaration = ts.createSourceFile('types.d.ts', 'declare function hidden(): void;', ts.ScriptTarget.Latest, true);
   const declared = createEffectManifest(new Map([['types.d.ts', declaration]]), 'whole', resolve);
   assert.equal(declared.runtimeModules.size, 0);
-  assert.equal(reconcileEffectInventory(declared, [collectEffectPart(declaration, resolve)]).ambientSafety, 'safe');
+  assert.equal(reconcileEffectInventory(declared, [collectEffectPart(declaration, resolve)], 'whole',
+    actualReferenceMaps([declaration], resolve)).ambientSafety, 'safe');
 });
 
 test('all-type 지정자의 runtime edge는 실제 emit policy를 따르고 선언 단위 type import/export는 지운다', () => {
@@ -139,7 +159,8 @@ test('생산 관점은 독립 기대 집합이며 whole part를 잘못 섞으면
   const parts = [collectEffectPart(file, resolve), collectEffectPart(testFile, resolve)];
   assert.equal(reconcileEffectInventory(whole, parts).ambientSafety, 'unknown');
   assert.deepEqual(reconcileEffectInventory(whole, [...parts].reverse()).records, reconcileEffectInventory(whole, parts).records);
-  assert.equal(reconcileEffectInventory(production, parts.slice(0, 1)).ambientSafety, 'safe');
+  assert.equal(reconcileEffectInventory(production, parts.slice(0, 1), 'production',
+    actualReferenceMaps([file], resolve)).ambientSafety, 'safe');
   assert.equal(reconcileEffectInventory(production, parts).enumeration, 'incomplete');
   const checker = ts.createProgram([], { types: [], noLib: true }).getTypeChecker();
   const index = buildFileIndex(checker, file, resolve);
@@ -222,7 +243,8 @@ test('해석한 정적 모듈 연결은 기대 runtime 집합 안에서만 초�
   const manifest = createEffectManifest(sources, 'whole', resolve);
   const parts = [...sources.values()].map((file) => collectEffectPart(file, resolve, undefined, undefined, checker));
   assert.equal(reconcileEffectInventory(manifest, parts).initialization, 'complete');
-  assert.equal(reconcileEffectInventory(manifest, parts).ambientSafety, 'safe');
+  assert.equal(reconcileEffectInventory(manifest, parts, 'whole',
+    actualReferenceMaps([...sources.values()], resolve, checker)).ambientSafety, 'safe');
   const outside = createEffectManifest(new Map([['a.ts', sources.get('a.ts')!]]), 'production', resolve);
   assert.equal(reconcileEffectInventory(outside, parts.slice(0, 1)).initialization, 'incomplete');
   const altered = { ...parts[0]!, moduleEdges: parts[0]!.moduleEdges.map((edge) => ({ ...edge, target: undefined })) };
@@ -255,7 +277,8 @@ test('루프·CJS export·빈 binding pattern은 primitive 자식만으로 안�
     assert.ok(part.records.some((record) => record.operation !== 'primitive'), text);
   }
   const inert = fixture('export {}; const resource = "x";');
-  assert.equal(reconcileEffectInventory(inert.manifest, [collectEffectPart(inert.file, inert.resolve)]).ambientSafety, 'safe');
+  assert.equal(reconcileEffectInventory(inert.manifest, [collectEffectPart(inert.file, inert.resolve)], 'whole',
+    actualReferenceMaps([inert.file], inert.resolve)).ambientSafety, 'safe');
 });
 
 test('wrapper는 자체 unknown을 만들지 않고 shorthand 값 읽기와 피연산자는 남긴다', () => {
@@ -420,7 +443,8 @@ test('supplied record getter는 모르는 호출 효과를 primitive로 바꿔 �
     let reads = 0;
     return { site: record.site, get operation() { return ++reads === 1 ? record.operation : 'primitive' as const; } };
   });
-  const inventory = reconcileEffectInventory(manifest, [{ ...part, records }]);
+  const inventory = reconcileEffectInventory(manifest, [{ ...part, records }], 'whole',
+    actualReferenceMaps([file], resolve, checked.checker));
   assert.equal(inventory.referenceAliases, 'complete');
   assert.equal(inventory.ambientSafety, 'unknown');
   assert.deepEqual(inventory.records.map((record) => record.operation), part.records.map((record) => record.operation));

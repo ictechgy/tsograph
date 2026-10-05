@@ -1654,6 +1654,11 @@ export function reconcileEffectInventory(
   if (reconciliationBudget.exhausted) reasons.add('build-cap');
   const enumerationReasons = [...reasons].filter((reason) => reason !== 'reference-closure-mismatch');
   if (enumerationReasons.length > 0) return incompleteInventory(manifest, reasons);
+  if (referenceIndex === undefined) {
+    // part witness만으로 실제 FlowIndex map의 완전성을 대신 인증하지 않는다.
+    reasons.add('reference-closure-mismatch');
+    referenceClosureComplete = false;
+  }
   if (referenceIndex !== undefined && referenceClosureComplete) {
     const closureCheck = closureMapsContain(sources, manifest, referenceIndex, reconciliationBudget);
     if (closureCheck.exhausted) {
