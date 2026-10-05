@@ -21,7 +21,7 @@
 import ts from 'typescript';
 
 import { isTypeOnly, skipWrappers } from './node-collector.ts';
-import { collectEffectPart, reconcileEffectInventory, type EffectBuildBudget, type EffectInventory, type EffectManifest, type EffectPart } from './effect-inventory.ts';
+import { collectEffectPart, reconcileEffectInventory, type EffectBuildBudget, type EffectEmitPolicy, type EffectInventory, type EffectManifest, type EffectPart } from './effect-inventory.ts';
 
 /** 값을 모르는 쓰기를 나타내는 표식이다. */
 export const UNKNOWN_WRITE = undefined;
@@ -209,13 +209,21 @@ function emptyIndex(): MutableIndex {
  * @param checker TypeChecker
  * @param sourceFile 노드 파일
  * @param resolveModule 조건식 안 문자열 지정자(`import(a ? "./x" : "./y")`)를 모듈 심볼로 푸는 함수
+ * @param effectBudget 전체 inventory build가 공유하는 별도 상한
+ * @param effectEmitPolicy Program compiler options에 고정한 type-only 지정자 emit 결정
  * @returns 파일 색인
  */
-export function buildFileIndex(checker: ts.TypeChecker, sourceFile: ts.SourceFile, resolveModule: ModuleResolver, effectBudget?: EffectBuildBudget): FlowIndex {
+export function buildFileIndex(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  resolveModule: ModuleResolver,
+  effectBudget?: EffectBuildBudget,
+  effectEmitPolicy?: EffectEmitPolicy,
+): FlowIndex {
   const index = emptyIndex();
   new IndexCollector(checker, index, resolveModule).visitFile(sourceFile);
   index.files.push(sourceFile);
-  index.effectParts.push(collectEffectPart(sourceFile, resolveModule, undefined, effectBudget, checker));
+  index.effectParts.push(collectEffectPart(sourceFile, resolveModule, undefined, effectBudget, checker, effectEmitPolicy));
   return index;
 }
 

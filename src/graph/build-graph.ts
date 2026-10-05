@@ -28,7 +28,7 @@ import { isSourceFileName } from '../schema/source-module.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
-import { createEffectManifest, selectEffectManifest } from './effect-inventory.ts';
+import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
 import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
 import { buildFileIndex, type FlowIndex, mergeFlowIndexes } from './flow-index.ts';
@@ -106,10 +106,10 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   const { program, checker, status } = createGraphProgram(project, [...inputs.sources.values(), ...inputs.declarations]);
   const files = nodeFiles(program, inputs.sources);
-  const expectedFiles = new Map([...inputs.sources.keys()].map((path) => [path, files.get(path)]));
   const walk = inputs.walk;
-  const coverageComplete = !walk.truncated && inputs.oversized === 0 && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
-  const analysis = analyzeFiles(program, checker, files, expectedFiles, coverageComplete);
+  const coverageComplete = !status.configUnreadable && !walk.truncated && inputs.oversized === 0
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
+  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
     routeFacts: routes.facts,
@@ -201,9 +201,11 @@ interface FileAnalysis {
  * @param program Program
  * @param checker TypeChecker
  * @param files 노드 파일
+ * @param expectedPaths 프로젝트 상대 경로 → authoritative 절대 입력 경로
+ * @param coverageComplete 파일 걷기와 compiler 설정을 빠짐없이 해석했는지
  * @returns 저장소와 계수
  */
-function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedFiles: ReadonlyMap<string, ts.SourceFile | undefined>, coverageComplete: boolean): FileAnalysis {
+function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean): FileAnalysis {
   const store = new GraphStore();
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
@@ -211,12 +213,16 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const resolveModule = createModuleResolver(program, checker);
   const testPaths = new Set([...files.keys()].filter(isTestSourcePath));
   const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
+  const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, files.get(path)]));
   const effectBudget = { visited: 0, records: 0 };
-  const wholeManifest = createEffectManifest(expectedFiles, 'whole', resolveModule, coverageComplete, effectBudget, checker);
+  const emitPolicy = effectEmitPolicy(program.getCompilerOptions());
+  const wholeManifest = createEffectManifest(expectedFiles, 'whole', resolveModule, coverageComplete, effectBudget, checker, emitPolicy);
   const productionManifest = separateTests
-    ? selectEffectManifest(wholeManifest, new Map([...expectedFiles].filter(([path]) => !isTestSourcePath(path))), 'production')
+    ? selectEffectManifest(wholeManifest, new Map([...expectedPaths]
+      .filter(([path]) => !testPaths.has(path))
+      .map(([path, absolute]) => [absolute, files.get(path)])), 'production')
     : wholeManifest;
-  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget)]));
+  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy)]));
   const flowIndex = mergeFlowIndexes(flowIndexes.values(), wholeManifest);
   const productionFlowIndex = separateTests
     ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest)
