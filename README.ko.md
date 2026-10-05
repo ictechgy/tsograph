@@ -719,6 +719,37 @@ mutation 효과가 필요하다. optional Date callback도 명시적인 own data
 기존 own data slot 쓰기만 완전한 사용 감사 안에서 무관한 mutation으로 분리할 수 있다. 배열 타입·spread 배열·
 임의 factory·`map().sort().map()`은 이 증명이 아니다.
 
+확장 carrier 증명은 exact literal 의존성 bag으로 직접·무조건 실행하는 최상위 `const` 생성 한 곳을
+인정한다. 기존 프로젝트 정책으로 닫힌 정적 import/export 별칭을 포함해 class와 instance의 모든
+런타임 사용을 감사한다. 두 번째 생성·생성자 값 별칭·factory·subclass·탈출·런타임 namespace/enum
+병합·CJS·미해석 참조는 확장 격리 자격을 얻지 않는다. 일반 반복 생성의 기존 가능한 target은 유지한다.
+
+의존성은 같은 모듈에서 controller보다 먼저 생성해야 한다. import한 의존성의 초기화, 필요한 binding
+이전의 초기화 시점 호출, 관련 런타임 import 순환은 증명하지 않는다. 의존성 생성자는 없거나
+매개변수 없는 빈 본문이어야 하고, 초기화한 필드는 primitive literal이어야 한다. 미사용 메서드도
+모두 동기·무매개변수이며 본문이 비었거나 primitive literal을 반환해야 한다. 예를 들면 다음과 같다.
+
+```ts
+class Port { send() { return 1; } }
+class Controller {
+  tick: () => Date;
+  constructor(private readonly inputs: { port: Port; tick?: () => Date }) {
+    this.tick = inputs.tick ?? (() => new Date());
+  }
+  run() { this.tick(); return this.inputs.port.send(); }
+}
+const live = new Port();
+const controller = new Controller({ port: live, tick: undefined });
+controller.run();
+```
+
+이 문법 안에서 `Controller.run → Port.send`는 `bound` 근거를 얻는다. class 평가·생성·매개변수 속성
+저장·projection·지연 Date 생성·호출은 각각 감사한 효과 모델을 요구한다. 열거된 효과에 맞는 모델이
+없으면 새 증명을 막으며, 완성된 목록만으로 순수하다고 판단하지 않는다. 기존 canonical private
+own-slot 쓰기는 별도 검사를 유지한다. 일반적인 부수효과가 있는 의존 메서드·임의 helper·callback·
+factory는 이 증명 밖에 남긴다. 증명 구축과 캐시 재생은 member·endpoint 순회를 포함해 기존
+20,000단계·깊이 256·식 frame 400의 상한을 함께 적용한다.
+
 일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
 직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.
 `const result = await this.method(value); return result`도 메서드 조회가 suspension보다 먼저 일어난다.

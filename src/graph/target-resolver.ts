@@ -187,6 +187,20 @@ export class TargetResolver {
   /** carrier role의 same-class method는 receiver/entry proof가 실패하면 direct 대신 dispatch로 넘긴다. */
   private shouldDeferCarrierMethod(access: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean {
     if (this.constructorCarrier === undefined) return false;
+    // bag에서 빌린 endpoint는 타입의 선언만으로 direct가 아니다. 실제 allocation flow로 판정한다.
+    let root = skipWrappers(access.expression);
+    while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) {
+      if (++this.carrierSteps > 20_000) throw new CarrierCallerExhausted();
+      root = skipWrappers(root.expression);
+    }
+    if (root.kind === ts.SyntaxKind.ThisKeyword && root !== access.expression) {
+      let owner: ts.Node | undefined = access.parent;
+      while (owner !== undefined && !ts.isClassLike(owner)) {
+        if (++this.carrierSteps > 20_000) throw new CarrierCallerExhausted();
+        owner = owner.parent;
+      }
+      if (owner !== undefined && ts.isClassLike(owner) && this.constructorCarrier.hasCarrierFlowObligation(owner)) return true;
+    }
     const name = ts.isPropertyAccessExpression(access) ? access.name.text
       : ts.isStringLiteralLike(access.argumentExpression) ? access.argumentExpression.text : undefined;
     if (name === undefined) return false;

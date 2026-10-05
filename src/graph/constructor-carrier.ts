@@ -12,6 +12,7 @@ import ts from 'typescript';
 import { climbWrappers, type FlowIndex, referenceSite, type MutationRecord } from './flow-index.ts';
 import { isMutationCleanView, type MutationSafetyContext } from './mutation-safety.ts';
 import { skipWrappers } from './node-collector.ts';
+import { auditSingletonCarrier, coversSingletonEffects, certifiesSingletonWrite, type SingletonWitness } from './singleton-carrier.ts';
 import type { FlowPolicy } from './value-flow.ts';
 import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge, type ProofGuard, type ProofWork } from './proof-dag.ts';
 
@@ -80,7 +81,7 @@ export interface ConstructorCarrierProof {
 }
 
 /** source-derived legacy obligation의 정적 노드 종류다. */
-type CarrierOperation = 'proof' | 'role' | 'lineage' | 'instance' | 'identity' | 'consumption' | 'receiver' | 'construction';
+type CarrierOperation = 'proof' | 'role' | 'lineage' | 'instance' | 'identity' | 'consumption' | 'receiver' | 'construction' | 'field' | 'extended-selection' | 'dependency-selection';
 
 /** 생성자 carrier 분석기다. 완료한 AST 결과만 메모하고 재진입은 실패시킨다. */
 export class ConstructorCarrierAnalyzer {
@@ -97,16 +98,17 @@ export class ConstructorCarrierAnalyzer {
   private readonly dag: ProofDag;
   private readonly recipes = new Map<ts.ClassLikeDeclaration, Map<CarrierOperation, ProofRecipe<unknown>>>();
   private readonly bagRecipes = new Map<ts.ObjectLiteralExpression, Map<ts.ClassLikeDeclaration, ProofRecipe<ConstructorCarrierProof>>>();
-  /** 새 instance 격리 recipe는 legacy 증명 노드를 공유하지 않는다. */
-  private readonly extendedRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>();
-  /** 새 exact bag 인증서는 legacy bag 결과로 fallback하지 않는다. */
-  private readonly extendedBagRecipes = new Map<ts.ObjectLiteralExpression,
-    Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>>();
+  /** source/allocation별 정적 extended proof DAG recipe다. */
+  private readonly singletonRecipes = new Map<ts.Node, Map<string, ProofRecipe<SingletonWitness>>>();
+  /** borrowed endpoint의 자기 singleton family를 root-scoped witness로 확인한다. */
+  private readonly dependencyRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<SingletonWitness>>();
   private readonly issuedProofs = new WeakMap<ProofCertificate, ConstructorCarrierProof>();
   private query: ProofQuery | undefined;
   private work: ProofWork | undefined;
   private walkDepth = 0;
   private readonly files: ReadonlySet<ts.SourceFile>;
+  /** 독립 build inventory를 받은 순간의 모든 dependency source revision이다. */
+  private readonly sourceTexts: ReadonlyMap<ts.SourceFile, string>;
   private readonly policyGuards = new Map<string, WeakMap<object, ProofGuard>>();
 
   constructor(context: ConstructorCarrierContext) {
@@ -114,9 +116,10 @@ export class ConstructorCarrierAnalyzer {
     this.origin = { program: context.program, checker: context.checker, index: context.index,
       policy: context.policy, inventory: context.index.effectInventory, manifest: context.index.effectInventory?.manifest };
     this.files = new Set(context.index.files);
+    this.sourceTexts = new Map(context.index.files.map((file) => [file, file.text]));
     this.dag = new ProofDag({ program: context.program ?? context.checker, checker: context.checker,
       view: context.index.effectInventory?.manifest.view ?? 'whole', manifest: context.index.effectInventory?.manifest,
-      policy: context.policy, version: 2, coverage: () => {
+      policy: context.policy, version: 3, coverage: () => {
         const inventory = context.index.effectInventory;
         return inventory?.enumeration === 'complete' && inventory.referenceAliases === 'complete'
           && inventory.initialization === 'complete';
@@ -202,148 +205,208 @@ export class ConstructorCarrierAnalyzer {
       && this.dag.accepts(result.certificate, 'exact-bag', literal, query);
   }
 
-  /** 모르는 반사 대상에만 적용하는 명시적 확장 instance-family 권한이다. */
+  /** unknown reflection에는 completed singleton family capability만 소비한다. */
   allowsExtendedInstanceIsolation(declaration: ts.ClassLikeDeclaration): boolean {
-    let recipe = this.extendedRecipes.get(declaration);
-    if (recipe === undefined) {
-      const source = declaration.getSourceFile();
-      const text = source.text;
-      const inventory = this.context.index.effectInventory;
-      const policy = this.context.policy;
-      const project = policy.isProjectFile;
-      const callable = policy.isOpenCallable;
-      const open = policy.openProperties;
-      const intrinsic = policy.isDefaultLibraryFile;
-      const program = this.context.program;
-      const checker = this.context.checker;
-      const references = this.context.index.references;
-      const referenceCount = references.size;
-      const mutations = this.context.index.mutations;
-      const mutationCount = mutations.length;
-      const opaque = this.context.index.hasOpaqueMutation;
-      const incompleteMutations = this.context.index.hasIncompleteMutations;
-      const mutationComplete = this.context.index.mutationComplete;
-      recipe = {
-        id: `${source.fileName}:${declaration.pos}:extended-instance-family`,
-        capability: 'instance-family',
-        mode: 'extended',
-        identity: declaration,
-        valid: () => this.validEntry(declaration) && source.text === text
-          && this.context.index.effectInventory === inventory && this.context.policy === policy
-          && this.context.program === program && this.context.checker === checker
-          && program !== undefined && program.getTypeChecker() === checker
-          && program.getSourceFile(source.fileName) === source
-          && this.context.policy.isProjectFile === project
-          && this.context.policy.isOpenCallable === callable
-          && this.context.policy.openProperties === open
-          && this.context.policy.isDefaultLibraryFile === intrinsic
-          && this.context.index.references === references && references.size === referenceCount
-          && this.context.index.mutations === mutations && mutations.length === mutationCount
-          && this.context.index.hasOpaqueMutation === opaque
-          && this.context.index.hasIncompleteMutations === incompleteMutations
-          && this.context.index.mutationComplete === mutationComplete,
-        dependencies: (work) => {
-          work.require(this.policyGuard('project', source), true);
-          work.require(this.policyGuard('callable', declaration), false);
-          return [];
-        },
-        evaluate: (work) => this.withWork(work, () => {
-          try {
-            work();
-            const proof = this.proveClass(declaration);
-            return proof !== undefined && this.cleanMutations(proof)
-              ? { kind: 'proved', value: true }
-              : { kind: 'rejected', reason: 'isolation' };
-          }
-          catch (error) {
-            if (error instanceof CarrierIncomplete) return { kind: 'incomplete', reason: 'coverage' };
-            throw error;
-          }
-        }),
-      };
-      this.extendedRecipes.set(declaration, recipe);
-    }
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
-    const result = this.resolveRecipe(recipe, query);
-    return result.kind === 'proved' && result.value
-      && this.dag.accepts(result.certificate, 'instance-family', declaration, query, 'extended');
+    return this.extendedAuthority(declaration, 'instance-family', declaration);
   }
 
-  /** 생성자의 정확한 inner literal에만 적용하는 명시적 확장 exact-bag 권한이다. */
+  /** exact allocation의 bag authority는 descriptor/effects/confinement를 모두 의존한다. */
   isolatesExtendedBag(declaration: ts.ClassLikeDeclaration, literal: ts.ObjectLiteralExpression): boolean {
-    let byDeclaration = this.extendedBagRecipes.get(literal);
-    if (byDeclaration === undefined) {
-      byDeclaration = new Map();
-      this.extendedBagRecipes.set(literal, byDeclaration);
-    }
-    let recipe = byDeclaration.get(declaration);
+    return this.extendedAuthority(declaration, 'exact-bag', literal);
+  }
+
+  /** root/dependency/legacy 모드를 증명 전에 선택한다. extended negative에서 legacy로 fallback하지 않는다. */
+  allowsUnknownReflectionIsolation(declaration: ts.ClassLikeDeclaration): boolean {
+    if (this.selectsExtendedFlow(declaration)) return this.allowsExtendedInstanceIsolation(declaration);
+    const selection = this.resolve<boolean>(declaration, 'dependency-selection');
+    if (selection.kind !== 'proved') return false;
+    return selection.value ? this.allowsExtendedDependencyIsolation(declaration)
+      : this.allowsLegacyUnknownReflectionIsolation(declaration);
+  }
+
+  /** dependency의 class 값·prototype ownership을 빌리지 않고 자기 singleton census만 소비한다. */
+  allowsExtendedDependencyIsolation(declaration: ts.ClassLikeDeclaration): boolean {
+    let recipe = this.dependencyRecipes.get(declaration);
     if (recipe === undefined) {
-      const source = declaration.getSourceFile();
-      const text = source.text;
-      const inventory = this.context.index.effectInventory;
-      const policy = this.context.policy;
-      const project = policy.isProjectFile;
-      const callable = policy.isOpenCallable;
-      const open = policy.openProperties;
-      const intrinsic = policy.isDefaultLibraryFile;
-      const program = this.context.program;
-      const checker = this.context.checker;
-      const references = this.context.index.references;
-      const referenceCount = references.size;
-      const mutations = this.context.index.mutations;
-      const mutationCount = mutations.length;
-      const opaque = this.context.index.hasOpaqueMutation;
-      const incompleteMutations = this.context.index.hasIncompleteMutations;
-      const mutationComplete = this.context.index.mutationComplete;
+      const entry = this.recipe(declaration, 'proof');
       recipe = {
-        id: `${literal.getSourceFile().fileName}:${literal.pos}:extended-exact-bag:${declaration.pos}`,
-        capability: 'exact-bag',
-        mode: 'extended',
-        identity: literal,
-        valid: () => this.validEntry(declaration) && source.text === text
-          && this.context.index.effectInventory === inventory && this.context.policy === policy
-          && this.context.program === program && this.context.checker === checker
-          && program !== undefined && program.getTypeChecker() === checker
-          && program.getSourceFile(source.fileName) === source
-          && this.context.policy.isProjectFile === project
-          && this.context.policy.isOpenCallable === callable
-          && this.context.policy.openProperties === open
-          && this.context.policy.isDefaultLibraryFile === intrinsic
-          && this.context.index.references === references && references.size === referenceCount
-          && this.context.index.mutations === mutations && mutations.length === mutationCount
-          && this.context.index.hasOpaqueMutation === opaque
-          && this.context.index.hasIncompleteMutations === incompleteMutations
-          && this.context.index.mutationComplete === mutationComplete
-          && literal.getSourceFile() === declaration.getSourceFile(),
-        dependencies: (work) => {
-          work.require(this.policyGuard('project', source), true);
+        id: `${declaration.getSourceFile().fileName}:${declaration.pos}:stage3:dependency-family`,
+        capability: 'instance-family', identity: declaration, mode: 'extended',
+        valid: () => entry.valid() && this.context.program !== undefined
+          && this.context.program.getTypeChecker() === this.context.checker,
+        dependencies: (work) => this.withWork(work, () => {
+          work.require(this.policyGuard('project', declaration.getSourceFile()), true);
           work.require(this.policyGuard('callable', declaration), false);
-          return [];
-        },
-        evaluate: (work) => this.withWork(work, () => {
-          try {
-            work();
-            const proof = this.proveClass(declaration);
-            return proof !== undefined && proof.innerLiteral === literal && this.cleanMutations(proof)
-              ? { kind: 'proved', value: true }
-              : { kind: 'rejected', reason: 'allocation' };
-          }
-          catch (error) {
-            if (error instanceof CarrierIncomplete) return { kind: 'incomplete', reason: 'coverage' };
-            throw error;
-          }
+          const owner = this.singletonDependencyOwner(declaration);
+          return owner === undefined ? [] : [{ recipe: this.singletonRecipe(owner, 'sterile-confinement'),
+            capability: 'sterile-confinement', depth: 1, frames: 0 }];
         }),
+        evaluate: (work, children) => {
+          work();
+          const child = children[0];
+          const witness = child?.kind === 'proved' ? child.value as SingletonWitness : undefined;
+          return witness?.dependencies.has(declaration) === true
+            ? { kind: 'proved', value: witness } : { kind: 'rejected', reason: 'dependency-family' };
+        },
       };
-      byDeclaration.set(declaration, recipe);
+      this.dependencyRecipes.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
     const result = this.resolveRecipe(recipe, query);
-    return result.kind === 'proved' && result.value
-      && this.dag.accepts(result.certificate, 'exact-bag', literal, query, 'extended');
+    return result.kind === 'proved' && this.dag.accepts(result.certificate, 'instance-family', declaration, query, 'extended');
   }
 
-  /** Stage 0 method grammar만 검사한다. repeated allocation의 ordinary union을 보존한다. */
-  allowsInstanceFlow(declaration: ts.ClassLikeDeclaration): boolean { return this.boolean(declaration, 'instance'); }
+  /** 직접 new→const→exact bag→new 경로만 따라가며 ValueFlow나 타입으로 owner를 추측하지 않는다. */
+  private singletonDependencyOwner(declaration: ts.ClassLikeDeclaration): ts.ClassLikeDeclaration | undefined {
+    const construction = this.singleConstruction(declaration);
+    if (construction === undefined) return undefined;
+    const binding = climbWrappers(construction).parent;
+    if (!ts.isVariableDeclaration(binding) || !ts.isIdentifier(binding.name)) return undefined;
+    const symbol = this.context.checker.getSymbolAtLocation(binding.name);
+    if (symbol === undefined) return undefined;
+    let owner: ts.ClassLikeDeclaration | undefined;
+    for (const reference of this.context.index.references.get(symbol) ?? []) {
+      this.step();
+      const site = referenceSite(reference);
+      const property = site.parent;
+      if (!ts.isPropertyAssignment(property) || property.initializer !== site || !ts.isObjectLiteralExpression(property.parent)) return undefined;
+      const allocation = climbWrappers(property.parent).parent;
+      if (!ts.isNewExpression(allocation)) return undefined;
+      this.step();
+      if (allocation.arguments?.length !== 1 || allocation.arguments[0] !== property.parent) return undefined;
+      const target = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(skipWrappers(allocation.expression)));
+      const candidate = target?.valueDeclaration;
+      if (candidate === undefined || !ts.isClassDeclaration(candidate) || owner !== undefined && owner !== candidate) return undefined;
+      owner = candidate;
+    }
+    return owner;
+  }
+
+  /** 선택한 extended flow는 실패 후 legacy 문법으로 재시도하지 않는다. */
+  selectsExtendedFlow(declaration: ts.ClassLikeDeclaration): boolean {
+    const outcome = this.resolve<boolean>(declaration, 'extended-selection');
+    return outcome.kind !== 'proved' || outcome.value;
+  }
+
+  /** 반복 allocation은 ordinary union에 남기고 exact own bag singleton만 확장 모드를 선택한다. */
+  private selectExtendedClass(declaration: ts.ClassLikeDeclaration): boolean {
+    this.step();
+    if (this.context.index.effectInventory === undefined) return false;
+    let constructor: ts.ConstructorDeclaration | undefined;
+    for (const member of declaration.members) {
+      this.step();
+      if (ts.isConstructorDeclaration(member)) { constructor = member; break; }
+    }
+    let bag: ts.ParameterDeclaration | undefined;
+    if (constructor !== undefined) {
+      for (const parameter of constructor.parameters) {
+        this.step();
+        if (isPrivateReadonlyParameterProperty(parameter, constructor)) { bag = parameter; break; }
+      }
+    }
+    if (bag === undefined) return false;
+    const shape = this.bagShape(bag);
+    if (shape === undefined) return false;
+    const symbol = classSymbol(this.context.checker, declaration);
+    if (symbol === undefined) return false;
+    let allocation: ts.NewExpression | undefined;
+    for (const reference of this.context.index.references.get(symbol) ?? []) {
+      this.step();
+      const site = climbWrappers(referenceSite(reference));
+      if (!ts.isNewExpression(site.parent) || site.parent.expression !== site) continue;
+      if (allocation !== undefined) return false;
+      allocation = site.parent;
+    }
+    if (allocation === undefined || allocation.arguments?.length !== 1) return false;
+    const binding = climbWrappers(allocation).parent;
+    if (!ts.isVariableDeclaration(binding) || !ts.isVariableDeclarationList(binding.parent)
+      || (binding.parent.flags & ts.NodeFlags.Const) === 0 || !ts.isVariableStatement(binding.parent.parent)
+      || binding.parent.parent.parent !== declaration.getSourceFile()) return false;
+    const literal = skipWrappers(allocation.arguments[0]!);
+    return ts.isObjectLiteralExpression(literal) && this.innerLiteralShape(literal, shape, true);
+  }
+
+  /** consumer별 opaque capability는 동일한 정적 witness DAG에 묶인다. */
+  private extendedAuthority(declaration: ts.ClassLikeDeclaration,
+    capability: 'instance-family' | 'exact-bag' | 'concrete-dispatch' | 'descriptor', identity: ts.Node): boolean {
+    const recipe = this.singletonRecipe(declaration, capability, identity);
+    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    const result = this.resolveRecipe(recipe, query);
+    if (result.kind === 'rejected' || result.kind === 'incomplete') {
+      this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}(${result.reason}); extended isolation was not certified.`);
+    }
+    return result.kind === 'proved' && this.dag.accepts(result.certificate, capability, identity, query, 'extended');
+  }
+
+  /** descriptor→named effects→confinement→consumer의 단방향 DAG다. legacy 성공은 의존에 포함하지 않는다. */
+  private singletonRecipe(declaration: ts.ClassLikeDeclaration,
+    capability: 'descriptor' | 'primitive-effects' | 'sterile-confinement' | 'instance-family' | 'exact-bag' | 'concrete-dispatch',
+    identity: ts.Node = declaration): ProofRecipe<SingletonWitness> {
+    let recipes = this.singletonRecipes.get(identity);
+    if (recipes === undefined) { recipes = new Map(); this.singletonRecipes.set(identity, recipes); }
+    const key = `${declaration.pos}:${capability}`;
+    const known = recipes.get(key); if (known !== undefined) return known;
+    const source = declaration.getSourceFile();
+    const program = this.context.program;
+    const checker = this.context.checker;
+    const baseEntry = this.recipe(declaration, 'proof');
+    const recipe: ProofRecipe<SingletonWitness> = {
+      id: `${source.fileName}:${identity.pos}:stage3:${key}`, identity, capability, mode: 'extended',
+      valid: () => baseEntry.valid() && program !== undefined && program.getTypeChecker() === checker
+        && program.getSourceFile(source.fileName) === source
+        && identity.getSourceFile() === source,
+      dependencies: (work) => {
+        work.require(this.policyGuard('project', source), true);
+        work.require(this.policyGuard('callable', declaration), false);
+        if (capability === 'descriptor') {
+          for (const file of this.files) {
+            work(); work.require(this.policyGuard('source-entry', file), true);
+          }
+        }
+        const child = capability === 'descriptor' ? undefined : capability === 'primitive-effects' ? 'descriptor'
+          : capability === 'sterile-confinement' ? 'primitive-effects' : 'sterile-confinement';
+        return child === undefined ? [] : [{ recipe: this.singletonRecipe(declaration, child), capability: child, depth: 1, frames: 0 }];
+      },
+      evaluate: (work, children) => this.withWork(work, () => {
+        work();
+        if (this.context.index.hasIncompleteMutations === true || this.context.index.mutationComplete === false) {
+          return { kind: 'incomplete', reason: 'coverage' };
+        }
+        let witness: SingletonWitness | undefined;
+        if (capability === 'descriptor') {
+          const proof = this.proveClass(declaration, true, true);
+          if (proof !== undefined) witness = auditSingletonCarrier(this.context, proof, work, {
+            project: (file) => this.policyIsProjectFile(file), open: (node) => this.policyIsOpenCallable(node),
+            intrinsic: (file) => this.policyIsDefaultLibraryFile(file),
+          });
+        } else {
+          const child = children[0]; witness = child?.kind === 'proved' ? child.value as SingletonWitness : undefined;
+        }
+        if (witness === undefined) return { kind: 'rejected', reason: 'singleton-descriptor' };
+        if (capability === 'primitive-effects' && !coversSingletonEffects(this.context, witness, work)) {
+          return { kind: 'rejected', reason: 'unmodeled-effect' };
+        }
+        if (capability === 'sterile-confinement') {
+          const safety: MutationSafetyContext = { checker, index: this.context.index,
+            isDefaultLibraryFile: (file) => this.policyIsDefaultLibraryFile(file),
+            openProgram: this.context.policy.openProperties, openProperties: this.context.policy.openProperties,
+            budgetStep: () => this.step() };
+          if (!isMutationCleanView(safety, { certifiedWrite: (record) => certifiesSingletonWrite(witness!, record) })) {
+            return { kind: 'rejected', reason: 'mutation' };
+          }
+        }
+        if (capability === 'exact-bag' && witness.proof.innerLiteral !== identity) return { kind: 'rejected', reason: 'allocation' };
+        return { kind: 'proved', value: witness };
+      }),
+    };
+    recipes.set(key, recipe); return recipe;
+  }
+
+  /** 선택한 flow 모드의 concrete-dispatch 권한을 소비하며 repeated allocation의 ordinary union을 보존한다. */
+  allowsInstanceFlow(declaration: ts.ClassLikeDeclaration): boolean {
+    return this.selectsExtendedFlow(declaration) && this.hasCarrierFlowObligation(declaration)
+      ? this.extendedAuthority(declaration, 'concrete-dispatch', declaration) : this.boolean(declaration, 'instance');
+  }
   /** source-derived 역할은 효과나 ownership 증명으로 쓰지 않는다. */
   hasCarrierFlowObligation(declaration: ts.ClassLikeDeclaration): boolean {
     const result = this.resolve<boolean>(declaration, 'role');
@@ -354,8 +417,15 @@ export class ConstructorCarrierAnalyzer {
     const result = this.resolve<boolean>(declaration, 'lineage');
     return result.kind !== 'proved' || result.value;
   }
-  /** identity는 constructor/storage만 검사하고 effect 권한을 부여하지 않는다. */
+  /** identity는 독립적인 constructor/storage만 검사하고 effect·isolation 권한을 부여하지 않는다. */
   allowsConstructedInstanceIdentity(declaration: ts.ClassLikeDeclaration): boolean { return this.boolean(declaration, 'identity'); }
+
+  /** 독립 service identity로 optional fallback field의 own-data 증명을 대신하지 않는다. */
+  allowsCarrierFieldFlow(declaration: ts.ClassLikeDeclaration): boolean {
+    return this.selectsExtendedFlow(declaration)
+      ? this.extendedAuthority(declaration, 'descriptor', declaration) : this.boolean(declaration, 'field');
+  }
+
   /** method recovery는 관찰된 consumption과 receiver 안정성만 소비한다. */
   allowsDeclaredMethodReceiver(declaration: ts.ClassLikeDeclaration): boolean { return this.boolean(declaration, 'receiver'); }
   /** method body effect를 승인하지 않는 construction/consumption 판정이다. */
@@ -406,7 +476,7 @@ export class ConstructorCarrierAnalyzer {
     const checker = this.context.checker;
     const recipe: ProofRecipe<unknown> = {
       id: `${source.fileName}:${declaration.pos}:${kind}`,
-      capability: kind === 'construction' ? 'descriptor'
+        capability: kind === 'construction' || kind === 'field' ? 'descriptor'
         : kind === 'identity' || kind === 'instance' || kind === 'consumption' || kind === 'receiver' ? 'concrete-dispatch' : 'legacy',
       identity: declaration,
       valid: () => this.validContext() && (this.validEntry(declaration)
@@ -427,8 +497,8 @@ export class ConstructorCarrierAnalyzer {
           work.require(this.policyGuard('project', source), this.files.has(source));
         }
         const edge = (owner: ts.ClassLikeDeclaration, operation: CarrierOperation): ProofEdge => ({ recipe: this.recipe(owner, operation), depth: 1, frames: 0 });
-        if (kind === 'role' || kind === 'construction') return [];
-        if (kind === 'proof') return [edge(declaration, 'construction')];
+        if (kind === 'role' || kind === 'construction' || kind === 'extended-selection' || kind === 'dependency-selection') return [];
+        if (kind === 'proof' || kind === 'field') return [edge(declaration, 'construction')];
         if (kind === 'receiver') return [edge(declaration, 'consumption')];
         const role = edge(declaration, 'role');
         if (kind === 'lineage' || kind === 'identity') {
@@ -447,8 +517,24 @@ export class ConstructorCarrierAnalyzer {
           // dependency는 canonical id 순서로 주어진다. 결과를 id로 매핑하므로 호출 순서를 권한으로 쓰지 않는다.
           const role = children.length === 0 ? undefined : this.dependencyValue(declaration, 'role', children);
           let value: unknown;
-          if (kind === 'role') value = this.isCarrierFlowCandidate(declaration);
+          if (kind === 'dependency-selection') value = !declaration.members.some((member) => {
+            this.step();
+            return ts.isConstructorDeclaration(member) && member.parameters.some((parameter) => {
+              this.step(); return isPrivateReadonlyParameterProperty(parameter, member);
+            });
+          });
+          else if (kind === 'extended-selection') value = this.selectExtendedClass(declaration);
+          else if (kind === 'role') value = this.isCarrierFlowCandidate(declaration);
           else if (kind === 'construction') value = this.proveReceiverConstruction(declaration);
+          else if (kind === 'field') {
+            const receiver = this.dependencyValue(declaration, 'construction', children) as ConstructorReceiverProof | undefined;
+            value = receiver !== undefined && receiver.constructions.every((construction) => {
+              this.step();
+              const literal = construction.arguments?.[0];
+              return literal !== undefined && ts.isObjectLiteralExpression(skipWrappers(literal))
+                && this.innerLiteralShape(skipWrappers(literal) as ts.ObjectLiteralExpression, receiver.bagShape, true);
+            });
+          }
           else if (kind === 'proof') {
             const proof = this.proveClass(declaration);
             value = proof !== undefined && this.cleanMutations(proof) ? proof : undefined;
@@ -462,7 +548,7 @@ export class ConstructorCarrierAnalyzer {
             const proof = role === true ? this.dependencyValue(declaration, 'construction', children) as ConstructorReceiverProof : undefined;
             value = proof !== undefined && this.scanDeclaredReceiverUses(declaration, proof.constructions);
           } else value = this.dependencyValue(declaration, 'consumption', children) === true && this.scanDeclaredMethodInstanceSafety(declaration);
-          const result = value === undefined || value === false && kind !== 'role' && kind !== 'lineage'
+          const result = value === undefined || value === false && kind !== 'role' && kind !== 'lineage' && kind !== 'extended-selection' && kind !== 'dependency-selection'
             ? { kind: 'rejected' as const, reason: 'syntax' } : { kind: 'proved' as const, value };
             return result;
           });
@@ -493,7 +579,10 @@ export class ConstructorCarrierAnalyzer {
     const existing = guards.get(target);
     if (existing !== undefined) return existing;
     const policy = this.context.policy;
-    const read = (): boolean => kind === 'project'
+    const read = (): boolean => kind === 'source-entry'
+      ? this.context.program?.getSourceFile((target as ts.SourceFile).fileName) === target
+        && (target as ts.SourceFile).text === this.sourceTexts.get(target as ts.SourceFile)
+      : kind === 'project'
       ? policy.isProjectFile.call(policy, target as ts.SourceFile)
       : kind === 'callable'
         ? policy.isOpenCallable.call(policy, target as ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration)
@@ -535,12 +624,12 @@ export class ConstructorCarrierAnalyzer {
   }
 
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
-  private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true): ConstructorCarrierProof | undefined {
+  private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true, extended = false): ConstructorCarrierProof | undefined {
     this.step();
     if (!this.policyIsProjectFile(declaration.getSourceFile()) || this.policyIsOpenCallable(declaration)) return undefined;
     if (hasDecorators(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
     if ((this.context.index.subclasses.get(declaration)?.length ?? 0) > 0) return undefined;
-    if (isExportedDeclaration(this.context, declaration)) return undefined;
+    if (!extended && isExportedDeclaration(this.context, declaration)) return undefined;
 
     const constructor = declaration.members.filter(ts.isConstructorDeclaration);
     if (constructor.length !== 1 || constructor[0]!.body === undefined) return undefined;
@@ -564,7 +653,7 @@ export class ConstructorCarrierAnalyzer {
     if (!ts.isObjectLiteralExpression(innerLiteral)
       || !this.innerLiteralShape(innerLiteral, bagShape, requireOptionalOwn)) return undefined;
 
-    const fields = this.instanceFields(declaration, bagParameter);
+    const fields = this.instanceFields(declaration, bagParameter, extended);
     if (fields === undefined) return undefined;
     const allowedMutationSites = new Set<ts.Node>();
     const serviceUses: ConstructorServiceUse[] = [];
@@ -711,7 +800,7 @@ export class ConstructorCarrierAnalyzer {
       const innerLiteral = skipWrappers(argumentsList[0]!);
       if (!ts.isObjectLiteralExpression(innerLiteral) || !this.innerLiteralShape(innerLiteral, bagShape, false)) return undefined;
     }
-    const fields = this.instanceFields(declaration, bagParameter);
+    const fields = this.instanceFields(declaration, bagParameter, true);
     if (fields === undefined) return undefined;
     const audit = this.scanConstructor(owner, bagParameter, bagShape, fields, new Set<ts.Node>());
     if (audit === undefined) return undefined;
@@ -943,6 +1032,7 @@ export class ConstructorCarrierAnalyzer {
   private instanceFields(
     declaration: ts.ClassLikeDeclaration,
     bagParameter: ts.ParameterDeclaration,
+    extended = false,
   ): ReadonlyMap<string, ts.PropertyDeclaration | ts.ParameterDeclaration> | undefined {
     const fields = new Map<string, ts.PropertyDeclaration | ts.ParameterDeclaration>();
     if (!ts.isIdentifier(bagParameter.name) || isPrototypeSensitiveSlotName(bagParameter.name.text)) return undefined;
@@ -952,7 +1042,7 @@ export class ConstructorCarrierAnalyzer {
       this.step();
       if (ts.isConstructorDeclaration(member)) continue;
       if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member) || ts.isAccessor(member)
-        || ts.isClassStaticBlockDeclaration(member)) return undefined;
+        || ts.isAutoAccessorPropertyDeclaration(member) || ts.isClassStaticBlockDeclaration(member)) return undefined;
       if (ts.isMethodDeclaration(member)) {
         const key = staticPropertyName(member.name);
         if (key === undefined || isPrototypeSensitiveSlotName(key) || hasDecorators(member) || slots.has(key)) return undefined;
@@ -963,8 +1053,8 @@ export class ConstructorCarrierAnalyzer {
       const key = staticPropertyName(member.name);
       if (key === undefined || isPrototypeSensitiveSlotName(key) || slots.has(key)) return undefined;
       if (member.initializer !== undefined) return undefined;
-      const modifiers = ts.getModifiers(member) ?? [];
-      if (!modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword)) return undefined;
+      if (!extended && !(ts.getModifiers(member) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword)) return undefined;
+      slots.add(key);
       fields.set(key, member);
     }
     return fields;

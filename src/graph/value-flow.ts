@@ -1094,6 +1094,8 @@ export class ValueFlow {
    */
   private fieldValues(declaration: ts.PropertyDeclaration): Flow {
     if (hasDecorators(declaration) || isAmbient(declaration)) return null;
+    if (this.constructorCarrier.hasCarrierFlowObligation(declaration.parent)
+      && !this.constructorCarrier.allowsCarrierFieldFlow(declaration.parent)) return null;
     const initial = declaration.initializer === undefined ? EMPTY : this.expressionValues(declaration.initializer);
     return unionFlows(initial, this.fieldExtras(declaration, declaration.parent));
   }
@@ -1445,10 +1447,9 @@ export class ValueFlow {
     // 알려진 반사 대상은 위에서 항상 막는다. 아래 증명은 값 흐름을 모르는 대상에만 적용한다.
     const isolatedLiteral = ts.isObjectLiteralExpression(value)
       && (this.isIsolatedReturnedLiteral(value) || this.isConstructorCarrierInnerLiteral(value));
-    // Unknown-reflection isolation is an existing legacy consumer; it must not be
-    // mistaken for ambient/effect ownership authority.
+    // root/dependency/legacy 모드를 먼저 고르고 현재 consumer의 family capability만 소비한다.
     const isolatedCarrier = ts.isClassLike(value)
-      && this.constructorCarrier.allowsLegacyUnknownReflectionIsolation(value);
+      && this.constructorCarrier.allowsUnknownReflectionIsolation(value);
     for (const target of this.reflective.unknownTargets) {
       this.step();
       if (isolatedLiteral || isolatedCarrier) continue;
@@ -1466,9 +1467,10 @@ export class ValueFlow {
     const declaration = ts.isClassExpression(callee)
       ? callee : this.classOfSymbol(this.calleeSymbol(callee));
     if (declaration === undefined) return false;
-    // Exact bag confinement is a new Stage2 capability and therefore requires the
-    // explicit extended certificate and authoritative inventory coverage.
-    return this.constructorCarrier.isolatesExtendedBag(declaration, literal);
+    // 모드는 실행 전에 선택한다. 기존 repaired bag 소비자와 새 singleton authority를 혼합하지 않는다.
+    return this.constructorCarrier.selectsExtendedFlow(declaration)
+      ? this.constructorCarrier.isolatesExtendedBag(declaration, literal)
+      : this.constructorCarrier.isolatesBag(declaration, literal);
   }
 
   /**
