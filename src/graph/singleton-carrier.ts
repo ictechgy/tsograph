@@ -50,7 +50,7 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
   const singleton = (owner: ts.ClassLikeDeclaration): ts.NewExpression | undefined => {
     work();
     if (!ts.isClassDeclaration(owner) || owner.name === undefined || owner.parent !== owner.getSourceFile()
-      || decorated(owner) || hasHeritage(owner, ts.SyntaxKind.ExtendsKeyword, work)
+      || decorated(owner, work) || hasHeritage(owner, ts.SyntaxKind.ExtendsKeyword, work)
       || policy.open(owner) || !policy.project(owner.getSourceFile()) || index.newThisClasses.has(owner)
       || (index.subclasses.get(owner)?.length ?? 0) !== 0) return undefined;
     const symbol = symbolOf(owner.name);
@@ -102,9 +102,9 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
     const callback = call.arguments[1]!;
     if (wrapper === undefined || !ts.isFunctionDeclaration(wrapper) || wrapper.parent !== source
       || wrapper.body === undefined || wrapper.parameters.length !== 2 || wrapper.asteriskToken !== undefined
-      || decorated(wrapper) || policy.open(wrapper) || (index.identifierWrites.get(target!)?.length ?? 0) !== 0
+      || decorated(wrapper, work) || policy.open(wrapper) || (index.identifierWrites.get(target!)?.length ?? 0) !== 0
       || target?.declarations?.length !== 1 || !ts.isArrowFunction(callback) || callback.parameters.length !== 1
-      || decorated(callback) || callback.parameters[0]!.initializer !== undefined
+      || decorated(callback, work) || callback.parameters[0]!.initializer !== undefined
       || callback.parameters[0]!.dotDotDotToken !== undefined || !ts.isIdentifier(callback.parameters[0]!.name)
       || !ts.isCallExpression(callback.body) || callback.body.arguments.length !== 0
       || !ts.isPropertyAccessExpression(callback.body.expression)
@@ -118,7 +118,7 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
     if (!carrier || !fn || !ts.isIdentifier(carrier.name) || !ts.isIdentifier(fn.name)
       || carrier.initializer !== undefined || fn.initializer !== undefined
       || carrier.dotDotDotToken !== undefined || fn.dotDotDotToken !== undefined
-      || carrier.questionToken !== undefined || fn.questionToken !== undefined || decorated(carrier) || decorated(fn)
+      || carrier.questionToken !== undefined || fn.questionToken !== undefined || decorated(carrier, work) || decorated(fn, work)
       || hasModifier(wrapper, ts.SyntaxKind.AsyncKeyword, work)
       || hasModifier(callback, ts.SyntaxKind.AsyncKeyword, work)) return false;
     const statement = wrapper.body.statements.length === 1 ? wrapper.body.statements[0] : undefined;
@@ -215,7 +215,7 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
       }
       continue;
     }
-    if (!ts.isArrowFunction(value) || value.parameters.length !== 0 || decorated(value)
+    if (!ts.isArrowFunction(value) || value.parameters.length !== 0 || decorated(value, work)
       || hasModifier(value, ts.SyntaxKind.AsyncKeyword, work)
       || !ts.isNewExpression(value.body) || (value.body.arguments?.length ?? 0) !== 0
       || !ts.isIdentifier(value.body.expression) || value.body.expression.text !== 'Date') return undefined;
@@ -286,7 +286,7 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
       work();
       if (ts.isClassDeclaration(statement) && !models.has(statement) && statement.name !== undefined
         && (index.references.get(symbolOf(statement.name)!)?.length ?? 0) === 0
-        && !decorated(statement) && statement.heritageClauses === undefined
+        && !decorated(statement, work) && statement.heritageClauses === undefined
         && sterileClass(statement, work, policy, mark)) { mark(statement, 'class-evaluation'); continue; }
       if (!ts.isVariableStatement(statement)) continue;
       for (const binding of statement.declarationList.declarations) {
@@ -340,7 +340,7 @@ function orderedCall(call: ts.CallExpression, binding: ts.VariableDeclaration, w
     work();
     if (ts.isArrowFunction(statement)) {
       const variable = directBinding(statement);
-      return statement.parameters.length === 0 && statement.body === outer && !decorated(statement)
+      return statement.parameters.length === 0 && statement.body === outer && !decorated(statement, work)
         && !hasModifier(statement, ts.SyntaxKind.AsyncKeyword, work)
         && variable !== undefined && variable.getSourceFile() === binding.getSourceFile() && binding.end < variable.pos;
     }
@@ -357,7 +357,7 @@ function sterileClass(owner: ts.ClassDeclaration, work: ProofWork, policy: Singl
   let constructors = 0;
   for (const member of owner.members) {
     work();
-    if (decorated(member) || staticMember(member, work)) return false;
+    if (decorated(member, work) || staticMember(member, work)) return false;
     if (ts.isConstructorDeclaration(member)) {
       if (++constructors !== 1 || member.parameters.length !== 0 || member.body === undefined || member.body.statements.length !== 0) return false;
       mark(member, 'sterile-endpoint'); continue;
@@ -403,8 +403,15 @@ function slot(name: ts.PropertyName | ts.BindingName | undefined): string | unde
 }
 /** prototype lookup에 영향을 주는 slot은 인증하지 않는다. */
 function sensitive(name: string): boolean { return ['__proto__', 'prototype', 'constructor', 'then'].includes(name); }
-/** decorator는 runtime descriptor를 바꿀 수 있다. */
-function decorated(node: ts.Node): boolean { return ts.canHaveDecorators(node) && (ts.getDecorators(node)?.length ?? 0) !== 0; }
+/** decorator는 runtime descriptor를 바꿀 수 있다. Stage3에서는 raw modifier만 읽는다. */
+function decorated(node: ts.Node, work?: ProofWork): boolean {
+  if (!ts.canHaveModifiers(node)) return false;
+  for (const modifier of node.modifiers ?? []) {
+    work?.();
+    if (modifier.kind === ts.SyntaxKind.Decorator) return true;
+  }
+  return false;
+}
 /** static 평가와 dependency instance의 primitive field를 구분한다. */
 function staticMember(node: ts.Node, work?: ProofWork): boolean {
   return ts.isClassStaticBlockDeclaration(node) || ts.canHaveModifiers(node)
@@ -452,7 +459,7 @@ function hasHeritage(node: ts.ClassLikeDeclaration, token: ts.SyntaxKind, work: 
 
 /** 신규 singleton grammar가 읽는 modifier 배열은 short-cut 없이 bounded하게 청구한다. */
 function hasModifier(node: ts.Node, kind: ts.SyntaxKind, work?: ProofWork): boolean {
-  for (const modifier of ts.canHaveModifiers(node) ? ts.getModifiers(node) ?? [] : []) {
+  for (const modifier of ts.canHaveModifiers(node) ? node.modifiers ?? [] : []) {
     work?.();
     if (modifier.kind === kind) return true;
   }

@@ -26,9 +26,9 @@ const controller = new Controller({ port: live, tick: undefined });
 controller.run();`;
 
 /** 공개 합성 파일을 실제 Program과 독립 manifest로 결합한다. */
-function indexed(source: string) {
+function indexed(source: string, compilerOptions: ts.CompilerOptions = {}) {
   const options: ts.CompilerOptions = { strict: true, types: [], lib: ['lib.es2022.d.ts'],
-    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext };
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, ...compilerOptions };
   const host = ts.createCompilerHost(options);
   const read = host.getSourceFile;
   host.getSourceFile = (name, version, onError, fresh) => name === 'main.ts'
@@ -591,4 +591,198 @@ const live = new Port(); const controller = new Controller({ port: live }); cont
   const large = measure(200);
   assert.ok(small > 0);
   assert.ok(large < small * 15, `descriptor reads ${small} -> ${large}`);
+});
+
+/** modifier API의 bulk filtering이 아니라 raw modifier.kind 접근을 계측한다. */
+function observeModifierKinds(node: ts.Node): { readonly count: () => number; readonly reset: () => void; readonly restore: () => void } {
+  const modifiers = (node as ts.Node & { readonly modifiers?: readonly ts.ModifierLike[] }).modifiers ?? [];
+  let reads = 0;
+  const originals = modifiers.map((modifier) => {
+    const descriptor = Object.getOwnPropertyDescriptor(modifier, 'kind')!;
+    Object.defineProperty(modifier, 'kind', { configurable: true, enumerable: descriptor.enumerable ?? false,
+      get: () => { reads++; return descriptor.value; } });
+    return { modifier, descriptor };
+  });
+  return { count: () => reads, reset: () => { reads = 0; }, restore: () => {
+    for (const { modifier, descriptor } of originals) Object.defineProperty(modifier, 'kind', descriptor);
+  } };
+}
+
+/** extended descriptor와 selection의 modifier census가 물리 읽기도 caller work로 청구한다. */
+test('stage3 extended decorator census charges raw modifier reads', () => {
+  const decorators = (count: number): string => Array.from({ length: count }, () => '@dec').join('\n');
+  const measureClass = (count: number): { value: boolean; steps: number; reads: number } => {
+    const source = `declare function dec(...args: any[]): any;\n${positive}`
+      .replace('class Controller {', `${decorators(count)}\nclass Controller {`);
+    const { context, declaration } = indexed(source, { experimentalDecorators: true });
+    assert.equal(context.index.effectInventory?.enumeration, 'complete');
+    const observation = observeModifierKinds(declaration);
+    let steps = 0;
+    try {
+      const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+        step: () => { steps++; }, check: () => {},
+      } });
+      analyzer.beginQuery();
+      try { return { value: analyzer.allowsExtendedInstanceIsolation(declaration), steps, reads: observation.count() }; }
+      finally { analyzer.endQuery(); }
+    } finally { observation.restore(); }
+  };
+  const measureParameter = (count: number): { value: boolean; steps: number; reads: number } => {
+    const decoratedParameter = `${decorators(count)}\nprivate readonly inputs`;
+    const source = `declare function dec(...args: any[]): any;\n${positive.replace('private readonly inputs', decoratedParameter)}`;
+    const { context, declaration } = indexed(source, { experimentalDecorators: true });
+    assert.equal(context.index.effectInventory?.enumeration, 'complete');
+    const constructor = declaration.members.find(ts.isConstructorDeclaration)!;
+    const observation = observeModifierKinds(constructor.parameters[0]!);
+    let steps = 0;
+    try {
+      const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+        step: () => { steps++; }, check: () => {},
+      } });
+      analyzer.beginQuery();
+      try { return { value: analyzer.selectsExtendedFlow(declaration), steps, reads: observation.count() }; }
+      finally { analyzer.endQuery(); }
+    } finally { observation.restore(); }
+  };
+  const classSmall = measureClass(1);
+  const classLarge = measureClass(1_000);
+  assert.equal(classSmall.value, false);
+  assert.equal(classLarge.value, false);
+  assert.ok(classSmall.reads <= 1, `first decorator should close: ${classSmall.reads}`);
+  assert.ok(classLarge.reads <= 1, `first decorator should close: ${classLarge.reads}`);
+  const parameterSmall = measureParameter(1);
+  const parameterLarge = measureParameter(1_000);
+  assert.equal(parameterSmall.value, true);
+  assert.equal(parameterLarge.value, true);
+  assert.ok(parameterLarge.reads > parameterSmall.reads + 900, `${parameterSmall.reads} -> ${parameterLarge.reads}`);
+  assert.ok(parameterLarge.steps > parameterSmall.steps + 900, `${parameterSmall.steps} -> ${parameterLarge.steps}`);
+});
+
+/** parameter modifier의 selection과 descriptor 모두 검사 전 중단·재시도를 보존한다. */
+test('stage3 parameter modifier census replays charged interruption prefixes', () => {
+  const count = 40;
+  const decoratedParameter = `${Array.from({ length: count }, () => '@dec').join('\n')}\nprivate readonly inputs`;
+  const source = `declare function dec(...args: any[]): any;\n${positive.replace('private readonly inputs', decoratedParameter)}`;
+  const { context, declaration } = indexed(source, { experimentalDecorators: true });
+  assert.equal(context.index.effectInventory?.enumeration, 'complete');
+  const constructor = declaration.members.find(ts.isConstructorDeclaration)!;
+  const observation = observeModifierKinds(constructor.parameters[0]!);
+  try {
+    for (const operation of ['selection', 'descriptor'] as const) {
+      const expected = operation === 'selection';
+      const run = (warm: boolean, limit: number) => {
+        const sentinel = new Error('parameter modifier caller interruption');
+        let activeLimit = Number.POSITIVE_INFINITY;
+        let steps = 0;
+        let events: string[] = [];
+        const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+          step: () => { events.push('step'); if (++steps > activeLimit) throw sentinel; },
+          check: (depth, frames) => { events.push(`check:${depth}:${frames}`); },
+        } });
+        const invoke = (allowance: number) => {
+          activeLimit = allowance; steps = 0; events = []; observation.reset();
+          analyzer.beginQuery();
+          try {
+            const value = operation === 'selection' ? analyzer.selectsExtendedFlow(declaration)
+              : analyzer.allowsExtendedInstanceIsolation(declaration);
+            return { kind: 'ok' as const, value, steps, events: [...events], reads: observation.count() };
+          } catch (error) {
+            if (error !== sentinel) throw error;
+            return { kind: 'abort' as const, value: false, steps, events: [...events], reads: observation.count() };
+          } finally { analyzer.endQuery(); }
+        };
+        if (warm) assert.equal(invoke(Number.POSITIVE_INFINITY).value, expected);
+        const result = invoke(limit);
+        // 같은 analyzer의 중단 이후 새 질의도 pending/cache 오염 없이 원래 판정을 낸다.
+        const recovery = invoke(Number.POSITIVE_INFINITY);
+        assert.equal(recovery.kind, 'ok');
+        assert.equal(recovery.value, expected);
+        return result;
+      };
+      const full = run(false, Number.POSITIVE_INFINITY);
+      assert.equal(full.kind, 'ok');
+      assert.equal(full.value, expected);
+      assert.ok(full.reads >= count + 2, `modifier reads ${full.reads}`);
+      let firstReadBudget: number | undefined;
+      for (let budget = 0; budget <= full.steps + 1; budget++) {
+        const cold = run(false, budget);
+        const warm = run(true, budget);
+        assert.equal(warm.kind, cold.kind, `${operation} budget ${budget}`);
+        assert.equal(warm.value, cold.value, `${operation} budget ${budget}`);
+        assert.equal(warm.steps, cold.steps, `${operation} budget ${budget}`);
+        assert.deepEqual(warm.events, cold.events, `${operation} budget ${budget}`);
+        assert.equal(warm.reads, 0, `warm AST read at ${operation} budget ${budget}`);
+        if (cold.reads > 0 && firstReadBudget === undefined) {
+          firstReadBudget = budget;
+          assert.ok(budget > 0);
+          const boundary = run(false, budget - 1);
+          assert.equal(boundary.kind, 'abort');
+          assert.equal(boundary.reads, 0, `${operation} inspected before charged modifier`);
+          assert.equal(boundary.steps, budget);
+          assert.equal(cold.reads, 1, `${operation} first charged modifier read`);
+        }
+      }
+      assert.ok(firstReadBudget !== undefined);
+    }
+  } finally { observation.restore(); }
+});
+
+/** 원 재현 경로인 singleton(Port)의 decorator 검사도 첫 원소 전에 caller가 중단한다. */
+test('stage3 dependency decorators close at one charged read with cold warm boundary parity', () => {
+  const count = 1_000;
+  const source = `declare function dec(...args: any[]): any;\n${positive.replace('class Port {',
+    `${Array.from({ length: count }, () => '@dec').join('\n')}\nclass Port {`)}`;
+  const { context, declaration } = indexed(source, { experimentalDecorators: true });
+  assert.equal(context.index.effectInventory?.enumeration, 'complete');
+  const port = declaration.getSourceFile().statements.find((node): node is ts.ClassDeclaration =>
+    ts.isClassDeclaration(node) && node.name?.text === 'Port')!;
+  const observation = observeModifierKinds(port);
+  try {
+    const run = (warm: boolean, limit: number) => {
+      const sentinel = new Error('dependency decorator caller interruption');
+      let budget = Number.POSITIVE_INFINITY;
+      let steps = 0;
+      let events: string[] = [];
+      const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+        step: () => { events.push('step'); if (++steps > budget) throw sentinel; },
+        check: (depth, frames) => { events.push(`check:${depth}:${frames}`); },
+      } });
+      const invoke = (allowance: number) => {
+        budget = allowance; steps = 0; events = []; observation.reset();
+        analyzer.beginQuery();
+        try {
+          return { kind: 'ok' as const, value: analyzer.allowsExtendedInstanceIsolation(declaration),
+            steps, events: [...events], reads: observation.count() };
+        } catch (error) {
+          assert.equal(error, sentinel);
+          return { kind: 'abort' as const, value: false, steps, events: [...events], reads: observation.count() };
+        } finally { analyzer.endQuery(); }
+      };
+      if (warm) assert.equal(invoke(Number.POSITIVE_INFINITY).value, false);
+      const result = invoke(limit);
+      const recovery = invoke(Number.POSITIVE_INFINITY);
+      assert.equal(recovery.kind, 'ok');
+      assert.equal(recovery.value, false);
+      return result;
+    };
+    const full = run(false, Number.POSITIVE_INFINITY);
+    assert.equal(full.kind, 'ok');
+    assert.equal(full.value, false);
+    assert.equal(full.reads, 1);
+    for (let budget = 0; budget <= full.steps + 1; budget++) {
+      const cold = run(false, budget);
+      const warm = run(true, budget);
+      assert.equal(warm.kind, cold.kind, `budget ${budget}`);
+      assert.equal(warm.steps, cold.steps, `budget ${budget}`);
+      assert.deepEqual(warm.events, cold.events, `budget ${budget}`);
+      assert.equal(warm.reads, 0);
+      if (budget < full.steps) {
+        assert.equal(cold.kind, 'abort');
+        assert.equal(cold.reads, 0, `inspected before dependency step at budget ${budget}`);
+      } else {
+        assert.equal(cold.kind, 'ok');
+        assert.equal(cold.reads, 1);
+      }
+    }
+  } finally { observation.restore(); }
 });

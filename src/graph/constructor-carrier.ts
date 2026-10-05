@@ -301,7 +301,7 @@ export class ConstructorCarrierAnalyzer {
     if (constructor !== undefined) {
       for (const parameter of constructor.parameters) {
         this.step();
-        if (isPrivateReadonlyParameterProperty(parameter, constructor)) { bag = parameter; break; }
+        if (isPrivateReadonlyParameterProperty(parameter, constructor, () => this.step())) { bag = parameter; break; }
       }
     }
     if (bag === undefined) return false;
@@ -520,7 +520,8 @@ export class ConstructorCarrierAnalyzer {
           if (kind === 'dependency-selection') value = !declaration.members.some((member) => {
             this.step();
             return ts.isConstructorDeclaration(member) && member.parameters.some((parameter) => {
-              this.step(); return isPrivateReadonlyParameterProperty(parameter, member);
+              this.step();
+              return isPrivateReadonlyParameterProperty(parameter, member, () => this.step());
             });
           });
           else if (kind === 'extended-selection') value = this.selectExtendedClass(declaration);
@@ -626,20 +627,40 @@ export class ConstructorCarrierAnalyzer {
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
   private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true, extended = false): ConstructorCarrierProof | undefined {
     this.step();
+    const decorated = (node: ts.Node): boolean => extended
+      ? hasDecorators(node, () => this.step()) : hasDecorators(node);
     if (!this.policyIsProjectFile(declaration.getSourceFile()) || this.policyIsOpenCallable(declaration)) return undefined;
-    if (hasDecorators(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
+    if (decorated(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
     if ((this.context.index.subclasses.get(declaration)?.length ?? 0) > 0) return undefined;
     if (!extended && isExportedDeclaration(this.context, declaration)) return undefined;
 
-    const constructor = declaration.members.filter(ts.isConstructorDeclaration);
+    const constructor: readonly ts.ConstructorDeclaration[] = extended
+      ? (() => {
+        const result: ts.ConstructorDeclaration[] = [];
+        for (const member of declaration.members) {
+          this.step();
+          if (ts.isConstructorDeclaration(member)) result.push(member);
+        }
+        return result;
+      })()
+      : declaration.members.filter(ts.isConstructorDeclaration);
     if (constructor.length !== 1 || constructor[0]!.body === undefined) return undefined;
     const owner = constructor[0]!;
-    if (hasDecorators(owner) || hasExplicitConstructorReturn(owner, (depth) => this.work?.(depth, depth))) return undefined;
-    const parameters = owner.parameters.filter((parameter) => !isThisParameter(parameter));
+    if (decorated(owner) || hasExplicitConstructorReturn(owner, (depth) => this.work?.(depth, depth))) return undefined;
+    const parameters: readonly ts.ParameterDeclaration[] = extended
+      ? (() => {
+        const result: ts.ParameterDeclaration[] = [];
+        for (const parameter of owner.parameters) {
+          this.step();
+          if (!isThisParameter(parameter)) result.push(parameter);
+        }
+        return result;
+      })()
+      : owner.parameters.filter((parameter) => !isThisParameter(parameter));
     if (parameters.length !== 1) return undefined;
     const bagParameter = parameters[0]!;
-    if (!isPrivateReadonlyParameterProperty(bagParameter, owner)) return undefined;
-    if (hasDecorators(bagParameter) || bagParameter.questionToken !== undefined
+    if (!isPrivateReadonlyParameterProperty(bagParameter, owner, extended ? () => this.step() : undefined)) return undefined;
+    if (decorated(bagParameter) || bagParameter.questionToken !== undefined
       || !ts.isIdentifier(bagParameter.name) || bagParameter.initializer !== undefined
       || bagParameter.dotDotDotToken !== undefined || isPrototypeSensitiveSlotName(bagParameter.name.text)) return undefined;
 
@@ -662,7 +683,7 @@ export class ConstructorCarrierAnalyzer {
     for (const member of declaration.members) {
       this.step();
       if (!ts.isMethodDeclaration(member)) continue;
-      if (hasDecorators(member) || member.body === undefined || hasStaticModifier(member)) return undefined;
+      if (decorated(member) || member.body === undefined || hasStaticModifier(member, extended ? () => this.step() : undefined)) return undefined;
       if (!this.scanMethod(member, bagParameter, bagShape, fields, audit.dateFieldName, serviceUses)) return undefined;
     }
     if (serviceUses.length === 0) return undefined;
@@ -1045,11 +1066,14 @@ export class ConstructorCarrierAnalyzer {
         || ts.isAutoAccessorPropertyDeclaration(member) || ts.isClassStaticBlockDeclaration(member)) return undefined;
       if (ts.isMethodDeclaration(member)) {
         const key = staticPropertyName(member.name);
-        if (key === undefined || isPrototypeSensitiveSlotName(key) || hasDecorators(member) || slots.has(key)) return undefined;
+        if (key === undefined || isPrototypeSensitiveSlotName(key)
+          || hasDecorators(member, extended ? () => this.step() : undefined) || slots.has(key)) return undefined;
         slots.add(key);
         continue;
       }
-      if (!ts.isPropertyDeclaration(member) || hasDecorators(member) || hasStaticModifier(member)) return undefined;
+      if (!ts.isPropertyDeclaration(member)
+        || hasDecorators(member, extended ? () => this.step() : undefined)
+        || hasStaticModifier(member, extended ? () => this.step() : undefined)) return undefined;
       const key = staticPropertyName(member.name);
       if (key === undefined || isPrototypeSensitiveSlotName(key) || slots.has(key)) return undefined;
       if (member.initializer !== undefined) return undefined;
@@ -1809,7 +1833,20 @@ interface ConstructorReceiverProof {
 
 
 /** parameter-property인지 확인한다. */
-function isPrivateReadonlyParameterProperty(parameter: ts.ParameterDeclaration, constructor: ts.ConstructorDeclaration): boolean {
+function isPrivateReadonlyParameterProperty(parameter: ts.ParameterDeclaration, constructor: ts.ConstructorDeclaration,
+  step?: () => void): boolean {
+  if (step !== undefined) {
+    if (parameter.parent !== constructor || !ts.isIdentifier(parameter.name)) return false;
+    let privateModifier = false;
+    let readonlyModifier = false;
+    for (const modifier of parameter.modifiers ?? []) {
+      step();
+      const kind = modifier.kind;
+      if (kind === ts.SyntaxKind.PrivateKeyword) privateModifier = true;
+      if (kind === ts.SyntaxKind.ReadonlyKeyword) readonlyModifier = true;
+    }
+    return privateModifier && readonlyModifier;
+  }
   if (!ts.isParameterPropertyDeclaration(parameter, constructor)) return false;
   const modifiers = ts.getModifiers(parameter) ?? [];
   return modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword)
@@ -1835,12 +1872,26 @@ function hasExplicitConstructorReturn(constructor: ts.ConstructorDeclaration, st
 }
 
 /** genuine decorator 유무를 확인한다. */
-function hasDecorators(node: ts.Node): boolean {
+function hasDecorators(node: ts.Node, step?: () => void): boolean {
+  if (step !== undefined) {
+    for (const modifier of ts.canHaveModifiers(node) ? node.modifiers ?? [] : []) {
+      step();
+      if (modifier.kind === ts.SyntaxKind.Decorator) return true;
+    }
+    return false;
+  }
   return ts.canHaveDecorators(node) && (ts.getDecorators(node)?.length ?? 0) > 0;
 }
 
 /** static modifier 유무를 확인한다. */
-function hasStaticModifier(node: ts.Node): boolean {
+function hasStaticModifier(node: ts.Node, step?: () => void): boolean {
+  if (step !== undefined) {
+    for (const modifier of ts.canHaveModifiers(node) ? node.modifiers ?? [] : []) {
+      step();
+      if (modifier.kind === ts.SyntaxKind.StaticKeyword) return true;
+    }
+    return false;
+  }
   return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword);
 }
 
