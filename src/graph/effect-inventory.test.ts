@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { buildFileIndex, mergeFlowIndexes } from './flow-index.ts';
-import { EFFECT_BUILD_CAPS, createEffectManifest, collectEffectPart, reconcileEffectInventory, selectEffectManifest } from './effect-inventory.ts';
+import { EFFECT_BUILD_CAPS, createEffectManifest, collectEffectPart, reconcileEffectInventory, selectEffectManifest,
+  type EffectBuildBudget } from './effect-inventory.ts';
 
 /** AST 정체성이 보존되는 합성 입력이다. */
 function fixture(text = 'export const value = 1;') {
@@ -161,7 +162,7 @@ test('누락 소스·불완전 스캔·parse 오류·기대 정체성 중복은 
 test('공유 빌드 계수는 파일마다 초기화되지 않는다', () => {
   const { file, resolve } = fixture();
   const full = collectEffectPart(file, resolve);
-  const budget = { visited: 0, records: 0, perFileVisited: new Map<ts.SourceFile, number>() };
+  const budget: EffectBuildBudget = { visited: 0, records: 0, perFileVisited: new Map<ts.SourceFile, number>() };
   const caps = { visited: full.visited, records: full.retained, perFile: full.visited };
   assert.equal(collectEffectPart(file, resolve, caps, budget).status, 'complete');
   assert.equal(collectEffectPart(file, resolve, caps, budget).status, 'incomplete(build-cap)');
@@ -170,7 +171,7 @@ test('공유 빌드 계수는 파일마다 초기화되지 않는다', () => {
 test('manifest·view projection·part 수집은 global/per-file/retained 계수를 한 번 공유한다', () => {
   const { file, files, resolve } = fixture();
   const full = collectEffectPart(file, resolve);
-  const budget = { visited: 0, records: 0, perFileVisited: new Map<ts.SourceFile, number>() };
+  const budget: EffectBuildBudget = { visited: 0, records: 0, perFileVisited: new Map<ts.SourceFile, number>() };
   const limits = { visited: full.visited * 2, records: full.retained * 2, perFile: full.visited };
   const manifest = createEffectManifest(files, 'whole', resolve, true, budget);
   const beforeProjection = { visited: budget.visited, records: budget.records };
@@ -540,6 +541,9 @@ test('unresolved runtime loader는 initialization coverage를 닫지 않고 shad
   for (const text of [
     'declare const require: (id: string) => unknown; export default require;',
     'declare const require: (id: string) => unknown; export = require;',
+    'declare const require: (id: string) => unknown; export { require };',
+    'declare const require: (id: string) => unknown; export { require as load };',
+    'declare const require: (id: string) => unknown; export { require as default };',
   ]) {
     const exportedLoader = checkedSources({ '/export.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
     const exportFile = exportedLoader.files.get('/export.ts')!;
@@ -594,12 +598,20 @@ test('unresolved runtime loader는 initialization coverage를 닫지 않고 shad
     '/mutable.ts': 'declare const module: { require: (id: string) => unknown }; function load() { let require = (id: string): unknown => id; require = module.require.bind(module); return require("untyped-pkg"); } export const value = load();',
     '/written-function.ts': 'declare const module: { require: (id: string) => unknown }; function require(id: string): unknown { return id; } require = module.require.bind(module); export const value = require("untyped-pkg");',
     '/array-written-function.ts': 'declare const module: { require: (id: string) => unknown }; function load() { function require(id: string): unknown { return id; } ([require] = [module.require.bind(module)]); return require("untyped-pkg"); } export const value = load();',
+    '/const-written-function.ts': 'declare const module: { require: (id: string) => unknown }; function load() { const require = (id: string): unknown => id; (require as any) = module.require.bind(module); return require("untyped-pkg"); } export const value = load();',
   }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
   for (const source of mutable.files.values()) {
     const mutablePart = collectEffectPart(source, resolve, undefined, undefined, mutable.checker,
       { preserveTypeOnlySpecifiers: false });
     assert.ok(mutablePart.moduleEdges.some((edge) => edge.specifier === undefined && edge.target === undefined), source.fileName);
   }
+  const scripts = checkedSources({
+    '/helper.ts': 'function require(id: string) { return id; }',
+    '/consumer.ts': 'const value = require("untyped-pkg");',
+  }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const scriptPart = collectEffectPart(scripts.files.get('/consumer.ts')!, resolve, undefined, undefined,
+    scripts.checker, { preserveTypeOnlySpecifiers: false });
+  assert.ok(scriptPart.moduleEdges.some((edge) => edge.target === undefined));
 
   const constructed = checkedSources({
     '/constructed.ts': 'declare const createRequire: (url: string) => (name: string) => unknown; const require = createRequire("x"); export function loadAll(names: string[]) { for (const name of names) require(name); }',
@@ -623,6 +635,9 @@ test('unresolved runtime loader는 initialization coverage를 닫지 않고 shad
   for (const text of [
     'function require(value: string) { return value; } export default require;',
     'function require(value: string) { return value; } export = require;',
+    'function require(value: string) { return value; } export { require as load };',
+    'const require = (value: string) => value; export { require };',
+    'declare const require: (id: string) => unknown; export type { require };',
     'const require = (value: string) => value; export const result = require("untyped-pkg");',
   ]) {
     const ordinary = checkedSources({ '/ordinary.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
@@ -630,4 +645,71 @@ test('unresolved runtime loader는 initialization coverage를 닫지 않고 shad
     assert.deepEqual(collectEffectPart(ordinaryFile, resolve, undefined, undefined, ordinary.checker,
       { preserveTypeOnlySpecifiers: false }).moduleEdges, [], text);
   }
+});
+
+test('Node loader origin은 정적 alias까지 opaque closure로 남기고 일반 helper를 열지 않는다', () => {
+  const platformChecked = checkedSources({
+    '/platform.ts': `
+      declare const module: { require: (id: string) => unknown };
+      declare const createRequire: (url: string) => (id: string) => unknown;
+      const localModuleLoader = module.require;
+      const localFactoryLoader = createRequire('base');
+      module.require('module-pkg');
+      globalThis.require('global-pkg');
+      localModuleLoader('alias-pkg');
+      localFactoryLoader('factory-pkg');
+      createRequire('inline-base')('inline-pkg');
+    `,
+  }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const ordinaryChecked = checkedSources({
+    '/ordinary.ts': `
+      const module = { require: (id: string) => id };
+      function createRequire(url: string) { return (id: string) => id; }
+      module.require('ordinary-module');
+      createRequire('ordinary-factory')('ordinary-pkg');
+    `,
+  }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const resolve = () => undefined;
+  const platform = collectEffectPart(platformChecked.files.get('/platform.ts')!, resolve, undefined, undefined,
+    platformChecked.checker, { preserveTypeOnlySpecifiers: false });
+  const ordinary = collectEffectPart(ordinaryChecked.files.get('/ordinary.ts')!, resolve, undefined, undefined,
+    ordinaryChecked.checker, { preserveTypeOnlySpecifiers: false });
+  assert.ok(platform.moduleEdges.filter((edge) => edge.specifier === undefined && edge.target === undefined).length >= 7);
+  assert.deepEqual(ordinary.moduleEdges, []);
+  assert.equal(platform.closure.unresolved, true);
+
+  const importedPlatform = checkedSources({
+    '/node-module.d.ts': "declare module 'node:module' { export function createRequire(url: string): (id: string) => unknown; }",
+    '/imported.ts': "import { createRequire as buildLoader } from 'node:module'; const localLoader = buildLoader('base'); localLoader('imported-pkg');",
+  }, { noLib: true, types: [], module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler });
+  const importedPart = collectEffectPart(importedPlatform.files.get('/imported.ts')!, resolve, undefined, undefined,
+    importedPlatform.checker, { preserveTypeOnlySpecifiers: false });
+  assert.ok(importedPart.moduleEdges.some((edge) => edge.specifier === undefined && edge.target === undefined));
+  assert.equal(importedPart.closure.unresolved, true);
+
+  const manifest = createEffectManifest(new Map([['/platform.ts', platformChecked.files.get('/platform.ts')!]]), 'whole', resolve,
+    true, undefined, platformChecked.checker, { preserveTypeOnlySpecifiers: false });
+  const inventory = reconcileEffectInventory(manifest, [platform]);
+  assert.equal(inventory.initialization, 'incomplete');
+  assert.equal(inventory.referenceAliases, 'incomplete');
+});
+
+test('require classifier는 overload declaration work를 한 번만 청구하고 두 번째 분류를 cache한다', () => {
+  const overloads = Array.from({ length: 250 }, (_, index) => `function require(id: '${index}'): unknown;`).join('\n');
+  const calls = Array.from({ length: 250 }, (_, index) => `const value${index} = require('${index}');`).join('\n');
+  const checked = checkedSources({ '/overloads.ts': `${overloads}\nfunction require(id: string): unknown { return id; }\n${calls}` },
+    { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
+  const source = checked.files.get('/overloads.ts')!;
+  const budget: EffectBuildBudget = { visited: 0, records: 0, perFileVisited: new Map<ts.SourceFile, number>() };
+  const first = collectEffectPart(source, () => undefined, undefined, budget, checked.checker,
+    { preserveTypeOnlySpecifiers: false });
+  const afterFirst = budget.visited;
+  const second = collectEffectPart(source, () => undefined, undefined, budget, checked.checker,
+    { preserveTypeOnlySpecifiers: false });
+  assert.equal(first.status, 'complete');
+  assert.equal(second.status, 'complete');
+  assert.deepEqual(first.moduleEdges, []);
+  assert.deepEqual(second.moduleEdges, []);
+  assert.equal(budget.requireDeclarationScans?.size, 1);
+  assert.equal(budget.visited - afterFirst, second.visited);
 });

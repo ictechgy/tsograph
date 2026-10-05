@@ -22,8 +22,14 @@ export interface EffectBuildBudget {
   records: number;
   /** manifest/part 재방문을 합친 source별 visited 수다. */
   perFileVisited?: Map<ts.SourceFile, number>;
-  /** checker symbol별 require binding 증거를 같은 build 안에서 한 번만 조사한다. */
+  /** checker symbol별 require binding 증거를 usage source별로 한 번만 조사한다. */
   requireBindings?: Map<ts.Symbol, 'loader' | 'ordinary' | 'opaque'>;
+  /** 같은 checker symbol도 script 전역에서는 usage source마다 의미가 달라질 수 있다. */
+  requireBindingScopes?: Map<ts.SourceFile, Map<ts.Symbol, 'loader' | 'ordinary' | 'opaque'>>;
+  /** canonical symbol 선언의 runtime 판정을 AST budget 안에서 재사용한다. */
+  requireDeclarationScans?: Map<ts.Symbol, RequireDeclarationScan>;
+  /** loader origin도 usage source별로만 재사용해 script 전역 충돌을 숨기지 않는다. */
+  loaderOriginScopes?: Map<ts.SourceFile, Map<ts.Symbol, LoaderOrigin | null>>;
 }
 /** 실행식 하나의 관찰이다. unknown은 안전하거나 비어 있다는 뜻이 아니다. */
 export interface EffectRecord {
@@ -115,9 +121,46 @@ function erased(node: ts.Node): boolean {
 }
 
 /** 선언이 emit 뒤에도 지역 runtime binding을 만드는지 판정한다. */
-function hasRuntimeBinding(declaration: ts.Declaration): boolean {
-  if (declaration.getSourceFile().isDeclarationFile) return false;
-  for (let current: ts.Node | undefined = declaration; current !== undefined && !ts.isSourceFile(current); current = current.parent) {
+type RequireBindingKind = 'loader' | 'ordinary' | 'opaque';
+type LoaderOrigin = 'loader' | 'factory' | 'platform';
+
+interface RequireDeclarationScan {
+  readonly runtime: readonly ts.Declaration[];
+  readonly sources: readonly ts.SourceFile[];
+}
+
+interface BindingWalkLimits {
+  readonly visited: number;
+  readonly perFile: number;
+}
+
+const MAX_BINDING_ANCESTORS = 256;
+
+/** runtime 선언 판정에 쓰는 AST work를 global/per-file build budget에 청구한다. */
+function chargeBindingWork(
+  source: ts.SourceFile,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+): boolean {
+  const sourceVisited = budget.perFileVisited?.get(source) ?? 0;
+  if (sourceVisited >= limits.perFile || budget.visited >= limits.visited) return false;
+  budget.visited++;
+  budget.perFileVisited?.set(source, sourceVisited + 1);
+  return true;
+}
+
+/** 선언의 runtime 여부를 제한된 ancestor 확인으로 판정한다. */
+function hasRuntimeBinding(
+  declaration: ts.Declaration,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+): boolean | undefined {
+  const source = declaration.getSourceFile();
+  if (!chargeBindingWork(source, budget, limits)) return undefined;
+  if (source.isDeclarationFile) return false;
+  let current: ts.Node | undefined = declaration;
+  for (let depth = 0; current !== undefined && !ts.isSourceFile(current); depth++, current = current.parent) {
+    if (depth >= MAX_BINDING_ANCESTORS || !chargeBindingWork(source, budget, limits)) return undefined;
     if (ts.canHaveModifiers(current) && (ts.getModifiers(current) ?? [])
       .some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return false;
   }
@@ -134,7 +177,6 @@ function hasRuntimeBinding(declaration: ts.Declaration): boolean {
 
 /** runtime require 이름을 평범한 helper라고 확정할 수 있는 직접 선언이다. */
 function knownOrdinaryRequireBinding(declaration: ts.Declaration): boolean {
-  if (!hasRuntimeBinding(declaration)) return false;
   if (ts.isFunctionDeclaration(declaration)) return declaration.body !== undefined;
   if (ts.isImportSpecifier(declaration) || ts.isImportClause(declaration)
     || ts.isNamespaceImport(declaration) || ts.isImportEqualsDeclaration(declaration)) return true;
@@ -147,10 +189,10 @@ function knownOrdinaryRequireBinding(declaration: ts.Declaration): boolean {
   return false;
 }
 
-type RequireBindingKind = 'loader' | 'ordinary' | 'opaque';
-
 interface RequireClassifier {
   readonly classify: (identifier: ts.Identifier) => RequireBindingKind;
+  /** module.require/globalThis.require/createRequire와 그 정적 alias의 origin이다. */
+  readonly loaderOrigin: (expression: ts.Expression) => LoaderOrigin | undefined;
   readonly capped: () => boolean;
 }
 
@@ -179,11 +221,10 @@ function bindingWrite(identifier: ts.Identifier): boolean {
 function hasBindingWrite(
   checker: ts.TypeChecker,
   symbol: ts.Symbol,
+  sources: readonly ts.SourceFile[],
   budget: EffectBuildBudget,
-  limits: Readonly<{ visited: number; perFile: number }>,
+  limits: BindingWalkLimits,
 ): boolean | undefined {
-  const sources = new Set((symbol.declarations ?? []).map((declaration) => declaration.getSourceFile())
-    .filter((source) => !source.isDeclarationFile));
   for (const source of sources) {
     const stack: ts.Node[] = [source];
     while (stack.length > 0) {
@@ -192,7 +233,7 @@ function hasBindingWrite(
       const node = stack.pop()!;
       budget.visited++;
       budget.perFileVisited?.set(source, sourceVisited + 1);
-      if (ts.isIdentifier(node) && node.text === 'require' && bindingWrite(node)) {
+      if (ts.isIdentifier(node) && bindingWrite(node)) {
         const target = dealias(checker, ts.isShorthandPropertyAssignment(node.parent)
           ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node));
         if (target === symbol) return true;
@@ -213,37 +254,267 @@ function hasBindingWrite(
   return false;
 }
 
+/** declaration array를 확장하지 않고 bounded runtime subset과 source set을 한 번 조사한다. */
+function inspectRequireDeclarations(
+  symbol: ts.Symbol,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+): RequireDeclarationScan | undefined {
+  budget.requireDeclarationScans ??= new Map();
+  const cached = budget.requireDeclarationScans.get(symbol);
+  if (cached !== undefined) return cached;
+  const runtime: ts.Declaration[] = [];
+  const sources = new Set<ts.SourceFile>();
+  for (const declaration of symbol.declarations ?? []) {
+    const isRuntime = hasRuntimeBinding(declaration, budget, limits);
+    if (isRuntime === undefined) return undefined;
+    if (!isRuntime) continue;
+    runtime.push(declaration);
+    if (!declaration.getSourceFile().isDeclarationFile) sources.add(declaration.getSourceFile());
+  }
+  const result: RequireDeclarationScan = { runtime, sources: [...sources] };
+  budget.requireDeclarationScans.set(symbol, result);
+  return result;
+}
+
+/** import alias가 Node module loader factory에서 왔는지 bounded하게 확인한다. */
+function nodeModuleImport(declaration: ts.Declaration, importedName: string): boolean {
+  if (!ts.isImportSpecifier(declaration) || (declaration.propertyName ?? declaration.name).text !== importedName) return false;
+  const imports = declaration.parent;
+  const clause = imports.parent;
+  const importDeclaration = clause.parent;
+  return ts.isImportDeclaration(importDeclaration) && ts.isStringLiteralLike(importDeclaration.moduleSpecifier)
+    && (importDeclaration.moduleSpecifier.text === 'node:module' || importDeclaration.moduleSpecifier.text === 'module');
+}
+
+/** Node module에서 온 namespace/default/import-equals binding인지 확인한다. */
+function nodeModuleBinding(declaration: ts.Declaration): boolean {
+  if (ts.isImportSpecifier(declaration)) return nodeModuleImport(declaration, (declaration.propertyName ?? declaration.name).text);
+  if (ts.isImportEqualsDeclaration(declaration)) {
+    const reference = declaration.moduleReference;
+    return ts.isExternalModuleReference(reference) && ts.isStringLiteralLike(reference.expression)
+      && (reference.expression.text === 'node:module' || reference.expression.text === 'module');
+  }
+  const clause = ts.isImportClause(declaration) ? declaration
+    : ts.isNamespaceImport(declaration) ? declaration.parent : undefined;
+  const importDeclaration = clause?.parent;
+  return importDeclaration !== undefined && ts.isImportDeclaration(importDeclaration)
+    && ts.isStringLiteralLike(importDeclaration.moduleSpecifier)
+    && (importDeclaration.moduleSpecifier.text === 'node:module' || importDeclaration.moduleSpecifier.text === 'module');
+}
+
+/** declaration 또는 그 제한된 container가 ambient인지 확인하고 ancestor work를 청구한다. */
+function ambientDeclaration(
+  declaration: ts.Declaration,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+): boolean | undefined {
+  const source = declaration.getSourceFile();
+  if (!chargeBindingWork(source, budget, limits)) return undefined;
+  if (source.isDeclarationFile) return true;
+  let current: ts.Node | undefined = declaration;
+  for (let depth = 0; current !== undefined && !ts.isSourceFile(current); depth++, current = current.parent) {
+    if (depth >= MAX_BINDING_ANCESTORS || !chargeBindingWork(source, budget, limits)) return undefined;
+    if (ts.canHaveModifiers(current) && (ts.getModifiers(current) ?? [])
+      .some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return true;
+  }
+  return false;
+}
+
+/** expression이 module/globalThis require 또는 createRequire로 이어지는 정적 origin인지 판정한다. */
+function directLoaderOrigin(
+  expression: ts.Expression,
+  checker: ts.TypeChecker | undefined,
+  classify: (identifier: ts.Identifier) => RequireBindingKind,
+  budget: EffectBuildBudget,
+  limits: BindingWalkLimits,
+  markCapped: () => void,
+  depth = 0,
+  seen = new Set<ts.Symbol>(),
+): LoaderOrigin | undefined {
+  if (depth > 8) return undefined;
+  const inner = skipExpressionWrappers(expression);
+  if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
+    const owner = inner.expression;
+    const key = ts.isPropertyAccessExpression(inner) ? inner.name.text
+      : (() => { const argument = skipExpressionWrappers(inner.argumentExpression); return ts.isStringLiteralLike(argument) ? argument.text : undefined; })();
+    if (key !== 'require' && key !== 'createRequire') return undefined;
+    const ownerOrigin = directLoaderOrigin(owner, checker, classify, budget, limits, markCapped, depth + 1, seen);
+    if (key === 'require' && ownerOrigin === 'platform') return 'loader';
+    if (key === 'createRequire' && ownerOrigin === 'platform') return 'factory';
+    return undefined;
+  }
+  if (ts.isCallExpression(inner)) {
+    const calleeOrigin = directLoaderOrigin(inner.expression, checker, classify, budget, limits, markCapped, depth + 1, seen);
+    if (calleeOrigin === 'factory') return 'loader';
+    if (calleeOrigin === 'loader') {
+      const argument = inner.arguments[0] === undefined ? undefined : skipExpressionWrappers(inner.arguments[0]);
+      if (argument !== undefined && ts.isStringLiteralLike(argument)
+        && (argument.text === 'node:module' || argument.text === 'module')) return 'platform';
+    }
+    return undefined;
+  }
+  if (!ts.isIdentifier(inner)) return undefined;
+  if (checker === undefined) {
+    if (inner.text === 'module' || inner.text === 'globalThis') return 'platform';
+    if (inner.text === 'createRequire') return 'factory';
+    if (inner.text === 'require') return 'loader';
+    return undefined;
+  }
+  const symbol = checker.getSymbolAtLocation(inner);
+  if (symbol === undefined) {
+    if (inner.text === 'module' || inner.text === 'globalThis') return 'platform';
+    if (inner.text === 'createRequire') return 'factory';
+    if (inner.text === 'require') return 'loader';
+    return undefined;
+  }
+  budget.loaderOriginScopes ??= new Map();
+  let scoped = budget.loaderOriginScopes.get(inner.getSourceFile());
+  if (scoped === undefined) {
+    scoped = new Map();
+    budget.loaderOriginScopes.set(inner.getSourceFile(), scoped);
+  }
+  const cached = scoped.get(symbol);
+  if (cached !== undefined) return cached === null ? undefined : cached;
+  if (seen.has(symbol)) return undefined;
+  seen.add(symbol);
+  let result: LoaderOrigin | undefined;
+  let complete = true;
+  for (const declaration of symbol.declarations ?? []) {
+    const ambient = ambientDeclaration(declaration, budget, limits);
+    if (ambient === undefined) {
+      complete = false;
+      markCapped();
+      break;
+    }
+    if (inner.text === 'module' || inner.text === 'globalThis') {
+      if (ambient || nodeModuleBinding(declaration)) result = 'platform';
+    } else if (inner.text === 'createRequire') {
+      if (ambient || nodeModuleImport(declaration, 'createRequire')) result = 'factory';
+    } else if (nodeModuleImport(declaration, 'createRequire')) {
+      result = 'factory';
+    } else if (ts.isImportSpecifier(declaration) && nodeModuleImport(declaration, 'require')) {
+      result = 'loader';
+    } else if (nodeModuleBinding(declaration)) {
+      result = 'platform';
+    }
+    let initializer: ts.Expression | undefined;
+    let memberName: string | undefined;
+    if (ts.isVariableDeclaration(declaration)) initializer = declaration.initializer;
+    else if (ts.isBindingElement(declaration)) {
+      const variable = ts.findAncestor(declaration, ts.isVariableDeclaration);
+      initializer = variable?.initializer;
+      const propertyName = declaration.propertyName ?? declaration.name;
+      memberName = ts.isIdentifier(propertyName) || ts.isStringLiteralLike(propertyName) ? propertyName.text : undefined;
+    }
+    if (initializer !== undefined) {
+      const origin = directLoaderOrigin(initializer, checker, classify, budget, limits, markCapped, depth + 1, seen);
+      if (memberName !== undefined && origin === 'platform') {
+        if (memberName === 'require') result = 'loader';
+        if (memberName === 'createRequire') result = 'factory';
+      } else if (origin !== undefined) result = origin;
+    }
+  }
+  seen.delete(symbol);
+  if (complete) scoped.set(symbol, result ?? null);
+  return result;
+}
+
 /** require 식별자를 runtime alias target과 bounded binding-write 증거로 분류한다. */
 function createRequireClassifier(
   checker: ts.TypeChecker | undefined,
   budget: EffectBuildBudget,
-  limits: Readonly<{ visited: number; perFile: number }>,
+  limits: BindingWalkLimits,
 ): RequireClassifier {
   let capped = false;
-  budget.requireBindings ??= new Map();
-  return {
-    classify(identifier) {
-      if (checker === undefined) return 'loader';
-      const local = checker.getSymbolAtLocation(identifier);
-      if (local === undefined) return 'loader';
-      const localRuntime = (local.declarations ?? []).filter(hasRuntimeBinding);
-      if (localRuntime.length === 0) return 'loader';
-      const target = dealias(checker, local);
-      if (target === undefined) return 'opaque';
-      const cached = budget.requireBindings!.get(target);
-      if (cached !== undefined) return cached;
-      const runtimeDeclarations = (target.declarations ?? []).filter(hasRuntimeBinding);
-      let result: RequireBindingKind = 'opaque';
-      if (runtimeDeclarations.length === 0) result = 'loader';
-      else if (runtimeDeclarations.every(knownOrdinaryRequireBinding)) {
-        const needsWriteCensus = runtimeDeclarations.some(ts.isFunctionDeclaration);
-        const written = needsWriteCensus ? hasBindingWrite(checker, target, budget, limits) : false;
-        if (written === undefined) capped = true;
-        else result = written ? 'opaque' : 'ordinary';
+  budget.requireBindingScopes ??= new Map();
+  budget.perFileVisited ??= new Map();
+  const isRuntimeImport = (declaration: ts.Declaration): boolean => ts.isImportSpecifier(declaration)
+    || ts.isImportClause(declaration) || ts.isNamespaceImport(declaration) || ts.isImportEqualsDeclaration(declaration);
+  const requiresWriteCensus = (declaration: ts.Declaration): boolean => ts.isFunctionDeclaration(declaration)
+    || ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined
+      && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer));
+  const classify = (identifier: ts.Identifier): RequireBindingKind => {
+    if (checker === undefined) return 'loader';
+    const local = checker.getSymbolAtLocation(identifier);
+    if (local === undefined) return 'loader';
+    let scoped = budget.requireBindingScopes!.get(identifier.getSourceFile());
+    if (scoped === undefined) {
+      scoped = new Map();
+      budget.requireBindingScopes!.set(identifier.getSourceFile(), scoped);
+    }
+    // Check the encountered local before looking at declarations. Script globals share one
+    // checker symbol, so this cache must remain scoped to the source using the name.
+    const localCached = scoped.get(local);
+    if (localCached !== undefined) return localCached;
+    const localScan = inspectRequireDeclarations(local, budget, limits);
+    if (localScan === undefined) {
+      capped = true;
+      return 'opaque';
+    }
+    let usageRuntime = 0;
+    let explicitRuntimeImport = false;
+    for (const declaration of localScan.runtime) {
+      if (declaration.getSourceFile() !== identifier.getSourceFile()) continue;
+      usageRuntime++;
+      explicitRuntimeImport ||= isRuntimeImport(declaration);
+    }
+    // A declaration in another script file is not evidence for this use. Treat it as the
+    // platform-loader possibility so a cross-file helper cannot close initialization.
+    if (usageRuntime === 0) {
+      scoped.set(local, 'loader');
+      return 'loader';
+    }
+    const target = dealias(checker, local);
+    if (target === undefined) {
+      scoped.set(local, 'opaque');
+      return 'opaque';
+    }
+    const targetCached = scoped.get(target);
+    if (targetCached !== undefined) {
+      scoped.set(local, targetCached);
+      return targetCached;
+    }
+    const targetScan = target === local ? localScan : inspectRequireDeclarations(target, budget, limits);
+    if (targetScan === undefined) {
+      capped = true;
+      return 'opaque';
+    }
+    let result: RequireBindingKind = 'opaque';
+    let targetOnlyInUsageSource = true;
+    for (const declaration of targetScan.runtime) {
+      if (declaration.getSourceFile() !== identifier.getSourceFile()) targetOnlyInUsageSource = false;
+    }
+    if (targetScan.runtime.length === 0) result = 'loader';
+    else if (!explicitRuntimeImport && !targetOnlyInUsageSource) result = 'loader';
+    else {
+      let ordinary = true;
+      let needsWriteCensus = false;
+      for (const declaration of targetScan.runtime) {
+        if (!knownOrdinaryRequireBinding(declaration)) ordinary = false;
+        needsWriteCensus ||= requiresWriteCensus(declaration);
       }
-      budget.requireBindings!.set(target, result);
-      return result;
-    },
+      if (ordinary) {
+        const written = needsWriteCensus
+          ? hasBindingWrite(checker, target, targetScan.sources, budget, limits) : false;
+        if (written === undefined) {
+          capped = true;
+          return 'opaque';
+        }
+        result = written ? 'opaque' : 'ordinary';
+      }
+    }
+    scoped.set(local, result);
+    scoped.set(target, result);
+    // Keep the pre-existing optional map populated for callers that inspect build evidence;
+    // classification never reads this unscoped map because script globals need the scoped key.
+    budget.requireBindings?.set(target, result);
+    return result;
+  };
+  return {
+    classify,
+    loaderOrigin: (expression) => directLoaderOrigin(expression, checker, classify, budget, limits,
+      () => { capped = true; }),
     capped: () => capped,
   };
 }
@@ -252,14 +523,36 @@ function createRequireClassifier(
 function runtimeModuleLoadKind(call: ts.CallExpression, classifier: RequireClassifier): 'direct' | 'opaque' | undefined {
   const callee = skipExpressionWrappers(call.expression);
   if (callee.kind === ts.SyntaxKind.ImportKeyword) return 'direct';
-  if (!ts.isIdentifier(callee) || callee.text !== 'require') return undefined;
-  const binding = classifier.classify(callee);
-  return binding === 'loader' ? 'direct' : binding === 'opaque' ? 'opaque' : undefined;
+  if (ts.isIdentifier(callee) && callee.text === 'require') {
+    const binding = classifier.classify(callee);
+    return binding === 'loader' ? 'direct' : binding === 'opaque' ? 'opaque' : undefined;
+  }
+  const origin = classifier.loaderOrigin(callee);
+  return origin === 'loader' || origin === 'factory' ? 'opaque' : undefined;
+}
+
+/** loader alias가 값으로 저장·반환·내보내지는 위치만 origin 조사를 허용한다. */
+function loaderValueUse(identifier: ts.Identifier): boolean {
+  const outer = climbWrappers(identifier);
+  const parent = outer.parent;
+  return ts.isVariableDeclaration(parent) && parent.initializer === outer
+    || ts.isReturnStatement(parent) && parent.expression === outer
+    || ts.isExportAssignment(parent) && parent.expression === outer
+    || ts.isPropertyAssignment(parent) && parent.initializer === outer
+    || ts.isShorthandPropertyAssignment(parent) && parent.name === outer
+    || ts.isSpreadElement(parent) && parent.expression === outer
+    || ts.isSpreadAssignment(parent) && parent.expression === outer
+    || ts.isArrayLiteralExpression(parent) || ts.isObjectLiteralExpression(parent);
 }
 
 /** 직접 require 호출의 callee가 아닌 loader 값 읽기는 alias 범위를 모르므로 opaque다. */
 function opaqueRequireValueRead(identifier: ts.Identifier, classifier: RequireClassifier): boolean {
-  if (identifier.text !== 'require' || classifier.classify(identifier) === 'ordinary') return false;
+  if (identifier.text === 'require' && classifier.classify(identifier) === 'ordinary') return false;
+  if (identifier.text !== 'require') {
+    if (identifier.text !== 'createRequire' && !loaderValueUse(identifier)) return false;
+    const origin = classifier.loaderOrigin(identifier);
+    if (origin !== 'loader' && origin !== 'factory') return false;
+  }
   const valuePosition = referencePosition(identifier) || ts.isShorthandPropertyAssignment(identifier.parent)
     || ts.isExportAssignment(identifier.parent) && identifier.parent.expression === identifier;
   if (!valuePosition) return false;
@@ -290,6 +583,14 @@ function runtimeEdges(
       && !emitPolicy.preserveTypeOnlySpecifiers) return [];
     return [{ site: node, specifier: node.moduleSpecifier.text, target: resolve(node.moduleSpecifier.text, source) }];
   }
+  if (ts.isExportSpecifier(node) && !node.isTypeOnly) {
+    const declaration = node.parent.parent;
+    const local = node.propertyName ?? node.name;
+    if (ts.isExportDeclaration(declaration) && !declaration.isTypeOnly && declaration.moduleSpecifier === undefined
+      && ts.isIdentifier(local) && local.text === 'require' && classifier.classify(local) !== 'ordinary') {
+      return [{ site: node, specifier: undefined, target: undefined }];
+    }
+  }
   if (ts.isImportEqualsDeclaration(node) && !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
     const specifier = node.moduleReference.expression;
     if (specifier && ts.isStringLiteralLike(specifier)) return [{ site: node, specifier: specifier.text, target: resolve(specifier.text, source) }];
@@ -301,6 +602,19 @@ function runtimeEdges(
     const argument = node.arguments[0] === undefined ? undefined : skipExpressionWrappers(node.arguments[0]);
     const specifier = argument !== undefined && ts.isStringLiteralLike(argument) ? argument.text : undefined;
     return [{ site: node, specifier, target: specifier === undefined ? undefined : resolve(specifier, source) }];
+  }
+  if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    const key = ts.isPropertyAccessExpression(node) ? node.name.text : (() => {
+      const argument = skipExpressionWrappers(node.argumentExpression);
+      return ts.isStringLiteralLike(argument) ? argument.text : undefined;
+    })();
+    if (key !== 'require' && key !== 'createRequire') return [];
+    const origin = classifier.loaderOrigin(node);
+    if (origin !== undefined) {
+      const outer = climbWrappers(node);
+      if (ts.isCallExpression(outer.parent) && outer.parent.expression === outer) return [];
+      return [{ site: node, specifier: undefined, target: undefined }];
+    }
   }
   if (ts.isIdentifier(node) && opaqueRequireValueRead(node, classifier)) {
     return [{ site: node, specifier: undefined, target: undefined }];
@@ -502,6 +816,9 @@ export function collectEffectPart(
     }
     if (runtime && (requiresReferenceResolution && !referenceResolved || aliasSite && !symbolResolved(checker, aliasSymbol))) unresolvedClosure = true;
     const edges = runtime ? runtimeEdges(node, source, resolve, requireClassifier, emitPolicy) : [];
+    // An undefined-specifier loader/escape leaves project references outside the
+    // checker closure even when every ordinary identifier is resolved.
+    if (edges.some((edge) => edge.specifier === undefined && edge.target === undefined)) unresolvedClosure = true;
     if (requireClassifier.capped()) status = 'incomplete(build-cap)';
     const kind = runtime ? operation(node) : undefined;
     const additions = Number(tokenText !== undefined) + Number(alias !== undefined) + Number(reference !== undefined)
