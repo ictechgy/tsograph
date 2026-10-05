@@ -225,7 +225,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy)]));
   const flowIndex = { ...mergeFlowIndexes(flowIndexes.values(), wholeManifest), proofProgram: program, proofDiagnostics: new Set<string>() };
   const productionFlowIndex = separateTests
-    ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: new Set<string>() }
+    ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
     : flowIndex;
   const resolver = new TargetResolver(
     checker,

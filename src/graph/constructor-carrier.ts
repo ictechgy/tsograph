@@ -91,7 +91,8 @@ export class ConstructorCarrierAnalyzer {
   /** 새 instance 격리 recipe는 legacy 증명 노드를 공유하지 않는다. */
   private readonly extendedRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>();
   /** 새 exact bag 인증서는 legacy bag 결과로 fallback하지 않는다. */
-  private readonly extendedBagRecipes = new Map<ts.ObjectLiteralExpression, ProofRecipe<boolean>>();
+  private readonly extendedBagRecipes = new Map<ts.ObjectLiteralExpression,
+    Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>>();
   private readonly issuedProofs = new WeakMap<ProofCertificate, ConstructorCarrierProof>();
   private query: ProofQuery | undefined;
   private work: ((depth?: number, frames?: number) => void) | undefined;
@@ -119,7 +120,7 @@ export class ConstructorCarrierAnalyzer {
   outcome(declaration: ts.ClassLikeDeclaration): ProofOutcome<ConstructorCarrierProof> {
     const result = this.resolve<ConstructorCarrierProof>(declaration, 'proof');
     if (result.kind === 'rejected' || result.kind === 'incomplete') {
-      this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}(${result.kind === 'rejected' ? 'syntax' : 'coverage'}); carrier isolation was not certified.`);
+      this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}(${result.reason}); carrier isolation was not certified.`);
     }
     if (result.kind !== 'proved') return result;
     let proof = this.issuedProofs.get(result.certificate);
@@ -186,20 +187,49 @@ export class ConstructorCarrierAnalyzer {
       const text = source.text;
       const inventory = this.context.index.effectInventory;
       const policy = this.context.policy;
+      const project = policy.isProjectFile;
+      const callable = policy.isOpenCallable;
+      const open = policy.openProperties;
+      const intrinsic = policy.isDefaultLibraryFile;
+      const program = this.context.program;
+      const checker = this.context.checker;
+      const references = this.context.index.references;
+      const referenceCount = references.size;
+      const mutations = this.context.index.mutations;
+      const mutationCount = mutations.length;
+      const opaque = this.context.index.hasOpaqueMutation;
+      const incompleteMutations = this.context.index.hasIncompleteMutations;
+      const mutationComplete = this.context.index.mutationComplete;
       recipe = {
         id: `${source.fileName}:${declaration.pos}:extended-instance-family`,
         capability: 'instance-family',
         mode: 'extended',
         identity: declaration,
         valid: () => this.validEntry(declaration) && source.text === text
-          && this.context.index.effectInventory === inventory && this.context.policy === policy,
+          && this.context.index.effectInventory === inventory && this.context.policy === policy
+          && this.context.program === program && this.context.checker === checker
+          && this.context.policy.isProjectFile === project
+          && this.context.policy.isOpenCallable === callable
+          && this.context.policy.openProperties === open
+          && this.context.policy.isDefaultLibraryFile === intrinsic
+          && this.context.index.references === references && references.size === referenceCount
+          && this.context.index.mutations === mutations && mutations.length === mutationCount
+          && this.context.index.hasOpaqueMutation === opaque
+          && this.context.index.hasIncompleteMutations === incompleteMutations
+          && this.context.index.mutationComplete === mutationComplete,
         dependencies: () => [],
         evaluate: (work) => this.withWork(work, () => {
-          work();
-          const proof = this.proveClass(declaration);
-          return proof !== undefined && this.cleanMutations(proof)
-            ? { kind: 'proved', value: true }
-            : { kind: 'rejected', reason: 'isolation' };
+          try {
+            work();
+            const proof = this.proveClass(declaration);
+            return proof !== undefined && this.cleanMutations(proof)
+              ? { kind: 'proved', value: true }
+              : { kind: 'rejected', reason: 'isolation' };
+          }
+          catch (error) {
+            if (error instanceof CarrierIncomplete) return { kind: 'incomplete', reason: 'coverage' };
+            throw error;
+          }
         }),
       };
       this.extendedRecipes.set(declaration, recipe);
@@ -212,30 +242,64 @@ export class ConstructorCarrierAnalyzer {
 
   /** 생성자의 정확한 inner literal에만 적용하는 명시적 확장 exact-bag 권한이다. */
   isolatesExtendedBag(declaration: ts.ClassLikeDeclaration, literal: ts.ObjectLiteralExpression): boolean {
-    let recipe = this.extendedBagRecipes.get(literal);
+    let byDeclaration = this.extendedBagRecipes.get(literal);
+    if (byDeclaration === undefined) {
+      byDeclaration = new Map();
+      this.extendedBagRecipes.set(literal, byDeclaration);
+    }
+    let recipe = byDeclaration.get(declaration);
     if (recipe === undefined) {
       const source = declaration.getSourceFile();
       const text = source.text;
       const inventory = this.context.index.effectInventory;
       const policy = this.context.policy;
+      const project = policy.isProjectFile;
+      const callable = policy.isOpenCallable;
+      const open = policy.openProperties;
+      const intrinsic = policy.isDefaultLibraryFile;
+      const program = this.context.program;
+      const checker = this.context.checker;
+      const references = this.context.index.references;
+      const referenceCount = references.size;
+      const mutations = this.context.index.mutations;
+      const mutationCount = mutations.length;
+      const opaque = this.context.index.hasOpaqueMutation;
+      const incompleteMutations = this.context.index.hasIncompleteMutations;
+      const mutationComplete = this.context.index.mutationComplete;
       recipe = {
-        id: `${literal.getSourceFile().fileName}:${literal.pos}:extended-exact-bag`,
+        id: `${literal.getSourceFile().fileName}:${literal.pos}:extended-exact-bag:${declaration.pos}`,
         capability: 'exact-bag',
         mode: 'extended',
         identity: literal,
         valid: () => this.validEntry(declaration) && source.text === text
           && this.context.index.effectInventory === inventory && this.context.policy === policy
+          && this.context.program === program && this.context.checker === checker
+          && this.context.policy.isProjectFile === project
+          && this.context.policy.isOpenCallable === callable
+          && this.context.policy.openProperties === open
+          && this.context.policy.isDefaultLibraryFile === intrinsic
+          && this.context.index.references === references && references.size === referenceCount
+          && this.context.index.mutations === mutations && mutations.length === mutationCount
+          && this.context.index.hasOpaqueMutation === opaque
+          && this.context.index.hasIncompleteMutations === incompleteMutations
+          && this.context.index.mutationComplete === mutationComplete
           && literal.getSourceFile() === declaration.getSourceFile(),
         dependencies: () => [],
         evaluate: (work) => this.withWork(work, () => {
-          work();
-          const proof = this.proveClass(declaration);
-          return proof !== undefined && proof.innerLiteral === literal && this.cleanMutations(proof)
-            ? { kind: 'proved', value: true }
-            : { kind: 'rejected', reason: 'allocation' };
+          try {
+            work();
+            const proof = this.proveClass(declaration);
+            return proof !== undefined && proof.innerLiteral === literal && this.cleanMutations(proof)
+              ? { kind: 'proved', value: true }
+              : { kind: 'rejected', reason: 'allocation' };
+          }
+          catch (error) {
+            if (error instanceof CarrierIncomplete) return { kind: 'incomplete', reason: 'coverage' };
+            throw error;
+          }
         }),
       };
-      this.extendedBagRecipes.set(literal, recipe);
+      byDeclaration.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
     const result = this.dag.resolve(recipe, query);
@@ -265,9 +329,9 @@ export class ConstructorCarrierAnalyzer {
   private boolean(declaration: ts.ClassLikeDeclaration, kind: CarrierOperation): boolean {
     const result = this.resolve<boolean>(declaration, kind);
     if (result.kind === 'rejected') {
-      this.context.index.proofDiagnostics?.add('carrier-proof: rejected(syntax); carrier dispatch was not certified.');
+      this.context.index.proofDiagnostics?.add(`carrier-proof: rejected(${result.reason}); carrier dispatch was not certified.`);
     } else if (result.kind === 'incomplete') {
-      this.context.index.proofDiagnostics?.add('carrier-proof: incomplete(coverage); carrier dispatch was not certified.');
+      this.context.index.proofDiagnostics?.add(`carrier-proof: incomplete(${result.reason}); carrier dispatch was not certified.`);
     }
     return result.kind === 'proved' && result.value;
   }

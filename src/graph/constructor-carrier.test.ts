@@ -13,6 +13,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { buildFileIndex, type FlowIndex } from './flow-index.ts';
+import type { EffectInventory } from './effect-inventory.ts';
 import { ConstructorCarrierAnalyzer, proveConstructorCarrier, type ConstructorCarrierContext } from './constructor-carrier.ts';
 
 interface IndexedSource {
@@ -83,6 +84,19 @@ function contextOf(source: string, compilerOptions: ts.CompilerOptions = {}): { 
     },
   };
   return { source: indexed, context, runner };
+}
+
+/** Stage2 capability tests use an authoritative synthetic inventory witness. */
+function completeInventory(): EffectInventory {
+  return {
+    manifest: {} as EffectInventory['manifest'],
+    enumeration: 'complete',
+    referenceAliases: 'complete',
+    initialization: 'complete',
+    ambientSafety: 'safe',
+    records: [],
+    reasons: [],
+  };
 }
 
 function carrierResult(source: string) {
@@ -1001,6 +1015,71 @@ test('stage2 carrier certificates reject foreign context, forged allocation and 
   assert.equal(analyzer.accepts(proof, runner), false);
   context.policy.isProjectFile = old;
   assert.equal(analyzer.outcome(runner).kind, 'proved');
+});
+
+test('stage2 extended mutation coverage exhaustion is an incomplete outcome, not an internal throw', () => {
+  const { context, runner } = contextOf(positive);
+  const legacy = new ConstructorCarrierAnalyzer(context).prove(runner);
+  assert.ok(legacy);
+  const analyzer = new ConstructorCarrierAnalyzer({
+    ...context,
+    index: { ...context.index, effectInventory: completeInventory(), hasIncompleteMutations: true },
+  });
+  assert.equal(analyzer.isolatesExtendedBag(runner, legacy.innerLiteral), false);
+});
+
+test('stage2 extended bag certificates bind the declaration as well as the literal', () => {
+  const source = `${positive}\nclass Other {}`;
+  const { source: indexed, context, runner } = contextOf(source);
+  const other = indexed.file.statements.find((statement): statement is ts.ClassDeclaration =>
+    ts.isClassDeclaration(statement) && statement.name?.text === 'Other');
+  assert.ok(other);
+  const analyzer = new ConstructorCarrierAnalyzer({
+    ...context,
+    index: { ...context.index, effectInventory: completeInventory() },
+  });
+  const proof = analyzer.prove(runner);
+  assert.ok(proof);
+  assert.equal(analyzer.isolatesExtendedBag(runner, proof.innerLiteral), true);
+  assert.equal(analyzer.isolatesExtendedBag(other, proof.innerLiteral), false);
+});
+
+test('stage2 extended bag cache revalidates policy entry state before reuse', () => {
+  const { context, runner } = contextOf(positive);
+  const analyzer = new ConstructorCarrierAnalyzer({
+    ...context,
+    index: { ...context.index, effectInventory: completeInventory() },
+  });
+  const proof = analyzer.prove(runner);
+  assert.ok(proof);
+  assert.equal(analyzer.isolatesExtendedBag(runner, proof.innerLiteral), true);
+  const oldProjectCheck = context.policy.isProjectFile;
+  context.policy.isProjectFile = () => false;
+  try {
+    assert.equal(analyzer.isolatesExtendedBag(runner, proof.innerLiteral), false);
+  }
+  finally {
+    context.policy.isProjectFile = oldProjectCheck;
+  }
+});
+
+test('stage2 preserves entry versus coverage reasons in carrier diagnostics', () => {
+  const { context, runner } = contextOf(positive);
+  const diagnostics = new Set<string>();
+  const scoped = new ConstructorCarrierAnalyzer({
+    ...context,
+    index: { ...context.index, proofDiagnostics: diagnostics },
+  });
+  const oldProjectCheck = context.policy.isProjectFile;
+  context.policy.isProjectFile = () => false;
+  try {
+    assert.equal(scoped.outcome(runner).kind, 'incomplete');
+    assert.ok([...diagnostics].some((line) => line.startsWith('carrier-proof: incomplete(entry)')));
+    assert.equal([...diagnostics].some((line) => line.startsWith('carrier-proof: incomplete(coverage)')), false);
+  }
+  finally {
+    context.policy.isProjectFile = oldProjectCheck;
+  }
 });
 
 test('stage2 actual carrier cold/warm and reversed consumer order replay the same caller work', () => {

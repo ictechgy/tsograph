@@ -245,7 +245,8 @@ function arrayValuesPrimitive(context: MutationSafetyContext, literal: ts.ArrayL
 
 /** mutation record가 없는 array method/alias/escape도 clean-view를 열도록 모든 const array reference를 검사한다. */
 function hasSafeArrayLiteralUse(context: MutationSafetyContext, budget: GuardBudget): boolean {
-  const cached = ARRAY_USE_MEMO.get(context.index);
+  // caller 증명은 DAG가 비용을 재생하므로 다른 recipe의 전역 memo로 census 비용을 생략하지 않는다.
+  const cached = context.budgetStep === undefined ? ARRAY_USE_MEMO.get(context.index) : undefined;
   if (cached !== undefined) return cached;
   const declarations = new Set<ts.VariableDeclaration>();
   for (const tokens of context.index.tokenOccurrences.values()) {
@@ -322,7 +323,8 @@ function propertyName(name: ts.PropertyName): string | undefined {
 
 /** eval·Function·Proxy의 직접 참조와 alias, computed globalThis 참조를 보수적으로 닫는다. */
 function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: GuardBudget): boolean {
-  const cached = DYNAMIC_REFERENCE_MEMO.get(context.index);
+  // proof node 구성 비용이 먼저 평가한 analyzer나 recipe에 따라 달라지지 않게 한다.
+  const cached = context.budgetStep === undefined ? DYNAMIC_REFERENCE_MEMO.get(context.index) : undefined;
   if (cached !== undefined) return cached;
   const forbidden = new Set(['eval', 'Function', 'Proxy']);
   if (hasBuiltinReplacement(context)) return true;

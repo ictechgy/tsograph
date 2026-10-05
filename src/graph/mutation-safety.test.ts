@@ -57,6 +57,21 @@ test('private object-literal own-data primitive writes are clean, unrelated bind
   assert.equal(isMutationCleanView(contextOf('const state = { 0: 0 }; state[0] = 1;')), true);
 });
 
+test('a previously memoized guard cannot bypass the same caller proof budget', () => {
+  const source = `${Array.from({ length: 80 }, (_, i) => `const value${i} = ${i};`).join('\n')}\nconst values = [0]; values[0] = 1;`;
+  const context = contextOf(source);
+  let coldSteps = 0;
+  assert.equal(isMutationCleanView({ ...context, budgetStep: () => { coldSteps++; } }), true);
+  assert.ok(coldSteps > 1);
+  let remaining = coldSteps - 1;
+  assert.throws(() => isMutationCleanView({ ...context, budgetStep: () => {
+    if (--remaining < 0) throw new Error('caller proof budget exhausted');
+  } }), /caller proof budget exhausted/);
+  let warmSteps = 0;
+  assert.equal(isMutationCleanView({ ...context, budgetStep: () => { warmSteps++; } }), true);
+  assert.equal(warmSteps, coldSteps);
+});
+
 test('unknown receivers, unknown keys, updates, deletes and reflective effects are unsafe', () => {
   const context = contextOf([
     'declare const receiver: { known: number };',
