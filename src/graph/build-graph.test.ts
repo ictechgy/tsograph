@@ -26,7 +26,32 @@ import { traverse } from './traversal.ts';
 const fixtures = fileURLToPath(new URL('../../fixtures/', import.meta.url));
 const graphFixture = realpathSync(`${fixtures}graph/next-prisma`);
 const fileSystem = createNodeFileSystem();
-const graph = await buildCallGraph(graphFixture, fileSystem);
+/** 변경하지 않는 공개 fixture의 graph 결과만 test module 안에서 공유한다. */
+const immutableGraphResults = new Map<string, Promise<CallGraph>>();
+/** 같은 고정 `schema --project` 명령의 출력만 test module 안에서 공유한다. */
+const immutableSchemaResults = new Map<string, Promise<string>>();
+/** 모든 cached CLI 호출이 같은 고정 환경을 관찰한다. */
+const immutableCommandEnvironment = Object.freeze({ fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) });
+
+/** 변경하지 않는 fixture의 완성된 graph만 재사용하고 fresh 검사에는 적용하지 않는다. */
+function immutableGraph(project: string): Promise<CallGraph> {
+  const existing = immutableGraphResults.get(project);
+  if (existing !== undefined) return existing;
+  const result = buildCallGraph(project, fileSystem);
+  immutableGraphResults.set(project, result);
+  return result;
+}
+
+/** 같은 고정 fixture와 인자의 schema 출력 문자열만 재사용한다. */
+function immutableSchema(project: string): Promise<string> {
+  const existing = immutableSchemaResults.get(project);
+  if (existing !== undefined) return existing;
+  const result = runSchemaCommand(['--project', project], immutableCommandEnvironment).then((command) => command.standardOutput);
+  immutableSchemaResults.set(project, result);
+  return result;
+}
+
+const graph = await immutableGraph(graphFixture);
 
 /**
  * 그래프 간선을 `from -> to kinds` 문자열로 줄인다.
@@ -164,13 +189,12 @@ test('같은 입력의 그래프와 graphRevision은 같다', async () => {
 });
 
 test('모든 route-decl·소스 relation-use usr는 그래프 노드이고, 선언 사실 usr는 노드가 아니다(모든 fixture)', async () => {
-  const environment = { fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) };
   const projects = ['graph/next-prisma', 'graph/hono-d1-inline', 'graph/express-pg-inline', 'next/app-router', 'next/pages-api', 'node/hono-app',
     'node/express4-app', 'schema/prisma-app', 'schema/drizzle-d1-app'].map((name) => realpathSync(`${fixtures}${name}`));
   for (const project of projects) {
-    const nodes = new Set((await buildCallGraph(project, fileSystem)).nodes.map((node) => node.id));
-    const routes = usrsOf((await runRoutesCommand(['--role', 'server', '--project', project, '--include-tests'], environment)).standardOutput);
-    const relations = usrsOf((await runSchemaCommand(['--project', project], environment)).standardOutput);
+    const nodes = new Set((await immutableGraph(project)).nodes.map((node) => node.id));
+    const routes = usrsOf((await runRoutesCommand(['--role', 'server', '--project', project, '--include-tests'], immutableCommandEnvironment)).standardOutput);
+    const relations = usrsOf(await immutableSchema(project));
     assert.ok(routes.length + relations.length > 0, project);
     const isDeclarationId = (usr: string): boolean => /#(?:model|typedsql):/u.test(usr);
     for (const usr of [...routes, ...relations.filter((usr) => !isDeclarationId(usr))]) assert.ok(nodes.has(usr), `${project}: ${usr}`);
@@ -186,11 +210,10 @@ test('모든 route-decl·소스 relation-use usr는 그래프 노드이고, 선�
  * @returns `<핸들러 usr> <테이블,…>` 목록
  */
 async function routeTables(project: string, target: CallGraph): Promise<string[]> {
-  const environment = { fileSystem, toolVersion: '0.0.0-test', now: () => new Date(0) };
-  const routeDocument = JSON.parse((await runRoutesCommand(['--role', 'server', '--project', project], environment)).standardOutput) as {
+  const routeDocument = JSON.parse((await runRoutesCommand(['--role', 'server', '--project', project], immutableCommandEnvironment)).standardOutput) as {
     facts: { method: string; channel: string; symbol: { usr: string } }[];
   };
-  const relationDocument = JSON.parse((await runSchemaCommand(['--project', project], environment)).standardOutput) as {
+  const relationDocument = JSON.parse(await immutableSchema(project)) as {
     facts: { channel: string; method?: string; symbol?: { usr?: string } }[];
   };
   const handlers = [...new Set(routeDocument.facts.map((fact) => fact.symbol.usr))];
@@ -204,7 +227,7 @@ async function routeTables(project: string, target: CallGraph): Promise<string[]
 
 test('인라인 핸들러(Hono·Express): route usr가 핸들러 노드이고, 안의 relation-use가 같은 id라 route가 제 테이블에만 닿는다', async () => {
   const hono = realpathSync(`${fixtures}graph/hono-d1-inline`);
-  const honoGraph = await buildCallGraph(hono, fileSystem);
+  const honoGraph = await immutableGraph(hono);
   assert.deepEqual(await routeTables(hono, honoGraph), [
     'src/admin.ts#admin.….get("/audit") audit_log',
     'src/index.ts#<module>.app.get("/health") ',
@@ -217,7 +240,7 @@ test('인라인 핸들러(Hono·Express): route usr가 핸들러 노드이고, �
   assert.ok(lines.has('src/admin.ts#admin -> src/admin.ts#admin.….get("/audit") contains'));
   assert.ok(honoGraph.nodes.find((node) => node.id === 'src/index.ts#<module>.app.get("/users")')?.entries?.includes('route-handler'));
   const express = realpathSync(`${fixtures}graph/express-pg-inline`);
-  assert.deepEqual(await routeTables(express, await buildCallGraph(express, fileSystem)), [
+  assert.deepEqual(await routeTables(express, await immutableGraph(express)), [
     'src/app.ts#<module>.router.get("/customers") customers',
     'src/app.ts#<module>.app.get("/orders") orders',
     'src/app.ts#<module>.app.delete("/orders/:id") order_items',
