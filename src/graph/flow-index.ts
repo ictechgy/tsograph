@@ -91,6 +91,10 @@ export interface MutationRecord {
 
 /** 모은 색인이다. */
 export interface FlowIndex {
+  /** build-graph가 만든 실제 Program이다. legacy 단일 AST 색인은 checker로 scope를 고정한다. */
+  readonly proofProgram?: ts.Program;
+  /** semantic syntax와 coverage 실패의 중복 없는 limitation 채널이다. */
+  readonly proofDiagnostics?: Set<string>;
   /** 파일별 실행 관찰이다. 이것만으로 완전성이나 안전을 주장하지 않는다. */
   readonly effectParts: readonly EffectPart[];
   /** 독립 기대 매니페스트와 대조한 결과다. 매니페스트 없는 legacy 병합은 인증되지 않는다. */
@@ -109,6 +113,10 @@ export interface FlowIndex {
   readonly mutations: readonly MutationRecord[];
   /** bounded alias 추적이나 call/apply/bind escape로 mutation 관찰이 불완전해진 경우다. */
   readonly hasOpaqueMutation: boolean;
+  /** 외부 조립 색인의 mutation coverage 결손은 semantic rejection과 분리한다. */
+  readonly hasIncompleteMutations?: boolean;
+  /** 명시적인 mutation coverage 완료 witness다. absent는 legacy 계약을 유지한다. */
+  readonly mutationComplete?: boolean;
   /** `export { x }`·`export default x`로 내보낸(별칭을 푼) 심볼 */
   readonly exportedSymbols: ReadonlySet<ts.Symbol>;
   /** 멤버 참조를 다 볼 수 없는 모듈·네임스페이스 심볼(동적 import 대상, 값으로 쓰이거나 계산된 키로 읽힌 네임스페이스) */

@@ -1022,11 +1022,24 @@ What `bound` guarantees, and what it does not:
   reported as `effect-inventory: incomplete(coverage)`. These effect-inventory limitations report whole-view
   enumeration coverage. Future effect certificates must check the selected view's reference closure and module-load
   coverage directly; a complete enumeration does not certify either verdict or initialization order.
-- Each flow query has a budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
-  budget, or one that overflows the JavaScript stack, is unknown, and the count appears under
+- Carrier proof outcomes distinguish successful proof, semantic rejection, incomplete coverage,
+  cycles, and resource exhaustion. Certificates bind the Program/checker, selected source view,
+  manifest, policy, proof version, allocation identity, and dependency authority. Proof modes and
+  capabilities are checked before dependencies execute; an extended failure does not retry a legacy
+  proof. Completed AST proofs replay the same charged work in canonical dependency order, including
+  rejected dependencies, and recheck entry validity and shared-edge depth/frame limits. Legacy
+  dispatch and identity results do not grant new ambient, primitive-effect, or confinement authority.
+  Policy predicates are sampled after their charged step and depth/frame check, at the same position
+  in cold construction and warm replay. Each query keeps the first sampled value for a predicate
+  and target; a new query reads the current policy again. A failed guard is incomplete and cannot
+  become a completed visit or authorize a certificate on a retry in the same query.
+- Each flow query has a fixed budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
+  budget is unknown, and the count appears under
   `dispatch-budget:`. Property writes, member reads, and receiver flows looked up by name are memoized
   across queries, so common member names do not exhaust the budget (a synthetic 1,500-module fixture
-  with 1,500 same-named writes and detached reads went from 21.7 s to 2.5 s).
+  with 1,500 same-named writes and detached reads went from 21.7 s to 2.5 s). Unexpected internal
+  `RangeError` exceptions propagate as failures; they do not become a cached rejection or an unknown
+  flow result.
 
 `unresolvedCalls` counts, per node and per mode, the node's own call sites (calls, `new`, tagged
 templates, decorators, JSX) that have no edge or only a partial set of targets under that mode:

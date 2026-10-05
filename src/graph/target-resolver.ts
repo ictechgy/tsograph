@@ -27,6 +27,9 @@ export type Resolution =
 /** 값 별칭(`const h = g`)을 따라가는 최대 깊이다. 순환 별칭에서 끝나게 한다. */
 const MAX_FOLLOW_DEPTH = 8;
 
+/** direct target 질의의 carrier 감사가 caller 상한을 넘었다는 내부 중단이다. */
+class CarrierCallerExhausted extends Error {}
+
 /** 외부 결과(공유 상수)다. */
 const external: Resolution = { kind: 'external' };
 
@@ -52,6 +55,10 @@ export class TargetResolver {
   private readonly writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> & Partial<Pick<FlowIndex, 'hasOpaqueMutation'>>;
   /** carrier-role direct method를 shared Stage 0 proof로 defer하는 분석기(전체 index가 있을 때만) */
   private readonly constructorCarrier: ConstructorCarrierAnalyzer | undefined;
+  /** direct 호출 하나에 청구한 proof 작업이다. 질의 종료 뒤에는 재사용하지 않는다. */
+  private carrierSteps = 0;
+  /** whole/production graph가 공유하는 제한 진단 sink다. */
+  private readonly proofDiagnostics: Set<string> | undefined;
 
   /**
    * @param checker TypeChecker
@@ -73,9 +80,15 @@ export class TargetResolver {
     this.pathOf = pathOf;
     this.isProjectSpecifier = isProjectSpecifier;
     this.writes = index ?? { identifierWrites: new Map(), propertyWrites: new Map(), reflectiveTargets: [] };
+    this.proofDiagnostics = index?.proofDiagnostics;
     this.constructorCarrier = index === undefined ? undefined : new ConstructorCarrierAnalyzer({
       checker,
       index,
+      ...(index.proofProgram === undefined ? {} : { program: index.proofProgram }),
+      caller: {
+        step: () => { if (++this.carrierSteps > 20_000) throw new CarrierCallerExhausted(); },
+        check: (depth, frames) => { if (depth > 256 || frames > 400) throw new CarrierCallerExhausted(); },
+      },
       policy: {
         isProjectFile: (sourceFile) => pathOf(sourceFile) !== undefined,
         isOpenCallable: () => false,
@@ -93,6 +106,18 @@ export class TargetResolver {
    * @returns 해석 결과
    */
   resolveCallee(expression: ts.Expression): Resolution {
+    this.carrierSteps = 0;
+    this.constructorCarrier?.beginQuery();
+    try { return this.resolveCalleeInQuery(expression); }
+    catch (error) {
+      if (!(error instanceof CarrierCallerExhausted)) throw error;
+      this.proofDiagnostics?.add('carrier-proof: exhausted; direct carrier dispatch was not certified.');
+      return unresolved('interface');
+    } finally { this.constructorCarrier?.endQuery(); }
+  }
+
+  /** 하나의 caller 예산 안에서 direct 해석과 carrier defer 결정을 함께 수행한다. */
+  private resolveCalleeInQuery(expression: ts.Expression): Resolution {
     const callee = skipWrappers(expression);
     if ((ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))
       && (this.hasContradictoryMemberOwner(callee) || this.shouldDeferCarrierMethod(callee))) return unresolved('interface');

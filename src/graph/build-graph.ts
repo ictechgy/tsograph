@@ -223,9 +223,9 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
       .map(([path, absolute]) => [absolute, files.get(path)])), 'production')
     : wholeManifest;
   const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy)]));
-  const flowIndex = mergeFlowIndexes(flowIndexes.values(), wholeManifest);
+  const flowIndex = { ...mergeFlowIndexes(flowIndexes.values(), wholeManifest), proofProgram: program, proofDiagnostics: new Set<string>() };
   const productionFlowIndex = separateTests
-    ? mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest)
+    ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
     : flowIndex;
   const resolver = new TargetResolver(
     checker,
@@ -443,7 +443,7 @@ function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts, view
   const inventory = counts.flowIndex.effectInventory;
   const coverage = inventory?.enumeration === 'incomplete'
     ? [`effect-inventory: incomplete(${inventory.reasons.includes('build-cap') ? 'build-cap' : 'coverage'}); coverage cannot certify ambient safety.`] : [];
-  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts), ...coverage];
+  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts), ...coverage, ...[...counts.flowIndex.proofDiagnostics ?? []].sort()];
 }
 
 /** 관점에서 아직 잇지 못한 호출 공백을 이유별로 계산한다. */

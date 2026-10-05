@@ -947,3 +947,36 @@ test('nonliteral carrier bags and instanceof class uses remain conservative', as
   assert.equal(hasStrongEvidence(graph, 'readPlainAliased', 'Plain.serve'), true);
   assert.equal(hasStrongEvidence(graph, 'readPlainChecked', 'Plain.serve'), true);
 });
+
+test('stage2 graph query order preserves carrier targets and known-reflection fence', async () => {
+  const calls = ['export const readA = () => controller.run();', 'export const readB = () => controller.run();'];
+  for (const reflection of ['', 'Object.assign(controller, { replaced: true });']) {
+    const source = (reverse: boolean) => carrierSource({ use: [...(reflection ? [reflection] : []), ...(reverse ? [...calls].reverse() : calls)] });
+    const first = await graphOf(source(false)); const second = await graphOf(source(true));
+    const targets = (graph: CallGraph) => graph.edges.filter((edge) => edge.kinds.includes('call'))
+      .map((edge) => [edge.from, edge.to, edge.evidence].join(' ')).sort();
+    assert.deepEqual(targets(first), targets(second));
+    if (reflection) assertNoControllerBoundService(first, 'known reflective membership');
+    else assert.deepEqual(evidence(first, 'Controller.run', 'LocalRepo.run'), ['bound']);
+  }
+});
+
+test('stage2 carrier exhaustion is charged to caller and emits one graph diagnostic channel', async () => {
+  const source = carrierSource().replace('this.clock = inputs.clock ?? (() => new Date());',
+    `this.clock = inputs.clock ?? (() => new Date()); ${';'.repeat(20_050)}`);
+  const graph = await graphOf(source);
+  assertNoControllerBoundService(graph, 'caller step exhaustion');
+  const count = graph.statistics.calls.dispatch.overBudget;
+  assert.ok(count > 0);
+  const diagnostics = graph.limitations.filter((line) => line.startsWith('dispatch-budget:'));
+  assert.equal(diagnostics.length, 1);
+  assert.ok(diagnostics[0]!.startsWith(`dispatch-budget: ${count} deferred`));
+  assert.equal(graph.limitations.some((line) => line.startsWith('carrier-proof: rejected(syntax)')), false);
+});
+
+
+test('stage2 graph retains distinct syntax and authoritative coverage limitations', async () => {
+  const syntax = await graphOf(carrierSource({ method: '  run(value = this) { this.clock(); return this.inputs.repo.run(); }' }));
+  assertNoControllerBoundService(syntax, 'unsupported runtime entry');
+  assert.ok(syntax.limitations.some((line) => line.startsWith('carrier-proof: rejected(syntax)')));
+});
