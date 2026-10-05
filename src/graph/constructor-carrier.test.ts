@@ -12,8 +12,8 @@ import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
-import { buildFileIndex, type FlowIndex } from './flow-index.ts';
-import type { EffectInventory } from './effect-inventory.ts';
+import { buildFileIndex, mergeFlowIndexes, type FlowIndex } from './flow-index.ts';
+import { createEffectManifest, type EffectInventory } from './effect-inventory.ts';
 import { ConstructorCarrierAnalyzer, proveConstructorCarrier, type ConstructorCarrierContext } from './constructor-carrier.ts';
 
 interface IndexedSource {
@@ -73,6 +73,7 @@ function contextOf(source: string, compilerOptions: ts.CompilerOptions = {}): { 
   visit(indexed.file);
   assert.ok(runner);
   const context: ConstructorCarrierContext = {
+    program: indexed.program,
     checker: indexed.checker,
     index: indexed.index,
     policy: {
@@ -86,17 +87,16 @@ function contextOf(source: string, compilerOptions: ts.CompilerOptions = {}): { 
   return { source: indexed, context, runner };
 }
 
-/** Stage2 capability tests use an authoritative synthetic inventory witness. */
-function completeInventory(): EffectInventory {
-  return {
-    manifest: {} as EffectInventory['manifest'],
-    enumeration: 'complete',
-    referenceAliases: 'complete',
-    initialization: 'complete',
-    ambientSafety: 'safe',
-    records: [],
-    reasons: [],
-  };
+/** 독립 manifest를 실제 파일 색인과 대조한 합성 inventory를 사용한다. */
+function completeInventory(source: IndexedSource): EffectInventory {
+  const manifest = createEffectManifest(new Map([[source.file.fileName, source.file]]),
+    'whole', () => undefined, true, undefined, source.checker);
+  const inventory = mergeFlowIndexes([source.index], manifest).effectInventory;
+  assert.ok(inventory);
+  assert.equal(inventory.enumeration, 'complete', inventory.reasons.join(';'));
+  assert.equal(inventory.referenceAliases, 'complete', inventory.reasons.join(';'));
+  assert.equal(inventory.initialization, 'complete', inventory.reasons.join(';'));
+  return inventory;
 }
 
 function carrierResult(source: string) {
@@ -1018,12 +1018,12 @@ test('stage2 carrier certificates reject foreign context, forged allocation and 
 });
 
 test('stage2 extended mutation coverage exhaustion is an incomplete outcome, not an internal throw', () => {
-  const { context, runner } = contextOf(positive);
+  const { source, context, runner } = contextOf(positive);
   const legacy = new ConstructorCarrierAnalyzer(context).prove(runner);
   assert.ok(legacy);
   const analyzer = new ConstructorCarrierAnalyzer({
     ...context,
-    index: { ...context.index, effectInventory: completeInventory(), hasIncompleteMutations: true },
+    index: { ...context.index, effectInventory: completeInventory(source), hasIncompleteMutations: true },
   });
   assert.equal(analyzer.isolatesExtendedBag(runner, legacy.innerLiteral), false);
 });
@@ -1036,7 +1036,7 @@ test('stage2 extended bag certificates bind the declaration as well as the liter
   assert.ok(other);
   const analyzer = new ConstructorCarrierAnalyzer({
     ...context,
-    index: { ...context.index, effectInventory: completeInventory() },
+    index: { ...context.index, effectInventory: completeInventory(indexed) },
   });
   const proof = analyzer.prove(runner);
   assert.ok(proof);
@@ -1045,10 +1045,10 @@ test('stage2 extended bag certificates bind the declaration as well as the liter
 });
 
 test('stage2 extended bag cache revalidates policy entry state before reuse', () => {
-  const { context, runner } = contextOf(positive);
+  const { source, context, runner } = contextOf(positive);
   const analyzer = new ConstructorCarrierAnalyzer({
     ...context,
-    index: { ...context.index, effectInventory: completeInventory() },
+    index: { ...context.index, effectInventory: completeInventory(source) },
   });
   const proof = analyzer.prove(runner);
   assert.ok(proof);
@@ -1060,6 +1060,44 @@ test('stage2 extended bag cache revalidates policy entry state before reuse', ()
   }
   finally {
     context.policy.isProjectFile = oldProjectCheck;
+  }
+});
+
+test('stage2 extended certificates reject a checker paired with a foreign Program', () => {
+  const { source, context, runner } = contextOf(positive);
+  const foreign = contextOf(positive);
+  const inventory = completeInventory(source);
+  const proof = new ConstructorCarrierAnalyzer(context).prove(runner); assert.ok(proof);
+  const matching = new ConstructorCarrierAnalyzer({ ...context, program: source.program,
+    index: { ...context.index, effectInventory: inventory } });
+  assert.equal(matching.isolatesExtendedBag(runner, proof.innerLiteral), true);
+  assert.equal(matching.allowsExtendedInstanceIsolation(runner), true);
+  const mismatched = new ConstructorCarrierAnalyzer({ ...context, program: foreign.source.program,
+    index: { ...context.index, effectInventory: inventory } });
+  assert.deepEqual(mismatched.outcome(runner), { kind: 'incomplete', reason: 'entry' });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.equal(mismatched.isolatesExtendedBag(runner, proof.innerLiteral), false);
+    assert.equal(mismatched.allowsExtendedInstanceIsolation(runner), false);
+  }
+  const { program: _program, ...withoutProgram } = context;
+  const unbound = new ConstructorCarrierAnalyzer({ ...withoutProgram,
+    index: { ...context.index, effectInventory: inventory } });
+  assert.ok(unbound.prove(runner));
+  assert.equal(unbound.isolatesExtendedBag(runner, proof.innerLiteral), false);
+  assert.equal(unbound.allowsExtendedInstanceIsolation(runner), false);
+});
+
+test('stage2 legacy bag probes do not cache a foreign declaration rejection for the owner', () => {
+  const { source, context, runner } = contextOf(`${positive}\nclass Other {}`);
+  const other = source.file.statements.find((statement): statement is ts.ClassDeclaration =>
+    ts.isClassDeclaration(statement) && statement.name?.text === 'Other'); assert.ok(other);
+  const literal = new ConstructorCarrierAnalyzer(context).prove(runner)?.innerLiteral; assert.ok(literal);
+  for (const reverse of [false, true]) {
+    const analyzer = new ConstructorCarrierAnalyzer(context);
+    const owners: readonly ts.ClassLikeDeclaration[] = reverse ? [runner, other] : [other, runner];
+    const results: boolean[] = owners.map((owner): boolean => analyzer.isolatesBag(owner, literal));
+    assert.deepEqual(results, reverse ? [true, false] : [false, true]);
+    assert.equal(analyzer.isolatesBag(runner, literal), true);
   }
 });
 

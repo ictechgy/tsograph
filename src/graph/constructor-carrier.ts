@@ -17,7 +17,7 @@ import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type Pro
 
 /** 생성자 carrier 증명에 필요한 공개 분석 문맥이다. */
 export interface ConstructorCarrierContext {
-  /** checker의 실제 Program 정체성이다. 독립 AST 소비자는 checker로 scope를 고정한다. */
+  /** 확장 권한에 필요한 checker의 실제 Program이다. 독립 legacy AST는 checker로 scope를 고정한다. */
   readonly program?: ts.Program;
   /** ValueFlow caller의 step/depth/frame 예산이다. */
   readonly caller?: ProofCaller;
@@ -87,7 +87,7 @@ export class ConstructorCarrierAnalyzer {
   private readonly context: ConstructorCarrierContext;
   private readonly dag: ProofDag;
   private readonly recipes = new Map<ts.ClassLikeDeclaration, Map<CarrierOperation, ProofRecipe<unknown>>>();
-  private readonly bagRecipes = new Map<ts.ObjectLiteralExpression, ProofRecipe<ConstructorCarrierProof>>();
+  private readonly bagRecipes = new Map<ts.ObjectLiteralExpression, Map<ts.ClassLikeDeclaration, ProofRecipe<ConstructorCarrierProof>>>();
   /** 새 instance 격리 recipe는 legacy 증명 노드를 공유하지 않는다. */
   private readonly extendedRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>();
   /** 새 exact bag 인증서는 legacy bag 결과로 fallback하지 않는다. */
@@ -156,11 +156,16 @@ export class ConstructorCarrierAnalyzer {
 
   /** exact allocation bag 소비자는 class/family 또는 effect 권한을 빌리지 않는다. */
   isolatesBag(declaration: ts.ClassLikeDeclaration, literal: ts.ObjectLiteralExpression): boolean {
-    let recipe = this.bagRecipes.get(literal);
+    let byDeclaration = this.bagRecipes.get(literal);
+    if (byDeclaration === undefined) {
+      byDeclaration = new Map();
+      this.bagRecipes.set(literal, byDeclaration);
+    }
+    let recipe = byDeclaration.get(declaration);
     if (recipe === undefined) {
       const proofRecipe = this.recipe(declaration, 'proof');
       recipe = {
-        id: `${literal.getSourceFile().fileName}:${literal.pos}:exact-bag`, capability: 'exact-bag', identity: literal,
+        id: `${literal.getSourceFile().fileName}:${literal.pos}:exact-bag:${declaration.pos}`, capability: 'exact-bag', identity: literal,
         valid: () => proofRecipe.valid() && literal.getSourceFile() === declaration.getSourceFile(),
         dependencies: () => [{ recipe: proofRecipe, capability: 'legacy', depth: 1, frames: 0 }],
         evaluate: (work, children) => {
@@ -171,7 +176,7 @@ export class ConstructorCarrierAnalyzer {
             ? { kind: 'proved', value: proof } : { kind: 'rejected', reason: 'allocation' };
         },
       };
-      this.bagRecipes.set(literal, recipe);
+      byDeclaration.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
     const result = this.dag.resolve(recipe, query);
@@ -208,6 +213,7 @@ export class ConstructorCarrierAnalyzer {
         valid: () => this.validEntry(declaration) && source.text === text
           && this.context.index.effectInventory === inventory && this.context.policy === policy
           && this.context.program === program && this.context.checker === checker
+          && program !== undefined && program.getTypeChecker() === checker
           && this.context.policy.isProjectFile === project
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
@@ -274,6 +280,7 @@ export class ConstructorCarrierAnalyzer {
         valid: () => this.validEntry(declaration) && source.text === text
           && this.context.index.effectInventory === inventory && this.context.policy === policy
           && this.context.program === program && this.context.checker === checker
+          && program !== undefined && program.getTypeChecker() === checker
           && this.context.policy.isProjectFile === project
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
