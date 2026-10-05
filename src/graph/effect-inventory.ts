@@ -944,8 +944,8 @@ function runtimeEdges(
     return [{ site: node, specifier, target: specifier === undefined ? undefined : resolve(specifier, source) }];
   }
   if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-    // 알려진 플랫폼 객체의 임의 멤버에서 loader로 이어질 수 있으므로 첫 접근부터 닫는다.
-    if (classifier.loaderOrigin(node.expression) === 'platform') {
+    // 플랫폼·로더·팩터리의 임의 멤버에서 동적 실행으로 이어질 수 있으므로 첫 접근부터 닫는다.
+    if (classifier.loaderOrigin(node.expression) !== undefined) {
       const outer = climbWrappers(node);
       // 직접 해석된 loader 호출은 call 자리에 이미 opaque 근거를 남긴다.
       if (ts.isCallExpression(outer.parent) && outer.parent.expression === outer

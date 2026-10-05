@@ -943,6 +943,10 @@ test('실제 기본 lib·Node 선언을 읽은 platform loader도 opaque로 남�
     "export const value = Function('return this')().process.mainModule.require('pkg');",
     "export const value = new Function('return process')().mainModule.require('pkg');",
     "export const value = globalThis.Function('return process')().mainModule.require('pkg');",
+    "export const value = Function.bind(null, 'return process')()().mainModule.require('pkg');",
+    "export const value = Function.prototype.constructor('return process')().mainModule.require('pkg');",
+    "export const value = Function.call(null, 'return process')().mainModule.require('pkg');",
+    "export const value = eval.bind(null, \"process.mainModule.require('pkg')\")();",
   ]) {
     const checked = checkedSources({ '/lib-root.ts': text }, { types: ['node'], module: ts.ModuleKind.CommonJS });
     const file = checked.files.get('/lib-root.ts')!;
@@ -950,6 +954,25 @@ test('실제 기본 lib·Node 선언을 읽은 platform loader도 opaque로 남�
       { preserveTypeOnlySpecifiers: false });
     assert.ok(part.moduleEdges.some((edge) => edge.specifier === undefined), text);
     assert.equal(part.closure.unresolved, true, text);
+  }
+});
+
+test('일반 constructor 반사·팩터리는 unknown 효과로 남아 ambient 안전성을 인증하지 않는다', () => {
+  for (const text of [
+    "export const value = [].constructor.constructor('return process')().mainModule.require('pkg');",
+    "export const value = ({}).constructor.constructor('return process')().mainModule.require('pkg');",
+    "export const value = (() => {}).constructor('return process')().mainModule.require('pkg');",
+  ]) {
+    const checked = checkedSources({ '/reflection.ts': text }, { types: ['node'], module: ts.ModuleKind.CommonJS });
+    const file = checked.files.get('/reflection.ts')!;
+    const policy = { preserveTypeOnlySpecifiers: false };
+    const part = collectEffectPart(file, () => undefined, undefined, undefined, checked.checker, policy);
+    const manifest = createEffectManifest(new Map([['/reflection.ts', file]]), 'whole', () => undefined,
+      true, undefined, checked.checker, policy);
+    const inventory = reconcileEffectInventory(manifest, [part]);
+    assert.ok(inventory.records.some((record) => record.operation === 'call'));
+    assert.ok(inventory.records.some((record) => record.operation === 'read'));
+    assert.equal(inventory.ambientSafety, 'unknown');
   }
 });
 

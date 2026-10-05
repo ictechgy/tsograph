@@ -1012,7 +1012,9 @@ What `bound` guarantees, and what it does not:
   is bounded by 1,000,000 visited nodes, 1,000,000 retained records, and 100,000 additional nodes per
   file. Repeated collection passes share these limits; counts include the work of each pass and
   retained reference, alias, and token witnesses. Initialization coverage describes module-load
-  coverage; initialization order requires a separate proof. Runtime CJS import-equals loader
+  coverage for static edges and recognized loader origins; initialization order requires a separate
+  proof. General reflection and arbitrary factories retain unknown call/property effects, so this
+  verdict does not certify their runtime module loads or ambient safety. Runtime CJS import-equals loader
   evaluation remains unknown. Dynamic access to genuine platform loaders and exposure of their
   platform roots retain opaque module-load evidence. Malformed supplied index parts cannot certify
   coverage. A build cap produces `effect-inventory: incomplete(build-cap)`; it does not consume a flow
