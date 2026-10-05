@@ -150,3 +150,91 @@ test('canonical dependencies and reordered entry queries preserve costs and nega
   const capped = { ...leaf('cap'), dependencies: () => Array.from({ length: 20_001 }, () => ({ recipe: shared, depth: 1, frames: 0 })) };
   assert.equal(new ProofDag(binding()).resolve(capped, new ProofQuery()).kind, 'exhausted');
 });
+
+test('ordered guards have identical cold/warm events at every budget and check before callbacks', () => {
+  let events: string[] = [];
+  const guard = { read: () => { events.push('guard'); return true; } };
+  const recipe: ProofRecipe<boolean> = { ...leaf('guarded'), dependencies: (work) => {
+    work.require(guard, true, 2, 3); work(1, 1); return [];
+  }, evaluate: (work) => {
+    work(4, 5); assert.equal(work.observe(guard, 6, 7), true);
+    return { kind: 'proved', value: true };
+  } };
+  const warm = new ProofDag(binding()); assert.equal(warm.resolve(recipe, new ProofQuery()).kind, 'proved');
+  const run = (dag: ProofDag, steps: number, depth = 256, frames = 400) => {
+    events = [];
+    const query = new ProofQuery({ steps, depth, frames }, {
+      step: () => { events.push('step'); }, check: (d, f) => { events.push(`check:${d}:${f}`); },
+    });
+    const outcome = dag.resolve(recipe, query);
+    return { kind: outcome.kind, steps: query.steps, depth: query.maxDepth, frames: query.maxFrames, events: [...events] };
+  };
+  const full = run(new ProofDag(binding()), 20_000);
+  for (let budget = 0; budget <= full.steps + 1; budget++) {
+    assert.deepEqual(run(warm, budget), run(new ProofDag(binding()), budget), `budget ${budget}`);
+  }
+  for (const [depth, frames] of [[1, 400], [256, 2], [5, 400], [256, 6]]) {
+    assert.deepEqual(run(warm, 20_000, depth, frames), run(new ProofDag(binding()), 20_000, depth, frames));
+  }
+  assert.equal(run(warm, 1).events.includes('guard'), false);
+  assert.equal(run(warm, 20_000, 1).events.includes('guard'), false);
+  assert.equal(full.events.filter((event) => event === 'guard').length, 1);
+});
+
+test('stale guard remains incomplete on repeated resolution and certificate acceptance in one query', () => {
+  let allowed = true;
+  const guard = { read: () => allowed };
+  const recipe: ProofRecipe<boolean> = { ...leaf('stale'), dependencies: (work) => {
+    work.require(guard, true); return [];
+  } };
+  const dag = new ProofDag(binding()); const success = dag.resolve(recipe, new ProofQuery());
+  assert.equal(success.kind, 'proved'); if (success.kind !== 'proved') return;
+  allowed = false;
+  const query = new ProofQuery();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(dag.resolve(recipe, query), { kind: 'incomplete', reason: 'entry' });
+    assert.equal(dag.accepts(success.certificate, 'legacy', recipe.identity, query), false);
+  }
+  const initiallyInvalid = new ProofDag(binding());
+  assert.equal(initiallyInvalid.resolve(recipe, new ProofQuery()).kind, 'incomplete');
+  allowed = true;
+  assert.equal(initiallyInvalid.resolve(recipe, new ProofQuery()).kind, 'proved');
+  assert.equal(dag.resolve(recipe, new ProofQuery()).kind, 'proved');
+});
+
+test('shared negative guarded nodes retain canonical work and fresh per-query snapshots', () => {
+  let reads = 0;
+  const guard = { read: () => { reads++; return false; } };
+  const negative: ProofRecipe<boolean> = { ...leaf('guard-negative'), dependencies: (work) => {
+    assert.equal(work.observe(guard, 1, 2), false); return [];
+  }, evaluate: (work) => { work(); return { kind: 'rejected', reason: 'syntax' }; } };
+  const child = (id: string): ProofRecipe<boolean> => ({ ...leaf(id), dependencies: (work) => {
+    work.observe(guard); return [{ recipe: negative, depth: 1, frames: 1 }];
+  } });
+  const root = { ...leaf('guard-root'), dependencies: () => [
+    { recipe: child('guard-b'), depth: 1, frames: 1 }, { recipe: child('guard-a'), depth: 2, frames: 1 },
+  ] };
+  const dag = new ProofDag(binding());
+  const run = () => {
+    reads = 0; const query = new ProofQuery(); const outcome = dag.resolve(root, query);
+    return { kind: outcome.kind, steps: query.steps, depth: query.maxDepth, frames: query.maxFrames, reads };
+  };
+  const cold = run(); assert.equal(cold.kind, 'rejected'); assert.equal(cold.reads, 1);
+  assert.deepEqual(run(), cold);
+  const deep = { ...leaf('guard-deep'), dependencies: () => [{ recipe: negative, depth: 256, frames: 0 }] };
+  assert.equal(dag.resolve(deep, new ProofQuery()).kind, 'exhausted');
+});
+
+test('guard exceptions and interrupted reads clear pending without caching unstable results', () => {
+  let fail = true; let reads = 0;
+  const guard = { read: () => { reads++; if (fail) throw new RangeError('internal guard'); return true; } };
+  const recipe: ProofRecipe<boolean> = { ...leaf('guard-error'), dependencies: (work) => { work.require(guard, true); return []; } };
+  const dag = new ProofDag(binding());
+  assert.throws(() => dag.resolve(recipe, new ProofQuery()), RangeError);
+  fail = false;
+  assert.equal(dag.resolve(recipe, new ProofQuery()).kind, 'proved');
+  const before = reads;
+  assert.equal(dag.resolve(recipe, new ProofQuery({ steps: 1 })).kind, 'exhausted');
+  assert.equal(reads, before);
+  assert.equal(dag.resolve(recipe, new ProofQuery()).kind, 'proved');
+});

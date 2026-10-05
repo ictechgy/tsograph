@@ -13,7 +13,7 @@ import { climbWrappers, type FlowIndex, referenceSite, type MutationRecord } fro
 import { isMutationCleanView, type MutationSafetyContext } from './mutation-safety.ts';
 import { skipWrappers } from './node-collector.ts';
 import type { FlowPolicy } from './value-flow.ts';
-import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge } from './proof-dag.ts';
+import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge, type ProofGuard, type ProofWork } from './proof-dag.ts';
 
 /** 생성자 carrier 증명에 필요한 공개 분석 문맥이다. */
 export interface ConstructorCarrierContext {
@@ -95,9 +95,10 @@ export class ConstructorCarrierAnalyzer {
     Map<ts.ClassLikeDeclaration, ProofRecipe<boolean>>>();
   private readonly issuedProofs = new WeakMap<ProofCertificate, ConstructorCarrierProof>();
   private query: ProofQuery | undefined;
-  private work: ((depth?: number, frames?: number) => void) | undefined;
+  private work: ProofWork | undefined;
   private walkDepth = 0;
   private readonly files: ReadonlySet<ts.SourceFile>;
+  private readonly policyGuards = new Map<string, WeakMap<object, ProofGuard>>();
 
   constructor(context: ConstructorCarrierContext) {
     this.context = context;
@@ -146,12 +147,18 @@ export class ConstructorCarrierAnalyzer {
   /** current allocation과 repaired legacy 권한을 모두 확인한다. */
   accepts(proof: ConstructorCarrierProof, declaration: ts.ClassLikeDeclaration, literal?: ts.ObjectLiteralExpression): boolean {
     const issued = proof.certificate === undefined ? undefined : this.issuedProofs.get(proof.certificate);
-    return issued !== undefined && proof.certificate !== undefined && proof.declaration === declaration
+    if (!(issued !== undefined && proof.certificate !== undefined && proof.declaration === declaration
       && issued.innerLiteral === proof.innerLiteral && issued.constructor === proof.constructor
       && issued.bagParameter === proof.bagParameter && issued.allowedMutationSites === proof.allowedMutationSites
-      && (literal === undefined || proof.innerLiteral === literal)
-      && this.dag.accepts(proof.certificate, 'legacy', declaration, this.query ?? new ProofQuery({}, this.context.caller))
-      && this.context.index.hasOpaqueMutation !== true;
+      && (literal === undefined || proof.innerLiteral === literal))) return false;
+    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    const previous = this.query;
+    this.query = query;
+    try {
+      return this.dag.accepts(proof.certificate, 'legacy', declaration, query)
+        && this.context.index.hasOpaqueMutation !== true;
+    }
+    finally { if (previous === undefined) this.query = undefined; }
   }
 
   /** exact allocation bag 소비자는 class/family 또는 effect 권한을 빌리지 않는다. */
@@ -179,7 +186,7 @@ export class ConstructorCarrierAnalyzer {
       byDeclaration.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
-    const result = this.dag.resolve(recipe, query);
+    const result = this.resolveRecipe(recipe, query);
     return result.kind === 'proved' && result.value.declaration === declaration
       && this.dag.accepts(result.certificate, 'exact-bag', literal, query);
   }
@@ -219,13 +226,16 @@ export class ConstructorCarrierAnalyzer {
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
           && this.context.policy.isDefaultLibraryFile === intrinsic
-          && policy.isProjectFile(source) && !policy.isOpenCallable(declaration)
           && this.context.index.references === references && references.size === referenceCount
           && this.context.index.mutations === mutations && mutations.length === mutationCount
           && this.context.index.hasOpaqueMutation === opaque
           && this.context.index.hasIncompleteMutations === incompleteMutations
           && this.context.index.mutationComplete === mutationComplete,
-        dependencies: () => [],
+        dependencies: (work) => {
+          work.require(this.policyGuard('project', source), true);
+          work.require(this.policyGuard('callable', declaration), false);
+          return [];
+        },
         evaluate: (work) => this.withWork(work, () => {
           try {
             work();
@@ -243,7 +253,7 @@ export class ConstructorCarrierAnalyzer {
       this.extendedRecipes.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
-    const result = this.dag.resolve(recipe, query);
+    const result = this.resolveRecipe(recipe, query);
     return result.kind === 'proved' && result.value
       && this.dag.accepts(result.certificate, 'instance-family', declaration, query, 'extended');
   }
@@ -288,14 +298,17 @@ export class ConstructorCarrierAnalyzer {
           && this.context.policy.isOpenCallable === callable
           && this.context.policy.openProperties === open
           && this.context.policy.isDefaultLibraryFile === intrinsic
-          && policy.isProjectFile(source) && !policy.isOpenCallable(declaration)
           && this.context.index.references === references && references.size === referenceCount
           && this.context.index.mutations === mutations && mutations.length === mutationCount
           && this.context.index.hasOpaqueMutation === opaque
           && this.context.index.hasIncompleteMutations === incompleteMutations
           && this.context.index.mutationComplete === mutationComplete
           && literal.getSourceFile() === declaration.getSourceFile(),
-        dependencies: () => [],
+        dependencies: (work) => {
+          work.require(this.policyGuard('project', source), true);
+          work.require(this.policyGuard('callable', declaration), false);
+          return [];
+        },
         evaluate: (work) => this.withWork(work, () => {
           try {
             work();
@@ -313,7 +326,7 @@ export class ConstructorCarrierAnalyzer {
       byDeclaration.set(declaration, recipe);
     }
     const query = this.query ?? new ProofQuery({}, this.context.caller);
-    const result = this.dag.resolve(recipe, query);
+    const result = this.resolveRecipe(recipe, query);
     return result.kind === 'proved' && result.value
       && this.dag.accepts(result.certificate, 'exact-bag', literal, query, 'extended');
   }
@@ -377,16 +390,21 @@ export class ConstructorCarrierAnalyzer {
         : kind === 'identity' || kind === 'instance' || kind === 'consumption' || kind === 'receiver' ? 'concrete-dispatch' : 'legacy',
       identity: declaration,
       valid: () => (this.validEntry(declaration)
-        || (kind === 'role' || kind === 'lineage') && !policy.isProjectFile(source)) && source.text === text
+        || (kind === 'role' || kind === 'lineage') && !this.files.has(source)) && source.text === text
         && (this.context.program === undefined || this.context.program.getTypeChecker() === this.context.checker)
         && this.context.index.effectInventory === inventory && this.context.policy === policy
         && policy.openProperties === open && policy.isProjectFile === project && policy.isOpenCallable === callable
         && policy.isDefaultLibraryFile === intrinsic && this.context.index.hasOpaqueMutation === opaque
         && this.context.index.hasIncompleteMutations === incompleteMutations && this.context.index.mutationComplete === mutationComplete
         && this.context.index.references === references && references.size === referenceCount
-        && this.context.index.mutations === mutations && mutations.length === mutationCount
-        && (kind !== 'proof' || policy.isProjectFile(source) && !policy.isOpenCallable(declaration)),
+        && this.context.index.mutations === mutations && mutations.length === mutationCount,
       dependencies: (work) => this.withWork(work, () => {
+        if (kind !== 'role' && kind !== 'lineage') {
+          work.require(this.policyGuard('project', source), true);
+          work.require(this.policyGuard('callable', declaration), false);
+        } else {
+          work.require(this.policyGuard('project', source), this.files.has(source));
+        }
         const edge = (owner: ts.ClassLikeDeclaration, operation: CarrierOperation): ProofEdge => ({ recipe: this.recipe(owner, operation), depth: 1, frames: 0 });
         if (kind === 'role' || kind === 'construction') return [];
         if (kind === 'proof') return [edge(declaration, 'construction')];
@@ -423,8 +441,9 @@ export class ConstructorCarrierAnalyzer {
             const proof = role === true ? this.dependencyValue(declaration, 'construction', children) as ConstructorReceiverProof : undefined;
             value = proof !== undefined && this.scanDeclaredReceiverUses(declaration, proof.constructions);
           } else value = this.dependencyValue(declaration, 'consumption', children) === true && this.scanDeclaredMethodInstanceSafety(declaration);
-          return value === undefined || value === false && kind !== 'role' && kind !== 'lineage'
-            ? { kind: 'rejected', reason: 'syntax' } : { kind: 'proved', value };
+          const result = value === undefined || value === false && kind !== 'role' && kind !== 'lineage'
+            ? { kind: 'rejected' as const, reason: 'syntax' } : { kind: 'proved' as const, value };
+            return result;
           });
         } catch (error) {
           if (error instanceof CarrierIncomplete) return { kind: 'incomplete', reason: 'coverage' };
@@ -441,20 +460,57 @@ export class ConstructorCarrierAnalyzer {
     const child = children.find((result) => result.kind === 'proved' && result.certificate.nodeId === id);
     return child?.kind === 'proved' ? child.value : undefined;
   }
-  /** 현재 recipe의 logical work callback만 설치하고 예외에도 이전 문맥을 복원한다. */
-  private withWork<T>(work: (depth?: number, frames?: number) => void, run: () => T): T {
+  /** 현재 recipe의 ordered proof work만 설치하고 예외에도 이전 문맥을 복원한다. */
+  private withWork<T>(work: ProofWork, run: () => T): T {
     const previous = this.work; this.work = work;
     try { return run(); } finally { this.work = previous; }
   }
+  /** policy 대상별 guard를 analyzer 안에서 intern한다. */
+  private policyGuard(kind: string, target: object): ProofGuard {
+    let guards = this.policyGuards.get(kind);
+    if (guards === undefined) { guards = new WeakMap(); this.policyGuards.set(kind, guards); }
+    const existing = guards.get(target);
+    if (existing !== undefined) return existing;
+    const policy = this.context.policy;
+    const read = (): boolean => kind === 'project'
+      ? policy.isProjectFile.call(policy, target as ts.SourceFile)
+      : kind === 'callable'
+        ? policy.isOpenCallable.call(policy, target as ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration)
+        : policy.isDefaultLibraryFile?.call(policy, target as ts.SourceFile) === true;
+    const guard: ProofGuard = { read };
+    guards.set(target, guard);
+    return guard;
+  }
+  /** policy 조회는 active ordered work가 없으면 uncharged internal use로 취급한다. */
+  private policyWork(): ProofWork {
+    if (this.work === undefined) throw new Error('carrier policy read without active ProofWork');
+    return this.work;
+  }
+  private policyIsProjectFile(sourceFile: ts.SourceFile): boolean {
+    return this.policyWork().observe(this.policyGuard('project', sourceFile), this.walkDepth, this.walkDepth);
+  }
+  private policyIsOpenCallable(declaration: ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration): boolean {
+    return this.policyWork().observe(this.policyGuard('callable', declaration), this.walkDepth, this.walkDepth);
+  }
+  private policyIsDefaultLibraryFile(sourceFile: ts.SourceFile): boolean {
+    return this.policyWork().observe(this.policyGuard('default-library', sourceFile), this.walkDepth, this.walkDepth);
+  }
   /** static AST node는 ValueFlow를 재귀 호출하지 않는다. */
   private resolve<T>(declaration: ts.ClassLikeDeclaration, kind: CarrierOperation): ProofOutcome<T> {
-    return this.dag.resolve(this.recipe(declaration, kind), this.query ?? new ProofQuery({}, this.context.caller)) as ProofOutcome<T>;
+    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    return this.resolveRecipe<T>(this.recipe(declaration, kind) as ProofRecipe<T>, query);
+  }
+  private resolveRecipe<T>(recipe: ProofRecipe<T>, query: ProofQuery): ProofOutcome<T> {
+    const previous = this.query;
+    this.query = query;
+    try { return this.dag.resolve(recipe, query) as ProofOutcome<T>; }
+    finally { if (previous === undefined) this.query = undefined; }
   }
 
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
   private proveClass(declaration: ts.ClassLikeDeclaration, requireOptionalOwn = true): ConstructorCarrierProof | undefined {
     this.step();
-    if (!this.context.policy.isProjectFile(declaration.getSourceFile()) || this.context.policy.isOpenCallable(declaration)) return undefined;
+    if (!this.policyIsProjectFile(declaration.getSourceFile()) || this.policyIsOpenCallable(declaration)) return undefined;
     if (hasDecorators(declaration) || declaration.heritageClauses !== undefined || this.context.index.newThisClasses.has(declaration)) return undefined;
     if ((this.context.index.subclasses.get(declaration)?.length ?? 0) > 0) return undefined;
     if (isExportedDeclaration(this.context, declaration)) return undefined;
@@ -515,7 +571,7 @@ export class ConstructorCarrierAnalyzer {
    */
   private isCarrierFlowCandidate(declaration: ts.ClassLikeDeclaration): boolean {
     this.step();
-    if (!this.context.policy.isProjectFile(declaration.getSourceFile())) return false;
+    if (!this.policyIsProjectFile(declaration.getSourceFile())) return false;
     const constructors = declaration.members.filter(
       (member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member) && member.body !== undefined,
     );
@@ -543,7 +599,8 @@ export class ConstructorCarrierAnalyzer {
   /** literal/global nullish source는 private parameter bag에서 유래할 수 없으므로 역할 판정에서 제외한다. */
   private isDefinitelyIndependentFallbackSource(expression: ts.Expression): boolean {
     const inner = skipWrappers(expression);
-    return inner.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(inner) || isGlobalUndefined(this.context, inner);
+    return inner.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(inner)
+      || isGlobalUndefined(this.context, inner, (source) => this.policyIsDefaultLibraryFile(source));
   }
 
   /** nested callable을 제외한 direct return들이 모두 genuine intrinsic `new Date()`인지 본다. */
@@ -578,7 +635,7 @@ export class ConstructorCarrierAnalyzer {
     const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(callee));
     const declarations = symbol?.declarations ?? [];
     return declarations.length > 0
-      && declarations.every((declaration) => defaultLibraryFile(this.context.policy, declaration.getSourceFile()));
+      && declarations.every((declaration) => this.policyIsDefaultLibraryFile(declaration.getSourceFile()));
   }
 
   /**
@@ -798,7 +855,8 @@ export class ConstructorCarrierAnalyzer {
       if (!ts.isPropertySignature(member) || member.type === undefined || hasDecorators(member)) return undefined;
       const key = staticPropertyName(member.name);
       if (key === undefined || key === '__proto__' || key === 'then' || keys.has(key)) return undefined;
-      if (member.questionToken !== undefined && !isDateFactoryType(this.context, member.type)) return undefined;
+      if (member.questionToken !== undefined && !isDateFactoryType(this.context, member.type,
+        (source) => this.policyIsDefaultLibraryFile(source))) return undefined;
       keys.add(key);
       if (member.questionToken !== undefined) optional.add(key);
     }
@@ -814,7 +872,7 @@ export class ConstructorCarrierAnalyzer {
     if (!ts.isTypeReferenceNode(typeNode) || !ts.isIdentifier(typeNode.typeName) || (typeNode.typeArguments?.length ?? 0) !== 0) return undefined;
     const symbol = dealias(this.context.checker, this.context.checker.getSymbolAtLocation(typeNode.typeName));
     const declaration = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
-    if (declaration === undefined || !this.context.policy.isProjectFile(declaration.getSourceFile())) return undefined;
+    if (declaration === undefined || !this.policyIsProjectFile(declaration.getSourceFile())) return undefined;
     if (ts.isInterfaceDeclaration(declaration)) {
       if (declaration.heritageClauses !== undefined) return undefined;
       return [...declaration.members];
@@ -849,7 +907,9 @@ export class ConstructorCarrierAnalyzer {
   private isInertOrPureDateProperty(property: ts.PropertyAssignment | ts.ShorthandPropertyAssignment): boolean {
     if (!ts.isPropertyAssignment(property)) return false;
     const value = skipWrappers(property.initializer);
-    return value.kind === ts.SyntaxKind.NullKeyword || isGlobalUndefined(this.context, value) || this.isPureDefaultDate(value);
+    return value.kind === ts.SyntaxKind.NullKeyword
+      || isGlobalUndefined(this.context, value, (source) => this.policyIsDefaultLibraryFile(source))
+      || this.isPureDefaultDate(value);
   }
 
   /** instance field와 parameter-property의 허용된 정적 이름을 수집한다. */
@@ -1071,7 +1131,7 @@ export class ConstructorCarrierAnalyzer {
     if (symbol === undefined || this.context.policy.isDefaultLibraryFile === undefined) return false;
     const target = (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? this.context.checker.getAliasedSymbol(symbol) : symbol;
     const declarations = target.declarations ?? [];
-    return declarations.length > 0 && declarations.every((declaration) => defaultLibraryFile(this.context.policy, declaration.getSourceFile()))
+    return declarations.length > 0 && declarations.every((declaration) => this.policyIsDefaultLibraryFile(declaration.getSourceFile()))
       && (this.context.index.identifierWrites.get(dealias(this.context.checker, symbol)!)?.length ?? 0) === 0;
   }
 
@@ -1135,7 +1195,8 @@ export class ConstructorCarrierAnalyzer {
       this.step();
       if (value === undefined) return false;
       const rhs = skipWrappers(value);
-      if (rhs === literal || rhs.kind === ts.SyntaxKind.NullKeyword || isGlobalUndefined(this.context, rhs)) continue;
+      if (rhs === literal || rhs.kind === ts.SyntaxKind.NullKeyword
+        || isGlobalUndefined(this.context, rhs, (source) => this.policyIsDefaultLibraryFile(source))) continue;
       return false;
     }
     return true;
@@ -1158,7 +1219,8 @@ export class ConstructorCarrierAnalyzer {
       || (declaration.parent.flags & ts.NodeFlags.Let) === 0 || declaration.parent.parent.parent !== declaration.getSourceFile()
       || hasExportedVariableStatement(declaration)) return undefined;
     const initializer = declaration.initializer === undefined ? undefined : skipWrappers(declaration.initializer);
-    if (initializer !== undefined && initializer.kind !== ts.SyntaxKind.NullKeyword && !isGlobalUndefined(this.context, initializer)) return undefined;
+    if (initializer !== undefined && initializer.kind !== ts.SyntaxKind.NullKeyword
+      && !isGlobalUndefined(this.context, initializer, (source) => this.policyIsDefaultLibraryFile(source))) return undefined;
     return symbol;
   }
 
@@ -1179,7 +1241,8 @@ export class ConstructorCarrierAnalyzer {
       || parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken
       || parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
       && (parent.left === expression || parent.right === expression)
-      && isNullOrUndefinedExpression(parent.left === expression ? parent.right : parent.left, this.context)
+      && isNullOrUndefinedExpression(parent.left === expression ? parent.right : parent.left, this.context,
+        (source) => this.policyIsDefaultLibraryFile(source))
       && isConditionExpression(parent);
   }
 
@@ -1319,7 +1382,7 @@ export class ConstructorCarrierAnalyzer {
     const declaration = declarations.length === 1 ? declarations[0] : undefined;
     if (declaration === undefined || !ts.isFunctionDeclaration(declaration) || declaration.body === undefined
       || declaration.asteriskToken !== undefined || hasAsyncModifier(declaration)) return undefined;
-    return this.context.policy.isProjectFile(declaration.getSourceFile()) && !this.context.policy.isOpenCallable(declaration)
+    return this.policyIsProjectFile(declaration.getSourceFile()) && !this.policyIsOpenCallable(declaration)
       ? declaration : undefined;
   }
 
@@ -1563,7 +1626,7 @@ export class ConstructorCarrierAnalyzer {
     const safety: MutationSafetyContext = {
       checker: this.context.checker,
       index: this.context.index,
-      isDefaultLibraryFile: (sourceFile) => defaultLibraryFile(policy, sourceFile),
+      isDefaultLibraryFile: (sourceFile) => this.policyIsDefaultLibraryFile(sourceFile),
       openProgram: policy.openProperties,
       openProperties: policy.openProperties,
       budgetStep: () => this.step(),
@@ -1774,19 +1837,27 @@ function isAmbient(node: ts.Node): boolean {
 }
 
 /** shadow되지 않은 global undefined 식인지 확인한다. */
-function isGlobalUndefined(context: ConstructorCarrierContext, expression: ts.Expression): boolean {
+function isGlobalUndefined(
+  context: ConstructorCarrierContext,
+  expression: ts.Expression,
+  isDefaultLibrary: (sourceFile: ts.SourceFile) => boolean = (sourceFile) => defaultLibraryFile(context.policy, sourceFile),
+): boolean {
   const inner = skipWrappers(expression);
   if (!ts.isIdentifier(inner) || inner.text !== 'undefined') return false;
   const symbol = context.checker.getSymbolAtLocation(inner);
   if (symbol === undefined) return (context.checker.getTypeAtLocation(inner).flags & ts.TypeFlags.Undefined) !== 0;
   const declarations = symbol.declarations ?? [];
-  return declarations.length === 0 || declarations.every((declaration) => defaultLibraryFile(context.policy, declaration.getSourceFile()));
+  return declarations.length === 0 || declarations.every((declaration) => isDefaultLibrary(declaration.getSourceFile()));
 }
 
 /** null 또는 genuine global undefined 비교값인지 확인한다. */
-function isNullOrUndefinedExpression(expression: ts.Expression, context: ConstructorCarrierContext): boolean {
+function isNullOrUndefinedExpression(
+  expression: ts.Expression,
+  context: ConstructorCarrierContext,
+  isDefaultLibrary?: (sourceFile: ts.SourceFile) => boolean,
+): boolean {
   const inner = skipWrappers(expression);
-  return inner.kind === ts.SyntaxKind.NullKeyword || isGlobalUndefined(context, inner);
+  return inner.kind === ts.SyntaxKind.NullKeyword || isGlobalUndefined(context, inner, isDefaultLibrary);
 }
 
 /** memo equality가 실제 control-flow condition 자리인지 확인한다. */
@@ -1800,7 +1871,11 @@ function isConditionExpression(expression: ts.Expression): boolean {
 }
 
 /** optional bag member가 genuine `() => Date` 타입인지 확인한다. */
-function isDateFactoryType(context: ConstructorCarrierContext, type: ts.TypeNode): boolean {
+function isDateFactoryType(
+  context: ConstructorCarrierContext,
+  type: ts.TypeNode,
+  isDefaultLibrary: (sourceFile: ts.SourceFile) => boolean = (sourceFile) => defaultLibraryFile(context.policy, sourceFile),
+): boolean {
   if (!ts.isFunctionTypeNode(type) || type.parameters.length !== 0 || type.typeParameters !== undefined) return false;
   const result = skipTypeWrappers(type.type);
   if (!ts.isTypeReferenceNode(result) || !ts.isIdentifier(result.typeName) || result.typeName.text !== 'Date'
@@ -1810,7 +1885,7 @@ function isDateFactoryType(context: ConstructorCarrierContext, type: ts.TypeNode
     ? context.checker.getAliasedSymbol(symbol).declarations ?? [] : symbol.declarations ?? [];
   const known = declarations.filter((declaration): declaration is ts.Declaration => declaration !== undefined);
   return known.length > 0 && known.length === declarations.length
-    && known.every((declaration) => defaultLibraryFile(context.policy, declaration.getSourceFile()));
+    && known.every((declaration) => isDefaultLibrary(declaration.getSourceFile()));
 }
 
 /** FlowPolicy method 구현의 receiver를 보존한 genuine default-library 판정이다. */

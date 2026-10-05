@@ -291,7 +291,7 @@ test('analyzer는 완료 결과·재진입·예산 경계를 분리하고 내부
   assert.equal(instanceFlow.allowsInstanceFlow(runner), true);
   const completedChecks = instanceFlowChecks;
   assert.equal(instanceFlow.allowsInstanceFlow(runner), true);
-  assert.equal(instanceFlowChecks, completedChecks);
+  assert.ok(instanceFlowChecks > completedChecks);
 
   let exhaustedFlowChecks = 0;
   const exhaustedFlow = new ConstructorCarrierAnalyzer({
@@ -1132,6 +1132,26 @@ test('stage2 extended cache rechecks an open-callable closure without changing i
   assert.equal(analyzer.allowsExtendedInstanceIsolation(runner), false);
 });
 
+test('stage2 extended cache rechecks wrapper policy results without changing function identity', () => {
+  const { source, context, runner } = contextOf(`${positive}
+function use(value: Runner, callback: (value: Runner) => void) { callback(value); }
+use(runner, (value) => value.run());`);
+  let open = false;
+  const callable = (declaration: ts.Node): boolean => open
+    && ts.isFunctionDeclaration(declaration) && declaration.name?.text === 'use';
+  const policy = { ...context.policy, isOpenCallable: callable };
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, policy,
+    index: { ...context.index, effectInventory: completeInventory(source) },
+  });
+  const literal = analyzer.prove(runner)?.innerLiteral; assert.ok(literal);
+  assert.equal(analyzer.isolatesExtendedBag(runner, literal), true);
+  open = true;
+  assert.equal(analyzer.isolatesExtendedBag(runner, literal), false);
+  assert.equal(new ConstructorCarrierAnalyzer({ ...context, policy,
+    index: { ...context.index, effectInventory: completeInventory(source) },
+  }).isolatesExtendedBag(runner, literal), false);
+});
+
 test('stage2 preserves entry versus coverage reasons in carrier diagnostics', () => {
   const { context, runner } = contextOf(positive);
   const diagnostics = new Set<string>();
@@ -1169,6 +1189,113 @@ test('stage2 actual carrier cold/warm and reversed consumer order replay the sam
     finally { analyzer.endQuery(); }
   };
   const cold = run(); assert.deepEqual(run(), cold); assert.deepEqual(run(true), cold);
+});
+
+test('stage2 policy observation validation preserves cold/warm interruption positions', () => {
+  const { context, runner } = contextOf(positive);
+  const interrupted = new Error('caller budget');
+  let limit = Infinity; let steps = 0; let depth = 0; let frames = 0;
+  const create = () => new ConstructorCarrierAnalyzer({ ...context, caller: {
+    step: () => { if (++steps > limit) throw interrupted; },
+    check: (d, f) => { depth = Math.max(depth, d); frames = Math.max(frames, f); },
+  } });
+  const warm = create(); assert.equal(warm.outcome(runner).kind, 'proved');
+  const run = (analyzer: ConstructorCarrierAnalyzer, budget: number) => {
+    limit = budget; steps = 0; depth = 0; frames = 0;
+    analyzer.beginQuery();
+    let kind: string;
+    try { kind = analyzer.outcome(runner).kind; }
+    catch (error) { if (error !== interrupted) throw error; kind = 'caller-exhausted'; }
+    finally { analyzer.endQuery(); }
+    return { kind, steps, depth, frames };
+  };
+  for (const budget of [0, 1, 2, 3, 4, 5, 8, 10, 20, 40, 80, 160, 320]) {
+    assert.deepEqual(run(warm, budget), run(create(), budget), `caller budget ${budget}`);
+  }
+});
+
+test('stage2 carrier guards have identical caller and policy events at every interruption budget', () => {
+  const { context, runner } = contextOf(positive);
+  const interrupted = new Error('caller event budget');
+  const identities = new WeakMap<object, number>(); let nextIdentity = 0;
+  let events: string[] = []; let limit = Infinity; let steps = 0; let depth = 0; let frames = 0;
+  const note = (kind: string, target: object) => {
+    let id = identities.get(target);
+    if (id === undefined) { id = nextIdentity++; identities.set(target, id); }
+    events.push(`policy:${kind}:${id}`);
+  };
+  const policy = { ...context.policy,
+    isProjectFile: (file: ts.SourceFile) => { note('project', file); return context.policy.isProjectFile.call(context.policy, file); },
+    isOpenCallable: (node: ts.FunctionLikeDeclaration | ts.ClassLikeDeclaration) => {
+      note('callable', node); return context.policy.isOpenCallable.call(context.policy, node);
+    },
+    isDefaultLibraryFile: (file: ts.SourceFile) => {
+      note('library', file); return context.policy.isDefaultLibraryFile?.call(context.policy, file) === true;
+    },
+  };
+  const create = () => new ConstructorCarrierAnalyzer({ ...context, policy, caller: {
+    step: () => { events.push('step'); if (++steps > limit) throw interrupted; },
+    check: (d, f) => { events.push(`check:${d}:${f}`); depth = Math.max(depth, d); frames = Math.max(frames, f); },
+  } });
+  const run = (analyzer: ConstructorCarrierAnalyzer, budget: number) => {
+    limit = budget; steps = 0; depth = 0; frames = 0; events = [];
+    analyzer.beginQuery(); let kind: string;
+    try { kind = analyzer.outcome(runner).kind; }
+    catch (error) { if (error !== interrupted) throw error; kind = 'caller-exhausted'; }
+    finally { analyzer.endQuery(); }
+    return { kind, steps, depth, frames, events: [...events] };
+  };
+  const warm = create(); const full = run(warm, Infinity); assert.equal(full.kind, 'proved');
+  for (let budget = 0; budget <= full.steps + 1; budget++) {
+    assert.deepEqual(run(warm, budget), run(create(), budget), `caller event budget ${budget}`);
+  }
+  assert.equal(run(warm, 1).events.some((event) => event.startsWith('policy:')), false);
+});
+
+test('stage2 public accepts shares active guard snapshots and refreshes standalone queries', () => {
+  const { source, context, runner } = contextOf(positive);
+  let open = false;
+  const policy = { ...context.policy, isOpenCallable: () => open };
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, policy,
+    index: { ...context.index, effectInventory: completeInventory(source) },
+  });
+  analyzer.beginQuery();
+  let proof;
+  try {
+    proof = analyzer.prove(runner); assert.ok(proof);
+    open = true;
+    assert.equal(analyzer.accepts(proof, runner), true);
+  } finally { analyzer.endQuery(); }
+  assert.ok(proof);
+  assert.equal(analyzer.accepts(proof, runner), false);
+  assert.equal(analyzer.isolatesExtendedBag(runner, proof.innerLiteral), false);
+  open = false;
+  assert.equal(analyzer.accepts(proof, runner), true);
+});
+
+test('stage2 public accepts charges current policy validation and rejects stale entry state', () => {
+  const { context, runner } = contextOf(positive);
+  let steps = 0;
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+    step: () => { steps++; },
+    check: () => {},
+  } });
+  const proof = analyzer.prove(runner); assert.ok(proof);
+  steps = 0;
+  analyzer.beginQuery();
+  try {
+    assert.equal(analyzer.accepts(proof, runner), true);
+    assert.ok(steps > 0);
+  }
+  finally { analyzer.endQuery(); }
+  const oldProjectCheck = context.policy.isProjectFile;
+  context.policy.isProjectFile = () => false;
+  try {
+    analyzer.beginQuery();
+    try { assert.equal(analyzer.accepts(proof, runner), false); }
+    finally { analyzer.endQuery(); }
+  }
+  finally { context.policy.isProjectFile = oldProjectCheck; }
 });
 
 test('stage2 syntax, missing mutation coverage, and interrupted caller work have distinct outcomes', () => {

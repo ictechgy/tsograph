@@ -1029,6 +1029,10 @@ What `bound` guarantees, and what it does not:
   proof. Completed AST proofs replay the same charged work in canonical dependency order, including
   rejected dependencies, and recheck entry validity and shared-edge depth/frame limits. Legacy
   dispatch and identity results do not grant new ambient, primitive-effect, or confinement authority.
+  Policy predicates are sampled after their charged step and depth/frame check, at the same position
+  in cold construction and warm replay. Each query keeps the first sampled value for a predicate
+  and target; a new query reads the current policy again. A failed guard is incomplete and cannot
+  become a completed visit or authorize a certificate on a retry in the same query.
 - Each flow query has a fixed budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
   budget is unknown, and the count appears under
   `dispatch-budget:`. Property writes, member reads, and receiver flows looked up by name are memoized

@@ -44,15 +44,24 @@ export interface ProofRecipe<T> {
   readonly identity: object;
   readonly mode?: 'legacy' | 'extended';
   readonly valid: () => boolean;
-  readonly dependencies: (work: (depth?: number, frames?: number) => void) => readonly ProofEdge[];
-  readonly evaluate: (work: (depth?: number, frames?: number) => void, children: readonly ProofOutcome<unknown>[]) => ProofResult<T>;
+  readonly dependencies: (work: ProofWork) => readonly ProofEdge[];
+  readonly evaluate: (work: ProofWork, children: readonly ProofOutcome<unknown>[]) => ProofResult<T>;
 }
 /** caller 자원과 동일한 고정 상한이다. */
 export interface ProofLimits { readonly steps?: number; readonly depth?: number; readonly frames?: number }
 /** caller step 및 edge 위치를 함께 검증한다. */
 export interface ProofCaller { readonly step: () => void; readonly check: (depth: number, frames: number) => void }
+/** 현재 값이 proof entry에 포함되는 policy/default-library 조회다. */
+export interface ProofGuard { readonly read: () => boolean }
+/** 순서가 보존된 proof work다. guard 조회는 callback 전에 청구하고 같은 edge 위치에서 재생한다. */
+export type ProofWork = ((depth?: number, frames?: number) => void) & {
+  observe: (guard: ProofGuard, depth?: number, frames?: number) => boolean;
+  require: (guard: ProofGuard, required: boolean, depth?: number, frames?: number) => void;
+};
 /** 외부에 semantic negative로 전달하지 않는 내부 중단이다. */
 class ProofExhausted extends Error {}
+/** 현재 질의의 guard 불일치는 semantic rejection이 아니라 entry 무효화다. */
+class ProofEntryInvalid extends Error {}
 /** 낮은 테스트 예산만 허용하고 잘못된 수치는 보수적으로 즉시 중단한다. */
 function boundedLimit(value: number | undefined, maximum: number): number {
   if (value === undefined) return maximum;
@@ -66,6 +75,7 @@ export class ProofQuery {
   maxFrames = 0;
   private readonly limits: Required<ProofLimits>;
   private readonly caller: ProofCaller | undefined;
+  private readonly guards = new Map<ProofGuard, boolean>();
   constructor(limits: ProofLimits = {}, caller?: ProofCaller) {
     this.limits = { steps: boundedLimit(limits.steps, 20_000), depth: boundedLimit(limits.depth, 256), frames: boundedLimit(limits.frames, 400) };
     this.caller = caller;
@@ -82,14 +92,28 @@ export class ProofQuery {
     this.maxFrames = Math.max(this.maxFrames, frames);
     if (depth > this.limits.depth || frames > this.limits.frames) throw new ProofExhausted();
   }
+  /** guard 조회 위치를 먼저 청구하고 현재 질의 snapshot을 읽는다. */
+  observeGuard(guard: ProofGuard, depth: number, frames: number): boolean {
+    this.step();
+    this.check(depth, frames);
+    const known = this.guards.get(guard);
+    if (known !== undefined) return known;
+    const value = guard.read();
+    this.guards.set(guard, value);
+    return value;
+  }
 }
 /** 동일한 위치의 연속 local work를 압축한다. */
 interface LogicalWork { cost: number; readonly depth: number; readonly frames: number }
+/** callback 결과와 원래 실행 위치를 재생할 guard 연산이다. */
+interface GuardWork { readonly guard: ProofGuard; readonly expected: boolean; readonly depth: number; readonly frames: number }
+/** 일반 작업과 guard의 순서를 보존하는 완료 trace다. */
+type ProofOperation = { readonly kind: 'work'; readonly work: LogicalWork } | { readonly kind: 'guard'; readonly guard: GuardWork };
 /** 완성된 정적 node의 pre/post local cost와 canonical dependency다. */
 interface Completed {
   readonly recipe: ProofRecipe<unknown>;
-  readonly before: readonly LogicalWork[];
-  readonly after: readonly LogicalWork[];
+  readonly before: readonly ProofOperation[];
+  readonly after: readonly ProofOperation[];
   readonly localDepth: number;
   readonly localFrames: number;
   readonly edges: readonly ProofEdge[];
@@ -113,12 +137,23 @@ export class ProofDag {
   /** 자원 중단만 outcome으로 바꾸며 예상 밖 예외는 finally 정리 뒤 전파한다. */
   resolve<T>(recipe: ProofRecipe<T>, query: ProofQuery): ProofOutcome<T> {
     try { return this.visit(recipe, query, 0, 0) as ProofOutcome<T>; }
-    catch (error) { if (error instanceof ProofExhausted) return { kind: 'exhausted' }; throw error; }
+    catch (error) {
+      if (error instanceof ProofExhausted) return { kind: 'exhausted' };
+      if (error instanceof ProofEntryInvalid) return { kind: 'incomplete', reason: 'entry' };
+      throw error;
+    }
   }
   /** cold AST 작업과 같은 순서로 위치와 비용을 재생한다. */
-  private replay(operations: readonly LogicalWork[], query: ProofQuery, depth: number, frames: number): void {
-    for (const operation of operations) for (let i = 0; i < operation.cost; i++) {
-      query.step(); query.check(depth + operation.depth, frames + operation.frames);
+  private replay(operations: readonly ProofOperation[], query: ProofQuery, depth: number, frames: number): void {
+    for (const operation of operations) {
+      if (operation.kind === 'guard') {
+        const current = query.observeGuard(operation.guard.guard, depth + operation.guard.depth, frames + operation.guard.frames);
+        if (current !== operation.guard.expected) throw new ProofEntryInvalid();
+        continue;
+      }
+      for (let i = 0; i < operation.work.cost; i++) {
+        query.step(); query.check(depth + operation.work.depth, frames + operation.work.frames);
+      }
     }
   }
   /** 권한과 모드를 child 실행 전에 결정해 다른 증명의 결과를 소비하지 않는다. */
@@ -149,31 +184,47 @@ export class ProofDag {
     if (cached !== undefined) {
       if (this.mismatched(recipe, cached.edges)) return { kind: 'rejected', reason: 'capability' };
       const fresh = !query.visited.has(cached);
-      query.visited.add(cached);
       if (!fresh) query.check(depth + cached.localDepth, frames + cached.localFrames);
       if (fresh) this.replay(cached.before, query, depth, frames);
       const children = cached.edges.map((edge) => this.visit(edge.recipe, query, depth + edge.depth, frames + edge.frames));
       const unstable = children.find((child) => child.kind === 'incomplete' || child.kind === 'cycle' || child.kind === 'exhausted');
       if (unstable !== undefined) return unstable;
       if (fresh) this.replay(cached.after, query, depth, frames);
+      // guard·의존성 중단은 완료 방문이 아니므로 다음 확인에서 trace를 건너뛰지 않는다.
+      query.visited.add(cached);
       return cached.outcome;
     }
-    const before: LogicalWork[] = [];
-    const after: LogicalWork[] = [];
+    const before: ProofOperation[] = [];
+    const after: ProofOperation[] = [];
     let localDepth = 0;
     let localFrames = 0;
     const localCheck = (relativeDepth = 0, relativeFrames = 0): void => {
       query.check(depth + relativeDepth, frames + relativeFrames);
       localDepth = Math.max(localDepth, relativeDepth); localFrames = Math.max(localFrames, relativeFrames);
     };
-    const record = (operations: LogicalWork[], d = 0, f = 0): void => {
+    const record = (operations: ProofOperation[], d = 0, f = 0): void => {
       query.step(); localCheck(d, f);
       const last = operations.at(-1);
-      if (last !== undefined && last.depth === d && last.frames === f) last.cost++;
-      else operations.push({ cost: 1, depth: d, frames: f });
+      if (last?.kind === 'work' && last.work.depth === d && last.work.frames === f) {
+        operations[operations.length - 1] = { kind: 'work', work: { ...last.work, cost: last.work.cost + 1 } };
+      }
+      else operations.push({ kind: 'work', work: { cost: 1, depth: d, frames: f } });
+    };
+    const makeWork = (operations: ProofOperation[]): ProofWork => {
+      const work = ((d?: number, f?: number) => record(operations, d, f)) as ProofWork;
+      work.observe = (guard, d = 0, f = 0) => {
+        const value = query.observeGuard(guard, depth + d, frames + f);
+        operations.push({ kind: 'guard', guard: { guard, expected: value, depth: d, frames: f } });
+        localDepth = Math.max(localDepth, d); localFrames = Math.max(localFrames, f);
+        return value;
+      };
+      work.require = (guard, required, d = 0, f = 0) => {
+        if (work.observe(guard, d, f) !== required) throw new ProofEntryInvalid();
+      };
+      return work;
     };
     {
-      const supplied = recipe.dependencies((d, f) => record(before, d, f));
+      const supplied = recipe.dependencies(makeWork(before));
       if (supplied.length > 20_000) throw new ProofExhausted();
       const edges = [...supplied].sort((a, b) =>
         (a.recipe.id < b.recipe.id ? -1 : a.recipe.id > b.recipe.id ? 1 : 0) || a.depth - b.depth || a.frames - b.frames);
@@ -182,14 +233,14 @@ export class ProofDag {
       const unstable = children.find((child) => child.kind === 'incomplete' || child.kind === 'cycle' || child.kind === 'exhausted');
       if (unstable !== undefined) return unstable;
       const negative = children.find((child) => child.kind === 'rejected');
-      const result = negative ?? recipe.evaluate((d, f) => record(after, d, f), children);
+      const result = negative ?? recipe.evaluate(makeWork(after), children);
       if (result.kind !== 'proved' && result.kind !== 'rejected') return result;
       const outcome: ProofOutcome<unknown> = result.kind === 'proved' ? {
         ...result, certificate: Object.freeze({ mode: recipe.mode ?? 'legacy', nodeId: recipe.id, binding: this.binding, capability: recipe.capability, identity: recipe.identity,
           dependencies: Object.freeze(children.flatMap((child) => child.kind === 'proved' ? [child.certificate] : [])) }),
       } : result;
       if (outcome.kind === 'proved') this.issued.set(outcome.certificate, recipe);
-      const node = { recipe, before, after, localDepth, localFrames, edges: Object.freeze(edges), outcome };
+      const node = { recipe, before: Object.freeze(before), after: Object.freeze(after), localDepth, localFrames, edges: Object.freeze(edges), outcome };
       this.completed.set(recipe.id, node);
       query.visited.add(node);
       return outcome;
