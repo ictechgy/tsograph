@@ -133,7 +133,7 @@ type LoaderOrigin = 'loader' | 'factory' | 'platform';
 const PLATFORM_ROOT_NAMES = new Set(['module', 'globalThis', 'process', 'global', 'Reflect']);
 const PLATFORM_TRANSITION_NAMES = new Set(['mainModule', 'parent', 'constructor', 'getBuiltinModule',
   'module', 'globalThis', 'process', 'global', 'Reflect', 'prototype']);
-const LOADER_MEMBER_NAMES = new Set(['require', 'eval', '_load']);
+const LOADER_MEMBER_NAMES = new Set(['require', 'eval', 'Function', '_load']);
 const MAX_PLATFORM_DECLARATIONS = 1_024;
 const MAX_PLATFORM_STATEMENTS = 4_096;
 
@@ -616,7 +616,7 @@ function directLoaderOrigin(
   if (checker === undefined) {
     if (PLATFORM_ROOT_NAMES.has(inner.text)) return 'platform';
     if (inner.text === 'createRequire') return 'factory';
-    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
+    if (inner.text === 'require' || inner.text === 'eval' || inner.text === 'Function') return 'loader';
     return undefined;
   }
   const symbol = ts.isExportSpecifier(inner.parent)
@@ -628,7 +628,7 @@ function directLoaderOrigin(
       if (intrinsic) return 'platform';
     }
     if (inner.text === 'createRequire') return 'factory';
-    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
+    if (inner.text === 'require' || inner.text === 'eval' || inner.text === 'Function') return 'loader';
     return undefined;
   }
   if ((symbol.declarations?.length ?? 0) === 0) {
@@ -638,7 +638,7 @@ function directLoaderOrigin(
       if (intrinsic) return 'platform';
     }
     if (inner.text === 'createRequire') return 'factory';
-    if (inner.text === 'require' || inner.text === 'eval') return 'loader';
+    if (inner.text === 'require' || inner.text === 'eval' || inner.text === 'Function') return 'loader';
   }
   budget.loaderOriginScopes ??= new Map();
   let scoped = budget.loaderOriginScopes.get(inner.getSourceFile());
@@ -673,7 +673,7 @@ function directLoaderOrigin(
         || declaration.getSourceFile() !== inner.getSourceFile()) result = 'platform';
     } else if (inner.text === 'createRequire') {
       if (ambient || nodeModuleImport(declaration, 'createRequire')) result = 'factory';
-    } else if (inner.text === 'eval') {
+    } else if (inner.text === 'eval' || inner.text === 'Function') {
       if (ambient) result = 'loader';
     } else if (nodeModuleImport(declaration, 'createRequire')) {
       result = 'factory';
@@ -886,7 +886,7 @@ function opaqueRequireValueRead(identifier: ts.Identifier, classifier: RequireCl
   if (identifier.text !== 'require') {
     const outer = climbWrappers(identifier);
     const parent = outer.parent;
-    const rootValue = (PLATFORM_ROOT_NAMES.has(identifier.text) || identifier.text === 'eval')
+    const rootValue = (PLATFORM_ROOT_NAMES.has(identifier.text) || identifier.text === 'eval' || identifier.text === 'Function')
       && !((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer);
     if (identifier.text !== 'createRequire' && !loaderValueUse(identifier) && !rootValue) return false;
     const origin = classifier.loaderOrigin(identifier);
@@ -944,6 +944,14 @@ function runtimeEdges(
     return [{ site: node, specifier, target: specifier === undefined ? undefined : resolve(specifier, source) }];
   }
   if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    // 알려진 플랫폼 객체의 임의 멤버에서 loader로 이어질 수 있으므로 첫 접근부터 닫는다.
+    if (classifier.loaderOrigin(node.expression) === 'platform') {
+      const outer = climbWrappers(node);
+      // 직접 해석된 loader 호출은 call 자리에 이미 opaque 근거를 남긴다.
+      if (ts.isCallExpression(outer.parent) && outer.parent.expression === outer
+        && classifier.loaderOrigin(node) !== undefined) return [];
+      return [{ site: node, specifier: undefined, target: undefined }];
+    }
     const key = ts.isPropertyAccessExpression(node) ? node.name.text : undefined;
     if (ts.isPropertyAccessExpression(node) && !LOADER_MEMBER_NAMES.has(key ?? '') && key !== 'createRequire'
       && !PLATFORM_TRANSITION_NAMES.has(key ?? '')) return [];

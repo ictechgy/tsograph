@@ -879,6 +879,8 @@ test('platform root의 대입·반환·named export는 원래 노출 자리에 o
     "declare function eval(code: string): any; (0, eval)(\"require('pkg')\");",
     "export const x = (globalThis as any).process.mainModule.require('pkg');",
     "export const x = (globalThis as any).eval(\"require('pkg')\");",
+    "declare const module: any; export const x = module.children[0].require('pkg');",
+    "declare const module: any; export const x = module.__proto__.constructor._load('pkg');",
   ];
   for (const text of fixtures) {
     const checked = checkedSources({ '/exposed.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
@@ -938,6 +940,9 @@ test('실제 기본 lib·Node 선언을 읽은 platform loader도 opaque로 남�
   for (const text of [
     "export const value = globalThis.eval(\"require('pkg')\");",
     "import { createRequire } from 'node:module'; export const value = createRequire('entry')('pkg');",
+    "export const value = Function('return this')().process.mainModule.require('pkg');",
+    "export const value = new Function('return process')().mainModule.require('pkg');",
+    "export const value = globalThis.Function('return process')().mainModule.require('pkg');",
   ]) {
     const checked = checkedSources({ '/lib-root.ts': text }, { types: ['node'], module: ts.ModuleKind.CommonJS });
     const file = checked.files.get('/lib-root.ts')!;
@@ -958,6 +963,8 @@ test('platform 이름의 실제 local helper는 loader로 승격하지 않는다
     "function eval(value: string) { return value; } eval('module.require(\"plugin\")');",
     "const module = { require: (id: string) => id }; let m: typeof module; m = module; export { module };",
     "const module = { require: (id: string) => id }; function get() { return module; } get().require('pkg');",
+    "const module = { children: [{ require: (id: string) => id }] }; module.children[0].require('pkg');",
+    "function Function(value: string) { return value; } Function('ordinary');",
   ] as const;
   for (const text of fixtures) {
     const checked = checkedSources({ '/ordinary.ts': text }, { noLib: true, types: [], module: ts.ModuleKind.CommonJS });
