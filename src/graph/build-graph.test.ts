@@ -279,3 +279,25 @@ test('프로젝트 import 판정: 상대·절대 경로와 paths 패턴', () => 
   ]);
   assert.equal(projectSpecifierMatcher({})('next/server'), false);
 });
+
+test('실제 그래프의 inventory build-cap은 기존 간선을 보존하고 query exhaustion과 구분한다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-inventory-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'src/main.ts'), 'function target() { return 1; } export function run() { return target(); }');
+    const baseline = await buildCallGraph(project, fileSystem);
+    assert.ok(edgeLines(baseline).has('src/main.ts#run -> src/main.ts#target call'));
+    assert.ok(!baseline.limitations.some((limitation) => limitation.startsWith('effect-inventory:')));
+    writeFileSync(join(project, 'src/padding.ts'), Array.from({ length: 26_000 }, (_, index) => `const v${index} = 1;`).join('\n'));
+    const capped = await buildCallGraph(project, fileSystem);
+    assert.ok(edgeLines(capped).has('src/main.ts#run -> src/main.ts#target call'));
+    assert.ok(capped.limitations.some((limitation) => limitation.includes('effect-inventory: incomplete(build-cap)')));
+    assert.equal(capped.statistics.calls.dispatch.overBudget, 0);
+    for (const mode of ['direct', 'bound', 'candidates'] as const) {
+      assert.equal(capped.limitationsByMode![mode].filter((limitation) => limitation.startsWith('effect-inventory:')).length, 1);
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

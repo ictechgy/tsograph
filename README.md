@@ -1004,6 +1004,15 @@ What `bound` guarantees, and what it does not:
   program without test sources, so mocks injected by unit tests do not block production edges. Call
   sites inside test sources use the whole project. If a non-test file imports a test source, the whole
   project is used everywhere.
+- An independent effect inventory reconciles the expected whole or production sources with their
+  file indexes, source revisions, runtime module edges, and executable operations. Enumeration,
+  reference/alias closure, initialization coverage, and ambient safety are separate checks;
+  complete enumeration can still contain unknown effects. Incomplete coverage prevents new effect
+  certificates while existing dispatch capabilities retain their own checks. Inventory construction
+  is bounded by 1,000,000 visited nodes, 1,000,000 retained records, and 100,000 additional nodes per
+  file. A build cap produces `effect-inventory: incomplete(build-cap)`; it does not consume a flow
+  query's budget or certify a partial inventory as safe. Other missing or mismatched coverage is
+  reported as `effect-inventory: incomplete(coverage)`.
 - Each flow query has a budget (20,000 steps, 256 nested slots, 400 nested expressions); a query over
   budget, or one that overflows the JavaScript stack, is unknown, and the count appears under
   `dispatch-budget:`. Property writes, member reads, and receiver flows looked up by name are memoized
