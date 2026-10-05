@@ -384,6 +384,8 @@ export class ConstructorCarrierAnalyzer {
     const project = policy.isProjectFile;
     const callable = policy.isOpenCallable;
     const intrinsic = policy.isDefaultLibraryFile;
+    const program = this.context.program;
+    const checker = this.context.checker;
     const recipe: ProofRecipe<unknown> = {
       id: `${source.fileName}:${declaration.pos}:${kind}`,
       capability: kind === 'construction' ? 'descriptor'
@@ -391,6 +393,7 @@ export class ConstructorCarrierAnalyzer {
       identity: declaration,
       valid: () => (this.validEntry(declaration)
         || (kind === 'role' || kind === 'lineage') && !this.files.has(source)) && source.text === text
+        && this.context.program === program && this.context.checker === checker
         && (this.context.program === undefined || this.context.program.getTypeChecker() === this.context.checker)
         && this.context.index.effectInventory === inventory && this.context.policy === policy
         && policy.openProperties === open && policy.isProjectFile === project && policy.isOpenCallable === callable
@@ -503,7 +506,13 @@ export class ConstructorCarrierAnalyzer {
   private resolveRecipe<T>(recipe: ProofRecipe<T>, query: ProofQuery): ProofOutcome<T> {
     const previous = this.query;
     this.query = query;
-    try { return this.dag.resolve(recipe, query) as ProofOutcome<T>; }
+    try {
+      const result = this.dag.resolve(recipe, query) as ProofOutcome<T>;
+      if (result.kind === 'cycle' || result.kind === 'exhausted') {
+        this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}; carrier proof was not completed.`);
+      }
+      return result;
+    }
     finally { if (previous === undefined) this.query = undefined; }
   }
 

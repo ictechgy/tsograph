@@ -1273,6 +1273,48 @@ test('stage2 public accepts shares active guard snapshots and refreshes standalo
   assert.equal(analyzer.accepts(proof, runner), true);
 });
 
+test('stage2 lineage cycles retain a deduplicated diagnostic instead of silent boolean projection', () => {
+  const { source, context } = contextOf(`${positive}\nclass CycleA extends CycleB {}\nclass CycleB extends CycleA {}`);
+  const cycle = source.file.statements.find((statement): statement is ts.ClassDeclaration =>
+    ts.isClassDeclaration(statement) && statement.name?.text === 'CycleA'); assert.ok(cycle);
+  const diagnostics = new Set<string>();
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context,
+    index: { ...context.index, proofDiagnostics: diagnostics },
+  });
+  assert.equal(analyzer.hasCarrierFlowLineage(cycle), true);
+  assert.equal(analyzer.hasCarrierFlowLineage(cycle), true);
+  assert.equal([...diagnostics].filter((line) => line.startsWith('carrier-proof: cycle')).length, 1);
+  assert.equal([...diagnostics].some((line) => line.startsWith('dispatch-budget:')), false);
+});
+
+test('stage2 standalone proof exhaustion has one resource diagnostic without a syntax rejection', () => {
+  const fixture = positive.replace('this.clock = deps.clock ?? (() => new Date());',
+    `this.clock = deps.clock ?? (() => new Date()); ${';'.repeat(20_050)}`);
+  const { context, runner } = contextOf(fixture);
+  const diagnostics = new Set<string>();
+  const analyzer = new ConstructorCarrierAnalyzer({ ...context,
+    index: { ...context.index, proofDiagnostics: diagnostics },
+  });
+  assert.equal(analyzer.outcome(runner).kind, 'exhausted');
+  assert.equal(analyzer.outcome(runner).kind, 'exhausted');
+  assert.equal([...diagnostics].filter((line) => line.startsWith('carrier-proof: exhausted')).length, 1);
+  assert.equal([...diagnostics].some((line) => line.startsWith('carrier-proof: rejected')), false);
+});
+
+test('stage2 legacy certificate remains bound to its original Program and checker', () => {
+  const a = contextOf(positive); const b = contextOf(positive);
+  // 실제 analyzer에 넘긴 문맥을 변경한다. 별도 spread 원본을 변경하는 테스트는 이 경계를 검증하지 못한다.
+  const supplied = { ...a.context };
+  const analyzer = new ConstructorCarrierAnalyzer(supplied);
+  const proof = analyzer.prove(a.runner); assert.ok(proof);
+  const writable = supplied as { program?: ts.Program; checker: ts.TypeChecker };
+  writable.program = b.source.program; writable.checker = b.source.checker;
+  const result = analyzer.outcome(a.runner);
+  assert.equal(result.kind, 'incomplete');
+  assert.deepEqual(result, { kind: 'incomplete', reason: 'entry' });
+  assert.equal(analyzer.accepts(proof, a.runner), false);
+});
+
 test('stage2 public accepts charges current policy validation and rejects stale entry state', () => {
   const { context, runner } = contextOf(positive);
   let steps = 0;
