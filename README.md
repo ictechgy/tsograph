@@ -899,8 +899,8 @@ A dependency must be allocated earlier in the same module. Imported dependency i
 initialization-time calls before the required binding, and relevant runtime import cycles remain
 unproved. Dependency constructors must be absent or empty with no parameters; initialized fields
 must be primitive literals or certified primitive helper results. Every method, including unused
-methods, must be synchronous and parameter-free, with an empty body or an audited primitive
-result. Public methods use the same runtime checks. For example:
+methods, must be synchronous, with an empty body or an audited primitive result. Required
+identifier parameters need complete provenance at every actual call. Public methods use the same runtime checks. For example:
 
 ```ts
 class Port { send() { return 1; } }
@@ -933,8 +933,20 @@ imports and public dependency methods follow the same checks. Helper writes, esc
 runtime cycles, arithmetic, coercion, property access, closures, `this`, `arguments`, scheduling,
 default/rest/destructured parameters, and unknown or protected arguments remain unproved. Completed
 helper summaries discharge their exact effect sites through the proof DAG; syntactic candidate hints
-alone grant no authority. Parameterized dependency methods and helper-created containers remain
-outside this grammar.
+alone grant no authority. Helper-created containers remain outside this grammar.
+
+Carrier and dependency methods can receive required identifier parameters when every actual call
+has the exact arity and proven primitive arguments. Argument evaluation is audited left to right,
+and the completed helper/dependency summary is instantiated at that call. Interface and type-literal
+annotations provide no receiver authority: the proof must identify the actual singleton allocation,
+exact bag and stable endpoint. Captures are checked at each actual method entry. Supported exported zero-parameter arrows use
+an explicit ESM module-ready entry plus every local/imported invocation; the existing synchronous
+inline wrapper uses its outer call as the entry. Binding readiness is checked even when the body
+has no captures. Early initialization, cycles, reentrant calls and scheduled or escaping callbacks
+remain unproved. Unknown or
+protected objects, containing wrappers, callbacks, spread arguments, missing or extra arguments,
+parameter writes and unproved entries block the new proof. Dependency constructors still require
+their existing absent-or-empty, zero-parameter grammar.
 
 Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
 same-class method call with inert entry and arguments can retain its target when it is returned or

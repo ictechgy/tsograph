@@ -2,7 +2,8 @@
 import ts from 'typescript';
 import type { ConstructorCarrierContext, ConstructorCarrierProof } from './constructor-carrier.ts';
 import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
-import { normalizePrimitiveExpression } from './primitive-helpers.ts';
+import { isPrimitiveModuleReadyEntry, normalizePrimitiveExpression, primitiveCallRuntimeEntries,
+  type PrimitiveRuntimeEntry } from './primitive-helpers.ts';
 import { climbWrappers, referenceSite, type MutationRecord } from './flow-index.ts';
 import { skipWrappers } from './node-collector.ts';
 import type { ProofWork } from './proof-dag.ts';
@@ -26,7 +27,7 @@ export interface SingletonPolicy {
   readonly intrinsic: (source: ts.SourceFile) => boolean;
 }
 
-/** plain zero-entry singleton과 같은 모듈의 선행 sterile dependency만 인증한다. */
+/** plain synchronous-entry singleton과 같은 모듈의 선행 sterile dependency만 인증한다. */
 export function auditSingletonCarrier(context: ConstructorCarrierContext, proof: ConstructorCarrierProof,
   work: ProofWork, policy: SingletonPolicy): SingletonWitness | undefined {
   const { checker, index } = context;
@@ -94,15 +95,17 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
     if (ts.isMethodDeclaration(member)) {
       mark(member, 'carrier-call');
       if (helperHint && member.body !== undefined) markPendingHelperSites(member.body, work, mark);
+      for (const parameter of member.parameters) { work(); mark(parameter, 'primitive-helper-pending'); }
     }
   }
   markDelayedDateSites(proof.constructor, checker, policy, work, mark);
   /** 기존 Stage0의 닫힌 callback wrapper를 정확한 호출·순서 모델로만 보존한다. */
   const wrapperUse = (site: ts.Node): boolean => {
     const call = site.parent;
+    const runtimeEntries = ts.isCallExpression(call) ? orderedCallEntries(context, call, controllerBinding, work) : undefined;
     if (!ts.isCallExpression(call) || call.arguments[0] !== site || call.arguments.length !== 2
       || !ts.isIdentifier(call.expression) || call.questionDotToken !== undefined
-      || !orderedCall(call, controllerBinding, work)) return false;
+      || runtimeEntries === undefined) return false;
     const target = symbolOf(call.expression);
     const wrapper = target?.valueDeclaration;
     const callback = call.arguments[1]!;
@@ -138,6 +141,10 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
       if (ref !== call.expression) return false;
     }
     mark(wrapper, 'carrier-call'); mark(call, 'carrier-call');
+    for (const entry of runtimeEntries) {
+      work();
+      if (!isPrimitiveModuleReadyEntry(entry) && ts.isCallExpression(entry) && entry !== call) mark(entry, 'carrier-call');
+    }
     if (ts.isArrowFunction(call.parent)) mark(call.parent.parent, 'carrier-call');
     return true;
   };
@@ -148,11 +155,18 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
     if (wrapperUse(site)) continue;
     const access = site.parent;
     const call = ts.isPropertyAccessExpression(access) && access.expression === site ? access.parent : undefined;
+    const runtimeEntries = call !== undefined && ts.isCallExpression(call)
+      ? orderedCallEntries(context, call, controllerBinding, work) : undefined;
     if (!ts.isPropertyAccessExpression(access) || call === undefined || !ts.isCallExpression(call) || call.expression !== access
-      || call.arguments.length !== 0 || call.questionDotToken !== undefined || access.questionDotToken !== undefined
-      || !proof.declaration.members.some((member) => { work(); return ts.isMethodDeclaration(member) && slot(member.name) === access.name.text; })
-      || !orderedCall(call, controllerBinding, work)) return undefined;
+      || call.questionDotToken !== undefined || access.questionDotToken !== undefined
+      || !proof.declaration.members.some((member) => { work(); return ts.isMethodDeclaration(member) && slot(member.name) === access.name.text && member.parameters.length === call.arguments.length; })
+      || runtimeEntries === undefined) return undefined;
     mark(call, 'carrier-call');
+    for (const argument of call.arguments) { work(); mark(argument, 'primitive-helper-pending'); }
+    for (const entry of runtimeEntries) {
+      work();
+      if (!isPrimitiveModuleReadyEntry(entry) && ts.isCallExpression(entry) && entry !== call) mark(entry, 'carrier-call');
+    }
     const arrow = ts.isArrowFunction(call.parent) ? call.parent : undefined;
     if (arrow !== undefined) mark(arrow.parent, 'carrier-call');
   }
@@ -203,8 +217,9 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
     work();
     const owner = dependencies.get(use.propertyName);
     const member = owner === undefined ? undefined : dependencyMethods.get(owner)?.get(use.methodName);
-    if (member === undefined) return undefined;
+    if (member === undefined || use.call.arguments.length !== member.parameters.length) return undefined;
     mark(use.call, 'sterile-endpoint');
+    for (const argument of use.call.arguments) { work(); mark(argument, 'primitive-helper-pending'); }
   }
   // 미사용 bag 값도 평가되므로 임의의 객체나 호출을 놓치지 않는다.
   for (const property of proof.innerLiteral.properties) {
@@ -339,24 +354,27 @@ function directBinding(expression: ts.Expression): ts.VariableDeclaration | unde
     ? binding : undefined;
 }
 /** 순서를 증명하지 못한 지연 alias/helper 호출은 이후 단계에 남긴다. */
-function orderedCall(call: ts.CallExpression, binding: ts.VariableDeclaration, work: ProofWork): boolean {
+function orderedCallEntries(context: ConstructorCarrierContext, call: ts.CallExpression, binding: ts.VariableDeclaration,
+  work: ProofWork): readonly PrimitiveRuntimeEntry[] | undefined {
   const outer = climbWrappers(call);
   let statement: ts.Node = outer;
   while (!ts.isSourceFile(statement.parent)) {
     work();
     if (ts.isArrowFunction(statement)) {
       const variable = directBinding(statement);
+      const entries = primitiveCallRuntimeEntries(context, call, work);
       return statement.parameters.length === 0 && statement.body === outer && !decorated(statement, work)
         && !hasModifier(statement, ts.SyntaxKind.AsyncKeyword, work)
-        && variable !== undefined && variable.getSourceFile() === binding.getSourceFile() && binding.end < variable.pos;
+        && variable !== undefined && variable.getSourceFile() === binding.getSourceFile() && binding.end < variable.pos
+        ? entries : undefined;
     }
-    if (ts.isFunctionLike(statement)) return false;
+    if (ts.isFunctionLike(statement)) return undefined;
     statement = statement.parent;
   }
   return call.getSourceFile() === binding.getSourceFile() && binding.end < statement.pos
-    && ts.isExpressionStatement(statement) && statement.expression === outer;
+    && ts.isExpressionStatement(statement) && statement.expression === outer ? [call] : undefined;
 }
-/** 의존 클래스의 미사용 method도 zero-entry primitive 문법으로 감사한다. */
+/** 의존 클래스의 미사용 method도 감사한다. required entry의 provenance는 completed primitive DAG가 담당한다. */
 function sterileClass(owner: ts.ClassDeclaration, work: ProofWork, policy: SingletonPolicy,
   mark: (node: ts.Node, model: SingletonEffectModel) => void): boolean {
   const slots = new Set<string>();
@@ -378,13 +396,13 @@ function sterileClass(owner: ts.ClassDeclaration, work: ProofWork, policy: Singl
       if (!primitive(skipWrappers(member.initializer))) mark(member.initializer, 'primitive-helper-pending');
       continue;
     }
-    if (!ts.isMethodDeclaration(member) || member.body === undefined || member.parameters.length !== 0
+    if (!ts.isMethodDeclaration(member) || member.body === undefined
       || member.asteriskToken !== undefined || hasModifier(member, ts.SyntaxKind.AsyncKeyword, work)
       || policy.open(member)) return false;
     // Stage3 literal/empty grammar의 비용과 named model을 그대로 보존한다.
     const only = member.body.statements.length === 1 ? member.body.statements[0] : undefined;
-    if (member.body.statements.length === 0 || only !== undefined && ts.isReturnStatement(only)
-      && (only.expression === undefined || primitive(skipWrappers(only.expression)))) {
+    if (member.parameters.length === 0 && (member.body.statements.length === 0 || only !== undefined && ts.isReturnStatement(only)
+      && (only.expression === undefined || primitive(skipWrappers(only.expression))))) {
       mark(member, 'sterile-endpoint'); continue;
     }
     // descriptor 단계는 entry만 닫는다. primitive body의 provenance/effect는 Stage4 DAG가 별도로 인증한다.

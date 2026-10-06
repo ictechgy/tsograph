@@ -1695,6 +1695,8 @@ export function reconcileEffectInventory(
 
 /** 이미 charged된 AST node 한 개만 본다. wrapper와 TDZ syntax도 후보에서 빠뜨리지 않는다. */
 function helperCandidate(node: ts.Node): boolean {
+  if (ts.isMethodDeclaration(node) && node.parameters.length > 0) return true;
+  if (ts.isCallExpression(node) && node.arguments.length > 0) return true;
   if (ts.isFunctionDeclaration(node)) return node.body !== undefined;
   if (ts.isCallExpression(node)) {
     const callee = node.expression;

@@ -6,6 +6,12 @@
 
 ### Added
 
+- carrier·의존 메서드의 필수 identifier 매개변수를 실제 모든 호출의 primitive 출처·inert 평가·정확한
+  인자 수와 완료된 summary 구체화로 증명한다. 인자 평가는 왼쪽부터 감사하며 interface·type-literal
+  뒤의 실제 singleton 생성과 endpoint를 타입 주석 대신 구조·descriptor 근거로 확인한다.
+- type-only 참조와 runtime 호출을 분리하고, 각 메서드·exported arrow·동기 wrapper의 실제 진입에서
+  캡처와 binding 초기화 순서를 검사한다. 캡처 없는 조기 alias 호출도 인증을 막으며, wrapper의 바깥
+  로컬·imported 호출까지 효과 위치에 연결한다.
 - 이름 있는 동기·수신자 없는 primitive helper의 필수 identifier 인자·선행 불변 지역 변수·캡처·
   인증된 helper 합성을 proof DAG로 증명하고 실제 carrier 효과 위치에서 소비한다. 캡처는 실제 사용마다
   초기화 순서를 확인하며 public 의존 메서드와 닫힌 default import도 같은 검사를 적용한다.

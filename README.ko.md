@@ -727,8 +727,8 @@ mutation 효과가 필요하다. optional Date callback도 명시적인 own data
 의존성은 같은 모듈에서 controller보다 먼저 생성해야 한다. import한 의존성의 초기화, 필요한 binding
 이전의 초기화 시점 호출, 관련 런타임 import 순환은 증명하지 않는다. 의존성 생성자는 없거나
 매개변수 없는 빈 본문이어야 하고, 초기화한 필드는 primitive literal 또는 인증된 primitive helper
-결과여야 한다. 미사용 메서드도 모두 동기·무매개변수이며 본문이 비었거나 감사한 primitive 결과를
-반환해야 한다. public 메서드도 같은 런타임 검사를 거친다. 예를 들면 다음과 같다.
+결과여야 한다. 미사용 메서드도 모두 동기이며 본문이 비었거나 감사한 primitive 결과를 반환해야 한다.
+필수 identifier 매개변수는 실제 호출마다 완전한 출처 증명을 요구한다. public 메서드도 같은 런타임 검사를 거친다. 예를 들면 다음과 같다.
 
 ```ts
 class Port { send() { return 1; } }
@@ -758,8 +758,18 @@ binding마다 primitive 출처와 inert한 평가를 모두 증명해야 한다.
 닫힌 default import와 public 의존 메서드에도 같은 검사를 적용한다. helper 쓰기·탈출·별칭 또는
 런타임 순환·산술·강제 변환·속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
 매개변수·모르는 인자나 보호된 객체 인자는 미해석으로 남긴다. 완료된 helper summary만 proof DAG를
-통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. 매개변수 있는 의존 메서드와
-helper가 만드는 컨테이너는 아직 이 문법 밖에 남긴다.
+통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. helper가 만드는 컨테이너는
+아직 이 문법 밖에 남긴다.
+
+carrier와 의존 메서드는 실제 모든 호출의 인자 수가 정확하고 primitive 인자의 출처가 증명될 때 필수
+identifier 매개변수를 받을 수 있다. 인자 평가는 왼쪽부터 감사하며, 완료된 helper·의존 summary를
+그 호출에서 구체화한다. interface나 type-literal 주석은 수신자 권한이 아니므로 실제 singleton 생성·
+정확한 bag·안정한 endpoint를 확인해야 한다. 캡처는 각 실제 메서드 진입 시점에 검사한다. 지원하는
+exported 무매개변수 arrow는 명시적인 ESM 모듈 초기화 완료와 모든 로컬·imported 호출을 검사하며,
+기존 동기 inline wrapper는 바깥 호출을 진입으로 사용한다. body 캡처가 없어도 binding 초기화 순서를
+검사한다. 조기 초기화·순환·재진입·스케줄링 또는 탈출한 callback은 미증명으로 남긴다. 모르는 인자나
+보호 객체·이를 담은 wrapper·callback·spread·누락 또는 초과 인자·매개변수 쓰기·미증명 진입은 새 증명을
+막는다. 의존 생성자는 기존의 없음 또는 빈 본문·무매개변수 문법을 유지한다.
 
 일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
 직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.
