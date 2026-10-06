@@ -435,15 +435,22 @@ export class ConstructorCarrierAnalyzer {
     const known = this.helperInventories.get(declaration);
     if (known !== undefined) return known;
     const entry = this.recipe(declaration, 'proof');
-    let plan: PrimitivePlan = { roots: [] };
+    let plan: PrimitivePlan = { roots: [], entries: [], complete: true };
     const recipe: ProofRecipe<PrimitiveSummary> = {
       id: `${declaration.getSourceFile().fileName}:${declaration.pos}:stage4-inventory`,
       identity: declaration, capability: 'primitive-effects', mode: 'extended', valid: entry.valid,
       dependencies: (work) => {
         plan = collectPrimitivePlan(this.context, declaration, work);
-        return plan.roots.map((root) => { work(); return { recipe: this.helpers.recipe(root.node), capability: 'primitive-effects', depth: 1, frames: 1 }; });
+        const edges: ProofEdge[] = plan.roots.map((root) => { work(); return { recipe: root.dependency === undefined ? this.helpers.recipe(root.node)
+          : this.helpers.instantiationRecipe(root.node as ts.CallExpression, root.dependency), capability: 'primitive-effects', depth: 1, frames: 1 }; });
+        for (const entry of plan.entries) {
+          work(); edges.push({ recipe: this.helpers.entryRecipe(entry.method), capability: 'primitive-effects', depth: 1, frames: 1 });
+        }
+        return edges;
       },
       evaluate: (work, children) => {
+        work();
+        if (!plan.complete) return { kind: 'rejected', reason: 'primitive-entry' };
         const summaries = new Map<object, PrimitiveSummary>();
         for (const child of children) { work(); if (child.kind === 'proved') summaries.set(child.certificate.identity, child.value as PrimitiveSummary); }
         for (const root of plan.roots) {
@@ -452,7 +459,20 @@ export class ConstructorCarrierAnalyzer {
             return { kind: 'rejected', reason: 'helper-initialization' };
           }
         }
+        for (const entry of plan.entries) {
+          work(); const summary = summaries.get(entry.method.name);
+          if (summary === undefined || entry.initialize
+            && (entry.entry === undefined || !this.helpers.initialized(summary, entry.entry, work))) {
+            return { kind: 'rejected', reason: 'primitive-entry-initialization' };
+          }
+        }
         const summary = primitiveChildren(children, work);
+        for (const parameter of summary.parameters) {
+          work();
+          if (ts.isMethodDeclaration(parameter.parent) && !summaries.has(parameter.parent.name)) {
+            return { kind: 'rejected', reason: 'unproved-primitive-entry' };
+          }
+        }
         return { kind: 'proved', value: summary };
       },
     };
@@ -745,7 +765,7 @@ export class ConstructorCarrierAnalyzer {
     }
     if (serviceUses.length === 0) return undefined;
     const projectionBindings: ConstructorProjectionBinding[] = [];
-    if (!this.scanInstanceUses(declaration, construction, projectionBindings)) return undefined;
+    if (!this.scanInstanceUses(declaration, construction, projectionBindings, extended)) return undefined;
     return {
       declaration,
       constructor: owner,
@@ -1185,7 +1205,13 @@ export class ConstructorCarrierAnalyzer {
     serviceUses: ConstructorServiceUse[],
     primitiveHelpers = false,
   ): boolean {
-    if (!this.isSynchronousZeroRuntimeParameterMethod(method)) return false;
+    if (primitiveHelpers) {
+      if (method.asteriskToken !== undefined || hasAsyncModifier(method) || hasDecorators(method)
+        || this.functionUsesArguments(method.body)) return false;
+      for (const parameter of method.parameters) {
+        this.step(); if (!isRequiredIdentifierParameter(parameter) || isThisParameter(parameter)) return false;
+      }
+    } else if (!this.isSynchronousZeroRuntimeParameterMethod(method)) return false;
     if (method.body === undefined) return false;
     for (const statement of method.body.statements) {
       this.step();
@@ -1201,7 +1227,7 @@ export class ConstructorCarrierAnalyzer {
         const expression = parenthesizedCall(statement.expression);
         if (primitiveHelpers && expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))) continue;
         if (expression === undefined
-          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;
+          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses, primitiveHelpers)) return false;
         continue;
       }
       if (ts.isReturnStatement(statement)) {
@@ -1211,7 +1237,7 @@ export class ConstructorCarrierAnalyzer {
           || ts.isCallExpression(value) && ts.isIdentifier(skipWrappers(value.expression)))) continue;
         const expression = parenthesizedCall(statement.expression);
         if (expression === undefined
-          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;
+          || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses, primitiveHelpers)) return false;
         continue;
       }
       return false;
@@ -1227,6 +1253,7 @@ export class ConstructorCarrierAnalyzer {
     fields: ReadonlyMap<string, ts.PropertyDeclaration | ts.ParameterDeclaration>,
     dateFieldName: string | undefined,
     serviceUses: ConstructorServiceUse[],
+    primitiveArguments = false,
   ): boolean {
     if (!isDirectCarrierCall(call)) return false;
     const callee = skipWrappers(call.expression);
@@ -1237,7 +1264,7 @@ export class ConstructorCarrierAnalyzer {
     const receiver = skipWrappers(callee.expression);
     const projection = this.projection(receiver, bagParameter, bagShape);
     if (projection !== undefined) {
-      if (call.arguments.length !== 0 || !this.knownMethod(receiver, methodName)) return false;
+      if ((!primitiveArguments && call.arguments.length !== 0) || !this.knownMethod(receiver, methodName)) return false;
       serviceUses.push({ propertyName: projection, methodName, call });
       return true;
     }
@@ -1351,6 +1378,7 @@ export class ConstructorCarrierAnalyzer {
     declaration: ts.ClassLikeDeclaration,
     construction: ts.NewExpression,
     projectionBindings: ConstructorProjectionBinding[],
+    primitiveArguments = false,
   ): boolean {
     const outer = climbWrappers(construction);
     const parent = outer.parent;
@@ -1367,7 +1395,7 @@ export class ConstructorCarrierAnalyzer {
     for (const reference of this.context.index.references.get(symbol) ?? []) {
       this.step();
       const site = climbWrappers(referenceSite(reference));
-      if (this.directInstanceMethodUse(site, declaration)) continue;
+      if (this.directInstanceMethodUse(site, declaration, primitiveArguments)) continue;
       if (this.inlineWrapperUse(site, declaration)) continue;
       return false;
     }
@@ -1681,13 +1709,13 @@ export class ConstructorCarrierAnalyzer {
   }
 
   /** 변수 instance를 떼어 내지 않은 direct method call인지 확인한다. */
-  private directInstanceMethodUse(site: ts.Node, declaration: ts.ClassLikeDeclaration): boolean {
+  private directInstanceMethodUse(site: ts.Node, declaration: ts.ClassLikeDeclaration, primitiveArguments = false): boolean {
     if (!ts.isIdentifier(site)) return false;
     if (this.insideNamedFunction(site)) return false;
     const access = site.parent;
     if (!ts.isPropertyAccessExpression(access) || access.expression !== site || ts.isPrivateIdentifier(access.name)) return false;
     const call = access.parent;
-    return ts.isCallExpression(call) && call.expression === access && call.arguments.length === 0
+    return ts.isCallExpression(call) && call.expression === access && (primitiveArguments || call.arguments.length === 0)
       && this.knownClassMethod(declaration, access.name.text);
   }
 

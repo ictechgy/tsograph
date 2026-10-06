@@ -1,17 +1,25 @@
 /** Stage4 summary를 소비할 실제 entry와 initializer를 charged AST로 수집한다. */
 import ts from 'typescript';
 import type { ConstructorCarrierContext } from './constructor-carrier.ts';
-import { climbPrimitiveWrappers, normalizePrimitiveExpression, primitiveLiteral, primitiveReferenceSite } from './primitive-helpers.ts';
+import { climbPrimitiveWrappers, normalizePrimitiveExpression, primitiveCallRuntimeEntries, primitiveCarrierMethodCall,
+  primitiveErasedReference, primitiveLiteral, primitiveReferenceSite, type PrimitiveRuntimeEntry } from './primitive-helpers.ts';
+import { primitiveDependencyTarget } from './primitive-dependency.ts';
 import type { ProofWork } from './proof-dag.ts';
 
 /** body capture는 선언 위치 대신 실제 호출 entry에서 초기화를 검증한다. */
 export interface PrimitiveEntry {
   readonly node: ts.Expression | ts.FunctionDeclaration | ts.MethodDeclaration;
-  readonly entry?: ts.Node;
+  readonly entry?: PrimitiveRuntimeEntry;
+  /** exact bag allocation에서 찾은 구조 후보이며 descriptor 완료 전에는 권한이 아니다. */
+  readonly dependency?: ts.MethodDeclaration;
 }
 /** 새 summary가 담당할 initializer·callee만 모은다. 이것은 인증 결과가 아니다. */
 export interface PrimitivePlan {
   readonly roots: readonly PrimitiveEntry[];
+  /** unused method를 포함해 required runtime entry마다 완전한 call provenance를 요구한다. */
+  readonly entries: readonly { readonly method: ts.MethodDeclaration; readonly entry?: PrimitiveRuntimeEntry; readonly initialize: boolean }[];
+  /** 관찰한 runtime method use마다 지원되는 실제 entry를 만들었다. */
+  readonly complete: boolean;
 }
 /** checker lookup과 alias lookup을 각각 logical work로 청구한다. */
 function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork): ts.Symbol | undefined {
@@ -22,11 +30,14 @@ function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: Proof
   return symbol;
 }
 
-/** singleton census는 descriptor가 별도로 닫는다. 여기서는 실제 binding과 가장 이른 entry만 구한다. */
-function controllerEntry(context: ConstructorCarrierContext, declaration: ts.ClassLikeDeclaration, work: ProofWork) {
+/** singleton census는 descriptor가 별도로 닫는다. 여기서는 실제 const binding만 구한다. */
+function controllerBinding(context: ConstructorCarrierContext, declaration: ts.ClassLikeDeclaration,
+  work: ProofWork): ts.VariableDeclaration | undefined {
   const symbol = declaration.name === undefined ? undefined : symbolOf(context, declaration.name, work);
   let binding: ts.VariableDeclaration | undefined;
-  for (const reference of symbol === undefined ? [] : context.index.references.get(symbol) ?? []) {
+  work();
+  const references = symbol === undefined ? [] : context.index.references.get(symbol) ?? [];
+  for (const reference of references) {
     work(); const site = primitiveReferenceSite(reference, work);
     const allocation = ts.isNewExpression(site.parent) ? site.parent : undefined;
     if (allocation !== undefined) {
@@ -37,20 +48,7 @@ function controllerEntry(context: ConstructorCarrierContext, declaration: ts.Cla
         && (parent.parent.flags & ts.NodeFlags.Const) !== 0) binding = parent;
     }
   }
-  if (binding === undefined) return { binding, anchor: declaration as ts.Node };
-  const controller = symbolOf(context, binding.name, work);
-  let earliest: ts.Node | undefined;
-  for (const reference of controller === undefined ? [] : context.index.references.get(controller) ?? []) {
-    work(); let current: ts.Node = primitiveReferenceSite(reference, work);
-    let delayed = false;
-    while (!ts.isSourceFile(current.parent)) {
-      work(); delayed ||= ts.isFunctionLike(current); current = current.parent;
-    }
-    // Stage3가 허용한 delayed carrier wrapper도 binding 완료보다 이른 capture에 의존하지 않는다.
-    const candidate = delayed ? binding : current;
-    if (earliest === undefined || candidate.pos < earliest.pos) earliest = candidate;
-  }
-  return { binding, anchor: earliest ?? binding };
+  return binding;
 }
 
 /** 기존 Stage3 wrapper는 같은 descriptor child가 exact 문법·entry·effects를 검증한다. */
@@ -69,8 +67,40 @@ function carrierWrapper(context: ConstructorCarrierContext, node: ts.FunctionDec
   return true;
 }
 
+/** method마다 실제 runtime call entry를 수집해 class-wide earliest capture를 피한다. */
+function methodEntrySites(context: ConstructorCarrierContext, method: ts.MethodDeclaration,
+  work: ProofWork): { readonly entries: readonly PrimitiveRuntimeEntry[]; readonly complete: boolean } {
+  const result: PrimitiveRuntimeEntry[] = [];
+  const name = method.name;
+  const text = ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name) ? name.text : undefined;
+  if (text === undefined) return { entries: result, complete: false };
+  const symbol = symbolOf(context, name, work);
+  work();
+  const occurrences = context.index.tokenOccurrences.get(text) ?? [];
+  for (const reference of occurrences) {
+    work();
+    if (reference === name || primitiveErasedReference(reference, work)) continue;
+    const site = primitiveReferenceSite(reference, work);
+    const call = site.parent;
+    const resolved = symbolOf(context, reference, work);
+    if (!ts.isCallExpression(call) || call.expression !== site || call.questionDotToken !== undefined) {
+      if (resolved === symbol || resolved?.valueDeclaration === method) return { entries: result, complete: false };
+      continue;
+    }
+    const concrete = primitiveCarrierMethodCall(context, method, call, work);
+    if (resolved === symbol || resolved?.valueDeclaration === method || concrete) {
+      const entries = primitiveCallRuntimeEntries(context, call, work);
+      if (entries === undefined) return { entries: result, complete: false };
+      for (const entry of entries) { work(); result.push(entry); }
+    }
+  }
+  return { entries: result, complete: true };
+}
+
+
 /** 이미 Stage3로 인증한 literal/empty endpoint에는 새 summary를 붙이지 않는다. */
 function literalEndpoint(method: ts.MethodDeclaration, work: ProofWork): boolean {
+  if (method.parameters.length > 0) return false;
   const statements = method.body!.statements;
   const only = statements.length === 1 ? statements[0] : undefined;
   return statements.length === 0 || only !== undefined && ts.isReturnStatement(only)
@@ -85,19 +115,23 @@ function primitiveCandidate(expression: ts.Expression, work: ProofWork): boolean
 }
 
 /** carrier 내부 helper 초기화·호출·반환은 actual method grammar와 같은 site를 소비한다. */
-function carrierRoots(method: ts.MethodDeclaration, anchor: ts.Node, roots: PrimitiveEntry[], work: ProofWork): void {
+function carrierRoots(method: ts.MethodDeclaration, entries: readonly PrimitiveRuntimeEntry[], roots: PrimitiveEntry[], work: ProofWork): void {
+  const add = (node: ts.Expression): void => {
+    if (entries.length === 0) roots.push({ node });
+    else for (const entry of entries) { work(); roots.push({ node, entry }); }
+  };
   for (const statement of method.body!.statements) {
     work();
     if (ts.isVariableStatement(statement)) {
       for (const binding of statement.declarationList.declarations) {
-        work(); if (binding.initializer !== undefined) roots.push({ node: binding.initializer, entry: anchor });
+        work(); if (binding.initializer !== undefined) add(binding.initializer);
       }
     } else if (ts.isReturnStatement(statement) && statement.expression !== undefined && primitiveCandidate(statement.expression, work)) {
-      roots.push({ node: statement.expression, entry: anchor });
+      add(statement.expression);
     } else if (ts.isExpressionStatement(statement)
       && ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)
       && primitiveCandidate(statement.expression, work)) {
-      roots.push({ node: statement.expression, entry: anchor });
+      add(statement.expression);
     }
   }
 }
@@ -117,7 +151,9 @@ function fieldEntry(context: ConstructorCarrierContext, owner: ts.ClassDeclarati
 export function collectPrimitivePlan(context: ConstructorCarrierContext, declaration: ts.ClassLikeDeclaration,
   work: ProofWork): PrimitivePlan {
   const roots: PrimitiveEntry[] = [];
-  const { binding, anchor } = controllerEntry(context, declaration, work);
+  const entries: { method: ts.MethodDeclaration; entry?: PrimitiveRuntimeEntry; initialize: boolean }[] = [];
+  const binding = controllerBinding(context, declaration, work);
+  let complete = true;
   for (const file of context.index.files) {
     work();
     for (const statement of file.statements) {
@@ -128,8 +164,38 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
         for (const member of statement.members) {
           work();
           if (ts.isMethodDeclaration(member) && member.body !== undefined) {
-            if (statement === declaration) carrierRoots(member, anchor, roots, work);
-            else if (!literalEndpoint(member, work)) roots.push({ node: member, entry: anchor });
+            const entryResult = statement === declaration ? methodEntrySites(context, member, work)
+              : { entries: [] as readonly PrimitiveRuntimeEntry[], complete: true };
+            const methodEntries = entryResult.entries;
+            work(); complete &&= entryResult.complete;
+            if (member.parameters.length > 0) {
+              for (const entry of methodEntries) { work(); entries.push({ method: member, entry, initialize: true }); }
+            }
+            if (statement === declaration) {
+              carrierRoots(member, methodEntries, roots, work);
+              // receiver와 descriptor는 별도 증명이 담당한다. 인자는 모든 실제 호출마다 소비한다.
+              const stack = [{ node: member.body as ts.Node, depth: 0 }];
+              while (stack.length > 0) {
+                const { node, depth } = stack.pop()!; work(depth, depth);
+                if (ts.isCallExpression(node) && !ts.isIdentifier(normalizePrimitiveExpression(node.expression, work).inner)) {
+                  const target = primitiveDependencyTarget(context, node, work);
+                  if (target !== undefined && ts.isMethodDeclaration(target) && target.parent !== declaration) {
+                    for (const entry of methodEntries) { work(); roots.push({ node, entry, dependency: target }); }
+                  } else {
+                    for (const argument of node.arguments) {
+                      for (const entry of methodEntries) { work(); roots.push({ node: argument, entry }); }
+                    }
+                  }
+                }
+                ts.forEachChild(node, child => { stack.push({ node: child, depth: depth + 1 }); });
+              }
+            } else if (!literalEndpoint(member, work)) {
+              const methodEntries = member.parameters.length > 0 ? methodEntrySites(context, member, work).entries : [];
+              if (member.parameters.length > 0) {
+                work(); entries.push({ method: member, initialize: false });
+              } else if (methodEntries.length === 0) roots.push({ node: member });
+              else for (const entry of methodEntries) { work(); roots.push({ node: member, entry }); }
+            }
           } else if (ts.isPropertyDeclaration(member) && member.initializer !== undefined
             && !primitiveLiteral(normalizePrimitiveExpression(member.initializer, work).inner)) {
             roots.push({ node: member.initializer, entry: fieldEntry(context, statement, work) });
@@ -156,5 +222,5 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
       }
     }
   }
-  return { roots };
+  return { roots, entries, complete };
 }

@@ -132,7 +132,6 @@ test('unsafe carrier method entry and invocation become candidate gaps at the gr
       method: '  run(value = observe(this)) { this.clock(); return this.inputs.repo.run(); }',
       prelude: ['declare function observe(value: unknown): unknown;'], scratch: true,
     }],
-    ['required parameter', { method: '  run(value: unknown) { this.clock(); return this.inputs.repo.run(); }', use: ['export const read = () => controller.run(1);'] }],
     ['rest parameter', { method: '  run(...values: unknown[]) { this.clock(); return this.inputs.repo.run(); }' }],
     ['destructured parameter', { method: '  run({ value }: { value?: unknown } = {}) { this.clock(); return this.inputs.repo.run(); }' }],
     ['async method', { method: '  async run() { this.clock(); return this.inputs.repo.run(); }' }],
@@ -142,6 +141,15 @@ test('unsafe carrier method entry and invocation become candidate gaps at the gr
   for (const [label, options] of cases) {
     await t.test(label, async () => assertCandidateService(await graphOf(carrierSource(options)), label));
   }
+});
+
+/** Stage5는 모든 실제 entry가 inert primitive 인자를 제공할 때 required identifier를 인증한다. */
+test('required carrier parameter with complete primitive entry is admitted by Stage5', async () => {
+  const graph = await graphOf(carrierSource({
+    method: '  run(value: unknown) { this.clock(); return this.inputs.repo.run(); }',
+    use: ['export const read = () => controller.run(1);'],
+  }));
+  assert.deepEqual(evidence(graph, 'Controller.run', 'LocalRepo.run'), ['bound']);
 });
 
 test('runtime slot, body and wrapper rejections reach the graph boundary', async (t) => {
