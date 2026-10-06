@@ -112,6 +112,14 @@ ${order}
 export {};`;
 }
 
+/** carrier와 dependency 양쪽에 method와 같은 이름의 primitive local argument를 둔다. */
+function sameNameArgumentSource(): string {
+  return positive.replace('const first = composed(value); this.tick();',
+    'const first = composed(value); const send = "safe"; this.tick();')
+    .replace('send(identity(first))', 'send(send)')
+    .replace('controller.run(captured);', 'const run = "safe"; controller.run(run);');
+}
+
 /** 실제 graph consumer에서 instantiated dependency와 carrier entry를 함께 검증한다. */
 test('stage5 primitive entry and dependency arguments instantiate actual bound endpoint', async () => {
   const graph = await fixedPositiveDocument();
@@ -207,6 +215,35 @@ test('stage5 arrow binding readiness does not depend on body captures', async ()
   assert.deepEqual(endpointEvidence(await graphOf(zeroCaptureArrowSource(`read();\n${alias}`))), ['candidate']);
   const exported = zeroCaptureArrowSource('export const read = () => controller.run();');
   assert.deepEqual(endpointEvidence(await graphOf(exported)), ['bound']);
+});
+
+/** method와 같은 이름의 argument token은 outer call의 callee authority를 빌리지 않는다. */
+test('stage5 same-name primitive arguments remain independent of callee references', async t => {
+  const positives: Record<string, string> = {
+    carrierLiteral: positive.replace('controller.run(captured);', 'controller.run("run");'),
+    carrierLocal: positive.replace('controller.run(captured);', 'const run = "safe"; controller.run(run);'),
+    dependencyLiteral: positive.replace('send(identity(first))', 'send("send")'),
+    dependencyLocal: sameNameArgumentSource(),
+  };
+  for (const [name, source] of Object.entries(positives)) await t.test(name, async () => {
+    assert.deepEqual(endpointEvidence(await graphOf(source)), ['bound'], name);
+  });
+  const negatives: Record<string, string> = {
+    carrierUnknown: 'declare const run: unknown;\n' + positive.replace('controller.run(captured);', 'controller.run(run as string);'),
+    carrierProtected: positive.replace('controller.run(captured);',
+      'const run = controller; controller.run(run as unknown as string);'),
+    dependencyUnknown: 'declare const send: unknown;\n' + positive.replace('send(identity(first))', 'send(send as string)'),
+    dependencyProtected: positive.replace('const first = composed(value); this.tick();',
+      'const first = composed(value); const send = this.inputs; this.tick();')
+      .replace('send(identity(first))', 'send(send as unknown as string)'),
+    carrierEscape: positive + '\nconst run = controller.run;',
+    dependencyEscape: positive.replace('this.tick(); return', 'const send = this.inputs.port.send; this.tick(); return'),
+  };
+  for (const [name, source] of Object.entries(negatives)) await t.test(name, async () => {
+    const evidence = endpointEvidence(await graphOf(source));
+    assert.ok(evidence.includes('candidate'), name);
+    assert.ok(!evidence.includes('bound'), name);
+  });
 });
 
 /** unused controller body도 fictitious entry 없이 purity summary를 거쳐야 한다. */
@@ -530,6 +567,37 @@ test('stage5 zero-capture arrow binding replay is deterministic and recoverable'
   for (const budget of new Set([0, 1, 2, Math.floor(negativeSteps / 2), negativeSteps - 1, negativeSteps])) {
     assert.deepEqual(negative(budget), create(early)(budget), `zero-capture negative budget ${budget}`);
     assert.deepEqual(negative(), rejected);
+  }
+});
+
+/** same-name token 분류도 cold/warm과 낮은 budget에서 동일한 charged source walk를 재생한다. */
+test('stage5 same-name argument entry replay preserves charged prefixes and recovery', () => {
+  const source = sameNameArgumentSource();
+  const { context, declaration } = indexed(source);
+  const sentinel = new Error('synthetic same-name argument interruption');
+  const create = () => {
+    let limit = Infinity, steps = 0, events: string[] = [];
+    const analyzer = new ConstructorCarrierAnalyzer({ ...context, caller: {
+      step: () => { events.push('step'); if (++steps > limit) throw sentinel; },
+      check: (depth, frames) => { events.push(`check:${depth}:${frames}`); },
+    } });
+    return (budget = Infinity) => {
+      limit = budget; steps = 0; events = []; analyzer.beginQuery();
+      try { return { value: analyzer.allowsExtendedInstanceIsolation(declaration), steps, events: [...events], aborted: false }; }
+      catch (error) {
+        assert.equal(error, sentinel); return { value: false, steps, events: [...events], aborted: true };
+      } finally { analyzer.endQuery(); }
+    };
+  };
+  const warm = create();
+  const complete = warm();
+  assert.equal(complete.value, true);
+  assert.deepEqual(warm(), complete);
+  const budgets = new Set([0, 1, 2, Math.floor(complete.steps / 4), Math.floor(complete.steps / 2),
+    complete.steps - 1, complete.steps, complete.steps + 1]);
+  for (const budget of budgets) {
+    assert.deepEqual(warm(budget), create()(budget), `same-name budget ${budget}`);
+    assert.deepEqual(warm(), complete);
   }
 });
 

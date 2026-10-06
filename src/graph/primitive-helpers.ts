@@ -458,17 +458,18 @@ export class PrimitiveHelpers {
           work();
           if (reference === method.name) continue;
           if (primitiveErasedReference(reference, work)) continue;
+          const site = primitiveReferenceSite(reference, work);
+          const parentCall = ts.isCallExpression(site.parent) && site.parent.expression === site
+            ? site.parent : undefined;
           const resolved = this.symbol(reference, work);
-          const possibleCall = primitiveReferenceSite(reference, work).parent;
-          const concreteEntry = ts.isCallExpression(possibleCall) && primitiveCarrierMethodCall(this.context, method, possibleCall, work);
-          if (resolved?.valueDeclaration !== method && (!ts.isCallExpression(possibleCall)
-            || primitiveDependencyTarget(this.context, possibleCall, work) !== method)
+          const concreteEntry = parentCall !== undefined && primitiveCarrierMethodCall(this.context, method, parentCall, work);
+          if (resolved?.valueDeclaration !== method && (parentCall === undefined
+            || primitiveDependencyTarget(this.context, parentCall, work) !== method)
             && !concreteEntry) {
             if (resolved === undefined && (ts.isPropertyAccessExpression(reference.parent)
               || ts.isElementAccessExpression(reference.parent))) return edges;
             continue;
           }
-          const site = primitiveReferenceSite(reference, work);
           const call = site.parent;
           const access = ts.isExpression(site) ? normalizePrimitiveExpression(site, work).inner : undefined;
           if (access === undefined || !ts.isPropertyAccessExpression(access) || access.questionDotToken !== undefined
