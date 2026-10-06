@@ -8,6 +8,7 @@
  */
 
 import ts from 'typescript';
+import { completeSterileConfinement } from './sterile-confinement.ts';
 
 import { climbWrappers, type FlowIndex, referenceSite, type MutationRecord } from './flow-index.ts';
 import { isMutationCleanView, type MutationSafetyContext } from './mutation-safety.ts';
@@ -15,7 +16,7 @@ import { skipWrappers } from './node-collector.ts';
 import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
 import { collectPrimitivePlan, type PrimitivePlan } from './primitive-helper-sites.ts';
 import { PrimitiveHelpers, primitiveChildren, primitiveLiteral, type PrimitiveSummary } from './primitive-helpers.ts';
-import { auditSingletonCarrier, coversSingletonEffects, certifiesSingletonWrite,
+import { auditSingletonCarrier, coversSingletonEffects,
   type SingletonEffectModel, type SingletonWitness } from './singleton-carrier.ts';
 import type { FlowPolicy } from './value-flow.ts';
 import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge, type ProofGuard, type ProofWork } from './proof-dag.ts';
@@ -406,7 +407,7 @@ export class ConstructorCarrierAnalyzer {
             const models = new Map<ts.Node, SingletonEffectModel>();
             for (const [site, model] of witness.models) { work(); models.set(site, model); }
             for (const site of (helper.value as PrimitiveSummary).sites) { work(); models.set(site, 'primitive-helper'); }
-            witness = { ...witness, models };
+            witness = { ...witness, models, literals: (helper.value as PrimitiveSummary).literals };
           } else if (hasPrimitiveHelperCandidates(this.context.index.effectInventory)) {
             return { kind: 'rejected', reason: 'primitive-helper' };
           }
@@ -419,7 +420,7 @@ export class ConstructorCarrierAnalyzer {
             isDefaultLibraryFile: (file) => this.policyIsDefaultLibraryFile(file),
             openProgram: this.context.policy.openProperties, openProperties: this.context.policy.openProperties,
             budgetStep: () => this.step() };
-          if (!isMutationCleanView(safety, { certifiedWrite: (record) => certifiesSingletonWrite(witness!, record) })) {
+          if (!isMutationCleanView(safety, { confinement: completeSterileConfinement(safety, witness, work) })) {
             return { kind: 'rejected', reason: 'mutation' };
           }
         }
@@ -1225,7 +1226,9 @@ export class ConstructorCarrierAnalyzer {
       }
       if (ts.isExpressionStatement(statement)) {
         const expression = parenthesizedCall(statement.expression);
-        if (primitiveHelpers && expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))) continue;
+        if (primitiveHelpers && (expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))
+          || ts.isBinaryExpression(skipWrappers(statement.expression))
+          || ts.isPropertyAccessExpression(skipWrappers(statement.expression)) || ts.isElementAccessExpression(skipWrappers(statement.expression)))) continue;
         if (expression === undefined
           || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses, primitiveHelpers)) return false;
         continue;
@@ -1234,6 +1237,7 @@ export class ConstructorCarrierAnalyzer {
         if (statement.expression === undefined) continue;
         const value = skipWrappers(statement.expression);
         if (primitiveHelpers && (primitiveLiteral(value) || ts.isIdentifier(value)
+          || ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)
           || ts.isCallExpression(value) && ts.isIdentifier(skipWrappers(value.expression)))) continue;
         const expression = parenthesizedCall(statement.expression);
         if (expression === undefined

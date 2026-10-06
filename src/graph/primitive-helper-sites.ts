@@ -111,6 +111,8 @@ function literalEndpoint(method: ts.MethodDeclaration, work: ProofWork): boolean
 function primitiveCandidate(expression: ts.Expression, work: ProofWork): boolean {
   const value = normalizePrimitiveExpression(expression, work).inner;
   return primitiveLiteral(value) || ts.isIdentifier(value)
+    || ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)
+    || ts.isBinaryExpression(value) || ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value)
     || ts.isCallExpression(value) && ts.isIdentifier(normalizePrimitiveExpression(value.expression, work).inner);
 }
 
@@ -129,7 +131,6 @@ function carrierRoots(method: ts.MethodDeclaration, entries: readonly PrimitiveR
     } else if (ts.isReturnStatement(statement) && statement.expression !== undefined && primitiveCandidate(statement.expression, work)) {
       add(statement.expression);
     } else if (ts.isExpressionStatement(statement)
-      && ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)
       && primitiveCandidate(statement.expression, work)) {
       add(statement.expression);
     }
@@ -145,6 +146,29 @@ function fieldEntry(context: ConstructorCarrierContext, owner: ts.ClassDeclarati
     if (ts.isNewExpression(site.parent)) allocation = site.parent;
   }
   return allocation;
+}
+
+/** Stage3의 literal-only scratch write는 기존 own-slot guard가 독립적으로 검사한다. */
+function existingScratchOnly(context: ConstructorCarrierContext, binding: ts.VariableDeclaration,
+  literal: ts.ArrayLiteralExpression | ts.ObjectLiteralExpression, work: ProofWork): boolean {
+  if (ts.isArrayLiteralExpression(literal)) {
+    for (const element of literal.elements) { work(); if (!primitiveLiteral(normalizePrimitiveExpression(element, work).inner)) return false; }
+  } else {
+    for (const property of literal.properties) {
+      work(); if (!ts.isPropertyAssignment(property) || !primitiveLiteral(normalizePrimitiveExpression(property.initializer, work).inner)) return false;
+    }
+  }
+  const symbol = symbolOf(context, binding.name, work);
+  work(); const references = symbol === undefined ? [] : context.index.references.get(symbol) ?? [];
+  if (references.length === 0) return false;
+  for (const reference of references) {
+    work(); const site = climbPrimitiveWrappers(reference, work), access = site.parent;
+    if ((!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) || access.expression !== site) return false;
+    const operation = climbPrimitiveWrappers(access, work).parent;
+    if (!ts.isBinaryExpression(operation) || operation.left !== access || operation.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+      || !primitiveLiteral(normalizePrimitiveExpression(operation.right, work).inner)) return false;
+  }
+  return true;
 }
 
 /** 실제 graph의 global evaluation·closed helper body·borrowed endpoint를 한 계획으로 연결한다. */
@@ -205,7 +229,10 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
         for (const binding of statement.declarationList.declarations) {
           work(); const value = binding.initializer === undefined ? undefined
             : normalizePrimitiveExpression(binding.initializer, work).inner;
-          if (value !== undefined && (ts.isIdentifier(value) || ts.isCallExpression(value))) {
+          if (value !== undefined && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))
+            && existingScratchOnly(context, binding, value, work)) continue;
+          if (value !== undefined && (ts.isIdentifier(value) || ts.isCallExpression(value)
+            || ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) {
             roots.push({ node: binding.initializer!, entry: binding.initializer! });
           }
         }

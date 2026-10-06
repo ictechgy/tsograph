@@ -930,10 +930,10 @@ certified helpers. Each initializer and captured binding needs both primitive pr
 evaluation. Captures must be initialized before every actual use, including field construction and
 static import/reexport calls; the function declaration's position alone is insufficient. Closed default
 imports and public dependency methods follow the same checks. Helper writes, escapes, alias or
-runtime cycles, arithmetic, coercion, property access, closures, `this`, `arguments`, scheduling,
+runtime cycles, arithmetic, coercion, uncertified property access, closures, `this`, `arguments`, scheduling,
 default/rest/destructured parameters, and unknown or protected arguments remain unproved. Completed
 helper summaries discharge their exact effect sites through the proof DAG; syntactic candidate hints
-alone grant no authority. Helper-created containers remain outside this grammar.
+alone grant no authority. Escaping containers and arbitrary container factories remain unproved.
 
 Carrier and dependency methods can receive required identifier parameters when every actual call
 has the exact arity and proven primitive arguments. Argument evaluation is audited left to right,
@@ -947,6 +947,22 @@ remain unproved. Unknown or
 protected objects, containing wrappers, callbacks, spread arguments, missing or extra arguments,
 parameter writes and unproved entries block the new proof. Dependency constructors still require
 their existing absent-or-empty, zero-parameter grammar.
+
+Direct primitive object and array literals can be used as confined scratch values in certified
+helpers, carrier methods and dependency methods. Immutable aliases may read or assign an existing
+canonical own-data slot and return its certified primitive value. Initializers and assigned values
+need both proven provenance and inert evaluation; every alias, runtime reference and actual entry
+is audited. Arrays cannot contain holes or spreads, change length, create new indices, or use
+mutator methods. Objects need unique static own-data keys; accessors, dynamic or duplicate keys,
+prototype-sensitive operations and container escape remain unproved. Types and `as const` do not
+provide a runtime ownership or descriptor witness.
+
+The same completed confinement certificate must validate the write receiver, array aliases and
+references, and each final mutation record. A site whitelist or a certificate for another root
+cannot grant this authority. Opaque effects, known reflection, intrinsic changes, unstable borrowed
+endpoints and unmatched effects still block extended isolation. General factories, callbacks,
+reentrancy, scheduling, asynchronous services and ordinary effectful methods remain outside this
+grammar.
 
 Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
 same-class method call with inert entry and arguments can retain its target when it is returned or

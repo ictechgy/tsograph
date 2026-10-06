@@ -6,6 +6,12 @@
 
 ### Added
 
+- 직접 primitive 객체·배열 리터럴의 불변 confined 별칭·기존 canonical own-slot 쓰기·인증된 읽기와
+  primitive 반환을 helper·carrier·의존 메서드 효과 증명에 연결한다. 같은 완료 인증서로 mutation의
+  수신자, 배열 별칭·참조와 마지막 site record를 검증하며 위치 whitelist나 다른 root의 권한을 빌리지 않는다.
+- 초기화·대입 값의 출처와 inert 평가, 모든 참조와 실제 진입을 감사한다. hole·spread·길이 변경·새
+  슬롯·accessor·동적/중복 키·탈출·prototype/intrinsic 변경·알려진 반사·불안정한 endpoint·미대응
+  효과는 보수적으로 남기며 타입·`as const` 표기로 런타임 소유권을 추측하지 않는다.
 - carrier·의존 메서드의 필수 identifier 매개변수를 실제 모든 호출의 primitive 출처·inert 평가·정확한
   인자 수와 완료된 summary 구체화로 증명한다. 인자 평가는 왼쪽부터 감사하며 interface·type-literal
   뒤의 실제 singleton 생성과 endpoint를 타입 주석 대신 구조·descriptor 근거로 확인한다.

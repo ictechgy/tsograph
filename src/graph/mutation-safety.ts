@@ -6,6 +6,7 @@
  */
 
 import ts from 'typescript';
+import { SterileConfinementCertificate } from './sterile-confinement.ts';
 
 import { climbWrappers, referenceSite, type FlowIndex, type MutationRecord } from './flow-index.ts';
 import { propertyToKey, resolvePrimitiveKeys, type PrimitiveKeyContext } from './primitive-keys.ts';
@@ -25,8 +26,8 @@ export interface MutationSafetyContext extends PrimitiveKeyContext {
 export interface MutationSafetyOptions {
   /** 이 site identity만 해당 mutation을 허용한다. 모든 다른 record는 계속 검사한다. */
   readonly allowedSites?: ReadonlySet<ts.Node>;
-  /** completed descriptor/effect dependency가 exact receiver/key/value를 인증한다. */
-  readonly certifiedWrite?: (record: MutationRecord) => boolean;
+  /** 세 소비자가 같은 완료·문맥 인증서를 검사한다. 영역 안 mismatch는 즉시 닫는다. */
+  readonly confinement?: SterileConfinementCertificate;
 }
 
 /**
@@ -43,13 +44,17 @@ export function isMutationCleanView(context: MutationSafetyContext, options: Mut
   const budget = new GuardBudget(context.budgetStep);
   try {
     if (context.openProgram || context.openProperties || context.index.hasOpaqueImport || context.index.hasOpaqueMutation) return false;
+    if (options.confinement !== undefined && !SterileConfinementCertificate.isIssued(options.confinement)) return false;
     if (hasDefinitelyDirtyMutation(context, options, budget)) return false;
     if (hasForbiddenDynamicReference(context, budget)) return false;
-    if (!hasSafeArrayLiteralUse(context, budget)) return false;
+    if (!hasSafeArrayLiteralUse(context, options, budget)) return false;
     const allowedSites = options.allowedSites;
     for (const record of context.index.mutations) {
       budget.step();
-      if (options.certifiedWrite?.(record) === true || allowedSites?.has(record.site)) continue;
+      const certified = options.confinement?.write(context, record);
+      if (certified === false) return false;
+      if (certified === true) continue;
+      if (allowedSites?.has(record.site)) continue;
       if (record.effect === 'binding') continue;
       if (!isPrivatePrimitiveOwnDataWrite(context, record, budget)) return false;
     }
@@ -69,7 +74,10 @@ function hasDefinitelyDirtyMutation(
 ): boolean {
   for (const record of context.index.mutations) {
     budget.step();
-    if (options.certifiedWrite?.(record) === true || options.allowedSites?.has(record.site)) continue;
+    const certified = options.confinement?.write(context, record);
+    if (certified === false) return true;
+    if (certified === true) continue;
+    if (options.allowedSites?.has(record.site)) continue;
     if (record.effect === 'binding') {
       const target = skipWrappers(record.target);
       if (ts.isIdentifier(target) && BUILTIN_GLOBAL_NAMES.has(target.text)) return true;
@@ -246,9 +254,10 @@ function arrayValuesPrimitive(context: MutationSafetyContext, literal: ts.ArrayL
 }
 
 /** mutation record가 없는 array method/alias/escape도 clean-view를 열도록 모든 const array reference를 검사한다. */
-function hasSafeArrayLiteralUse(context: MutationSafetyContext, budget: GuardBudget): boolean {
+function hasSafeArrayLiteralUse(context: MutationSafetyContext, options: MutationSafetyOptions, budget: GuardBudget): boolean {
   // caller 증명은 DAG가 비용을 재생하므로 다른 recipe의 전역 memo로 census 비용을 생략하지 않는다.
-  const cached = context.budgetStep === undefined ? ARRAY_USE_MEMO.get(context.index) : undefined;
+  const memoize = context.budgetStep === undefined && options.confinement === undefined;
+  const cached = memoize ? ARRAY_USE_MEMO.get(context.index) : undefined;
   if (cached !== undefined) return cached;
   const declarations = new Set<ts.VariableDeclaration>();
   for (const tokens of context.index.tokenOccurrences.values()) {
@@ -261,21 +270,24 @@ function hasSafeArrayLiteralUse(context: MutationSafetyContext, budget: GuardBud
     }
   }
   for (const declaration of declarations) {
+    const certified = options.confinement?.array(context, declaration);
+    if (certified === false) return false;
+    if (certified === true) continue;
     const literal = skipWrappers(declaration.initializer!);
     if (!ts.isArrayLiteralExpression(literal)) continue;
     const symbol = context.checker.getSymbolAtLocation(declaration.name);
     if (symbol === undefined) {
-      ARRAY_USE_MEMO.set(context.index, false);
+      if (memoize) ARRAY_USE_MEMO.set(context.index, false);
       return false;
     }
     const references = context.index.references.get(symbol) ?? [];
     if (references.length > 0 && (isReadonlyArrayDeclaration(declaration) || !arrayValuesPrimitive(context, literal, budget)
       || !isNonescapingObject(context, symbol, budget, 'array'))) {
-      ARRAY_USE_MEMO.set(context.index, false);
+      if (memoize) ARRAY_USE_MEMO.set(context.index, false);
       return false;
     }
   }
-  ARRAY_USE_MEMO.set(context.index, true);
+  if (memoize) ARRAY_USE_MEMO.set(context.index, true);
   return true;
 }
 

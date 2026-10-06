@@ -1,5 +1,6 @@
 /** Receiver-free primitive 문법을 ValueFlow 없이 charged acyclic summary로 인증한다. */
 import ts from 'typescript';
+import { inspectSterileLiteral, sterileLiteralOrigin, type SterileLiteralWitness } from './sterile-literals.ts';
 import type { ConstructorCarrierContext } from './constructor-carrier.ts';
 import { primitiveDependencyTarget } from './primitive-dependency.ts';
 import type { ProofEdge, ProofGuard, ProofOutcome, ProofRecipe, ProofWork } from './proof-dag.ts';
@@ -108,6 +109,8 @@ function primitiveErasedNode(node: ts.Node, work: ProofWork): boolean {
 /** primitive 결과의 provenance와 실행 전에 필요한 top-level 초기화를 함께 보존한다. */
 export interface PrimitiveSummary {
   readonly sites: ReadonlySet<ts.Node>;
+  /** 완료된 primitive child가 모든 initializer/write 값을 인증한 literal closure다. */
+  readonly literals?: ReadonlyMap<ts.Node, SterileLiteralWitness>;
   readonly captures: ReadonlySet<ts.VariableDeclaration>;
   /** generic body의 요구는 실제 호출에서만 primitive 인자로 해소한다. */
   readonly parameters: ReadonlySet<ts.ParameterDeclaration>;
@@ -340,13 +343,14 @@ export class PrimitiveHelpers {
     let sites = new Set<ts.Node>();
     let captures = new Set<ts.VariableDeclaration>();
     let parameters = new Set<ts.ParameterDeclaration>();
+    let literals = new Map<ts.Node, SterileLiteralWitness>();
     const recipe: ProofRecipe<PrimitiveSummary> = {
       id: `${node.getSourceFile().fileName}:${node.pos}:${node.end}:stage4-primitive`,
       identity: node, capability: 'primitive-effects', mode: 'extended', valid: this.policy.valid,
       dependencies: (work) => {
-        sites = new Set(); captures = new Set(); parameters = new Set();
+        sites = new Set(); captures = new Set(); parameters = new Set(); literals = new Map();
         const edges: ProofEdge[] = [];
-        accepted = this.inspect(node, work, sites, captures, parameters, edges);
+        accepted = this.inspect(node, work, sites, captures, parameters, edges, literals);
         return edges;
       },
       evaluate: (work, children) => {
@@ -356,6 +360,7 @@ export class PrimitiveHelpers {
           work();
           if (child.kind !== 'proved') return child;
           const summary = child.value as PrimitiveSummary;
+          for (const [identity, literal] of summary.literals ?? []) { work(); literals.set(identity, literal); }
           for (const site of summary.sites) { work(); sites.add(site); }
           for (const capture of summary.captures) { work(); captures.add(capture); }
           for (const parameter of summary.parameters) { work(); parameters.add(parameter); }
@@ -370,7 +375,7 @@ export class PrimitiveHelpers {
             }
           }
         }
-        return { kind: 'proved', value: { sites, captures, parameters } };
+        return { kind: 'proved', value: { sites, captures, parameters, literals } };
       },
     };
     this.recipes.set(node, recipe); return recipe;
@@ -553,7 +558,7 @@ export class PrimitiveHelpers {
 
   /** 요약에 primitive만 넣으므로 parameter 타입이나 literal의 TS 타입은 사용하지 않는다. */
   private inspect(node: PrimitiveNode, work: ProofWork, sites: Set<ts.Node>,
-    captures: Set<ts.VariableDeclaration>, parameters: Set<ts.ParameterDeclaration>, edges: ProofEdge[]): boolean {
+    captures: Set<ts.VariableDeclaration>, parameters: Set<ts.ParameterDeclaration>, edges: ProofEdge[], literals: Map<ts.Node, SterileLiteralWitness>): boolean {
     work();
     if (!work.observe(this.policy.project(node.getSourceFile()))) return false;
     const depend = (child: PrimitiveNode): void => {
@@ -592,7 +597,10 @@ export class PrimitiveHelpers {
           returned = true;
           if (statement.expression !== undefined) depend(statement.expression);
         } else if (ts.isExpressionStatement(statement)
-          && ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)) {
+          && (ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isBinaryExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isPropertyAccessExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isElementAccessExpression(normalizePrimitiveExpression(statement.expression, work).inner))) {
           depend(statement.expression);
         } else return false;
       }
@@ -610,9 +618,49 @@ export class PrimitiveHelpers {
     const normalized = normalizePrimitiveExpression(node, work);
     const expression = normalized.inner;
     this.markWrappers(normalized, sites, work);
+    if (ts.isBinaryExpression(expression)) {
+      if (expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isExpressionStatement(expression.parent)) return false;
+      const access = normalizePrimitiveExpression(expression.left, work).inner;
+      if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) return false;
+      const literal = sterileLiteralOrigin(this.context, access.expression, work);
+      if (literal === undefined) return false;
+      depend(literal); return true;
+    }
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+      const literal = sterileLiteralOrigin(this.context, expression.expression, work);
+      if (literal === undefined) return false;
+      const witness = inspectSterileLiteral(this.context, literal, work);
+      if (witness === undefined || !witness.sites.has(expression)) return false;
+      for (const binding of witness.bindings) {
+        work();
+        if (this.callableOwner(binding, work) === undefined) captures.add(binding);
+      }
+      if (witness.bindings.size === 0) depend(literal);
+      else for (const value of witness.initialValues) { work(); depend(value); }
+      return true;
+    }
+    if (ts.isObjectLiteralExpression(expression) || ts.isArrayLiteralExpression(expression)) {
+      const literalParent = climbPrimitiveWrappers(expression, work).parent;
+      if (!ts.isVariableDeclaration(literalParent) && !ts.isPropertyAccessExpression(literalParent)
+        && !ts.isElementAccessExpression(literalParent)) return false;
+      const witness = inspectSterileLiteral(this.context, expression, work);
+      if (witness === undefined) return false;
+      literals.set(expression, witness);
+      for (const site of witness.sites) { work(); sites.add(site); }
+      for (const value of witness.values) { work(); depend(value); }
+      return true;
+    }
     if (primitiveLiteral(expression)) return true;
     if (ts.isIdentifier(expression)) {
       if (expression.text === 'arguments') return false;
+      const origin = sterileLiteralOrigin(this.context, expression, work);
+      if (origin !== undefined) {
+        const alias = climbPrimitiveWrappers(expression, work).parent;
+        if (!ts.isVariableDeclaration(alias) || alias.initializer !== climbPrimitiveWrappers(expression, work)) return false;
+        const witness = inspectSterileLiteral(this.context, origin, work);
+        if (witness === undefined || !witness.bindings.has(alias)) return false;
+        depend(origin); return true;
+      }
       const symbol = this.symbol(expression, work);
       if (symbol === undefined) return false;
       if (expression.text === 'undefined') {
@@ -716,7 +764,8 @@ export class PrimitiveHelpers {
   /** source와 binding의 canonical identity를 얻는 checker lookup도 청구한다. */
   private symbol(node: ts.Node, work: ProofWork): ts.Symbol | undefined {
     work();
-    const symbol = this.context.checker.getSymbolAtLocation(node);
+    const symbol = ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent)
+      ? this.context.checker.getShorthandAssignmentValueSymbol(node.parent) : this.context.checker.getSymbolAtLocation(node);
     if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
       work(); return this.context.checker.getAliasedSymbol(symbol);
     }
@@ -757,13 +806,15 @@ export function primitiveLiteral(node: ts.Node): boolean {
 /** primitive recipe children은 canonical 정렬되므로 summary 값만 합쳐 소비한다. */
 export function primitiveChildren(children: readonly ProofOutcome<unknown>[], work: ProofWork): PrimitiveSummary {
   const sites = new Set<ts.Node>(), captures = new Set<ts.VariableDeclaration>(), parameters = new Set<ts.ParameterDeclaration>();
+  const literals = new Map<ts.Node, SterileLiteralWitness>();
   for (const child of children) {
     work();
     if (child.kind !== 'proved') continue;
     const summary = child.value as PrimitiveSummary;
+    for (const [identity, literal] of summary.literals ?? []) { work(); literals.set(identity, literal); }
     for (const site of summary.sites) { work(); sites.add(site); }
     for (const capture of summary.captures) { work(); captures.add(capture); }
     for (const parameter of summary.parameters) { work(); parameters.add(parameter); }
   }
-  return { sites, captures, parameters };
+  return { sites, captures, parameters, literals };
 }

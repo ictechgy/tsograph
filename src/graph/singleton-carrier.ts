@@ -1,7 +1,8 @@
 /** Stage3의 singleton census와 명명된 효과 증명이다. ValueFlow를 호출하지 않는다. */
 import ts from 'typescript';
+import type { SterileLiteralWitness } from './sterile-literals.ts';
 import type { ConstructorCarrierContext, ConstructorCarrierProof } from './constructor-carrier.ts';
-import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
+import { classifyEffectOperation, hasPrimitiveHelperCandidates } from './effect-inventory.ts';
 import { isPrimitiveModuleReadyEntry, normalizePrimitiveExpression, primitiveCallRuntimeEntries,
   type PrimitiveRuntimeEntry } from './primitive-helpers.ts';
 import { climbWrappers, referenceSite, type MutationRecord } from './flow-index.ts';
@@ -15,9 +16,14 @@ export type SingletonEffectModel = 'class-evaluation' | 'singleton-construction'
 /** descriptor·순서 증명이 효과와 mutation 소비자에게 전달하는 같은 근거다. */
 export interface SingletonWitness {
   readonly proof: ConstructorCarrierProof;
+  /** completed descriptor와 literal census가 읽은 원 index/checker를 문맥에 묶는다. */
+  readonly origin: { readonly index: ConstructorCarrierContext["index"]; readonly checker: ts.TypeChecker;
+    readonly inventory: ConstructorCarrierContext["index"]["effectInventory"] };
   /** 자기 census·descriptor·endpoint 감사가 완료된 실제 dependency singleton family다. */
   readonly dependencies: ReadonlySet<ts.ClassLikeDeclaration>;
   readonly models: ReadonlyMap<ts.Node, SingletonEffectModel>;
+  /** 완료된 helper DAG가 인증한 exact literal closure다. */
+  readonly literals?: ReadonlyMap<ts.Node, SterileLiteralWitness> | undefined;
   readonly writes: ReadonlyMap<ts.Node, { readonly target: ts.Expression; readonly key: string; readonly value: ts.Expression }>;
 }
 /** 정책 조회도 호출자의 ordered work trace에 포함한다. */
@@ -289,16 +295,16 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
   for (const record of index.mutations) {
     work();
     if (record.effect !== 'property' || writes.has(record.site)) continue;
-    if (record.operation !== 'assignment' || record.confidence !== 'known' || record.value === undefined
-      || !primitive(skipWrappers(record.value))) return undefined;
     const target = skipWrappers(record.target);
     const symbol = ts.isIdentifier(target) ? symbolOf(target) : undefined;
     const binding = symbol?.valueDeclaration;
-    if (binding === undefined || !ts.isVariableDeclaration(binding) || binding.initializer === undefined
-      || directBinding(binding.initializer) !== binding) return undefined;
-    const literal = skipWrappers(binding.initializer);
-    if (!canonicalLiteral(literal, work)) return undefined;
-    mark(binding, 'canonical-private-slot'); mark(record.site, 'canonical-private-slot');
+    if (record.operation === 'assignment' && record.confidence === 'known' && record.value !== undefined
+      && primitive(skipWrappers(record.value)) && binding !== undefined && ts.isVariableDeclaration(binding)
+      && binding.initializer !== undefined && directBinding(binding.initializer) === binding
+      && canonicalLiteral(skipWrappers(binding.initializer), work)) {
+      mark(binding, 'canonical-private-slot'); mark(record.site, 'canonical-private-slot');
+    } else if (helperHint) mark(record.site, 'primitive-helper-pending');
+    else return undefined;
   }
   // 감사된 subtree 밖은 primitive와 직접 immutable primitive binding만 모델링한다.
   for (const file of index.files) {
@@ -318,13 +324,14 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
       }
     }
   }
-  return { proof, dependencies: new Set(dependencies.values()), models, writes };
+  return { proof, origin: { index, checker, inventory }, dependencies: new Set(dependencies.values()), models, writes };
 }
 
 /** 모든 실행 기록에 개별 site 모델이 있는지 확인한다. unknown은 빈 효과가 아니다. */
 export function coversSingletonEffects(context: ConstructorCarrierContext, witness: SingletonWitness, work: ProofWork): boolean {
   for (const record of context.index.effectInventory!.records) {
     work();
+    if (classifyEffectOperation(record.site) !== record.operation) return false;
     if (record.operation === 'primitive') continue;
     const model = witness.models.get(record.site);
     if (model === undefined || !compatibleEffectModel(record.operation, model, record.site)) return false;
@@ -341,7 +348,10 @@ export function certifiesSingletonWrite(witness: SingletonWitness, record: Mutat
   const write = witness.writes.get(record.site);
   return write !== undefined && record.operation === 'assignment' && record.effect === 'property'
     && record.confidence === 'known' && record.target === write.target && record.staticKey === write.key
-    && record.value === write.value;
+    && record.value === write.value && ts.isBinaryExpression(record.site)
+    && ts.isPropertyAccessExpression(record.site.left) && record.key === record.site.left.name
+    && record.args.length === 0 && record.sources.length === 0 && record.source === undefined
+    && record.descriptor === undefined && record.prototype === undefined;
 }
 
 /** 직접 top-level const initializer의 binding만 반환한다. */
@@ -411,7 +421,8 @@ function sterileClass(owner: ts.ClassDeclaration, work: ProofWork, policy: Singl
       if (ts.isReturnStatement(statement)) {
         if (statement.expression !== undefined && !primitiveCandidate(skipWrappers(statement.expression))) return false;
       } else if (ts.isExpressionStatement(statement)) {
-        if (!ts.isCallExpression(skipWrappers(statement.expression))) return false;
+        if (!ts.isCallExpression(skipWrappers(statement.expression)) && !ts.isBinaryExpression(skipWrappers(statement.expression))
+          && !ts.isPropertyAccessExpression(skipWrappers(statement.expression)) && !ts.isElementAccessExpression(skipWrappers(statement.expression))) return false;
       } else if (ts.isVariableStatement(statement)) {
         if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
         for (const binding of statement.declarationList.declarations) {
@@ -528,7 +539,7 @@ function compatibleEffectModel(operation: string, model: SingletonEffectModel, s
       if (ts.isObjectLiteralExpression(site) || ts.isArrayLiteralExpression(site)) {
         return model === 'singleton-construction' || model === 'descriptor-projection'
           || model === 'parameter-property-storage' || model === 'ordered-binding'
-          || model === 'canonical-private-slot';
+          || model === 'canonical-private-slot' || model === 'primitive-helper';
       }
       if (site.kind === ts.SyntaxKind.ThisKeyword) {
         return model === 'parameter-property-storage' || model === 'carrier-call' || model === 'sterile-endpoint';
@@ -542,7 +553,9 @@ function compatibleEffectModel(operation: string, model: SingletonEffectModel, s
 
 /** syntactic 후보는 capability가 아니다. 효과 소비 전에 primitive summary가 모두 필요하다. */
 function primitiveCandidate(node: ts.Expression): boolean {
-  return primitive(node) || ts.isIdentifier(node) || ts.isCallExpression(node);
+  return primitive(node) || ts.isIdentifier(node) || ts.isCallExpression(node)
+    || ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node)
+    || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node);
 }
 
 /** helper 후보가 skip된 carrier subtree는 completed summary가 오기 전까지 pending으로 둔다. */

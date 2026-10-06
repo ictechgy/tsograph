@@ -974,7 +974,8 @@ function runtimeEdges(
 }
 
 /** 단독 primitive 생성만 inert로 분류한다. 다른 평가는 후속 named witness가 필요하다. */
-function operation(node: ts.Node): EffectRecord['operation'] | undefined {
+/** build inventory와 completed effect 소비자가 같은 exact AST 연산 identity를 대조한다. */
+export function classifyEffectOperation(node: ts.Node): EffectRecord['operation'] | undefined {
   // 속성 이름·선언 이름·모듈 지정자는 값 읽기가 아니다. computed 이름은 자식을 따로 평가한다.
   const parent = node.parent;
   if (parent && ((parent as { name?: ts.Node }).name === node && !ts.isComputedPropertyName(node)
@@ -1168,7 +1169,7 @@ export function collectEffectPart(
     // checker closure even when every ordinary identifier is resolved.
     if (edges.some((edge) => edge.specifier === undefined && edge.target === undefined)) unresolvedClosure = true;
     if (requireClassifier.capped()) status = 'incomplete(build-cap)';
-    const kind = runtime ? operation(node) : undefined;
+    const kind = runtime ? classifyEffectOperation(node) : undefined;
     const additions = Number(tokenText !== undefined) + Number(alias !== undefined) + Number(reference !== undefined)
       + edges.length + Number(kind !== undefined);
     if (budget.records + additions > limits.records) { status = 'incomplete(build-cap)'; break; }

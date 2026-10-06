@@ -756,10 +756,10 @@ factory는 이 증명 밖에 남긴다. 증명 구축과 캐시 재생은 member
 binding마다 primitive 출처와 inert한 평가를 모두 증명해야 한다. 필드 생성과 정적 import/reexport
 호출을 포함해 실제 사용마다 캡처 초기화가 먼저여야 하며, 함수 선언 위치만으로는 부족하다.
 닫힌 default import와 public 의존 메서드에도 같은 검사를 적용한다. helper 쓰기·탈출·별칭 또는
-런타임 순환·산술·강제 변환·속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
+런타임 순환·산술·강제 변환·미인증 속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
 매개변수·모르는 인자나 보호된 객체 인자는 미해석으로 남긴다. 완료된 helper summary만 proof DAG를
-통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. helper가 만드는 컨테이너는
-아직 이 문법 밖에 남긴다.
+통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. 탈출하는 컨테이너와 일반
+컨테이너 factory는 미증명으로 남긴다.
 
 carrier와 의존 메서드는 실제 모든 호출의 인자 수가 정확하고 primitive 인자의 출처가 증명될 때 필수
 identifier 매개변수를 받을 수 있다. 인자 평가는 왼쪽부터 감사하며, 완료된 helper·의존 summary를
@@ -770,6 +770,19 @@ exported 무매개변수 arrow는 명시적인 ESM 모듈 초기화 완료와 �
 검사한다. 조기 초기화·순환·재진입·스케줄링 또는 탈출한 callback은 미증명으로 남긴다. 모르는 인자나
 보호 객체·이를 담은 wrapper·callback·spread·누락 또는 초과 인자·매개변수 쓰기·미증명 진입은 새 증명을
 막는다. 의존 생성자는 기존의 없음 또는 빈 본문·무매개변수 문법을 유지한다.
+
+인증된 helper·carrier 메서드·의존 메서드에서는 직접 만든 primitive 객체·배열 리터럴을 외부로
+탈출하지 않는 임시 값으로 사용할 수 있다. 불변 별칭은 기존 canonical own-data 슬롯을 읽거나
+대입하고 그 슬롯의 인증된 primitive 값을 반환할 수 있다. 초기화 식과 대입 값마다 출처와 inert한
+평가를 증명하며, 모든 별칭·runtime 참조·실제 진입을 감사한다. 배열의 hole·spread·길이 변경·새
+index 생성·mutator 메서드는 허용하지 않는다. 객체는 중복 없는 정적 own-data 키가 필요하며,
+accessor·동적/중복 키·prototype 관련 연산·컨테이너 탈출은 미증명으로 남긴다. 타입과 `as const`는
+런타임 소유권이나 descriptor 근거가 아니다.
+
+같은 완료된 confinement 인증서가 쓰기 수신자, 배열 별칭·참조, 마지막 mutation record 각각을
+검증해야 한다. 위치 whitelist나 다른 root의 인증서로 이 권한을 얻을 수 없다. 불투명한 효과·알려진
+반사 대상·intrinsic 변경·불안정한 borrowed endpoint·모델과 맞지 않는 효과는 확장 격리를 계속 막는다.
+일반 factory·callback·재진입·스케줄링·비동기 서비스·일반 효과가 있는 메서드는 이 문법 밖에 남긴다.
 
 일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
 직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.
