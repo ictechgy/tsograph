@@ -12,7 +12,11 @@ import ts from 'typescript';
 import { climbWrappers, type FlowIndex, referenceSite, type MutationRecord } from './flow-index.ts';
 import { isMutationCleanView, type MutationSafetyContext } from './mutation-safety.ts';
 import { skipWrappers } from './node-collector.ts';
-import { auditSingletonCarrier, coversSingletonEffects, certifiesSingletonWrite, type SingletonWitness } from './singleton-carrier.ts';
+import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
+import { collectPrimitivePlan, type PrimitivePlan } from './primitive-helper-sites.ts';
+import { PrimitiveHelpers, primitiveChildren, primitiveLiteral, type PrimitiveSummary } from './primitive-helpers.ts';
+import { auditSingletonCarrier, coversSingletonEffects, certifiesSingletonWrite,
+  type SingletonEffectModel, type SingletonWitness } from './singleton-carrier.ts';
 import type { FlowPolicy } from './value-flow.ts';
 import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge, type ProofGuard, type ProofWork } from './proof-dag.ts';
 
@@ -103,6 +107,8 @@ export class ConstructorCarrierAnalyzer {
   /** borrowed endpoint의 자기 singleton family를 root-scoped witness로 확인한다. */
   private readonly dependencyRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<SingletonWitness>>();
   private readonly issuedProofs = new WeakMap<ProofCertificate, ConstructorCarrierProof>();
+  private readonly helpers: PrimitiveHelpers;
+  private readonly helperInventories = new Map<ts.ClassLikeDeclaration, ProofRecipe<PrimitiveSummary>>();
   private query: ProofQuery | undefined;
   private work: ProofWork | undefined;
   private walkDepth = 0;
@@ -119,11 +125,17 @@ export class ConstructorCarrierAnalyzer {
     this.sourceTexts = new Map(context.index.files.map((file) => [file, file.text]));
     this.dag = new ProofDag({ program: context.program ?? context.checker, checker: context.checker,
       view: context.index.effectInventory?.manifest.view ?? 'whole', manifest: context.index.effectInventory?.manifest,
-      policy: context.policy, version: 3, coverage: () => {
+      policy: context.policy, version: 4, coverage: () => {
         const inventory = context.index.effectInventory;
         return inventory?.enumeration === 'complete' && inventory.referenceAliases === 'complete'
           && inventory.initialization === 'complete';
       } });
+    this.helpers = new PrimitiveHelpers(context, {
+      project: (source) => this.policyGuard('project', source),
+      open: (node) => this.policyGuard('callable', node),
+      intrinsic: (source) => this.policyGuard('default-library', source),
+      valid: () => this.validContext(),
+    });
   }
 
   /** 호출자 질의 경계마다 local-work 방문 집합을 새로 만든다. */
@@ -365,7 +377,9 @@ export class ConstructorCarrierAnalyzer {
         }
         const child = capability === 'descriptor' ? undefined : capability === 'primitive-effects' ? 'descriptor'
           : capability === 'sterile-confinement' ? 'primitive-effects' : 'sterile-confinement';
-        return child === undefined ? [] : [{ recipe: this.singletonRecipe(declaration, child), capability: child, depth: 1, frames: 0 }];
+        const edges: ProofEdge[] = child === undefined ? [] : [{ recipe: this.singletonRecipe(declaration, child), capability: child, depth: 1, frames: 0 }];
+        if (capability === 'descriptor' && hasPrimitiveHelperCandidates(this.context.index.effectInventory)) edges.push({ recipe: this.helperInventory(declaration), capability: 'primitive-effects', depth: 1, frames: 0 });
+        return edges;
       },
       evaluate: (work, children) => this.withWork(work, () => {
         work();
@@ -380,9 +394,23 @@ export class ConstructorCarrierAnalyzer {
             intrinsic: (file) => this.policyIsDefaultLibraryFile(file),
           });
         } else {
-          const child = children[0]; witness = child?.kind === 'proved' ? child.value as SingletonWitness : undefined;
+          const child = children.find((child) => child.kind === 'proved' && child.certificate.capability === (capability === 'primitive-effects' ? 'descriptor'
+            : capability === 'sterile-confinement' ? 'primitive-effects' : 'sterile-confinement'));
+          witness = child?.kind === 'proved' ? child.value as SingletonWitness : undefined;
         }
         if (witness === undefined) return { kind: 'rejected', reason: 'singleton-descriptor' };
+        if (capability === 'descriptor') {
+          const helper = children.find((child) => child.kind === 'proved' && child.certificate.identity === declaration
+            && child.certificate.nodeId.endsWith(':stage4-inventory'));
+          if (helper?.kind === 'proved') {
+            const models = new Map<ts.Node, SingletonEffectModel>();
+            for (const [site, model] of witness.models) { work(); models.set(site, model); }
+            for (const site of (helper.value as PrimitiveSummary).sites) { work(); models.set(site, 'primitive-helper'); }
+            witness = { ...witness, models };
+          } else if (hasPrimitiveHelperCandidates(this.context.index.effectInventory)) {
+            return { kind: 'rejected', reason: 'primitive-helper' };
+          }
+        }
         if (capability === 'primitive-effects' && !coversSingletonEffects(this.context, witness, work)) {
           return { kind: 'rejected', reason: 'unmodeled-effect' };
         }
@@ -400,6 +428,35 @@ export class ConstructorCarrierAnalyzer {
       }),
     };
     recipes.set(key, recipe); return recipe;
+  }
+
+  /** 열거 완료와 helper purity를 분리하고 각 실제 entry의 초기화 의무를 DAG 결과에 적용한다. */
+  private helperInventory(declaration: ts.ClassLikeDeclaration): ProofRecipe<PrimitiveSummary> {
+    const known = this.helperInventories.get(declaration);
+    if (known !== undefined) return known;
+    const entry = this.recipe(declaration, 'proof');
+    let plan: PrimitivePlan = { roots: [] };
+    const recipe: ProofRecipe<PrimitiveSummary> = {
+      id: `${declaration.getSourceFile().fileName}:${declaration.pos}:stage4-inventory`,
+      identity: declaration, capability: 'primitive-effects', mode: 'extended', valid: entry.valid,
+      dependencies: (work) => {
+        plan = collectPrimitivePlan(this.context, declaration, work);
+        return plan.roots.map((root) => { work(); return { recipe: this.helpers.recipe(root.node), capability: 'primitive-effects', depth: 1, frames: 1 }; });
+      },
+      evaluate: (work, children) => {
+        const summaries = new Map<object, PrimitiveSummary>();
+        for (const child of children) { work(); if (child.kind === 'proved') summaries.set(child.certificate.identity, child.value as PrimitiveSummary); }
+        for (const root of plan.roots) {
+          work(); const summary = summaries.get(root.node);
+          if (summary === undefined || root.entry !== undefined && !this.helpers.initialized(summary, root.entry, work)) {
+            return { kind: 'rejected', reason: 'helper-initialization' };
+          }
+        }
+        const summary = primitiveChildren(children, work);
+        return { kind: 'proved', value: summary };
+      },
+    };
+    this.helperInventories.set(declaration, recipe); return recipe;
   }
 
   /** 선택한 flow 모드의 concrete-dispatch 권한을 소비하며 repeated allocation의 ordinary union을 보존한다. */
@@ -684,7 +741,7 @@ export class ConstructorCarrierAnalyzer {
       this.step();
       if (!ts.isMethodDeclaration(member)) continue;
       if (decorated(member) || member.body === undefined || hasStaticModifier(member, extended ? () => this.step() : undefined)) return undefined;
-      if (!this.scanMethod(member, bagParameter, bagShape, fields, audit.dateFieldName, serviceUses)) return undefined;
+      if (!this.scanMethod(member, bagParameter, bagShape, fields, audit.dateFieldName, serviceUses, extended)) return undefined;
     }
     if (serviceUses.length === 0) return undefined;
     const projectionBindings: ConstructorProjectionBinding[] = [];
@@ -1126,19 +1183,32 @@ export class ConstructorCarrierAnalyzer {
     fields: ReadonlyMap<string, ts.PropertyDeclaration | ts.ParameterDeclaration>,
     dateFieldName: string | undefined,
     serviceUses: ConstructorServiceUse[],
+    primitiveHelpers = false,
   ): boolean {
     if (!this.isSynchronousZeroRuntimeParameterMethod(method)) return false;
     if (method.body === undefined) return false;
     for (const statement of method.body.statements) {
       this.step();
+      if (primitiveHelpers && ts.isVariableStatement(statement)) {
+        if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
+        for (const binding of statement.declarationList.declarations) {
+          this.step();
+          if (!ts.isIdentifier(binding.name) || binding.initializer === undefined) return false;
+        }
+        continue;
+      }
       if (ts.isExpressionStatement(statement)) {
         const expression = parenthesizedCall(statement.expression);
+        if (primitiveHelpers && expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))) continue;
         if (expression === undefined
           || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;
         continue;
       }
       if (ts.isReturnStatement(statement)) {
         if (statement.expression === undefined) continue;
+        const value = skipWrappers(statement.expression);
+        if (primitiveHelpers && (primitiveLiteral(value) || ts.isIdentifier(value)
+          || ts.isCallExpression(value) && ts.isIdentifier(skipWrappers(value.expression)))) continue;
         const expression = parenthesizedCall(statement.expression);
         if (expression === undefined
           || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses)) return false;

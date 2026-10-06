@@ -726,8 +726,9 @@ mutation 효과가 필요하다. optional Date callback도 명시적인 own data
 
 의존성은 같은 모듈에서 controller보다 먼저 생성해야 한다. import한 의존성의 초기화, 필요한 binding
 이전의 초기화 시점 호출, 관련 런타임 import 순환은 증명하지 않는다. 의존성 생성자는 없거나
-매개변수 없는 빈 본문이어야 하고, 초기화한 필드는 primitive literal이어야 한다. 미사용 메서드도
-모두 동기·무매개변수이며 본문이 비었거나 primitive literal을 반환해야 한다. 예를 들면 다음과 같다.
+매개변수 없는 빈 본문이어야 하고, 초기화한 필드는 primitive literal 또는 인증된 primitive helper
+결과여야 한다. 미사용 메서드도 모두 동기·무매개변수이며 본문이 비었거나 감사한 primitive 결과를
+반환해야 한다. public 메서드도 같은 런타임 검사를 거친다. 예를 들면 다음과 같다.
 
 ```ts
 class Port { send() { return 1; } }
@@ -746,9 +747,19 @@ controller.run();
 이 문법 안에서 `Controller.run → Port.send`는 `bound` 근거를 얻는다. class 평가·생성·매개변수 속성
 저장·projection·지연 Date 생성·호출은 각각 감사한 효과 모델을 요구한다. 열거된 효과에 맞는 모델이
 없으면 새 증명을 막으며, 완성된 목록만으로 순수하다고 판단하지 않는다. 기존 canonical private
-own-slot 쓰기는 별도 검사를 유지한다. 일반적인 부수효과가 있는 의존 메서드·임의 helper·callback·
+own-slot 쓰기는 별도 검사를 유지한다. 일반적인 부수효과가 있는 의존 메서드·미지원 helper·callback·
 factory는 이 증명 밖에 남긴다. 증명 구축과 캐시 재생은 member·endpoint 순회를 포함해 기존
 20,000단계·깊이 256·식 frame 400의 상한을 함께 적용한다.
+
+이름 있는 동기 함수 선언은 필수 identifier 매개변수·primitive literal·앞서 초기화된 불변 primitive
+지역 변수·인증된 다른 helper 호출로 수신자 없는 primitive 결과를 만들 수 있다. 초기화 식과 캡처한
+binding마다 primitive 출처와 inert한 평가를 모두 증명해야 한다. 필드 생성과 정적 import/reexport
+호출을 포함해 실제 사용마다 캡처 초기화가 먼저여야 하며, 함수 선언 위치만으로는 부족하다.
+닫힌 default import와 public 의존 메서드에도 같은 검사를 적용한다. helper 쓰기·탈출·별칭 또는
+런타임 순환·산술·강제 변환·속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
+매개변수·모르는 인자나 보호된 객체 인자는 미해석으로 남긴다. 완료된 helper summary만 proof DAG를
+통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. 매개변수 있는 의존 메서드와
+helper가 만드는 컨테이너는 아직 이 문법 밖에 남긴다.
 
 일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
 직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.

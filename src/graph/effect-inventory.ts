@@ -1118,6 +1118,7 @@ export function collectEffectPart(
   let retained = 0;
   let status: EffectPart['status'] = 'complete';
   let unresolvedClosure = false;
+  let helpers = false;
   budget.perFileVisited ??= new Map<ts.SourceFile, number>();
   const requireClassifier = createRequireClassifier(checker, budget, limits);
   while (stack.length > 0) {
@@ -1128,6 +1129,7 @@ export function collectEffectPart(
     budget.visited++;
     budget.perFileVisited.set(source, sourceVisited + 1);
     const runtime = !source.isDeclarationFile && !erased(node);
+    if (runtime) helpers ||= helperCandidate(node);
     const tokenText = runtime && (ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node)) ? node.text : undefined;
     const aliasNode = ts.isImportSpecifier(node) || ts.isExportSpecifier(node) || ts.isImportClause(node)
       || ts.isNamespaceImport(node) || ts.isImportEqualsDeclaration(node) ? node : undefined;
@@ -1188,10 +1190,12 @@ export function collectEffectPart(
     });
     for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
   }
-  return {
+  const part: EffectPart = {
     source, revision: revision(source), records, moduleEdges, visited, retained, status, emitPolicy,
     closure: { references, aliases, tokens, unresolved: unresolvedClosure },
   };
+  partCandidates.set(part, helpers);
+  return part;
 }
 
 /** build-graph 기대 입력으로 만든다. 공급 flow index의 files는 참조하지 않는다. */
@@ -1203,6 +1207,7 @@ export function createEffectManifest(
   emitPolicy: EffectEmitPolicy = CONSERVATIVE_EMIT_POLICY,
 ): EffectManifest {
   const revisions = new Map<ts.SourceFile, string>();
+  const helperFiles = new Map<ts.SourceFile, boolean>();
   const runtimeModules = new Set<ts.SourceFile>();
   const moduleEdges = new Map<ts.SourceFile, readonly RuntimeModuleEdge[]>();
   const records = new Map<ts.SourceFile, readonly EffectRecord[]>();
@@ -1217,6 +1222,7 @@ export function createEffectManifest(
     if (revisions.has(source)) { complete = false; continue; }
     if (!sourceMatchesPath(path, source)) complete = false;
     const expected = collectEffectPart(source, resolve, EFFECT_BUILD_CAPS, budget, checker, emitPolicy);
+    helperFiles.set(source, partCandidates.get(expected) ?? true);
     revisions.set(source, expected.revision);
     if (!source.isDeclarationFile) runtimeModules.add(source);
     moduleEdges.set(source, expected.moduleEdges);
@@ -1229,10 +1235,12 @@ export function createEffectManifest(
     buildCapped ||= expected.status !== 'complete';
     if (((source as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0) > 0) complete = false;
   }
-  return {
+  const manifest: EffectManifest = {
     version: 1, view, emitPolicy, files: new Map(files), revisions, runtimeModules, moduleEdges, records,
     visited, retained, closures, statuses, coverageComplete, complete, buildCapped,
   };
+  manifestCandidates.set(manifest, helperFiles);
+  return manifest;
 }
 
 /** whole manifest의 이미 수집한 source witness를 view subset으로 투영해 중복 AST 순회를 피한다. */
@@ -1251,7 +1259,7 @@ export function selectEffectManifest(
     && [...files].every(([path, source]) => source !== undefined && sourceMatchesPath(path, source)
       && revisions.has(source) && statuses.get(source) === 'complete'
       && ((source as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0) === 0);
-  return {
+  const selection: EffectManifest = {
     version: manifest.version,
     view,
     emitPolicy: manifest.emitPolicy,
@@ -1268,6 +1276,9 @@ export function selectEffectManifest(
     complete,
     buildCapped: [...statuses.values()].some((status) => status !== 'complete'),
   };
+  const candidates = manifestCandidates.get(manifest);
+  if (candidates !== undefined) manifestCandidates.set(selection, pick(candidates));
+  return selection;
 }
 
 interface ReconciliationBudget { remaining: number; exhausted: boolean }
@@ -1671,10 +1682,49 @@ export function reconcileEffectInventory(
     }
   }
   const closed = referenceClosureComplete;
-  return {
+  const inventory: EffectInventory = {
     manifest, enumeration: 'complete', referenceAliases: closed ? 'complete' : 'incomplete',
     initialization: coveredEdges ? 'complete' : 'incomplete',
     ambientSafety: closed && coveredEdges && ambient.safe ? 'safe' : 'unknown',
     records, reasons: [...reasons].sort(),
   };
+  const candidates = manifestCandidates.get(manifest);
+  primitiveCandidates.set(inventory, candidates === undefined || sources.some((source) => candidates.get(source) !== false));
+  return inventory;
+}
+
+/** 이미 charged된 AST node 한 개만 본다. wrapper와 TDZ syntax도 후보에서 빠뜨리지 않는다. */
+function helperCandidate(node: ts.Node): boolean {
+  if (ts.isFunctionDeclaration(node)) return node.body !== undefined;
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    if (ts.isIdentifier(callee) || ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee)
+      || ts.isSatisfiesExpression(callee) || ts.isNonNullExpression(callee) || ts.isTypeAssertionExpression(callee)) return true;
+  }
+  const parent = node.parent;
+  if (!ts.isExpression(node)) return false;
+  if (ts.isReturnStatement(parent) && parent.expression === node) {
+    return !ts.isStringLiteralLike(node) && !ts.isNumericLiteral(node) && !ts.isBigIntLiteral(node)
+      && node.kind !== ts.SyntaxKind.TrueKeyword && node.kind !== ts.SyntaxKind.FalseKeyword
+      && node.kind !== ts.SyntaxKind.NullKeyword && !ts.isCallExpression(node);
+  }
+  if ((ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent)) && parent.initializer === node) {
+    if (ts.isIdentifier(node) || ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
+      || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node)) return true;
+    return ts.isVariableDeclaration(parent) && ts.isVariableDeclarationList(parent.parent)
+      && ts.isVariableStatement(parent.parent.parent) && ts.isBlock(parent.parent.parent.parent);
+  }
+  return false;
+}
+
+/** bounded AST build와 authoritative manifest가 만든 힌트는 외부 값으로 위조할 수 없다. */
+const partCandidates = new WeakMap<EffectPart, boolean>();
+const manifestCandidates = new WeakMap<EffectManifest, ReadonlyMap<ts.SourceFile, boolean>>();
+
+/** 진짜 bounded reconciliation이 만든 identity의 문법 힌트만 신뢰한다. false는 purity 권한이 아니다. */
+const primitiveCandidates = new WeakMap<EffectInventory, boolean>();
+
+/** 결손·외부 제작 inventory는 생략 경로로 들어가지 않고 charged helper 감사를 요구한다. */
+export function hasPrimitiveHelperCandidates(inventory: EffectInventory | undefined): boolean {
+  return inventory === undefined ? true : primitiveCandidates.get(inventory) ?? true;
 }

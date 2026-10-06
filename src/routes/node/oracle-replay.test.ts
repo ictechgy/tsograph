@@ -63,6 +63,10 @@ test('오라클 기록은 다섯 프레임워크와 아홉 fixture를 덮는다'
 });
 
 for (const recording of recordings) {
+  // 고정 fixture의 최종 문서만 공유한다. 두 검사는 출력을 읽기만 하며 입력·Program을 캐시하지 않는다.
+  let document: ReturnType<typeof scanFixture> | undefined;
+  const recordedDocument = () => document ??= scanFixture(recording.fixture);
+
   test(`${recording.fixture}: 모든 탐침이 통과했고 정밀도·재현율이 100%다`, () => {
     assert.equal(recording.summary.failedProbes, 0);
     assert.ok(recording.records.every((record) => record.ok));
@@ -73,14 +77,14 @@ for (const recording of recordings) {
   });
 
   test(`${recording.fixture}: 지금 tsograph 문서가 기록한 문서와 같다`, async () => {
-    const document = await scanFixture(recording.fixture);
+    const document = await recordedDocument();
     assert.equal(document.dispatch, recording.dispatch);
     assert.deepEqual(document.facts, recording.facts);
     assert.deepEqual(document.limitations, recording.limitations);
   });
 
   test(`${recording.fixture}: 문서가 isthmus 계약 검사(템플릿·order·dynamicScope)를 통과한다`, async () => {
-    const document = await scanFixture(recording.fixture);
+    const document = await recordedDocument();
     assert.equal(dispatchOrderProblem(document), undefined);
     for (const fact of document.facts) {
       if (fact['dynamic'] !== true) assert.ok(isCanonicalTemplate(fact['channel'] as string), String(fact['channel']));

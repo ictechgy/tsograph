@@ -1,6 +1,8 @@
 /** Stage3의 singleton census와 명명된 효과 증명이다. ValueFlow를 호출하지 않는다. */
 import ts from 'typescript';
 import type { ConstructorCarrierContext, ConstructorCarrierProof } from './constructor-carrier.ts';
+import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
+import { normalizePrimitiveExpression } from './primitive-helpers.ts';
 import { climbWrappers, referenceSite, type MutationRecord } from './flow-index.ts';
 import { skipWrappers } from './node-collector.ts';
 import type { ProofWork } from './proof-dag.ts';
@@ -8,7 +10,7 @@ import type { ProofWork } from './proof-dag.ts';
 /** 열거된 실행 효과마다 정확한 승인 모델을 남긴다. */
 export type SingletonEffectModel = 'class-evaluation' | 'singleton-construction' | 'parameter-property-storage'
   | 'descriptor-projection' | 'delayed-date' | 'carrier-call' | 'sterile-endpoint' | 'primitive-field'
-  | 'ordered-binding' | 'canonical-private-slot';
+  | 'ordered-binding' | 'canonical-private-slot' | 'primitive-helper' | 'primitive-helper-pending';
 /** descriptor·순서 증명이 효과와 mutation 소비자에게 전달하는 같은 근거다. */
 export interface SingletonWitness {
   readonly proof: ConstructorCarrierProof;
@@ -31,6 +33,7 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
   const source = proof.declaration.getSourceFile();
   const models = new Map<ts.Node, SingletonEffectModel>();
   const writes = new Map<ts.Node, { target: ts.Expression; key: string; value: ts.Expression }>();
+  const helperHint = hasPrimitiveHelperCandidates(index.effectInventory);
   /** grammar로 감사한 subtree의 개별 실행 site만 모델에 묶는다. */
   const mark = (root: ts.Node, model: SingletonEffectModel): void => {
     const stack: { node: ts.Node; depth: number }[] = [{ node: root, depth: 0 }];
@@ -88,7 +91,10 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
   for (const member of proof.declaration.members) {
     work();
     if (ts.isPropertyDeclaration(member)) mark(member, 'descriptor-projection');
-    if (ts.isMethodDeclaration(member)) mark(member, 'carrier-call');
+    if (ts.isMethodDeclaration(member)) {
+      mark(member, 'carrier-call');
+      if (helperHint && member.body !== undefined) markPendingHelperSites(member.body, work, mark);
+    }
   }
   markDelayedDateSites(proof.constructor, checker, policy, work, mark);
   /** 기존 Stage0의 닫힌 callback wrapper를 정확한 호출·순서 모델로만 보존한다. */
@@ -366,17 +372,38 @@ function sterileClass(owner: ts.ClassDeclaration, work: ProofWork, policy: Singl
     if (name === undefined || sensitive(name) || slots.has(name)) return false;
     slots.add(name);
     if (ts.isPropertyDeclaration(member)) {
-      if (member.initializer === undefined || !primitive(skipWrappers(member.initializer))
+      if (member.initializer === undefined || !primitiveCandidate(skipWrappers(member.initializer))
         || ts.isAutoAccessorPropertyDeclaration(member)) return false;
-      mark(member, 'primitive-field'); continue;
+      mark(member, 'primitive-field');
+      if (!primitive(skipWrappers(member.initializer))) mark(member.initializer, 'primitive-helper-pending');
+      continue;
     }
     if (!ts.isMethodDeclaration(member) || member.body === undefined || member.parameters.length !== 0
       || member.asteriskToken !== undefined || hasModifier(member, ts.SyntaxKind.AsyncKeyword, work)
       || policy.open(member)) return false;
-    const statements = member.body.statements;
-    if (statements.length > 1 || statements.length === 1 && (!ts.isReturnStatement(statements[0]!)
-      || statements[0]!.expression !== undefined && !primitive(skipWrappers(statements[0]!.expression!)))) return false;
-    mark(member, 'sterile-endpoint');
+    // Stage3 literal/empty grammar의 비용과 named model을 그대로 보존한다.
+    const only = member.body.statements.length === 1 ? member.body.statements[0] : undefined;
+    if (member.body.statements.length === 0 || only !== undefined && ts.isReturnStatement(only)
+      && (only.expression === undefined || primitive(skipWrappers(only.expression)))) {
+      mark(member, 'sterile-endpoint'); continue;
+    }
+    // descriptor 단계는 entry만 닫는다. primitive body의 provenance/effect는 Stage4 DAG가 별도로 인증한다.
+    for (const statement of member.body.statements) {
+      work();
+      if (ts.isReturnStatement(statement)) {
+        if (statement.expression !== undefined && !primitiveCandidate(skipWrappers(statement.expression))) return false;
+      } else if (ts.isExpressionStatement(statement)) {
+        if (!ts.isCallExpression(skipWrappers(statement.expression))) return false;
+      } else if (ts.isVariableStatement(statement)) {
+        if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) return false;
+        for (const binding of statement.declarationList.declarations) {
+          work();
+          if (!ts.isIdentifier(binding.name) || binding.initializer === undefined
+            || !primitiveCandidate(skipWrappers(binding.initializer))) return false;
+        }
+      } else return false;
+    }
+    mark(member, 'primitive-helper-pending');
   }
   return true;
 }
@@ -468,14 +495,15 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind, work?: ProofWork): bool
 
 /** operation과 exact named witness의 최소 호환표다. 미등록 operation은 닫힌다. */
 function compatibleEffectModel(operation: string, model: SingletonEffectModel, site: ts.Node): boolean {
+  if (model === 'primitive-helper-pending') return false;
   switch (operation) {
     case 'class': return model === 'class-evaluation';
     case 'construct': return model === 'singleton-construction' || model === 'delayed-date';
-    case 'call': return model === 'carrier-call' || model === 'sterile-endpoint';
+    case 'call': return model === 'carrier-call' || model === 'sterile-endpoint' || model === 'primitive-helper';
     case 'write': return model === 'parameter-property-storage' || model === 'descriptor-projection'
-      || model === 'primitive-field' || model === 'ordered-binding' || model === 'canonical-private-slot';
+      || model === 'primitive-field' || model === 'ordered-binding' || model === 'canonical-private-slot' || model === 'primitive-helper';
     case 'entry': return model === 'parameter-property-storage' || model === 'carrier-call'
-      || model === 'sterile-endpoint' || model === 'delayed-date';
+      || model === 'sterile-endpoint' || model === 'delayed-date' || model === 'primitive-helper';
     case 'iteration':
     case 'spread': return false;
     case 'unknown':
@@ -491,5 +519,32 @@ function compatibleEffectModel(operation: string, model: SingletonEffectModel, s
         && (model === 'parameter-property-storage' || model === 'delayed-date' || model === 'carrier-call');
     case 'read': return true;
     default: return false;
+  }
+}
+
+/** syntactic 후보는 capability가 아니다. 효과 소비 전에 primitive summary가 모두 필요하다. */
+function primitiveCandidate(node: ts.Expression): boolean {
+  return primitive(node) || ts.isIdentifier(node) || ts.isCallExpression(node);
+}
+
+/** helper 후보가 skip된 carrier subtree는 completed summary가 오기 전까지 pending으로 둔다. */
+function markPendingHelperSites(
+  root: ts.Node,
+  work: ProofWork,
+  mark: (node: ts.Node, model: SingletonEffectModel) => void,
+): void {
+  const stack: ts.Node[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    work();
+    if (ts.isCallExpression(node)) {
+      const callee = normalizePrimitiveExpression(node.expression, work).inner;
+      if (ts.isIdentifier(callee)) {
+        mark(node, 'primitive-helper-pending');
+      }
+    } else if (ts.isIdentifier(node) && ts.isReturnStatement(node.parent) && node.parent.expression === node) {
+      mark(node, 'primitive-helper-pending');
+    }
+    ts.forEachChild(node, (child) => { stack.push(child); });
   }
 }
