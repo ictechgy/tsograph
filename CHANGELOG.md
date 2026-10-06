@@ -6,6 +6,12 @@
 
 ### Added
 
+- 이름 있는 동기·수신자 없는 primitive helper의 필수 identifier 인자·선행 불변 지역 변수·캡처·
+  인증된 helper 합성을 proof DAG로 증명하고 실제 carrier 효과 위치에서 소비한다. 캡처는 실제 사용마다
+  초기화 순서를 확인하며 public 의존 메서드와 닫힌 default import도 같은 검사를 적용한다.
+- helper 후보 표시는 효과 권한과 분리한다. 감싼 ambient 호출·보호된 객체 인자·지역 변수의 외부 속성
+  호출은 인증을 막고, 기존 감싼 생성과 Date 수신자 호출은 보존한다. wrapper의 첫 물리 조회와 모델
+  복사도 cold/warm 질의의 동일한 작업·깊이·frame 상한에 청구한다.
 - 단일 최상위 exact-bag carrier 생성과 같은 모듈의 선행 sterile dependency를 전체 runtime census·
   binding 순서·descriptor·효과 모델로 증명한다. 미사용 의존 메서드까지 진입·본문을 감사하며,
   닫힌 fixture의 `Controller.run → Port.send`를 `bound`로 연결한다. 반복 생성은 일반 target union을 유지한다.

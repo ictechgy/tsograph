@@ -898,8 +898,9 @@ their existing possible targets.
 A dependency must be allocated earlier in the same module. Imported dependency initialization,
 initialization-time calls before the required binding, and relevant runtime import cycles remain
 unproved. Dependency constructors must be absent or empty with no parameters; initialized fields
-must be primitive literals, and every method, including unused methods, must be synchronous,
-parameter-free and empty or return a primitive literal. For example:
+must be primitive literals or certified primitive helper results. Every method, including unused
+methods, must be synchronous and parameter-free, with an empty body or an audited primitive
+result. Public methods use the same runtime checks. For example:
 
 ```ts
 class Port { send() { return 1; } }
@@ -919,9 +920,21 @@ Within that grammar, `Controller.run → Port.send` gains `bound` evidence. Clas
 construction, parameter-property storage, projections, delayed Date creation and calls each require
 an audited effect model. An enumerated effect without a matching model blocks the new proof;
 completed inventory alone is not a purity claim. Existing canonical private own-slot writes retain
-their separate checks. General effectful dependency methods, arbitrary helpers, callbacks and
+their separate checks. General effectful dependency methods, unsupported helpers, callbacks and
 factories remain outside this proof. Proof construction and cached replay share the existing
 20,000-step, depth-256 and 400-frame limits, including member and endpoint scans.
+
+Named synchronous function declarations can supply receiver-free primitive results through required
+identifier parameters, primitive literals, preceding immutable primitive locals, and calls to other
+certified helpers. Each initializer and captured binding needs both primitive provenance and inert
+evaluation. Captures must be initialized before every actual use, including field construction and
+static import/reexport calls; the function declaration's position alone is insufficient. Closed default
+imports and public dependency methods follow the same checks. Helper writes, escapes, alias or
+runtime cycles, arithmetic, coercion, property access, closures, `this`, `arguments`, scheduling,
+default/rest/destructured parameters, and unknown or protected arguments remain unproved. Completed
+helper summaries discharge their exact effect sites through the proof DAG; syntactic candidate hints
+alone grant no authority. Parameterized dependency methods and helper-created containers remain
+outside this grammar.
 
 Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
 same-class method call with inert entry and arguments can retain its target when it is returned or
