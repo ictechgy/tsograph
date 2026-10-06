@@ -25,6 +25,8 @@ export interface MutationSafetyContext extends PrimitiveKeyContext {
 export interface MutationSafetyOptions {
   /** 이 site identity만 해당 mutation을 허용한다. 모든 다른 record는 계속 검사한다. */
   readonly allowedSites?: ReadonlySet<ts.Node>;
+  /** completed descriptor/effect dependency가 exact receiver/key/value를 인증한다. */
+  readonly certifiedWrite?: (record: MutationRecord) => boolean;
 }
 
 /**
@@ -41,13 +43,13 @@ export function isMutationCleanView(context: MutationSafetyContext, options: Mut
   const budget = new GuardBudget(context.budgetStep);
   try {
     if (context.openProgram || context.openProperties || context.index.hasOpaqueImport || context.index.hasOpaqueMutation) return false;
-    if (hasDefinitelyDirtyMutation(context, options.allowedSites, budget)) return false;
+    if (hasDefinitelyDirtyMutation(context, options, budget)) return false;
     if (hasForbiddenDynamicReference(context, budget)) return false;
     if (!hasSafeArrayLiteralUse(context, budget)) return false;
     const allowedSites = options.allowedSites;
     for (const record of context.index.mutations) {
       budget.step();
-      if (allowedSites?.has(record.site)) continue;
+      if (options.certifiedWrite?.(record) === true || allowedSites?.has(record.site)) continue;
       if (record.effect === 'binding') continue;
       if (!isPrivatePrimitiveOwnDataWrite(context, record, budget)) return false;
     }
@@ -62,12 +64,12 @@ export function isMutationCleanView(context: MutationSafetyContext, options: Mut
 /** 값 흐름 AST를 걷기 전에 즉시 증명 실패인 mutation record를 닫는다. */
 function hasDefinitelyDirtyMutation(
   context: MutationSafetyContext,
-  allowedSites: ReadonlySet<ts.Node> | undefined,
+  options: MutationSafetyOptions,
   budget: GuardBudget,
 ): boolean {
   for (const record of context.index.mutations) {
     budget.step();
-    if (allowedSites?.has(record.site)) continue;
+    if (options.certifiedWrite?.(record) === true || options.allowedSites?.has(record.site)) continue;
     if (record.effect === 'binding') {
       const target = skipWrappers(record.target);
       if (ts.isIdentifier(target) && BUILTIN_GLOBAL_NAMES.has(target.text)) return true;

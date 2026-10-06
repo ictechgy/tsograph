@@ -888,6 +888,41 @@ or unresolved. Simple private primitive object/array literals may qualify as unr
 receivers only for existing own-data slots and fully audited uses; array types, spread arrays,
 arbitrary factories, and `map().sort().map()` do not establish that proof.
 
+An extended carrier proof admits a single direct, unconditional top-level `const` construction with
+an exact literal dependency bag. It audits every runtime use of the class and instance, including
+closed static import/export aliases under the existing project policy. Second constructions,
+constructor-value aliases, factories, subclasses, escapes, runtime namespace/enum merging, CJS,
+and unresolved references do not gain extended isolation. Repeated ordinary constructions retain
+their existing possible targets.
+
+A dependency must be allocated earlier in the same module. Imported dependency initialization,
+initialization-time calls before the required binding, and relevant runtime import cycles remain
+unproved. Dependency constructors must be absent or empty with no parameters; initialized fields
+must be primitive literals, and every method, including unused methods, must be synchronous,
+parameter-free and empty or return a primitive literal. For example:
+
+```ts
+class Port { send() { return 1; } }
+class Controller {
+  tick: () => Date;
+  constructor(private readonly inputs: { port: Port; tick?: () => Date }) {
+    this.tick = inputs.tick ?? (() => new Date());
+  }
+  run() { this.tick(); return this.inputs.port.send(); }
+}
+const live = new Port();
+const controller = new Controller({ port: live, tick: undefined });
+controller.run();
+```
+
+Within that grammar, `Controller.run → Port.send` gains `bound` evidence. Class evaluation,
+construction, parameter-property storage, projections, delayed Date creation and calls each require
+an audited effect model. An enumerated effect without a matching model blocks the new proof;
+completed inventory alone is not a purity claim. Existing canonical private own-slot writes retain
+their separate checks. General effectful dependency methods, arbitrary helpers, callbacks and
+factories remain outside this proof. Proof construction and cached replay share the existing
+20,000-step, depth-256 and 400-frame limits, including member and endpoint scans.
+
 Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
 same-class method call with inert entry and arguments can retain its target when it is returned or
 stored in an immutable local, including `const result = await this.method(value); return result`:

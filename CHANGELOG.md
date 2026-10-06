@@ -6,6 +6,11 @@
 
 ### Added
 
+- 단일 최상위 exact-bag carrier 생성과 같은 모듈의 선행 sterile dependency를 전체 runtime census·
+  binding 순서·descriptor·효과 모델로 증명한다. 미사용 의존 메서드까지 진입·본문을 감사하며,
+  닫힌 fixture의 `Controller.run → Port.send`를 `bound`로 연결한다. 반복 생성은 일반 target union을 유지한다.
+- 생성·저장·projection·지연 Date·호출과 기존 canonical own-slot 쓰기를 명명 모델로 대조한다.
+  class member·인자·endpoint 순회도 기존 query cap과 cold/warm 작업 회계 안에서 검사한다.
 - 전체·운영 소스의 독립 manifest와 실행 효과 목록을 대조하고 열거·참조/별칭 폐쇄·초기화 범위·ambient
   안전성을 분리한다. 누락·중복·오래된 색인·모듈 간선 및 실행 기록 불일치는 새 효과 인증을 막는다.
 - 효과 목록 구축에 전체 방문 1,000,000개·보존 기록 1,000,000개·파일당 추가 노드 100,000개의 상한을
