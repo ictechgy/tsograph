@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
@@ -47,6 +48,107 @@ test('tsconfig·jsconfig·설정 없음·깨진 설정을 구분한다', async (
   });
   await withProject({ 'tsconfig.json': '{ "compilerOptions": { "module": "nonsense" } }' }, (root) => {
     assert.deepEqual(createGraphProgram(root, []).status, { configName: 'tsconfig.json', configUnreadable: true });
+  });
+});
+
+test('기본 lib JSDoc 최적화도 프로젝트·외부 declaration의 JSDoc과 기본 타입을 보존한다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { allowJs: true, moduleResolution: 'Bundler', target: 'ES2022' }, include: ['src'] }),
+    'src/global.d.ts': 'interface Date { projectEpoch?: number; }\n',
+    'src/main.ts': `import type { Vendor } from 'vendor';
+import type { VendorLib } from 'vendor/lib.es5';
+/** @deprecated project declaration */
+export function project(value: string): string { return value; }
+export const arrayValue: Array<Date> = [];
+export const dateValue: Date = new Date();
+export const mapValue: Map<string, Date> = new Map();
+export const vendorValue: Vendor = { dates: [] };
+export const vendorLibValue: VendorLib = { value: new Date() };
+`,
+    'src/js-api.js': `/**
+ * @typedef {{ when?: Date, values?: Map<string, Date> }} JsPayload
+ */
+/**
+ * @param {JsPayload} payload
+ * @returns {Array<Date>}
+ */
+export function jsProject(payload) {
+  return payload.values ? Array.from(payload.values.values()) : payload.when ? [payload.when] : [];
+}
+`,
+    'node_modules/vendor/index.d.ts': `/** @deprecated third-party declaration */
+export interface Vendor { dates: Array<Date>; }
+`,
+    'node_modules/vendor/lib.es5.d.ts': `/** @deprecated third-party lib-like declaration */
+export interface VendorLib { value: Date; }
+`,
+  }, (root) => {
+    const actual = createGraphProgram(root, []);
+    const pristineHost = ts.createCompilerHost(actual.program.getCompilerOptions(), true);
+    const pristine = ts.createProgram({ rootNames: actual.program.getRootFileNames(), options: actual.program.getCompilerOptions(), host: pristineHost });
+    const summarize = (program: ts.Program) => {
+      const checker = program.getTypeChecker();
+      const project = program.getSourceFile(join(root, 'src/main.ts'))!;
+      const vendor = program.getSourceFile(join(root, 'node_modules/vendor/index.d.ts'))!;
+      const vendorLib = program.getSourceFile(join(root, 'node_modules/vendor/lib.es5.d.ts'))!;
+      const js = program.getSourceFile(join(root, 'src/js-api.js'))!;
+      const projectFunction = project.statements.find((node): node is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(node) && node.name?.text === 'project');
+      const vendorInterface = vendor.statements.find((node): node is ts.InterfaceDeclaration =>
+        ts.isInterfaceDeclaration(node) && node.name.text === 'Vendor');
+      const vendorLibInterface = vendorLib.statements.find((node): node is ts.InterfaceDeclaration =>
+        ts.isInterfaceDeclaration(node) && node.name.text === 'VendorLib');
+      const jsFunction = js.statements.find((node): node is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(node) && node.name?.text === 'jsProject');
+      const sdk = program.getSourceFiles().find((file) => file.fileName.endsWith('/lib.es5.d.ts'))!;
+      const sdkString = sdk.statements.find((node): node is ts.InterfaceDeclaration =>
+        ts.isInterfaceDeclaration(node) && node.name.text === 'String');
+      const sdkSubstr = sdkString?.members.find((node): node is ts.MethodSignature =>
+        ts.isMethodSignature(node) && node.name !== undefined && ts.isIdentifier(node.name) && node.name.text === 'substr');
+      const jsParameter = jsFunction?.parameters[0];
+      const jsReturnType = jsFunction === undefined ? undefined : checker.getSignatureFromDeclaration(jsFunction)?.getReturnType();
+      const types = new Map(project.statements.flatMap((statement) => {
+        if (!ts.isVariableStatement(statement)) return [];
+        return statement.declarationList.declarations.flatMap((declaration) =>
+          ts.isIdentifier(declaration.name) ? [[declaration.name.text, checker.typeToString(checker.getTypeAtLocation(declaration.name))] as const] : []);
+      }));
+      const dateDeclaration = project.statements.flatMap((statement) => {
+        if (!ts.isVariableStatement(statement)) return [];
+        return statement.declarationList.declarations.filter((declaration): declaration is ts.VariableDeclaration & { name: ts.Identifier } =>
+          ts.isIdentifier(declaration.name) && declaration.name.text === 'dateValue');
+      })[0]!;
+      const dateProperty = checker.getTypeAtLocation(dateDeclaration.name).getProperty('projectEpoch');
+      return {
+        projectTags: ts.getJSDocTags(projectFunction!).map((tag) => tag.tagName.text),
+        vendorTags: ts.getJSDocTags(vendorInterface!).map((tag) => tag.tagName.text),
+        vendorLibTags: ts.getJSDocTags(vendorLibInterface!).map((tag) => tag.tagName.text),
+        jsTags: ts.getJSDocTags(jsFunction!).map((tag) => tag.tagName.text),
+        sdkSubstrTags: ts.getJSDocTags(sdkSubstr!).map((tag) => tag.tagName.text),
+        jsParameterType: checker.typeToString(checker.getTypeAtLocation(jsParameter!)),
+        jsReturnType: jsReturnType === undefined ? undefined : checker.typeToString(jsReturnType),
+        dateEpochType: dateProperty === undefined ? undefined : checker.typeToString(checker.getTypeOfSymbolAtLocation(dateProperty, dateDeclaration.name)),
+        dateEpochOptional: dateProperty !== undefined && (dateProperty.flags & ts.SymbolFlags.Optional) !== 0,
+        types: Object.fromEntries(['arrayValue', 'dateValue', 'mapValue', 'vendorValue', 'vendorLibValue'].map((name) => [name, types.get(name)])),
+      };
+    };
+    const expected = summarize(pristine);
+    const observed = summarize(actual.program);
+    const { sdkSubstrTags: _expectedSdkSubstrTags, ...expectedBehavior } = expected;
+    const { sdkSubstrTags: _observedSdkSubstrTags, ...observedBehavior } = observed;
+    assert.deepEqual(observedBehavior, expectedBehavior);
+    assert.deepEqual(observed.projectTags, ['deprecated']);
+    assert.deepEqual(observed.vendorTags, ['deprecated']);
+    assert.deepEqual(observed.vendorLibTags, ['deprecated']);
+    assert.deepEqual(observed.jsTags, ['param', 'returns']);
+    assert.ok(expected.sdkSubstrTags.includes('deprecated'));
+    assert.deepEqual(observed.sdkSubstrTags, []);
+    assert.match(observed.jsParameterType!, /JsPayload/u);
+    assert.match(observed.jsReturnType!, /Date/u);
+    assert.match(observed.dateEpochType!, /number/u);
+    assert.equal(observed.dateEpochOptional, true);
+    assert.match(observed.types.arrayValue!, /Date/u);
+    assert.match(observed.types.dateValue!, /Date/u);
+    assert.match(observed.types.mapValue!, /Map/u);
   });
 });
 

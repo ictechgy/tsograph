@@ -10,7 +10,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import ts from 'typescript';
 
@@ -54,8 +54,36 @@ export function createGraphProgram(root: string, sourcePaths: readonly string[])
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
+  installDefaultLibraryJSDocMode(host, options);
   const program = ts.createProgram({ rootNames, options, host });
   return { program, checker: program.getTypeChecker(), status: config.status };
+}
+
+/** 기본 lib만 type-info JSDoc으로 낮춰 SDK 비타입 문서·suggestion metadata를 생략하고 프로젝트·외부 declaration 문서는 보존한다. */
+function installDefaultLibraryJSDocMode(host: ts.CompilerHost, options: ts.CompilerOptions): void {
+  const defaultLibDirectory = dirname(resolve(ts.getDefaultLibFilePath(options)));
+  const originalGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
+    const sourceFileOptions = isBundledDefaultLibraryFile(fileName, defaultLibDirectory)
+      ? defaultLibrarySourceFileOptions(languageVersionOrOptions)
+      : languageVersionOrOptions;
+    return originalGetSourceFile(fileName, sourceFileOptions, onError, shouldCreateNewSourceFile);
+  };
+}
+
+/** TypeScript가 배포한 바로 아래의 `lib*.d.ts`만 기본 lib로 인정한다. */
+function isBundledDefaultLibraryFile(fileName: string, defaultLibDirectory: string): boolean {
+  const normalized = resolve(fileName);
+  return dirname(normalized) === defaultLibDirectory && /^lib[^/]*\.d\.ts$/u.test(basename(normalized));
+}
+
+/** 기존 언어 옵션·format·module indicator를 보존한 채 기본 lib JSDoc 모드만 조정한다. */
+function defaultLibrarySourceFileOptions(
+  languageVersionOrOptions: ts.ScriptTarget | ts.CreateSourceFileOptions,
+): ts.CreateSourceFileOptions {
+  return typeof languageVersionOrOptions === 'object'
+    ? { ...languageVersionOrOptions, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo }
+    : { languageVersion: languageVersionOrOptions, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo };
 }
 
 /** 설정 파일에서 읽은 옵션·루트 파일·상태다. */
