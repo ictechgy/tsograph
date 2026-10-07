@@ -10,7 +10,7 @@
 import { dirname, isAbsolute, relative, sep } from 'node:path';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
-import { encodeSortedJson } from '../exchange/sorted-json.ts';
+import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { createContractDocument, FactLimitError, MAX_FACTS } from '../openapi/contract-document.ts';
 import { MAX_ALIAS_DEREFERENCES, MAX_ESTIMATED_NODES, parseSpecTree, SpecParseError } from '../openapi/spec-tree.ts';
 import { SpecContentError } from '../openapi/spec-version.ts';
@@ -215,15 +215,15 @@ function convertSpec(loaded: LoadedSpec, service: string, environment: OpenApiEn
  * @returns 성공 또는 길이 초과 실패
  */
 function encodeOutput(document: unknown): CommandResult {
-  let text: string;
+  let text: string | undefined;
   try {
-    text = encodeSortedJson(document);
+    text = encodeSortedJsonWithinLimit(document, MAX_OUTPUT_LENGTH);
   } catch (error) {
     if (error instanceof RangeError) return outputTooLarge();
     /* node:coverage ignore next */
     throw error;
   }
-  return text.length > MAX_OUTPUT_LENGTH ? outputTooLarge() : success(text);
+  return text === undefined ? outputTooLarge() : success(text);
 }
 
 /**

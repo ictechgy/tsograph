@@ -6,7 +6,7 @@
  */
 
 import ts from 'typescript';
-import { SterileConfinementCertificate } from './sterile-confinement.ts';
+import { SterileConfinementCertificate } from './constructor-carrier.ts';
 
 import { climbWrappers, referenceSite, type FlowIndex, type MutationRecord } from './flow-index.ts';
 import { propertyToKey, resolvePrimitiveKeys, type PrimitiveKeyContext } from './primitive-keys.ts';
@@ -20,6 +20,8 @@ export interface MutationSafetyContext extends PrimitiveKeyContext {
   readonly openProgram: boolean;
   /** 스캔 밖 코드가 공개 property를 쓸 수 있는지 여부다. */
   readonly openProperties: boolean;
+  /** cached extended proof가 실제 current fact read를 같은 charged guard 위치에서 재생한다. */
+  readonly currentFact?: <T>(read: () => T, equal?: (current: T, expected: T) => boolean) => T;
 }
 
 /** ctor가 정확히 audited initializer site를 예외로 넘길 때 쓰는 선택지다. */
@@ -255,12 +257,25 @@ function arrayValuesPrimitive(context: MutationSafetyContext, literal: ts.ArrayL
 
 /** mutation record가 없는 array method/alias/escape도 clean-view를 열도록 모든 const array reference를 검사한다. */
 function hasSafeArrayLiteralUse(context: MutationSafetyContext, options: MutationSafetyOptions, budget: GuardBudget): boolean {
-  // caller 증명은 DAG가 비용을 재생하므로 다른 recipe의 전역 memo로 census 비용을 생략하지 않는다.
-  const memoize = context.budgetStep === undefined && options.confinement === undefined;
-  const cached = memoize ? ARRAY_USE_MEMO.get(context.index) : undefined;
-  if (cached !== undefined) return cached;
+  // readonly index의 내용은 새 질의에서 바뀔 수 있다. 객체 identity로 완료 판정을 재사용하지 않는다.
   const declarations = new Set<ts.VariableDeclaration>();
-  for (const tokens of context.index.tokenOccurrences.values()) {
+  if (context.currentFact !== undefined) {
+    const snapshot = context.currentFact(() => {
+      const map = context.index.tokenOccurrences;
+      return { map, size: map.size };
+    }, (current, expected) => current.map === expected.map && current.size === expected.size);
+    for (const name of snapshot.map.keys()) {
+      const tokens = currentTokenList(context, name);
+      for (let index = 0; index < tokens.length; index++) {
+        const token = context.currentFact(() => context.index.tokenOccurrences.get(name)?.[index]);
+        if (token === undefined) return false;
+        if (!ts.isIdentifier(token) || !ts.isVariableDeclaration(token.parent) || token.parent.name !== token
+          || token.parent.initializer === undefined || !ts.isVariableDeclarationList(token.parent.parent)
+          || (token.parent.parent.flags & ts.NodeFlags.Const) === 0) continue;
+        declarations.add(token.parent);
+      }
+    }
+  } else for (const tokens of context.index.tokenOccurrences.values()) {
     for (const token of tokens) {
       budget.step();
       if (!ts.isIdentifier(token) || !ts.isVariableDeclaration(token.parent) || token.parent.name !== token
@@ -277,17 +292,14 @@ function hasSafeArrayLiteralUse(context: MutationSafetyContext, options: Mutatio
     if (!ts.isArrayLiteralExpression(literal)) continue;
     const symbol = context.checker.getSymbolAtLocation(declaration.name);
     if (symbol === undefined) {
-      if (memoize) ARRAY_USE_MEMO.set(context.index, false);
       return false;
     }
     const references = context.index.references.get(symbol) ?? [];
     if (references.length > 0 && (isReadonlyArrayDeclaration(declaration) || !arrayValuesPrimitive(context, literal, budget)
       || !isNonescapingObject(context, symbol, budget, 'array'))) {
-      if (memoize) ARRAY_USE_MEMO.set(context.index, false);
       return false;
     }
   }
-  if (memoize) ARRAY_USE_MEMO.set(context.index, true);
   return true;
 }
 
@@ -337,9 +349,7 @@ function propertyName(name: ts.PropertyName): string | undefined {
 
 /** eval·Function·Proxy의 직접 참조와 alias, computed globalThis 참조를 보수적으로 닫는다. */
 function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: GuardBudget): boolean {
-  // proof node 구성 비용이 먼저 평가한 analyzer나 recipe에 따라 달라지지 않게 한다.
-  const cached = context.budgetStep === undefined ? DYNAMIC_REFERENCE_MEMO.get(context.index) : undefined;
-  if (cached !== undefined) return cached;
+  // 예산이 있는 증명의 결과도 다른 caller의 전역 긍정 cache로 넘어가지 않도록 현재 근거만 읽는다.
   const forbidden = new Set(['eval', 'Function', 'Proxy']);
   if (hasBuiltinReplacement(context)) return true;
   const candidateNames = new Set([
@@ -347,8 +357,11 @@ function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: Gu
   ]);
   const ownerAliases = new Set<ts.Symbol>();
   for (const name of candidateNames) {
-    for (const token of context.index.tokenOccurrences.get(name) ?? []) {
-      budget.step();
+    const tokens = context.currentFact === undefined ? context.index.tokenOccurrences.get(name) ?? [] : currentTokenList(context, name);
+    for (let index = 0; index < tokens.length; index++) {
+      const token = context.currentFact === undefined
+        ? (budget.step(), tokens[index]!) : context.currentFact(() => context.index.tokenOccurrences.get(name)?.[index]);
+      if (token === undefined) return true;
       if (dangerousToken(context, token, forbidden)) return true;
       if (isIntrinsicOwnerAliasDeclaration(token)) {
         const symbol = context.checker.getSymbolAtLocation((token.parent as ts.VariableDeclaration).name);
@@ -362,8 +375,17 @@ function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: Gu
       if (dangerousToken(context, token, forbidden)) return true;
     }
   }
-  DYNAMIC_REFERENCE_MEMO.set(context.index, false);
   return false;
+}
+
+/** token map/list identity와 길이를 한 current guard로 읽어 append·교체를 닫는다. */
+function currentTokenList(context: MutationSafetyContext, name: string): readonly ts.Node[] {
+  return context.currentFact!(() => {
+    const map = context.index.tokenOccurrences;
+    const list = map.get(name);
+    return { map, present: map.has(name), list, length: list?.length ?? 0 };
+  }, (current, expected) => current.map === expected.map && current.present === expected.present
+    && current.list === expected.list && current.length === expected.length).list ?? [];
 }
 
 /** candidate token 하나의 direct forbidden/mutator/global namespace 사용을 판정한다. */
@@ -496,10 +518,6 @@ const MUTATOR_NAMES = new Set([
   'assign', 'defineProperty', 'defineProperties', 'setPrototypeOf', 'set', 'deleteProperty',
 ]);
 const BUILTIN_GLOBAL_NAMES = new Set(['Object', 'Reflect', 'Map', 'Date', 'Array']);
-
-/** 완주한 immutable FlowIndex에만 저장하는 expensive scan 결과다. */
-const DYNAMIC_REFERENCE_MEMO = new WeakMap<FlowIndex, boolean>();
-const ARRAY_USE_MEMO = new WeakMap<FlowIndex, boolean>();
 
 /** forbidden builtin으로 해석되는 import alias를 확인한다. */
 function isAliasedForbiddenSymbol(context: MutationSafetyContext, identifier: ts.Identifier): boolean {

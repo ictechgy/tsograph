@@ -2,7 +2,8 @@
 import ts from 'typescript';
 import type { ConstructorCarrierContext } from './constructor-carrier.ts';
 import { climbPrimitiveWrappers, normalizePrimitiveExpression, primitiveCallRuntimeEntries, primitiveCarrierMethodCall,
-  primitiveErasedReference, primitiveLiteral, primitiveReferenceSite, type PrimitiveRuntimeEntry } from './primitive-helpers.ts';
+  primitiveErasedReference, primitiveLiteral, primitiveReferenceSite, type PrimitiveFactObserver,
+  type PrimitiveRuntimeEntry } from './primitive-helpers.ts';
 import { primitiveDependencyTarget } from './primitive-dependency.ts';
 import type { ProofWork } from './proof-dag.ts';
 
@@ -22,18 +23,20 @@ export interface PrimitivePlan {
   readonly complete: boolean;
 }
 /** checker lookup과 alias lookup을 각각 logical work로 청구한다. */
-function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork): ts.Symbol | undefined {
+function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork,
+  facts?: PrimitiveFactObserver): ts.Symbol | undefined {
   work(); const symbol = context.checker.getSymbolAtLocation(node);
+  if (symbol !== undefined) facts?.symbol(symbol);
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
-    work(); return context.checker.getAliasedSymbol(symbol);
+    work(); const aliased = context.checker.getAliasedSymbol(symbol); facts?.symbol(aliased); return aliased;
   }
   return symbol;
 }
 
 /** singleton census는 descriptor가 별도로 닫는다. 여기서는 실제 const binding만 구한다. */
 function controllerBinding(context: ConstructorCarrierContext, declaration: ts.ClassLikeDeclaration,
-  work: ProofWork): ts.VariableDeclaration | undefined {
-  const symbol = declaration.name === undefined ? undefined : symbolOf(context, declaration.name, work);
+  work: ProofWork, facts?: PrimitiveFactObserver): ts.VariableDeclaration | undefined {
+  const symbol = declaration.name === undefined ? undefined : symbolOf(context, declaration.name, work, facts);
   let binding: ts.VariableDeclaration | undefined;
   work();
   const references = symbol === undefined ? [] : context.index.references.get(symbol) ?? [];
@@ -53,43 +56,44 @@ function controllerBinding(context: ConstructorCarrierContext, declaration: ts.C
 
 /** 기존 Stage3 wrapper는 같은 descriptor child가 exact 문법·entry·effects를 검증한다. */
 function carrierWrapper(context: ConstructorCarrierContext, node: ts.FunctionDeclaration,
-  binding: ts.VariableDeclaration | undefined, work: ProofWork): boolean {
+  binding: ts.VariableDeclaration | undefined, work: ProofWork, facts?: PrimitiveFactObserver): boolean {
   work();
-  const target = node.name === undefined ? undefined : symbolOf(context, node.name, work);
+  const target = node.name === undefined ? undefined : symbolOf(context, node.name, work, facts);
   const uses = target === undefined ? [] : context.index.references.get(target) ?? [];
   if (uses.length === 0 || binding === undefined) return false;
-  const controller = symbolOf(context, binding.name, work);
+  const controller = symbolOf(context, binding.name, work, facts);
   for (const reference of uses) {
     work(); const site = primitiveReferenceSite(reference, work); const call = site.parent;
     if (!ts.isCallExpression(call) || call.expression !== site || call.arguments.length !== 2
-      || !ts.isIdentifier(call.arguments[0]!) || symbolOf(context, call.arguments[0]!, work) !== controller) return false;
+      || !ts.isIdentifier(call.arguments[0]!) || symbolOf(context, call.arguments[0]!, work, facts) !== controller) return false;
   }
   return true;
 }
 
 /** method마다 실제 runtime call entry를 수집해 class-wide earliest capture를 피한다. */
 function methodEntrySites(context: ConstructorCarrierContext, method: ts.MethodDeclaration,
-  work: ProofWork): { readonly entries: readonly PrimitiveRuntimeEntry[]; readonly complete: boolean } {
+  work: ProofWork, facts?: PrimitiveFactObserver): { readonly entries: readonly PrimitiveRuntimeEntry[]; readonly complete: boolean } {
   const result: PrimitiveRuntimeEntry[] = [];
   const name = method.name;
   const text = ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name) ? name.text : undefined;
   if (text === undefined) return { entries: result, complete: false };
-  const symbol = symbolOf(context, name, work);
+  const symbol = symbolOf(context, name, work, facts);
   work();
+  facts?.tokenOccurrences(text);
   const occurrences = context.index.tokenOccurrences.get(text) ?? [];
   for (const reference of occurrences) {
     work();
     if (reference === name || primitiveErasedReference(reference, work)) continue;
     const site = primitiveReferenceSite(reference, work);
     const call = site.parent;
-    const resolved = symbolOf(context, reference, work);
+    const resolved = symbolOf(context, reference, work, facts);
     if (!ts.isCallExpression(call) || call.expression !== site || call.questionDotToken !== undefined) {
       if (resolved === symbol || resolved?.valueDeclaration === method) return { entries: result, complete: false };
       continue;
     }
-    const concrete = primitiveCarrierMethodCall(context, method, call, work);
+    const concrete = primitiveCarrierMethodCall(context, method, call, work, facts);
     if (resolved === symbol || resolved?.valueDeclaration === method || concrete) {
-      const entries = primitiveCallRuntimeEntries(context, call, work);
+      const entries = primitiveCallRuntimeEntries(context, call, work, facts);
       if (entries === undefined) return { entries: result, complete: false };
       for (const entry of entries) { work(); result.push(entry); }
     }
@@ -138,9 +142,10 @@ function carrierRoots(method: ts.MethodDeclaration, entries: readonly PrimitiveR
 }
 
 /** 필드 initializer의 TDZ는 method entry가 아니라 실제 construction entry에서 검사한다. */
-function fieldEntry(context: ConstructorCarrierContext, owner: ts.ClassDeclaration, work: ProofWork): ts.Node {
+function fieldEntry(context: ConstructorCarrierContext, owner: ts.ClassDeclaration, work: ProofWork,
+  facts?: PrimitiveFactObserver): ts.Node {
   let allocation: ts.Node = owner;
-  const symbol = owner.name === undefined ? undefined : symbolOf(context, owner.name, work);
+  const symbol = owner.name === undefined ? undefined : symbolOf(context, owner.name, work, facts);
   for (const reference of symbol === undefined ? [] : context.index.references.get(symbol) ?? []) {
     work(); const site = primitiveReferenceSite(reference, work);
     if (ts.isNewExpression(site.parent)) allocation = site.parent;
@@ -150,7 +155,8 @@ function fieldEntry(context: ConstructorCarrierContext, owner: ts.ClassDeclarati
 
 /** Stage3의 literal-only scratch write는 기존 own-slot guard가 독립적으로 검사한다. */
 function existingScratchOnly(context: ConstructorCarrierContext, binding: ts.VariableDeclaration,
-  literal: ts.ArrayLiteralExpression | ts.ObjectLiteralExpression, work: ProofWork): boolean {
+  literal: ts.ArrayLiteralExpression | ts.ObjectLiteralExpression, work: ProofWork,
+  facts?: PrimitiveFactObserver): boolean {
   if (ts.isArrayLiteralExpression(literal)) {
     for (const element of literal.elements) { work(); if (!primitiveLiteral(normalizePrimitiveExpression(element, work).inner)) return false; }
   } else {
@@ -158,7 +164,7 @@ function existingScratchOnly(context: ConstructorCarrierContext, binding: ts.Var
       work(); if (!ts.isPropertyAssignment(property) || !primitiveLiteral(normalizePrimitiveExpression(property.initializer, work).inner)) return false;
     }
   }
-  const symbol = symbolOf(context, binding.name, work);
+  const symbol = symbolOf(context, binding.name, work, facts);
   work(); const references = symbol === undefined ? [] : context.index.references.get(symbol) ?? [];
   if (references.length === 0) return false;
   for (const reference of references) {
@@ -173,22 +179,23 @@ function existingScratchOnly(context: ConstructorCarrierContext, binding: ts.Var
 
 /** 실제 graph의 global evaluation·closed helper body·borrowed endpoint를 한 계획으로 연결한다. */
 export function collectPrimitivePlan(context: ConstructorCarrierContext, declaration: ts.ClassLikeDeclaration,
-  work: ProofWork): PrimitivePlan {
+  work: ProofWork, facts?: PrimitiveFactObserver): PrimitivePlan {
   const roots: PrimitiveEntry[] = [];
   const entries: { method: ts.MethodDeclaration; entry?: PrimitiveRuntimeEntry; initialize: boolean }[] = [];
-  const binding = controllerBinding(context, declaration, work);
+  const binding = controllerBinding(context, declaration, work, facts);
   let complete = true;
+  facts?.files();
   for (const file of context.index.files) {
     work();
     for (const statement of file.statements) {
       work();
       if (ts.isFunctionDeclaration(statement) && statement.body !== undefined) {
-        if (!carrierWrapper(context, statement, binding, work)) roots.push({ node: statement });
+        if (!carrierWrapper(context, statement, binding, work, facts)) roots.push({ node: statement });
       } else if (ts.isClassDeclaration(statement)) {
         for (const member of statement.members) {
           work();
           if (ts.isMethodDeclaration(member) && member.body !== undefined) {
-            const entryResult = statement === declaration ? methodEntrySites(context, member, work)
+            const entryResult = statement === declaration ? methodEntrySites(context, member, work, facts)
               : { entries: [] as readonly PrimitiveRuntimeEntry[], complete: true };
             const methodEntries = entryResult.entries;
             work(); complete &&= entryResult.complete;
@@ -202,7 +209,7 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
               while (stack.length > 0) {
                 const { node, depth } = stack.pop()!; work(depth, depth);
                 if (ts.isCallExpression(node) && !ts.isIdentifier(normalizePrimitiveExpression(node.expression, work).inner)) {
-                  const target = primitiveDependencyTarget(context, node, work);
+                  const target = primitiveDependencyTarget(context, node, work, facts?.symbol);
                   if (target !== undefined && ts.isMethodDeclaration(target) && target.parent !== declaration) {
                     for (const entry of methodEntries) { work(); roots.push({ node, entry, dependency: target }); }
                   } else {
@@ -214,7 +221,7 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
                 ts.forEachChild(node, child => { stack.push({ node: child, depth: depth + 1 }); });
               }
             } else if (!literalEndpoint(member, work)) {
-              const methodEntries = member.parameters.length > 0 ? methodEntrySites(context, member, work).entries : [];
+              const methodEntries = member.parameters.length > 0 ? methodEntrySites(context, member, work, facts).entries : [];
               if (member.parameters.length > 0) {
                 work(); entries.push({ method: member, initialize: false });
               } else if (methodEntries.length === 0) roots.push({ node: member });
@@ -222,7 +229,7 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
             }
           } else if (ts.isPropertyDeclaration(member) && member.initializer !== undefined
             && !primitiveLiteral(normalizePrimitiveExpression(member.initializer, work).inner)) {
-            roots.push({ node: member.initializer, entry: fieldEntry(context, statement, work) });
+            roots.push({ node: member.initializer, entry: fieldEntry(context, statement, work, facts) });
           }
         }
       } else if (ts.isVariableStatement(statement)) {
@@ -230,7 +237,7 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
           work(); const value = binding.initializer === undefined ? undefined
             : normalizePrimitiveExpression(binding.initializer, work).inner;
           if (value !== undefined && (ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))
-            && existingScratchOnly(context, binding, value, work)) continue;
+            && existingScratchOnly(context, binding, value, work, facts)) continue;
           if (value !== undefined && (ts.isIdentifier(value) || ts.isCallExpression(value)
             || ts.isObjectLiteralExpression(value) || ts.isArrayLiteralExpression(value))) {
             roots.push({ node: binding.initializer!, entry: binding.initializer! });
@@ -242,8 +249,8 @@ export function collectPrimitivePlan(context: ConstructorCarrierContext, declara
         const call = callValue;
         const callee = normalizePrimitiveExpression(call.expression, work).inner;
         if (!ts.isIdentifier(callee)) continue;
-        const target = symbolOf(context, callee, work)?.valueDeclaration;
-        if (target !== undefined && ts.isFunctionDeclaration(target) && !carrierWrapper(context, target, binding, work)) {
+        const target = symbolOf(context, callee, work, facts)?.valueDeclaration;
+        if (target !== undefined && ts.isFunctionDeclaration(target) && !carrierWrapper(context, target, binding, work, facts)) {
           roots.push({ node: statement.expression, entry: statement });
         }
       }

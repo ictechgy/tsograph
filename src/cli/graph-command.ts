@@ -13,7 +13,7 @@
  */
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
-import { encodeSortedJson } from '../exchange/sorted-json.ts';
+import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { buildCallGraph } from '../graph/build-graph.ts';
 import { readGitRevision } from '../graph/git-revision.ts';
 import { computeGraphRevision, createGraphSnapshot, type DocumentHeader } from '../graph/graph-document.ts';
@@ -347,15 +347,15 @@ async function loadGraph(projectArgument: string, environment: GraphEnvironment)
  * @returns 성공 또는 실패 결과
  */
 export function render(document: unknown, maxLength: number = MAX_OUTPUT_LENGTH): CommandResult {
-  let text: string;
+  let text: string | undefined;
   try {
-    text = encodeSortedJson(document);
+    text = encodeSortedJsonWithinLimit(document, maxLength);
   } catch (error) {
     /* node:coverage ignore next */
     if (!(error instanceof RangeError)) throw error;
     return outputTooLarge(maxLength);
   }
-  return text.length > maxLength ? outputTooLarge(maxLength) : success(text);
+  return text === undefined ? outputTooLarge(maxLength) : success(text);
 }
 
 /**
@@ -365,5 +365,5 @@ export function render(document: unknown, maxLength: number = MAX_OUTPUT_LENGTH)
  * @returns 코드 2 결과
  */
 function outputTooLarge(maxLength: number): CommandResult {
-  return inputFailure(`the output document would exceed ${maxLength} characters; use --max-depth/--max-reached or a narrower --project.`);
+  return inputFailure(`the output document would exceed ${maxLength} characters; query fewer roots with reach/impact --max-depth/--max-reached or use a narrower --project.`);
 }

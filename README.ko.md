@@ -41,14 +41,24 @@ ky import·`create`/`extend` 인스턴스를 `platform: "js"`, `target: "http"`,
 `symbol.usr`는 화면 콜백을 포함한 감싸는 선언의 그래프 id이며, 위치는 1 기반 UTF-8 바이트 열이다.
 테스트 소스는 `--include-tests`로 포함할 때만 `testSource: true`를 단다.
 
+`thttp(url, options)` 같은 프로젝트 래퍼도 단일 return 또는 arrow 식이 필수 인자를 증명된
+fetch·axios·ky 호출에 그대로 넘기면 따라간다. 불변 함수 별칭과 닫힌 const 객체의 메서드,
+직접 async 반환을 지원하며 사실은 바깥 호출 지점에 귀속한다. export·탈출 또는 표현하지 못한
+진입이 있으면 내부의 dynamic 요청도 남겨 알려진 호출이 다른 가능한 진입을 가리지 않게 한다.
+
 axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 isthmus 공유 벡터와 실제
 로컬 HTTP 요청 27개로 검증했다. ky 설정은 선언된 major가 명확해야 한다. 전체 세그먼트 보간만 `{}`가
 되고 부분 보간은 dynamic이다. query·fragment·userinfo를 제거하고 고엔트로피·웹훅 경로를 마스킹한다.
 
 미상 전개, 변경되거나 외부로 넘겨진 설정, interceptor·hook·adapter 및 미확정 동사는 `dynamic`·
-`methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 자체 래퍼, URL/Request 객체, 계산된 메서드,
+`methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 추가 문장·인자 변환·default/rest가 있는
+래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
+
+JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
+넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
+부분 문서 없이 실패한다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
 ## 요구 사항
 
@@ -780,7 +790,10 @@ accessor·동적/중복 키·prototype 관련 연산·컨테이너 탈출은 미
 런타임 소유권이나 descriptor 근거가 아니다.
 
 같은 완료된 confinement 인증서가 쓰기 수신자, 배열 별칭·참조, 마지막 mutation record 각각을
-검증해야 한다. 위치 whitelist나 다른 root의 인증서로 이 권한을 얻을 수 없다. 불투명한 효과·알려진
+검증해야 한다. 위치 whitelist나 다른 root의 인증서로 이 권한을 얻을 수 없다. 분석기에 등록된
+primitive-effects producer만 발급하며, 범용 DAG의 완료 결과나 공개된 가변 witness 객체는 권한이
+아니다. 캐시 값을 공개하기 전에 필요한 proof·슬롯·쓰기·별칭·참조를 비공개 snapshot으로 보관한다.
+불투명한 효과·알려진
 반사 대상·intrinsic 변경·불안정한 borrowed endpoint·모델과 맞지 않는 효과는 확장 격리를 계속 막는다.
 일반 factory·callback·재진입·스케줄링·비동기 서비스·일반 효과가 있는 메서드는 이 문법 밖에 남긴다.
 

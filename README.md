@@ -43,16 +43,28 @@ and ky imports/`create`/`extend` instances as `platform: "js"`, `target: "http"`
 Calls keep their enclosing graph id in `symbol.usr`, including screen callbacks. Request locations
 use 1-based UTF-8 byte columns. Test sources are excluded unless `--include-tests` is passed.
 
+Project wrappers such as `thttp(url, options)` are followed when the body is a single return or
+arrow expression forwarding required arguments directly to a proven fetch/axios/ky call. Immutable
+function aliases and methods on closed const object literals are supported, including direct async
+returns. The fact belongs to the outer invocation. Exported or escaped wrappers and unrepresented
+invocations retain the inner dynamic request so known calls do not hide other possible entries.
+
 URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`baseUrl`), with shared
 isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
 major version. Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
 fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
 
 Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
-retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Custom wrappers, URL/Request
+retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Wrappers with additional
+statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
+
+JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
+16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
+data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
+document. Large traversals can use `--max-depth` and `--max-reached` to return explicit truncation.
 
 ## Requirements
 
@@ -959,7 +971,10 @@ provide a runtime ownership or descriptor witness.
 
 The same completed confinement certificate must validate the write receiver, array aliases and
 references, and each final mutation record. A site whitelist or a certificate for another root
-cannot grant this authority. Opaque effects, known reflection, intrinsic changes, unstable borrowed
+cannot grant this authority. Only the analyzer's registered primitive-effects producer can issue
+it; generic DAG completion and publicly mutable witness objects supply no authority. The producer
+keeps private snapshots of the relevant proof, slots, writes, aliases and references before exposing
+cached values. Opaque effects, known reflection, intrinsic changes, unstable borrowed
 endpoints and unmatched effects still block extended isolation. General factories, callbacks,
 reentrancy, scheduling, asynchronous services and ordinary effectful methods remain outside this
 grammar.

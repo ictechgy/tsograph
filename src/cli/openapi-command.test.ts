@@ -234,13 +234,26 @@ test('사실 상한을 넘는 조합 폭발은 사실을 만들기 전에 2로 �
   assert.match(result.standardError, /more than 100000 route-contract facts/);
 });
 
-test('isthmus 입력 상한을 넘는 출력은 쓰지 않고 2로 끝난다', { timeout: 20_000 }, async () => {
+test('들여쓰기만 큰 OpenAPI 출력은 모든 사실을 보존한 압축 JSON으로 소비자 상한 안에 낸다', { timeout: 20_000 }, async () => {
   const variants = Array.from({ length: 256 }, (_, index) => `v${index}`).join(', ');
   const lines = ['openapi: 3.0.0', `servers: [{url: "/{v}", variables: {v: {default: v0, enum: [${variants}]}}}]`, 'paths:'];
   for (let index = 0; index < 40; index++) lines.push(`  /p${index}: {get: {}, put: {}, post: {}, delete: {}, options: {}, head: {}, patch: {}, trace: {}}`);
   const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(lines.join('\n')) });
   const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
+  assert.equal(result.exitCode, 0, result.standardError);
+  assert.equal(JSON.parse(result.standardOutput).facts.length, 256 * 40 * 8);
+  assert.ok(result.standardOutput.length <= MAX_OUTPUT_LENGTH);
+});
+
+test('압축해도 isthmus 입력 상한을 넘는 출력은 쓰지 않고 2로 끝난다', { timeout: 20_000 }, async () => {
+  const variants = Array.from({ length: 256 }, (_, index) => `v${index}`).join(', ');
+  const lines = ['openapi: 3.0.0', `servers: [{url: "/{v}", variables: {v: {default: v0, enum: [${variants}]}}}]`, 'paths:'];
+  const prefix = Array.from({ length: 16 }, (_, index) => `segment-${index}`).join('/');
+  for (let index = 0; index < 40; index++) lines.push(`  /${prefix}/p${index}: {get: {}, put: {}, post: {}, delete: {}, options: {}, head: {}, patch: {}, trace: {}}`);
+  const fileSystem = fakeFileSystem({ readBytes: async () => new TextEncoder().encode(lines.join('\n')) });
+  const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], fileSystem);
   assert.equal(result.exitCode, 2);
+  assert.equal(result.standardOutput, '');
   assert.match(result.standardError, new RegExp(`exceed ${MAX_OUTPUT_LENGTH} characters`));
 });
 

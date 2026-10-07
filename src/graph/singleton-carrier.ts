@@ -33,9 +33,13 @@ export interface SingletonPolicy {
   readonly intrinsic: (source: ts.SourceFile) => boolean;
 }
 
+/** owning proof가 actual mutable fact read를 같은 charged guard 위치에 결합한다. */
+export type SingletonCurrentFact = <T>(read: () => T,
+  equal?: (current: T, expected: T) => boolean, reconstruct?: boolean) => T;
+
 /** plain synchronous-entry singleton과 같은 모듈의 선행 sterile dependency만 인증한다. */
 export function auditSingletonCarrier(context: ConstructorCarrierContext, proof: ConstructorCarrierProof,
-  work: ProofWork, policy: SingletonPolicy): SingletonWitness | undefined {
+  work: ProofWork, policy: SingletonPolicy, currentFact?: SingletonCurrentFact): SingletonWitness | undefined {
   const { checker, index } = context;
   const source = proof.declaration.getSourceFile();
   const models = new Map<ts.Node, SingletonEffectModel>();
@@ -266,10 +270,25 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
   if (inventory === undefined) return undefined;
   // 정적 모듈 연결도 순서를 증명하지 않는다. 관련 순환은 별도로 닫는다.
   const edgesBySource = new Map<ts.SourceFile, ts.SourceFile[]>();
-  for (const [file, edges] of inventory.manifest.moduleEdges) {
-    work();
-    for (const edge of edges) {
-      work();
+  const moduleEdges = currentFact === undefined ? inventory.manifest.moduleEdges : currentFact(() => {
+    const map = context.index.effectInventory?.manifest.moduleEdges;
+    return { map, size: map?.size ?? -1 };
+  }, (current, expected) => current.map === expected.map && current.size === expected.size, false).map;
+  if (moduleEdges === undefined) return undefined;
+  for (const [file, suppliedEdges] of moduleEdges) {
+    const edges = currentFact === undefined ? (work(), suppliedEdges) : currentFact(() => {
+      const map = context.index.effectInventory?.manifest.moduleEdges;
+      const list = map?.get(file);
+      return { map, present: map?.has(file) === true, list, length: list?.length ?? -1 };
+    }, (current, expected) => current.map === expected.map && current.present === expected.present
+      && current.list === expected.list && current.length === expected.length, false).list;
+    if (edges === undefined) return undefined;
+    for (let index = 0; index < edges.length; index++) {
+      const edge = currentFact === undefined ? (work(), edges[index]!) : currentFact(() =>
+        context.index.effectInventory?.manifest.moduleEdges.get(file)?.[index],
+      (current, expected) => current?.site === expected?.site && current?.specifier === expected?.specifier
+        && current?.target === expected?.target, false);
+      if (edge === undefined) return undefined;
       if (!ts.isImportDeclaration(edge.site) && !ts.isExportDeclaration(edge.site)) return undefined;
       for (const declaration of edge.target?.declarations ?? []) {
         work();
@@ -329,8 +348,36 @@ export function auditSingletonCarrier(context: ConstructorCarrierContext, proof:
 
 /** 모든 실행 기록에 개별 site 모델이 있는지 확인한다. unknown은 빈 효과가 아니다. */
 export function coversSingletonEffects(context: ConstructorCarrierContext, witness: SingletonWitness, work: ProofWork): boolean {
-  for (const record of context.index.effectInventory!.records) {
-    work();
+  const guarded = typeof work.require === 'function';
+  let currentRecords = context.index.effectInventory?.records;
+  if (guarded) {
+    let headerInitialized = false;
+    let expectedRecords: readonly import('./effect-inventory.ts').EffectRecord[] | undefined;
+    let expectedLength = 0;
+    work.require({ reconstruct: true, read: () => {
+      currentRecords = context.index.effectInventory?.records;
+      if (!headerInitialized) {
+        expectedRecords = currentRecords; expectedLength = currentRecords?.length ?? -1; headerInitialized = true; return true;
+      }
+      return currentRecords === expectedRecords && (currentRecords?.length ?? -1) === expectedLength;
+    } }, true);
+  }
+  if (currentRecords === undefined) return false;
+  for (let index = 0; index < currentRecords.length; index++) {
+    let record = currentRecords[index];
+    if (guarded) {
+      let initialized = false;
+      let expectedSite: ts.Node | undefined;
+      let expectedOperation: import('./effect-inventory.ts').EffectRecord['operation'] | undefined;
+      work.require({ reconstruct: true, read: () => {
+        record = context.index.effectInventory?.records[index];
+        if (!initialized) {
+          expectedSite = record?.site; expectedOperation = record?.operation; initialized = true; return record !== undefined;
+        }
+        return record?.site === expectedSite && record?.operation === expectedOperation;
+      } }, true);
+    } else work();
+    if (record === undefined) return false;
     if (classifyEffectOperation(record.site) !== record.operation) return false;
     if (record.operation === 'primitive') continue;
     const model = witness.models.get(record.site);

@@ -5,17 +5,19 @@ import { normalizePrimitiveExpression, primitiveReferenceSite } from './primitiv
 import type { ProofWork } from './proof-dag.ts';
 
 /** canonical binding 조회 자체도 query work에 포함한다. */
-function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork): ts.Symbol | undefined {
+function symbolOf(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork,
+  onSymbol?: (symbol: ts.Symbol) => void): ts.Symbol | undefined {
   work(); const symbol = context.checker.getSymbolAtLocation(node);
+  if (symbol !== undefined) onSymbol?.(symbol);
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
-    work(); return context.checker.getAliasedSymbol(symbol);
+    work(); const aliased = context.checker.getAliasedSymbol(symbol); onSymbol?.(aliased); return aliased;
   }
   return symbol;
 }
 
 /** 구조 후보만 반환한다. singleton census·descriptor·entry 인증 없이 이 결과는 권한이 아니다. */
 export function primitiveDependencyTarget(context: ConstructorCarrierContext, call: ts.CallExpression,
-  work: ProofWork): ts.MethodDeclaration | undefined {
+  work: ProofWork, onSymbol?: (symbol: ts.Symbol) => void): ts.MethodDeclaration | undefined {
   const callee = normalizePrimitiveExpression(call.expression, work).inner;
   if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken !== undefined) return undefined;
   const projection = normalizePrimitiveExpression(callee.expression, work).inner;
@@ -31,7 +33,7 @@ export function primitiveDependencyTarget(context: ConstructorCarrierContext, ca
   }
   if (!ts.isMethodDeclaration(owner) || !ts.isClassDeclaration(owner.parent) || owner.parent.name === undefined) return undefined;
   const carrier = owner.parent;
-  const bagSymbol = symbolOf(context, bag.name, work);
+  const bagSymbol = symbolOf(context, bag.name, work, onSymbol);
   let parameter: ts.ParameterDeclaration | undefined;
   for (const member of carrier.members) {
     work(); if (!ts.isConstructorDeclaration(member)) continue;
@@ -43,10 +45,13 @@ export function primitiveDependencyTarget(context: ConstructorCarrierContext, ca
     }
   }
   if (parameter === undefined) return undefined;
-  const carrierSymbol = symbolOf(context, carrier.name!, work);
+  const carrierSymbol = symbolOf(context, carrier.name!, work, onSymbol);
   let allocation: ts.NewExpression | undefined;
+  const seenReferences = new Set<ts.Node>();
   for (const reference of carrierSymbol === undefined ? [] : context.index.references.get(carrierSymbol) ?? []) {
-    work(); const site = primitiveReferenceSite(reference, work);
+    work(); if (seenReferences.has(reference)) continue;
+    work(); seenReferences.add(reference);
+    const site = primitiveReferenceSite(reference, work);
     if (!ts.isNewExpression(site.parent) || site.parent.expression !== site || allocation !== undefined) return undefined;
     allocation = site.parent;
   }
@@ -63,14 +68,17 @@ export function primitiveDependencyTarget(context: ConstructorCarrierContext, ca
     const value = ts.isShorthandPropertyAssignment(property) ? property.name
       : normalizePrimitiveExpression(property.initializer, work).inner;
     if (!ts.isIdentifier(value) || bindingSymbol !== undefined) return undefined;
-    work(); bindingSymbol = ts.isShorthandPropertyAssignment(property)
-      ? context.checker.getShorthandAssignmentValueSymbol(property) : symbolOf(context, value, work);
+    work();
+    if (ts.isShorthandPropertyAssignment(property)) {
+      bindingSymbol = context.checker.getShorthandAssignmentValueSymbol(property);
+      if (bindingSymbol !== undefined) onSymbol?.(bindingSymbol);
+    } else bindingSymbol = symbolOf(context, value, work, onSymbol);
   }
   const binding = bindingSymbol?.valueDeclaration;
   if (binding === undefined || !ts.isVariableDeclaration(binding) || binding.initializer === undefined) return undefined;
   const construction = normalizePrimitiveExpression(binding.initializer, work).inner;
   if (!ts.isNewExpression(construction)) return undefined;
-  const target = symbolOf(context, normalizePrimitiveExpression(construction.expression, work).inner, work)?.valueDeclaration;
+  const target = symbolOf(context, normalizePrimitiveExpression(construction.expression, work).inner, work, onSymbol)?.valueDeclaration;
   if (target === undefined || !ts.isClassDeclaration(target)) return undefined;
   for (const member of target.members) {
     work();

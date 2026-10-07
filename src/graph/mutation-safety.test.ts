@@ -72,6 +72,65 @@ test('a previously memoized guard cannot bypass the same caller proof budget', (
   assert.equal(warmSteps, coldSteps);
 });
 
+test('qualified and bare intrinsic aliases both reject computed reflective members', () => {
+  for (const owner of ['Reflect', 'globalThis.Reflect']) {
+    const context = contextOf(`const G = ${owner}; const member = 'define' + 'Property';
+      const target = { x: 0 }; G[member](target, 'x', { value: 1 });`);
+    assert.equal(isMutationCleanView(context), false, owner);
+  }
+});
+
+test('budgeted and unbudgeted clean views recheck current dynamic reference tokens', () => {
+  for (const budgeted of [false, true]) {
+    const context = contextOf('const values = [0]; values[0];');
+    let steps = 0;
+    assert.equal(isMutationCleanView(budgeted
+      ? { ...context, budgetStep: () => { steps++; } } : context), true);
+    if (budgeted) assert.ok(steps > 0);
+    const injected = ts.createSourceFile('injected.ts', 'eval("x");', ts.ScriptTarget.ES2022, true);
+    const statement = injected.statements[0];
+    assert.ok(statement && ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression));
+    const token = statement.expression.expression;
+    assert.ok(ts.isIdentifier(token));
+    const tokens = context.index.tokenOccurrences as Map<string, readonly ts.Node[]>;
+    const previous = tokens.get('eval');
+    tokens.set('eval', [token]);
+    assert.equal(isMutationCleanView({ ...context, index: {
+      ...context.index, tokenOccurrences: new Map(tokens),
+    } }), false);
+    assert.equal(isMutationCleanView(context), false);
+    if (previous === undefined) tokens.delete('eval');
+    else tokens.set('eval', previous);
+    assert.equal(isMutationCleanView(context), true);
+  }
+});
+
+test('an array view rechecks reference escapes and recovers after restoration', () => {
+  const context = contextOf('const values = [0]; values[0];');
+  assert.equal(isMutationCleanView(context), true);
+  const declaration = context.source.file.statements[0];
+  assert.ok(declaration && ts.isVariableStatement(declaration));
+  const binding = declaration.declarationList.declarations[0];
+  assert.ok(binding);
+  const symbol = context.checker.getSymbolAtLocation(binding.name);
+  assert.ok(symbol);
+  const injected = ts.createSourceFile('escape.ts', 'consume(values);', ts.ScriptTarget.ES2022, true);
+  const statement = injected.statements[0];
+  assert.ok(statement && ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression));
+  const token = statement.expression.arguments[0];
+  assert.ok(token && ts.isIdentifier(token));
+  const references = context.index.references as Map<ts.Symbol, readonly ts.Node[]>;
+  const previous = references.get(symbol);
+  references.set(symbol, [...(previous ?? []), token]);
+  assert.equal(isMutationCleanView({ ...context, index: {
+    ...context.index, references: new Map(references),
+  } }), false);
+  assert.equal(isMutationCleanView(context), false);
+  if (previous === undefined) references.delete(symbol);
+  else references.set(symbol, previous);
+  assert.equal(isMutationCleanView(context), true);
+});
+
 test('unknown receivers, unknown keys, updates, deletes and reflective effects are unsafe', () => {
   const context = contextOf([
     'declare const receiver: { known: number };',

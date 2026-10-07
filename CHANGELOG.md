@@ -6,9 +6,18 @@
 
 ### Added
 
+- `thttp` 같은 프로젝트 함수·불변 별칭·닫힌 객체 메서드의 직접 HTTP 전달을 실제 호출 인자로
+  해석한다. canonical 참조·탈출 색인과 bounded 별칭/호출 요약·변경 재검사를 사용하고,
+  표현하지 못한 진입의 내부 dynamic 요청을 보존해 경로 누락과 잘못된 정적 호출을 막는다.
+- JSON 문서의 들여쓰기만 출력 상한을 넘으면 사실 손실 없이 정렬된 압축 표현으로 내보낸다.
+  기존 소비자 상한과 사실 수 제한은 유지하고, 실제 데이터가 너무 크면 부분 성공으로 숨기지 않는다.
+
 - 직접 primitive 객체·배열 리터럴의 불변 confined 별칭·기존 canonical own-slot 쓰기·인증된 읽기와
   primitive 반환을 helper·carrier·의존 메서드 효과 증명에 연결한다. 같은 완료 인증서로 mutation의
   수신자, 배열 별칭·참조와 마지막 site record를 검증하며 위치 whitelist나 다른 root의 권한을 빌리지 않는다.
+- 인증서 발급은 실제 분석기의 등록된 primitive-effects recipe·root·문맥에 묶는다. 범용 DAG의
+  완료 결과를 발급 권한으로 쓰지 않고, 캐시 값 공개 전에 proof·슬롯·쓰기·별칭·참조의 비공개
+  snapshot을 보관해 공개된 witness와 collection의 변경으로 권한이 옮겨지지 않게 한다.
 - 초기화·대입 값의 출처와 inert 평가, 모든 참조와 실제 진입을 감사한다. hole·spread·길이 변경·새
   슬롯·accessor·동적/중복 키·탈출·prototype/intrinsic 변경·알려진 반사·불안정한 endpoint·미대응
   효과는 보수적으로 남기며 타입·`as const` 표기로 런타임 소유권을 추측하지 않는다.

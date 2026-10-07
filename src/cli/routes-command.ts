@@ -8,7 +8,7 @@
  */
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
-import { encodeSortedJson } from '../exchange/sorted-json.ts';
+import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
 import { extractClientRoutes } from '../routes/client/client-routes.ts';
 import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
@@ -144,18 +144,18 @@ async function extractDocument(project: string, parsed: RoutesArguments, environ
  * @returns 성공 또는 실패 결과
  */
 export function renderDocument(build: () => unknown, maxLength: number = MAX_OUTPUT_LENGTH): CommandResult {
-  let text: string;
+  let text: string | undefined;
   try {
-    text = encodeSortedJson(build());
+    text = encodeSortedJsonWithinLimit(build(), maxLength);
   } catch (error) {
     if (error instanceof RouteFactLimitError) {
       return inputFailure(`the project produces more than ${MAX_ROUTE_FACTS} route-decl facts, which isthmus rejects; scan a smaller project root.`);
     }
-    if (error instanceof RangeError) return outputTooLarge();
+    if (error instanceof RangeError) return outputTooLarge(maxLength);
     /* node:coverage ignore next */
     throw error;
   }
-  return text.length > maxLength ? outputTooLarge() : success(text);
+  return text === undefined ? outputTooLarge(maxLength) : success(text);
 }
 
 /**
@@ -163,6 +163,6 @@ export function renderDocument(build: () => unknown, maxLength: number = MAX_OUT
  *
  * @returns 코드 2 결과
  */
-function outputTooLarge(): CommandResult {
-  return inputFailure(`the output document would exceed ${MAX_OUTPUT_LENGTH} characters, which isthmus rejects; scan a smaller project root.`);
+function outputTooLarge(maxLength: number): CommandResult {
+  return inputFailure(`the output document would exceed ${maxLength} characters, which isthmus rejects; scan a smaller project root.`);
 }
