@@ -10,9 +10,11 @@
  */
 
 import { existsSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import ts from 'typescript';
+
+import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
 const configNames = ['tsconfig.json', 'jsconfig.json'] as const;
@@ -47,43 +49,38 @@ export interface GraphProgram {
  *
  * @param root 프로젝트 realpath
  * @param sourcePaths 루트로 넣을 프로젝트 소스 절대 경로(선언 파일 포함 가능)
+ * @param createProgram TypeScript Program factory (기본값은 `ts.createProgram`)
  * @returns Program·checker·설정 상태
  */
-export function createGraphProgram(root: string, sourcePaths: readonly string[]): GraphProgram {
+export function createGraphProgram(
+  root: string,
+  sourcePaths: readonly string[],
+  createProgram: typeof ts.createProgram = ts.createProgram,
+): GraphProgram {
   const config = readProjectConfig(root);
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
-  installDefaultLibraryJSDocMode(host, options);
-  const program = ts.createProgram({ rootNames, options, host });
-  return { program, checker: program.getTypeChecker(), status: config.status };
-}
-
-/** 기본 lib만 type-info JSDoc으로 낮춰 SDK 비타입 문서·suggestion metadata를 생략하고 프로젝트·외부 declaration 문서는 보존한다. */
-function installDefaultLibraryJSDocMode(host: ts.CompilerHost, options: ts.CompilerOptions): void {
-  const defaultLibDirectory = dirname(resolve(ts.getDefaultLibFilePath(options)));
-  const originalGetSourceFile = host.getSourceFile.bind(host);
-  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
-    const sourceFileOptions = isBundledDefaultLibraryFile(fileName, defaultLibDirectory)
-      ? defaultLibrarySourceFileOptions(languageVersionOrOptions)
-      : languageVersionOrOptions;
-    return originalGetSourceFile(fileName, sourceFileOptions, onError, shouldCreateNewSourceFile);
-  };
-}
-
-/** TypeScript가 배포한 바로 아래의 `lib*.d.ts`만 기본 lib로 인정한다. */
-function isBundledDefaultLibraryFile(fileName: string, defaultLibDirectory: string): boolean {
-  const normalized = resolve(fileName);
-  return dirname(normalized) === defaultLibDirectory && /^lib[^/]*\.d\.ts$/u.test(basename(normalized));
-}
-
-/** 기존 언어 옵션·format·module indicator를 보존한 채 기본 lib JSDoc 모드만 조정한다. */
-function defaultLibrarySourceFileOptions(
-  languageVersionOrOptions: ts.ScriptTarget | ts.CreateSourceFileOptions,
-): ts.CreateSourceFileOptions {
-  return typeof languageVersionOrOptions === 'object'
-    ? { ...languageVersionOrOptions, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo }
-    : { languageVersion: languageVersionOrOptions, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo };
+  const cacheLease = sdkSourceFileCache.install(host, options);
+  let primaryFailed = false;
+  try {
+    const program = createProgram({ rootNames, options, host });
+    const checker = program.getTypeChecker();
+    return { program, checker, status: config.status };
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
+  } finally {
+    if (primaryFailed) {
+      try {
+        cacheLease.release();
+      } catch {
+        // 원래 Program/checker 오류를 cleanup 오류로 가리지 않는다.
+      }
+    } else {
+      cacheLease.release();
+    }
+  }
 }
 
 /** 설정 파일에서 읽은 옵션·루트 파일·상태다. */
