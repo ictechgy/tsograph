@@ -8,7 +8,7 @@
  */
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
-import { encodeSortedJson } from '../exchange/sorted-json.ts';
+import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { extractPersistenceFacts, type ExtractionResult } from '../schema/extract.ts';
 import { createPersistenceDocument, MAX_SCHEMA_FACTS, SchemaFactLimitError } from '../schema/schema-document.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
@@ -109,16 +109,16 @@ async function resolveProject(fileSystem: CommandFileSystem, argument: string): 
  * @returns 성공 또는 실패 결과
  */
 function encodeDocument(project: string, extraction: ExtractionResult, environment: SchemaEnvironment): CommandResult {
-  let text: string;
+  let text: string | undefined;
   try {
-    text = encodeSortedJson(createPersistenceDocument({
+    text = encodeSortedJsonWithinLimit(createPersistenceDocument({
       project,
       toolVersion: environment.toolVersion,
       generatedAt: environment.now(),
       sourceModifiedAt: extraction.sourceModifiedAt,
       facts: extraction.facts,
       limitations: extraction.limitations,
-    }));
+    }), MAX_SCHEMA_OUTPUT_LENGTH);
   } catch (error) {
     if (error instanceof SchemaFactLimitError) {
       return inputFailure(`the project produces more than ${MAX_SCHEMA_FACTS} relation-use facts; pass a narrower --project.`);
@@ -127,7 +127,7 @@ function encodeDocument(project: string, extraction: ExtractionResult, environme
     /* node:coverage ignore next */
     throw error;
   }
-  return text.length > MAX_SCHEMA_OUTPUT_LENGTH ? outputTooLarge() : success(text);
+  return text === undefined ? outputTooLarge() : success(text);
 }
 
 /**

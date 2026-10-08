@@ -201,7 +201,19 @@ test('사실·출력 상한을 넘으면 부분 문서 대신 2다', () => {
   const tooLong = renderDocument(() => ({ text: 'x'.repeat(100) }), 50);
   assert.equal(tooLong.exitCode, 2);
   assert.match(tooLong.standardError, /would exceed/);
+  assert.match(tooLong.standardError, /exceed 50 characters/);
   const rangeError = renderDocument(() => { throw new RangeError('Invalid string length'); });
   assert.equal(rangeError.exitCode, 2);
   assert.equal(renderDocument(() => ({ a: 1 })).exitCode, 0);
+});
+
+test('공백 때문에 커진 문서는 한 번만 조립하고 사실 손실 없이 압축한다', () => {
+  let builds = 0;
+  const document = { z: [{ b: 2, a: 1 }, { b: 4, a: 3 }], a: '경로' };
+  const result = renderDocument(() => { builds++; return document; }, 65);
+  assert.equal(result.exitCode, 0, result.standardError);
+  assert.equal(builds, 1);
+  assert.deepEqual(JSON.parse(result.standardOutput), document);
+  assert.ok(result.standardOutput.length <= 65);
+  assert.equal(renderDocument(() => document, 20).exitCode, 2);
 });

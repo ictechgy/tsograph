@@ -28,6 +28,15 @@ export function encodeSortedJson(value: unknown): string {
   return `${JSON.stringify(sortJsonKeys(value), null, 2)}\n`;
 }
 
+/** 공백 때문에 교환 문서가 거부되지 않도록 같은 정렬 값의 압축 표현도 상한 안에서 확인한다. */
+export function encodeSortedJsonWithinLimit(value: unknown, maxLength: number): string | undefined {
+  const sorted = sortJsonKeys(value);
+  const readable = `${JSON.stringify(sorted, null, 2)}\n`;
+  if (readable.length <= maxLength) return readable;
+  const compact = `${JSON.stringify(sorted)}\n`;
+  return compact.length <= maxLength ? compact : undefined;
+}
+
 /**
  * 객체 키만 재귀 정렬한 사본을 만든다. 배열 순서는 보존한다.
  *

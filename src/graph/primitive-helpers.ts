@@ -1,5 +1,6 @@
 /** Receiver-free primitive 문법을 ValueFlow 없이 charged acyclic summary로 인증한다. */
 import ts from 'typescript';
+import { inspectSterileLiteral, sterileLiteralOrigin, type SterileLiteralWitness } from './sterile-literals.ts';
 import type { ConstructorCarrierContext } from './constructor-carrier.ts';
 import { primitiveDependencyTarget } from './primitive-dependency.ts';
 import type { ProofEdge, ProofGuard, ProofOutcome, ProofRecipe, ProofWork } from './proof-dag.ts';
@@ -66,25 +67,29 @@ export function primitiveErasedReference(token: ts.Node, work: ProofWork): boole
     if (ts.isSourceFile(parent)) return false;
     current = parent;
   }
-  return true;
+  return false;
 }
 
 /** interface/type-literal receiver를 nominal type이 아니라 actual const singleton binding으로 대조한다. */
 export function primitiveCarrierMethodCall(context: ConstructorCarrierContext, method: ts.MethodDeclaration,
-  call: ts.CallExpression, work: ProofWork): boolean {
+  call: ts.CallExpression, work: ProofWork, facts?: PrimitiveFactObserver): boolean {
   const access = normalizePrimitiveExpression(call.expression, work).inner;
   if (!ts.isPropertyAccessExpression(access)) return false;
   const receiver = normalizePrimitiveExpression(access.expression, work).inner;
   if (!ts.isIdentifier(receiver)) return false;
   work(); const symbol = context.checker.getSymbolAtLocation(receiver);
+  if (symbol !== undefined) facts?.symbol(symbol);
   const binding = symbol?.valueDeclaration;
   if (binding === undefined || !ts.isVariableDeclaration(binding) || binding.initializer === undefined
     || !ts.isVariableDeclarationList(binding.parent) || (binding.parent.flags & ts.NodeFlags.Const) === 0) return false;
   const allocation = normalizePrimitiveExpression(binding.initializer, work).inner;
   if (!ts.isNewExpression(allocation)) return false;
   work(); const target = context.checker.getSymbolAtLocation(normalizePrimitiveExpression(allocation.expression, work).inner);
-  const declaration = target === undefined ? undefined : (target.flags & ts.SymbolFlags.Alias) !== 0
-    ? (work(), context.checker.getAliasedSymbol(target).valueDeclaration) : target.valueDeclaration;
+  if (target !== undefined) facts?.symbol(target);
+  let declaration = target?.valueDeclaration;
+  if (target !== undefined && (target.flags & ts.SymbolFlags.Alias) !== 0) {
+    work(); const aliased = context.checker.getAliasedSymbol(target); facts?.symbol(aliased); declaration = aliased.valueDeclaration;
+  }
   return declaration === method.parent;
 }
 
@@ -108,6 +113,8 @@ function primitiveErasedNode(node: ts.Node, work: ProofWork): boolean {
 /** primitive 결과의 provenance와 실행 전에 필요한 top-level 초기화를 함께 보존한다. */
 export interface PrimitiveSummary {
   readonly sites: ReadonlySet<ts.Node>;
+  /** 완료된 primitive child가 모든 initializer/write 값을 인증한 literal closure다. */
+  readonly literals?: ReadonlyMap<ts.Node, SterileLiteralWitness>;
   readonly captures: ReadonlySet<ts.VariableDeclaration>;
   /** generic body의 요구는 실제 호출에서만 primitive 인자로 해소한다. */
   readonly parameters: ReadonlySet<ts.ParameterDeclaration>;
@@ -126,6 +133,17 @@ export function isPrimitiveModuleReadyEntry(entry: PrimitiveRuntimeEntry): entry
   return 'phase' in entry;
 }
 
+/** helper recipe가 실제 읽은 mutable index/manifest 사실을 owning trace에 연결한다. */
+export interface PrimitiveFactObserver {
+  readonly symbol: (symbol: ts.Symbol) => void;
+  readonly tokenOccurrences: (name: string) => void;
+  readonly files: () => void;
+  readonly effectInventory: () => void;
+  readonly moduleEdges: (source: ts.SourceFile) => void;
+  readonly hasOpaqueImport: () => void;
+  readonly openModules: () => void;
+}
+
 /** node의 가장 가까운 callable을 charged parent walk로 찾는다. */
 function primitiveCallableOwner(node: ts.Node, work: ProofWork): ts.Node | undefined {
   let current: ts.Node | undefined = node;
@@ -140,20 +158,25 @@ function primitiveCallableOwner(node: ts.Node, work: ProofWork): ts.Node | undef
 }
 
 /** checker lookup과 alias lookup을 각각 logical operation으로 청구한다. */
-function primitiveSymbol(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork): ts.Symbol | undefined {
+function primitiveSymbol(context: ConstructorCarrierContext, node: ts.Node, work: ProofWork,
+  facts?: PrimitiveFactObserver): ts.Symbol | undefined {
   work();
   const symbol = context.checker.getSymbolAtLocation(node);
+  if (symbol !== undefined) facts?.symbol(symbol);
   if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
     work();
-    return context.checker.getAliasedSymbol(symbol);
+    const aliased = context.checker.getAliasedSymbol(symbol);
+    facts?.symbol(aliased);
+    return aliased;
   }
   return symbol;
 }
 
 /** runtime import graph에서 source가 target 초기화 뒤 평가되며 reachable graph가 비순환인지 검증한다. */
 function primitiveModuleOrder(context: ConstructorCarrierContext, source: ts.SourceFile, target: ts.SourceFile,
-  work: ProofWork): boolean {
+  work: ProofWork, facts?: PrimitiveFactObserver): boolean {
   work();
+  facts?.effectInventory();
   const inventory = context.index.effectInventory;
   if (inventory === undefined) return false;
   const active = new Set<ts.SourceFile>(), done = new Set<ts.SourceFile>();
@@ -168,10 +191,12 @@ function primitiveModuleOrder(context: ConstructorCarrierContext, source: ts.Sou
     active.add(item.file); stack.push({ ...item, leaving: true });
     reached ||= item.file === target;
     work();
+    facts?.moduleEdges(item.file);
     const edges = inventory.manifest.moduleEdges.get(item.file) ?? [];
     for (const edge of edges) {
       work();
       if (!ts.isImportDeclaration(edge.site) && !ts.isExportDeclaration(edge.site)) return false;
+      if (edge.target !== undefined) facts?.symbol(edge.target);
       for (const declaration of edge.target?.declarations ?? []) {
         work(); stack.push({ file: declaration.getSourceFile(), leaving: false, depth: item.depth + 1 });
       }
@@ -182,19 +207,20 @@ function primitiveModuleOrder(context: ConstructorCarrierContext, source: ts.Sou
 
 /** arrow binding은 body capture 수와 무관하게 모든 actual call보다 먼저 준비되어야 한다. */
 function primitiveBindingReady(context: ConstructorCarrierContext, binding: ts.VariableDeclaration,
-  bindingSource: ts.SourceFile, invocation: ts.CallExpression, work: ProofWork): boolean {
+  bindingSource: ts.SourceFile, invocation: ts.CallExpression, work: ProofWork,
+  facts?: PrimitiveFactObserver): boolean {
   work();
   const invocationSource = invocation.getSourceFile();
   if (invocationSource === bindingSource) {
     work();
     return binding.end < invocation.pos;
   }
-  return primitiveModuleOrder(context, invocationSource, bindingSource, work);
+  return primitiveModuleOrder(context, invocationSource, bindingSource, work, facts);
 }
 
 /** direct/named export와 모든 direct zero-argument 호출을 닫은 arrow의 실제 runtime entry를 반환한다. */
 export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, call: ts.CallExpression,
-  work: ProofWork): readonly PrimitiveRuntimeEntry[] | undefined {
+  work: ProofWork, facts?: PrimitiveFactObserver): readonly PrimitiveRuntimeEntry[] | undefined {
   const owner = primitiveCallableOwner(call, work);
   if (owner === undefined) return [call];
   if (!ts.isArrowFunction(owner)) return undefined;
@@ -204,7 +230,7 @@ export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, 
     work();
     if (modifier.kind === ts.SyntaxKind.AsyncKeyword) return undefined;
   }
-  if (owner.parameters.length !== 0) return primitiveInlineWrapperEntries(context, owner, call, work);
+  if (owner.parameters.length !== 0) return primitiveInlineWrapperEntries(context, owner, call, work, facts);
   const outer = climbPrimitiveWrappers(owner, work);
   work();
   const binding = outer.parent;
@@ -215,7 +241,7 @@ export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, 
   const source = binding.getSourceFile();
   if (binding.parent.parent.parent !== source) return undefined;
   const statement = binding.parent.parent;
-  const symbol = primitiveSymbol(context, binding.name, work);
+  const symbol = primitiveSymbol(context, binding.name, work, facts);
   if (symbol === undefined) return undefined;
   work();
   if ((context.index.identifierWrites.get(symbol)?.length ?? 0) !== 0) return undefined;
@@ -226,8 +252,10 @@ export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, 
     if (declaration !== binding) return undefined;
   }
   work();
+  facts?.hasOpaqueImport();
   if (context.index.hasOpaqueImport) return undefined;
   work();
+  facts?.openModules();
   if (context.index.openModules.size !== 0) return undefined;
   let exported = false;
   for (const modifier of statement.modifiers ?? []) {
@@ -246,12 +274,12 @@ export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, 
     const site = primitiveReferenceSite(reference, work);
     const invocation = site.parent;
     if (!ts.isCallExpression(invocation) || invocation.expression !== site || invocation.questionDotToken !== undefined
-      || invocation.arguments.length !== 0 || primitiveSymbol(context, reference, work) !== symbol) return undefined;
-    if (!primitiveBindingReady(context, binding, source, invocation, work)) return undefined;
+      || invocation.arguments.length !== 0 || primitiveSymbol(context, reference, work, facts) !== symbol) return undefined;
+    if (!primitiveBindingReady(context, binding, source, invocation, work, facts)) return undefined;
     entries.push(invocation);
   }
   if (exported) {
-    if (!primitiveModuleOrder(context, source, source, work)) return undefined;
+    if (!primitiveModuleOrder(context, source, source, work, facts)) return undefined;
     work(); entries.push({ phase: 'module-ready', source, arrow: owner });
   }
   return entries;
@@ -259,7 +287,7 @@ export function primitiveCallRuntimeEntries(context: ConstructorCarrierContext, 
 
 /** Stage0가 인증하는 exact inline callback은 inner method를 outer synchronous wrapper call에서 실행한다. */
 function primitiveInlineWrapperEntries(context: ConstructorCarrierContext, owner: ts.ArrowFunction,
-  call: ts.CallExpression, work: ProofWork): readonly PrimitiveRuntimeEntry[] | undefined {
+  call: ts.CallExpression, work: ProofWork, facts?: PrimitiveFactObserver): readonly PrimitiveRuntimeEntry[] | undefined {
   work();
   if (owner.parameters.length !== 1 || call.arguments.length !== 0) return undefined;
   const parameter = owner.parameters[0]!;
@@ -269,7 +297,8 @@ function primitiveInlineWrapperEntries(context: ConstructorCarrierContext, owner
   const access = normalizePrimitiveExpression(call.expression, work).inner;
   if (!ts.isPropertyAccessExpression(access) || access.questionDotToken !== undefined) return undefined;
   const receiver = normalizePrimitiveExpression(access.expression, work).inner;
-  if (!ts.isIdentifier(receiver) || primitiveSymbol(context, receiver, work) !== primitiveSymbol(context, parameter.name, work)) {
+  if (!ts.isIdentifier(receiver)
+    || primitiveSymbol(context, receiver, work, facts) !== primitiveSymbol(context, parameter.name, work, facts)) {
     return undefined;
   }
   const callback = climbPrimitiveWrappers(owner, work);
@@ -282,7 +311,7 @@ function primitiveInlineWrapperEntries(context: ConstructorCarrierContext, owner
     || !ts.isIdentifier(normalizePrimitiveExpression(wrapperCall.arguments[0]!, work).inner)) return undefined;
   const callee = normalizePrimitiveExpression(wrapperCall.expression, work).inner;
   if (!ts.isIdentifier(callee)) return undefined;
-  const target = primitiveSymbol(context, callee, work)?.valueDeclaration;
+  const target = primitiveSymbol(context, callee, work, facts)?.valueDeclaration;
   if (target === undefined || !ts.isFunctionDeclaration(target) || target.body === undefined) return undefined;
   work();
   const source = target.getSourceFile();
@@ -307,9 +336,9 @@ function primitiveInlineWrapperEntries(context: ConstructorCarrierContext, owner
     || invocation.arguments.length !== 1 || !ts.isIdentifier(invocation.expression)) return undefined;
   for (const argument of invocation.arguments) { work(); }
   if (!ts.isIdentifier(invocation.arguments[0]!)
-    || primitiveSymbol(context, invocation.expression, work) !== primitiveSymbol(context, callbackParameter.name, work)
-    || primitiveSymbol(context, invocation.arguments[0]!, work) !== primitiveSymbol(context, value.name, work)) return undefined;
-  return primitiveCallRuntimeEntries(context, wrapperCall, work);
+    || primitiveSymbol(context, invocation.expression, work, facts) !== primitiveSymbol(context, callbackParameter.name, work, facts)
+    || primitiveSymbol(context, invocation.arguments[0]!, work, facts) !== primitiveSymbol(context, value.name, work, facts)) return undefined;
+  return primitiveCallRuntimeEntries(context, wrapperCall, work, facts);
 }
 /** callable body와 일반 expression의 독립 정적 entry다. */
 type PrimitiveNode = ts.Expression | ts.FunctionDeclaration | ts.MethodDeclaration;
@@ -321,6 +350,181 @@ export interface PrimitivePolicy {
   readonly valid: () => boolean;
 }
 
+/** helper가 실제로 조회한 symbol별 index 사실의 identity snapshot이다. */
+interface PrimitiveFactSnapshot {
+  readonly symbol: ts.Symbol;
+  readonly flags: ts.SymbolFlags;
+  readonly valueDeclaration: ts.Declaration | undefined;
+  readonly referencesMap: ReadonlyMap<ts.Symbol, readonly ts.Node[]>;
+  readonly referencesPresent: boolean;
+  readonly references: readonly ts.Node[];
+  readonly identifierWritesMap: ReadonlyMap<ts.Symbol, readonly (ts.Expression | undefined)[]>;
+  readonly identifierWritesPresent: boolean;
+  readonly identifierWrites: readonly (ts.Expression | undefined)[];
+  readonly exported: boolean;
+  readonly declarations: readonly ts.Declaration[];
+}
+
+/** 한 recipe callback이 실제로 읽은 mutable index/manifest fact key 집합이다. */
+interface PrimitiveFactReads {
+  readonly symbols: Set<ts.Symbol>;
+  readonly tokenOccurrences: Set<string>;
+  readonly moduleEdges: Set<ts.SourceFile>;
+  files: boolean;
+  effectInventory: boolean;
+  hasOpaqueImport: boolean;
+  openModules: boolean;
+}
+
+/** 첫 helper fact 읽기의 list를 element identity까지 charged snapshot으로 복사한다. */
+function primitiveFactList<T>(read: () => readonly T[], work: ProofWork): readonly T[] {
+  work(); const source = read();
+  work(); const length = source.length;
+  const result: T[] = [];
+  for (let index = 0; index < length; index++) { work(); result.push(source[index]!); }
+  return Object.freeze(result);
+}
+
+/** method-name census가 읽은 현재 token list를 재감사 가능한 ordered guards로 고정한다. */
+function primitiveTokenGuards(context: ConstructorCarrierContext, name: string,
+  work: ProofWork): readonly ProofGuard[] {
+  work(); const occurrencesMap = context.index.tokenOccurrences;
+  work(); const present = occurrencesMap.has(name);
+  const occurrences = primitiveFactList(() => occurrencesMap.get(name) ?? [], work);
+  const guards: ProofGuard[] = [];
+  work(); guards.push(Object.freeze({ read: () => context.index.tokenOccurrences === occurrencesMap }));
+  work(); guards.push(Object.freeze({ read: () => context.index.tokenOccurrences.has(name) === present }));
+  const length = occurrences.length;
+  work(); guards.push(Object.freeze({ reconstruct: true,
+    read: () => (context.index.tokenOccurrences.get(name)?.length ?? 0) === length }));
+  for (let index = 0; index < length; index++) {
+    const value = occurrences[index]!;
+    work(); guards.push(Object.freeze({ reconstruct: true,
+      read: () => context.index.tokenOccurrences.get(name)?.[index] === value }));
+  }
+  return Object.freeze(guards);
+}
+
+/** plan census가 순회한 current file list를 owning inventory recipe가 다시 감사한다. */
+function primitiveFilesGuards(context: ConstructorCarrierContext, work: ProofWork): readonly ProofGuard[] {
+  work(); const files = context.index.files;
+  const guards: ProofGuard[] = [];
+  work(); guards.push(Object.freeze({ reconstruct: true, read: () => context.index.files === files }));
+  work(); const length = files.length;
+  work(); guards.push(Object.freeze({ reconstruct: true, read: () => context.index.files.length === length }));
+  for (let index = 0; index < length; index++) {
+    const file = files[index]!;
+    work(); guards.push(Object.freeze({ reconstruct: true, read: () => context.index.files[index] === file }));
+  }
+  return Object.freeze(guards);
+}
+
+/** module-order walk의 inventory/manifest/map identity를 current entry에 묶는다. */
+function primitiveInventoryGuards(context: ConstructorCarrierContext, work: ProofWork): readonly ProofGuard[] {
+  work(); const inventory = context.index.effectInventory;
+  const guards: ProofGuard[] = [];
+  work(); guards.push(Object.freeze({ read: () => context.index.effectInventory === inventory }));
+  if (inventory !== undefined) {
+    work(); const manifest = inventory.manifest;
+    work(); guards.push(Object.freeze({ read: () => context.index.effectInventory?.manifest === manifest }));
+    work(); const moduleEdges = manifest.moduleEdges;
+    work(); guards.push(Object.freeze({ read: () => context.index.effectInventory?.manifest.moduleEdges === moduleEdges }));
+  }
+  return Object.freeze(guards);
+}
+
+/** 실제 방문한 source의 module edge list와 module-order가 읽는 field만 재감사한다. */
+function primitiveModuleEdgeGuards(context: ConstructorCarrierContext, source: ts.SourceFile,
+  work: ProofWork): readonly ProofGuard[] {
+  const read = () => context.index.effectInventory?.manifest.moduleEdges.get(source) ?? [];
+  work(); const map = context.index.effectInventory?.manifest.moduleEdges;
+  work(); const present = map?.has(source) === true;
+  const edges = primitiveFactList(read, work);
+  const guards: ProofGuard[] = [];
+  work(); guards.push(Object.freeze({ read: () => context.index.effectInventory?.manifest.moduleEdges === map }));
+  work(); guards.push(Object.freeze({ read: () =>
+    (context.index.effectInventory?.manifest.moduleEdges.has(source) === true) === present }));
+  const length = edges.length;
+  work(); guards.push(Object.freeze({ reconstruct: true, read: () => read().length === length }));
+  for (let index = 0; index < length; index++) {
+    const edge = edges[index]!;
+    work(); guards.push(Object.freeze({ reconstruct: true, read: () => read()[index] === edge }));
+    work(); guards.push(Object.freeze({ reconstruct: true, read: () => read()[index]?.site === edge.site }));
+    work(); guards.push(Object.freeze({ reconstruct: true, read: () => read()[index]?.target === edge.target }));
+  }
+  return Object.freeze(guards);
+}
+
+/** runtime-entry closure가 읽은 global import/open-module facts를 고정한다. */
+function primitiveRuntimeGuards(context: ConstructorCarrierContext, kind: 'opaque-import' | 'open-modules',
+  work: ProofWork): readonly ProofGuard[] {
+  const guards: ProofGuard[] = [];
+  if (kind === 'opaque-import') {
+    work(); const expected = context.index.hasOpaqueImport;
+    work(); guards.push(Object.freeze({ read: () => context.index.hasOpaqueImport === expected }));
+    return Object.freeze(guards);
+  }
+  work(); const openModules = context.index.openModules;
+  work(); guards.push(Object.freeze({ read: () => context.index.openModules === openModules }));
+  work(); const size = openModules.size;
+  work(); guards.push(Object.freeze({ read: () => context.index.openModules.size === size }));
+  for (const symbol of openModules) {
+    work(); guards.push(Object.freeze({ read: () => context.index.openModules.has(symbol) }));
+  }
+  return Object.freeze(guards);
+}
+
+/** shared helper가 실제 소비한 symbol fact에 대한 O(1) ordered guards를 만든다. */
+function primitiveFactGuards(context: ConstructorCarrierContext, symbols: ReadonlySet<ts.Symbol>, work: ProofWork): readonly ProofGuard[] {
+  const expected: PrimitiveFactSnapshot[] = [];
+  for (const symbol of symbols) {
+    work(); const flags = symbol.flags;
+    work(); const valueDeclaration = symbol.valueDeclaration;
+    work(); const referencesMap = context.index.references;
+    work(); const referencesPresent = context.index.references.has(symbol);
+    const references = primitiveFactList(() => context.index.references.get(symbol) ?? [], work);
+    work(); const identifierWritesMap = context.index.identifierWrites;
+    work(); const identifierWritesPresent = context.index.identifierWrites.has(symbol);
+    const identifierWrites = primitiveFactList(() => context.index.identifierWrites.get(symbol) ?? [], work);
+    work(); const exported = context.index.exportedSymbols.has(symbol);
+    const declarations = primitiveFactList(() => symbol.declarations ?? [], work);
+    expected.push(Object.freeze({ symbol, flags, valueDeclaration, referencesMap, referencesPresent, references, identifierWritesMap,
+      identifierWritesPresent, identifierWrites, exported, declarations }));
+  }
+  const guards: ProofGuard[] = [];
+  for (const fact of expected) {
+    work(); guards.push(Object.freeze({ read: () => fact.symbol.flags === fact.flags }));
+    work(); guards.push(Object.freeze({ read: () => fact.symbol.valueDeclaration === fact.valueDeclaration }));
+    work(); guards.push(Object.freeze({ read: () => context.index.references === fact.referencesMap }));
+    work(); guards.push(Object.freeze({ read: () => context.index.references.has(fact.symbol) === fact.referencesPresent }));
+    work(); guards.push(Object.freeze({ read: () => context.index.identifierWrites === fact.identifierWritesMap }));
+    work(); guards.push(Object.freeze({ read: () => context.index.identifierWrites.has(fact.symbol) === fact.identifierWritesPresent }));
+    const writesLength = fact.identifierWrites.length;
+    work(); guards.push(Object.freeze({ read: () => (context.index.identifierWrites.get(fact.symbol)?.length ?? 0) === writesLength }));
+    for (let index = 0; index < writesLength; index++) {
+      const value = fact.identifierWrites[index];
+      work(); guards.push(Object.freeze({ read: () => context.index.identifierWrites.get(fact.symbol)?.[index] === value }));
+    }
+    work(); guards.push(Object.freeze({ read: () => context.index.exportedSymbols.has(fact.symbol) === fact.exported }));
+    const declarationsLength = fact.declarations.length;
+    work(); guards.push(Object.freeze({ read: () => (fact.symbol.declarations?.length ?? 0) === declarationsLength }));
+    for (let index = 0; index < declarationsLength; index++) {
+      const value = fact.declarations[index]!;
+      work(); guards.push(Object.freeze({ read: () => fact.symbol.declarations?.[index] === value }));
+    }
+    // reference 내용은 helper 문법이 전체를 다시 감사할 수 있다. 다른 hard fact를 먼저 고정한다.
+    const referencesLength = fact.references.length;
+    work(); guards.push(Object.freeze({ reconstruct: true,
+      read: () => (context.index.references.get(fact.symbol)?.length ?? 0) === referencesLength }));
+    for (let index = 0; index < referencesLength; index++) {
+      const value = fact.references[index]!;
+      work(); guards.push(Object.freeze({ reconstruct: true,
+        read: () => context.index.references.get(fact.symbol)?.[index] === value }));
+    }
+  }
+  return Object.freeze(guards);
+}
+
 /** 각 initializer·argument·callee를 같은 capability DAG의 개별 dependency로 구성한다. */
 export class PrimitiveHelpers {
   private readonly recipes = new Map<PrimitiveNode, ProofRecipe<PrimitiveSummary>>();
@@ -328,8 +532,87 @@ export class PrimitiveHelpers {
   private readonly entries = new Map<ts.MethodDeclaration, ProofRecipe<PrimitiveSummary>>();
   private readonly context: ConstructorCarrierContext;
   private readonly policy: PrimitivePolicy;
+  private consumedFacts: PrimitiveFactReads | undefined;
+  private readonly factGuards = new Map<ts.Symbol, readonly ProofGuard[]>();
+  private readonly tokenGuards = new Map<string, readonly ProofGuard[]>();
+  private readonly moduleEdgeGuards = new Map<ts.SourceFile, readonly ProofGuard[]>();
+  private filesGuards: readonly ProofGuard[] | undefined;
+  private inventoryGuards: readonly ProofGuard[] | undefined;
+  private opaqueImportGuards: readonly ProofGuard[] | undefined;
+  private openModuleGuards: readonly ProofGuard[] | undefined;
+  private readonly facts: PrimitiveFactObserver;
   constructor(context: ConstructorCarrierContext, policy: PrimitivePolicy) {
     this.context = context; this.policy = policy;
+    this.facts = Object.freeze({
+      symbol: (symbol: ts.Symbol) => { this.consumedFacts?.symbols.add(symbol); },
+      tokenOccurrences: (name: string) => { this.consumedFacts?.tokenOccurrences.add(name); },
+      files: () => { if (this.consumedFacts !== undefined) this.consumedFacts.files = true; },
+      effectInventory: () => { if (this.consumedFacts !== undefined) this.consumedFacts.effectInventory = true; },
+      moduleEdges: (source: ts.SourceFile) => { this.consumedFacts?.moduleEdges.add(source); },
+      hasOpaqueImport: () => { if (this.consumedFacts !== undefined) this.consumedFacts.hasOpaqueImport = true; },
+      openModules: () => { if (this.consumedFacts !== undefined) this.consumedFacts.openModules = true; },
+    });
+  }
+
+  /** 같은 질의 안에서만 fact 구성을 공유한다. 다음 질의의 재평가는 현재 기준선을 다시 읽는다. */
+  beginQuery(): void {
+    this.factGuards.clear(); this.tokenGuards.clear(); this.moduleEdgeGuards.clear();
+    this.filesGuards = undefined; this.inventoryGuards = undefined;
+    this.opaqueImportGuards = undefined; this.openModuleGuards = undefined;
+  }
+
+  /** recipe callback의 실제 fact read를 모아 같은 before/after trace에 ordered guard를 남긴다. */
+  withFactReads<T>(work: ProofWork, read: (facts: PrimitiveFactObserver) => T): T {
+    if (this.consumedFacts !== undefined) return read(this.facts);
+    const facts: PrimitiveFactReads = { symbols: new Set(), tokenOccurrences: new Set(), moduleEdges: new Set(),
+      files: false, effectInventory: false, hasOpaqueImport: false, openModules: false };
+    this.consumedFacts = facts;
+    let value!: T;
+    try { value = read(this.facts); }
+    finally { this.consumedFacts = undefined; }
+    this.requireFactReads(facts, work);
+    return value;
+  }
+
+  /** query-local blueprint를 공유하되 각 owning recipe의 guard replay 비용은 독립 청구한다. */
+  private requireFactReads(facts: PrimitiveFactReads, work: ProofWork): void {
+    for (const symbol of facts.symbols) {
+      work(); let guards = this.factGuards.get(symbol);
+      if (guards === undefined) {
+        guards = primitiveFactGuards(this.context, new Set([symbol]), work); this.factGuards.set(symbol, guards);
+      }
+      for (const guard of guards) work.require(guard, true);
+    }
+    for (const name of facts.tokenOccurrences) {
+      work(); let guards = this.tokenGuards.get(name);
+      if (guards === undefined) {
+        guards = primitiveTokenGuards(this.context, name, work); this.tokenGuards.set(name, guards);
+      }
+      for (const guard of guards) work.require(guard, true);
+    }
+    if (facts.files) {
+      work(); this.filesGuards ??= primitiveFilesGuards(this.context, work);
+      for (const guard of this.filesGuards) work.require(guard, true);
+    }
+    if (facts.hasOpaqueImport) {
+      work(); this.opaqueImportGuards ??= primitiveRuntimeGuards(this.context, 'opaque-import', work);
+      for (const guard of this.opaqueImportGuards) work.require(guard, true);
+    }
+    if (facts.openModules) {
+      work(); this.openModuleGuards ??= primitiveRuntimeGuards(this.context, 'open-modules', work);
+      for (const guard of this.openModuleGuards) work.require(guard, true);
+    }
+    if (facts.effectInventory) {
+      work(); this.inventoryGuards ??= primitiveInventoryGuards(this.context, work);
+      for (const guard of this.inventoryGuards) work.require(guard, true);
+    }
+    for (const source of facts.moduleEdges) {
+      work(); let guards = this.moduleEdgeGuards.get(source);
+      if (guards === undefined) {
+        guards = primitiveModuleEdgeGuards(this.context, source, work); this.moduleEdgeGuards.set(source, guards);
+      }
+      for (const guard of guards) work.require(guard, true);
+    }
   }
 
   /** recipe 생성 자체는 AST를 탐색하지 않는다. 실제 구성은 첫 charged lookup에서만 한다. */
@@ -340,22 +623,24 @@ export class PrimitiveHelpers {
     let sites = new Set<ts.Node>();
     let captures = new Set<ts.VariableDeclaration>();
     let parameters = new Set<ts.ParameterDeclaration>();
+    let literals = new Map<ts.Node, SterileLiteralWitness>();
     const recipe: ProofRecipe<PrimitiveSummary> = {
       id: `${node.getSourceFile().fileName}:${node.pos}:${node.end}:stage4-primitive`,
       identity: node, capability: 'primitive-effects', mode: 'extended', valid: this.policy.valid,
-      dependencies: (work) => {
-        sites = new Set(); captures = new Set(); parameters = new Set();
+      dependencies: (work) => this.withFactReads(work, () => {
+        sites = new Set(); captures = new Set(); parameters = new Set(); literals = new Map();
         const edges: ProofEdge[] = [];
-        accepted = this.inspect(node, work, sites, captures, parameters, edges);
+        accepted = this.inspect(node, work, sites, captures, parameters, edges, literals);
         return edges;
-      },
-      evaluate: (work, children) => {
+      }),
+      evaluate: (work, children) => this.withFactReads(work, () => {
         work();
         if (!accepted) return { kind: 'rejected', reason: 'primitive-helper' };
         for (const child of children) {
           work();
           if (child.kind !== 'proved') return child;
           const summary = child.value as PrimitiveSummary;
+          for (const [identity, literal] of summary.literals ?? []) { work(); literals.set(identity, literal); }
           for (const site of summary.sites) { work(); sites.add(site); }
           for (const capture of summary.captures) { work(); captures.add(capture); }
           for (const parameter of summary.parameters) { work(); parameters.add(parameter); }
@@ -370,8 +655,8 @@ export class PrimitiveHelpers {
             }
           }
         }
-        return { kind: 'proved', value: { sites, captures, parameters } };
-      },
+        return { kind: 'proved', value: { sites, captures, parameters, literals } };
+      }),
     };
     this.recipes.set(node, recipe); return recipe;
   }
@@ -386,13 +671,13 @@ export class PrimitiveHelpers {
     const recipe: ProofRecipe<PrimitiveSummary> = {
       id: `${call.getSourceFile().fileName}:${call.pos}:${call.end}:${target.getSourceFile().fileName}:${target.pos}:stage5-instantiation`,
       identity: call, capability: 'primitive-effects', mode: 'extended', valid: this.policy.valid,
-      dependencies: (work) => {
+      dependencies: (work) => this.withFactReads(work, () => {
         accepted = false;
         const edges: ProofEdge[] = [];
         work();
         if (call.questionDotToken !== undefined || call.arguments.length !== target.parameters.length) return edges;
         work(); if (this.context.checker.getResolvedSignature(call)?.declaration !== target
-          && primitiveDependencyTarget(this.context, call, work) !== target) return edges;
+          && primitiveDependencyTarget(this.context, call, work, this.facts.symbol) !== target) return edges;
         // physical read와 인자 평가의 요구를 원래 left-to-right 순서로 기록한다.
         for (const argument of call.arguments) {
           work(); if (ts.isSpreadElement(argument)) return edges;
@@ -403,7 +688,7 @@ export class PrimitiveHelpers {
           work(); edges.push({ recipe: this.entryRecipe(target), capability: 'primitive-effects', depth: 1, frames: 1 });
         }
         accepted = true; return edges;
-      },
+      }),
       evaluate: (work, children) => {
         work(); if (!accepted) return { kind: 'rejected', reason: 'primitive-instantiation' };
         for (const child of children) { work(); if (child.kind !== 'proved') return child; }
@@ -430,7 +715,7 @@ export class PrimitiveHelpers {
     const recipe: ProofRecipe<PrimitiveSummary> = {
       id: `${method.getSourceFile().fileName}:${method.pos}:${method.end}:stage5-entry`,
       identity: method.name, capability: 'primitive-effects', mode: 'extended', valid: this.policy.valid,
-      dependencies: (work) => {
+      dependencies: (work) => this.withFactReads(work, () => {
         calls = []; runtimeEntries = new Map(); accepted = false;
         const edges: ProofEdge[] = [];
         work();
@@ -453,6 +738,7 @@ export class PrimitiveHelpers {
         work();
         if (!ts.isIdentifier(method.name) && !ts.isStringLiteralLike(method.name) && !ts.isNumericLiteral(method.name)) return edges;
         work();
+        this.facts.tokenOccurrences(method.name.text);
         const occurrences = this.context.index.tokenOccurrences.get(method.name.text) ?? [];
         for (const reference of occurrences) {
           work();
@@ -462,9 +748,10 @@ export class PrimitiveHelpers {
           const parentCall = ts.isCallExpression(site.parent) && site.parent.expression === site
             ? site.parent : undefined;
           const resolved = this.symbol(reference, work);
-          const concreteEntry = parentCall !== undefined && primitiveCarrierMethodCall(this.context, method, parentCall, work);
+          const concreteEntry = parentCall !== undefined
+            && primitiveCarrierMethodCall(this.context, method, parentCall, work, this.facts);
           if (resolved?.valueDeclaration !== method && (parentCall === undefined
-            || primitiveDependencyTarget(this.context, parentCall, work) !== method)
+            || primitiveDependencyTarget(this.context, parentCall, work, this.facts.symbol) !== method)
             && !concreteEntry) {
             if (resolved === undefined && (ts.isPropertyAccessExpression(reference.parent)
               || ts.isElementAccessExpression(reference.parent))) return edges;
@@ -476,11 +763,11 @@ export class PrimitiveHelpers {
             || !ts.isCallExpression(call) || call.expression !== site || call.questionDotToken !== undefined
             || call.arguments.length !== method.parameters.length) return edges;
           work(); if (this.context.checker.getResolvedSignature(call)?.declaration !== method
-            && primitiveDependencyTarget(this.context, call, work) !== method
-            && !primitiveCarrierMethodCall(this.context, method, call, work)) return edges;
+            && primitiveDependencyTarget(this.context, call, work, this.facts.symbol) !== method
+            && !primitiveCarrierMethodCall(this.context, method, call, work, this.facts)) return edges;
           const owner = this.callableOwner(call, work);
           const entries = owner !== undefined && ts.isArrowFunction(owner)
-            ? primitiveCallRuntimeEntries(this.context, call, work) : owner === undefined ? [call] : 'deferred';
+            ? primitiveCallRuntimeEntries(this.context, call, work, this.facts) : owner === undefined ? [call] : 'deferred';
           if (entries === undefined) return edges;
           if (entries !== 'deferred' && entries.length === 0) continue;
           work(); calls.push(call);
@@ -492,8 +779,8 @@ export class PrimitiveHelpers {
         }
         accepted = calls.length > 0;
         return edges;
-      },
-      evaluate: (work, children) => {
+      }),
+      evaluate: (work, children) => this.withFactReads(work, () => {
         work();
         if (!accepted) return { kind: 'rejected', reason: 'primitive-entry' };
         for (const child of children) { work(); if (child.kind !== 'proved') return child; }
@@ -529,31 +816,33 @@ export class PrimitiveHelpers {
         for (const parameter of summary.parameters) { work(); parameters.add(parameter); }
         for (const parameter of method.parameters) { work(); sites.add(parameter); sites.add(parameter.name); parameters.delete(parameter); }
         return { kind: 'proved', value: { ...summary, sites, captures, parameters } };
-      },
+      }),
     };
     this.entries.set(method, recipe); return recipe;
   }
 
   /** 외부 entry는 static import 경로와 실제 source-local 초기화 순서를 별개로 검증한다. */
   initialized(summary: PrimitiveSummary, entry: PrimitiveRuntimeEntry, work: ProofWork): boolean {
-    if (isPrimitiveModuleReadyEntry(entry) && !this.moduleOrder(entry.source, entry.source, work)) return false;
-    for (const capture of summary.captures) {
-      work();
-      if (isPrimitiveModuleReadyEntry(entry)) {
-        const target = capture.getSourceFile();
-        if (target === entry.source) {
-          work();
-          if (!ts.isVariableDeclarationList(capture.parent) || !ts.isVariableStatement(capture.parent.parent)
-            || capture.parent.parent.parent !== entry.source) return false;
-        } else if (!this.moduleOrder(entry.source, target, work)) return false;
-      } else if (!this.before(capture, entry, work)) return false;
-    }
-    return true;
+    return this.withFactReads(work, () => {
+      if (isPrimitiveModuleReadyEntry(entry) && !this.moduleOrder(entry.source, entry.source, work)) return false;
+      for (const capture of summary.captures) {
+        work();
+        if (isPrimitiveModuleReadyEntry(entry)) {
+          const target = capture.getSourceFile();
+          if (target === entry.source) {
+            work();
+            if (!ts.isVariableDeclarationList(capture.parent) || !ts.isVariableStatement(capture.parent.parent)
+              || capture.parent.parent.parent !== entry.source) return false;
+          } else if (!this.moduleOrder(entry.source, target, work)) return false;
+        } else if (!this.before(capture, entry, work)) return false;
+      }
+      return true;
+    });
   }
 
   /** 요약에 primitive만 넣으므로 parameter 타입이나 literal의 TS 타입은 사용하지 않는다. */
   private inspect(node: PrimitiveNode, work: ProofWork, sites: Set<ts.Node>,
-    captures: Set<ts.VariableDeclaration>, parameters: Set<ts.ParameterDeclaration>, edges: ProofEdge[]): boolean {
+    captures: Set<ts.VariableDeclaration>, parameters: Set<ts.ParameterDeclaration>, edges: ProofEdge[], literals: Map<ts.Node, SterileLiteralWitness>): boolean {
     work();
     if (!work.observe(this.policy.project(node.getSourceFile()))) return false;
     const depend = (child: PrimitiveNode): void => {
@@ -592,7 +881,10 @@ export class PrimitiveHelpers {
           returned = true;
           if (statement.expression !== undefined) depend(statement.expression);
         } else if (ts.isExpressionStatement(statement)
-          && ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)) {
+          && (ts.isCallExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isBinaryExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isPropertyAccessExpression(normalizePrimitiveExpression(statement.expression, work).inner)
+            || ts.isElementAccessExpression(normalizePrimitiveExpression(statement.expression, work).inner))) {
           depend(statement.expression);
         } else return false;
       }
@@ -610,14 +902,58 @@ export class PrimitiveHelpers {
     const normalized = normalizePrimitiveExpression(node, work);
     const expression = normalized.inner;
     this.markWrappers(normalized, sites, work);
+    if (ts.isBinaryExpression(expression)) {
+      const outerAssignment = climbPrimitiveWrappers(expression, work);
+      const statement = outerAssignment.parent;
+      if (expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isExpressionStatement(statement)
+        || statement.expression !== outerAssignment) return false;
+      const access = normalizePrimitiveExpression(expression.left, work).inner;
+      if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) return false;
+      const literal = sterileLiteralOrigin(this.context, access.expression, work, this.facts.symbol);
+      if (literal === undefined) return false;
+      depend(literal); return true;
+    }
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+      const literal = sterileLiteralOrigin(this.context, expression.expression, work, this.facts.symbol);
+      if (literal === undefined) return false;
+      const witness = inspectSterileLiteral(this.context, literal, work, this.facts.symbol);
+      if (witness === undefined || !witness.sites.has(expression)) return false;
+      for (const binding of witness.bindings) {
+        work();
+        if (this.callableOwner(binding, work) === undefined) captures.add(binding);
+      }
+      if (witness.bindings.size === 0) depend(literal);
+      else for (const value of witness.initialValues) { work(); depend(value); }
+      return true;
+    }
+    if (ts.isObjectLiteralExpression(expression) || ts.isArrayLiteralExpression(expression)) {
+      const literalParent = climbPrimitiveWrappers(expression, work).parent;
+      if (!ts.isVariableDeclaration(literalParent) && !ts.isPropertyAccessExpression(literalParent)
+        && !ts.isElementAccessExpression(literalParent)) return false;
+      const witness = inspectSterileLiteral(this.context, expression, work, this.facts.symbol);
+      if (witness === undefined) return false;
+      literals.set(expression, witness);
+      for (const site of witness.sites) { work(); sites.add(site); }
+      for (const value of witness.values) { work(); depend(value); }
+      return true;
+    }
     if (primitiveLiteral(expression)) return true;
     if (ts.isIdentifier(expression)) {
       if (expression.text === 'arguments') return false;
+      const origin = sterileLiteralOrigin(this.context, expression, work, this.facts.symbol);
+      if (origin !== undefined) {
+        const alias = climbPrimitiveWrappers(expression, work).parent;
+        if (!ts.isVariableDeclaration(alias) || alias.initializer !== climbPrimitiveWrappers(expression, work)) return false;
+        const witness = inspectSterileLiteral(this.context, origin, work, this.facts.symbol);
+        if (witness === undefined || !witness.bindings.has(alias)) return false;
+        depend(origin); return true;
+      }
       const symbol = this.symbol(expression, work);
       if (symbol === undefined) return false;
       if (expression.text === 'undefined') {
         work();
         const intrinsic = this.context.checker.resolveName('undefined', undefined, ts.SymbolFlags.Value, false);
+        if (intrinsic !== undefined) this.facts.symbol(intrinsic);
         if (symbol === intrinsic && (this.context.index.identifierWrites.get(symbol)?.length ?? 0) === 0) {
           for (const declaration of symbol.declarations ?? []) {
             work(); if (!work.observe(this.policy.intrinsic(declaration.getSourceFile()))) return false;
@@ -682,6 +1018,7 @@ export class PrimitiveHelpers {
       if (!ts.isCallExpression(site.parent) || site.parent.expression !== site) return false;
       work();
       const local = this.context.checker.getSymbolAtLocation(reference);
+      if (local !== undefined) this.facts.symbol(local);
       if (local !== undefined && (local.flags & ts.SymbolFlags.Alias) !== 0) {
         for (const declaration of local.declarations ?? []) {
           work();
@@ -716,9 +1053,13 @@ export class PrimitiveHelpers {
   /** source와 binding의 canonical identity를 얻는 checker lookup도 청구한다. */
   private symbol(node: ts.Node, work: ProofWork): ts.Symbol | undefined {
     work();
-    const symbol = this.context.checker.getSymbolAtLocation(node);
+    const symbol = ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent)
+      ? this.context.checker.getShorthandAssignmentValueSymbol(node.parent) : this.context.checker.getSymbolAtLocation(node);
+    if (symbol !== undefined) this.facts.symbol(symbol);
     if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
-      work(); return this.context.checker.getAliasedSymbol(symbol);
+      work(); const aliased = this.context.checker.getAliasedSymbol(symbol);
+      this.facts.symbol(aliased);
+      return aliased;
     }
     return symbol;
   }
@@ -744,7 +1085,7 @@ export class PrimitiveHelpers {
 
   /** source가 target 초기화 뒤 평가되며 reachable runtime import graph가 비순환인지 검증한다. */
   private moduleOrder(source: ts.SourceFile, target: ts.SourceFile, work: ProofWork): boolean {
-    return primitiveModuleOrder(this.context, source, target, work);
+    return primitiveModuleOrder(this.context, source, target, work, this.facts);
   }
 }
 
@@ -757,13 +1098,15 @@ export function primitiveLiteral(node: ts.Node): boolean {
 /** primitive recipe children은 canonical 정렬되므로 summary 값만 합쳐 소비한다. */
 export function primitiveChildren(children: readonly ProofOutcome<unknown>[], work: ProofWork): PrimitiveSummary {
   const sites = new Set<ts.Node>(), captures = new Set<ts.VariableDeclaration>(), parameters = new Set<ts.ParameterDeclaration>();
+  const literals = new Map<ts.Node, SterileLiteralWitness>();
   for (const child of children) {
     work();
     if (child.kind !== 'proved') continue;
     const summary = child.value as PrimitiveSummary;
+    for (const [identity, literal] of summary.literals ?? []) { work(); literals.set(identity, literal); }
     for (const site of summary.sites) { work(); sites.add(site); }
     for (const capture of summary.captures) { work(); captures.add(capture); }
     for (const parameter of summary.parameters) { work(); parameters.add(parameter); }
   }
-  return { sites, captures, parameters };
+  return { sites, captures, parameters, literals };
 }

@@ -43,16 +43,28 @@ and ky imports/`create`/`extend` instances as `platform: "js"`, `target: "http"`
 Calls keep their enclosing graph id in `symbol.usr`, including screen callbacks. Request locations
 use 1-based UTF-8 byte columns. Test sources are excluded unless `--include-tests` is passed.
 
+Project wrappers such as `thttp(url, options)` are followed when the body is a single return or
+arrow expression forwarding required arguments directly to a proven fetch/axios/ky call. Immutable
+function aliases and methods on closed const object literals are supported, including direct async
+returns. The fact belongs to the outer invocation. Exported or escaped wrappers and unrepresented
+invocations retain the inner dynamic request so known calls do not hide other possible entries.
+
 URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`baseUrl`), with shared
 isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
 major version. Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
 fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
 
 Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
-retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Custom wrappers, URL/Request
+retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Wrappers with additional
+statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
+
+JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
+16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
+data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
+document. Large traversals can use `--max-depth` and `--max-reached` to return explicit truncation.
 
 ## Requirements
 
@@ -930,10 +942,10 @@ certified helpers. Each initializer and captured binding needs both primitive pr
 evaluation. Captures must be initialized before every actual use, including field construction and
 static import/reexport calls; the function declaration's position alone is insufficient. Closed default
 imports and public dependency methods follow the same checks. Helper writes, escapes, alias or
-runtime cycles, arithmetic, coercion, property access, closures, `this`, `arguments`, scheduling,
+runtime cycles, arithmetic, coercion, uncertified property access, closures, `this`, `arguments`, scheduling,
 default/rest/destructured parameters, and unknown or protected arguments remain unproved. Completed
 helper summaries discharge their exact effect sites through the proof DAG; syntactic candidate hints
-alone grant no authority. Helper-created containers remain outside this grammar.
+alone grant no authority. Escaping containers and arbitrary container factories remain unproved.
 
 Carrier and dependency methods can receive required identifier parameters when every actual call
 has the exact arity and proven primitive arguments. Argument evaluation is audited left to right,
@@ -947,6 +959,25 @@ remain unproved. Unknown or
 protected objects, containing wrappers, callbacks, spread arguments, missing or extra arguments,
 parameter writes and unproved entries block the new proof. Dependency constructors still require
 their existing absent-or-empty, zero-parameter grammar.
+
+Direct primitive object and array literals can be used as confined scratch values in certified
+helpers, carrier methods and dependency methods. Immutable aliases may read or assign an existing
+canonical own-data slot and return its certified primitive value. Initializers and assigned values
+need both proven provenance and inert evaluation; every alias, runtime reference and actual entry
+is audited. Arrays cannot contain holes or spreads, change length, create new indices, or use
+mutator methods. Objects need unique static own-data keys; accessors, dynamic or duplicate keys,
+prototype-sensitive operations and container escape remain unproved. Types and `as const` do not
+provide a runtime ownership or descriptor witness.
+
+The same completed confinement certificate must validate the write receiver, array aliases and
+references, and each final mutation record. A site whitelist or a certificate for another root
+cannot grant this authority. Only the analyzer's registered primitive-effects producer can issue
+it; generic DAG completion and publicly mutable witness objects supply no authority. The producer
+keeps private snapshots of the relevant proof, slots, writes, aliases and references before exposing
+cached values. Opaque effects, known reflection, intrinsic changes, unstable borrowed
+endpoints and unmatched effects still block extended isolation. General factories, callbacks,
+reentrancy, scheduling, asynchronous services and ordinary effectful methods remain outside this
+grammar.
 
 Ordinary declared-method identity is checked separately from carrier field/bag isolation. A direct
 same-class method call with inert entry and arguments can retain its target when it is returned or

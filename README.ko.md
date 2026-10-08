@@ -41,14 +41,24 @@ ky import·`create`/`extend` 인스턴스를 `platform: "js"`, `target: "http"`,
 `symbol.usr`는 화면 콜백을 포함한 감싸는 선언의 그래프 id이며, 위치는 1 기반 UTF-8 바이트 열이다.
 테스트 소스는 `--include-tests`로 포함할 때만 `testSource: true`를 단다.
 
+`thttp(url, options)` 같은 프로젝트 래퍼도 단일 return 또는 arrow 식이 필수 인자를 증명된
+fetch·axios·ky 호출에 그대로 넘기면 따라간다. 불변 함수 별칭과 닫힌 const 객체의 메서드,
+직접 async 반환을 지원하며 사실은 바깥 호출 지점에 귀속한다. export·탈출 또는 표현하지 못한
+진입이 있으면 내부의 dynamic 요청도 남겨 알려진 호출이 다른 가능한 진입을 가리지 않게 한다.
+
 axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 isthmus 공유 벡터와 실제
 로컬 HTTP 요청 27개로 검증했다. ky 설정은 선언된 major가 명확해야 한다. 전체 세그먼트 보간만 `{}`가
 되고 부분 보간은 dynamic이다. query·fragment·userinfo를 제거하고 고엔트로피·웹훅 경로를 마스킹한다.
 
 미상 전개, 변경되거나 외부로 넘겨진 설정, interceptor·hook·adapter 및 미확정 동사는 `dynamic`·
-`methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 자체 래퍼, URL/Request 객체, 계산된 메서드,
+`methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 추가 문장·인자 변환·default/rest가 있는
+래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
+
+JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
+넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
+부분 문서 없이 실패한다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
 ## 요구 사항
 
@@ -756,10 +766,10 @@ factory는 이 증명 밖에 남긴다. 증명 구축과 캐시 재생은 member
 binding마다 primitive 출처와 inert한 평가를 모두 증명해야 한다. 필드 생성과 정적 import/reexport
 호출을 포함해 실제 사용마다 캡처 초기화가 먼저여야 하며, 함수 선언 위치만으로는 부족하다.
 닫힌 default import와 public 의존 메서드에도 같은 검사를 적용한다. helper 쓰기·탈출·별칭 또는
-런타임 순환·산술·강제 변환·속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
+런타임 순환·산술·강제 변환·미인증 속성 접근·closure·`this`·`arguments`·스케줄링·default/rest/구조 분해
 매개변수·모르는 인자나 보호된 객체 인자는 미해석으로 남긴다. 완료된 helper summary만 proof DAG를
-통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. helper가 만드는 컨테이너는
-아직 이 문법 밖에 남긴다.
+통해 정확한 효과 위치를 인증하며, 문법상 후보 표시는 권한을 주지 않는다. 탈출하는 컨테이너와 일반
+컨테이너 factory는 미증명으로 남긴다.
 
 carrier와 의존 메서드는 실제 모든 호출의 인자 수가 정확하고 primitive 인자의 출처가 증명될 때 필수
 identifier 매개변수를 받을 수 있다. 인자 평가는 왼쪽부터 감사하며, 완료된 helper·의존 summary를
@@ -770,6 +780,22 @@ exported 무매개변수 arrow는 명시적인 ESM 모듈 초기화 완료와 �
 검사한다. 조기 초기화·순환·재진입·스케줄링 또는 탈출한 callback은 미증명으로 남긴다. 모르는 인자나
 보호 객체·이를 담은 wrapper·callback·spread·누락 또는 초과 인자·매개변수 쓰기·미증명 진입은 새 증명을
 막는다. 의존 생성자는 기존의 없음 또는 빈 본문·무매개변수 문법을 유지한다.
+
+인증된 helper·carrier 메서드·의존 메서드에서는 직접 만든 primitive 객체·배열 리터럴을 외부로
+탈출하지 않는 임시 값으로 사용할 수 있다. 불변 별칭은 기존 canonical own-data 슬롯을 읽거나
+대입하고 그 슬롯의 인증된 primitive 값을 반환할 수 있다. 초기화 식과 대입 값마다 출처와 inert한
+평가를 증명하며, 모든 별칭·runtime 참조·실제 진입을 감사한다. 배열의 hole·spread·길이 변경·새
+index 생성·mutator 메서드는 허용하지 않는다. 객체는 중복 없는 정적 own-data 키가 필요하며,
+accessor·동적/중복 키·prototype 관련 연산·컨테이너 탈출은 미증명으로 남긴다. 타입과 `as const`는
+런타임 소유권이나 descriptor 근거가 아니다.
+
+같은 완료된 confinement 인증서가 쓰기 수신자, 배열 별칭·참조, 마지막 mutation record 각각을
+검증해야 한다. 위치 whitelist나 다른 root의 인증서로 이 권한을 얻을 수 없다. 분석기에 등록된
+primitive-effects producer만 발급하며, 범용 DAG의 완료 결과나 공개된 가변 witness 객체는 권한이
+아니다. 캐시 값을 공개하기 전에 필요한 proof·슬롯·쓰기·별칭·참조를 비공개 snapshot으로 보관한다.
+불투명한 효과·알려진
+반사 대상·intrinsic 변경·불안정한 borrowed endpoint·모델과 맞지 않는 효과는 확장 격리를 계속 막는다.
+일반 factory·callback·재진입·스케줄링·비동기 서비스·일반 효과가 있는 메서드는 이 문법 밖에 남긴다.
 
 일반 선언 메서드의 target identity는 carrier 필드·bag 격리와 따로 검사한다. 진입·인자가 inert한 동일 클래스의
 직접 메서드 호출은 반환하거나 불변 지역 변수에 저장할 때 target을 유지할 수 있다.

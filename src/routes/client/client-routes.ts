@@ -8,6 +8,7 @@ import { hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-pr
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
 import { ClientValues, configValue, type ClientConfig } from './client-values.ts';
+import { ClientWrappers } from './client-wrappers.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
 
 /** 호출 사실의 위치와 impact id다. */
@@ -35,13 +36,14 @@ interface Client { readonly library: 'axios' | 'ky'; readonly configs: readonly 
 interface Sink { readonly library: 'fetch' | 'axios' | 'ky'; readonly configs: readonly ClientConfig[]; readonly path?: ts.Expression | undefined; readonly forcedMethod?: string; readonly unsafe: boolean }
 /** 계약 동사 집합이다. */
 const methods = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']);
+const MAX_ESCAPE_RECHECKS = 20_000;
 
 /** const 별칭·import·create/extend를 심볼로 따라가 클라이언트를 식별한다. */
 function clientOf(expression: ts.Expression, values: ClientValues, depth = 0): Client | undefined {
   if (depth > 16) return undefined;
   const node = unwrap(expression);
   const root = values.rootSymbol(node);
-  const unsafe = root !== undefined && values.mutated.has(root);
+  const unsafe = values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root);
   const binding = packageBindingOf(values.project.checker, node);
   if (binding !== undefined && ['default', '*'].includes(binding.name) && (binding.module === 'axios' || binding.module === 'ky')) {
     return { library: binding.module, configs: [], unsafe };
@@ -75,21 +77,57 @@ function isGlobal(expression: ts.Expression, name: string, values: ClientValues)
 }
 
 /** 라우트 요청만 선택한다. create·extend·일반 객체의 get은 요청이 아니다. */
-function sinkOf(call: ts.CallExpression, values: ClientValues): Sink | undefined {
+function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientWrappers | undefined, depth = 0,
+  substitutions: ReadonlyMap<ts.Symbol, ts.Expression> = new Map()): Sink | undefined {
+  if (depth > 8) { wrappers?.markIncomplete(); return undefined; }
   const callee = unwrap(call.expression);
-  if (isGlobal(callee, 'fetch', values)) return { library: 'fetch', path: call.arguments[0], configs: [values.config(call.arguments[1])], unsafe: false };
+  const substitute = (expression: ts.Expression): ts.Expression => {
+    const symbol = ts.isIdentifier(unwrap(expression)) ? symbolAt(values.project.checker, unwrap(expression)) : undefined;
+    return symbol === undefined ? expression : substitutions.get(symbol) ?? expression;
+  };
+  if (isGlobal(callee, 'fetch', values)) return { library: 'fetch', path: call.arguments[0] === undefined ? undefined : substitute(call.arguments[0]), configs: [values.config(call.arguments[1] === undefined ? undefined : substitute(call.arguments[1]))], unsafe: false };
   const member = ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
   const direct = clientOf(callee, values);
   const client = direct ?? (ts.isPropertyAccessExpression(callee) ? clientOf(callee.expression, values) : undefined);
-  if (client === undefined) return undefined;
-  const aliases = client.library === 'axios' ? ['get', 'head', 'post', 'put', 'patch', 'delete', 'options'] : ['get', 'head', 'post', 'put', 'patch', 'delete'];
-  if (direct === undefined && !(client.library === 'axios' && member === 'request') && !aliases.includes(member ?? '')) return undefined;
-  const fixed = direct === undefined && member !== 'request' ? member!.toUpperCase() : undefined;
-  const first = call.arguments[0] === undefined ? undefined : values.resolve(call.arguments[0]);
-  const objectCall = client.library === 'axios' && fixed === undefined && (first === undefined || ts.isObjectLiteralExpression(first));
-  const configs = [...client.configs, values.config(objectCall ? call.arguments[0] : call.arguments[fixed !== undefined && ['POST', 'PUT', 'PATCH'].includes(fixed) && client.library === 'axios' ? 2 : 1])];
-  const url = objectCall ? configValue(configs, 'url') : call.arguments[0];
-  return { library: client.library, configs, ...(url == null ? {} : { path: url }), ...(fixed === undefined ? {} : { forcedMethod: fixed }), unsafe: client.unsafe };
+  if (client !== undefined) {
+    const aliases = client.library === 'axios' ? ['get', 'head', 'post', 'put', 'patch', 'delete', 'options'] : ['get', 'head', 'post', 'put', 'patch', 'delete'];
+    if (direct === undefined && !(client.library === 'axios' && member === 'request') && !aliases.includes(member ?? '')) return undefined;
+    const fixed = direct === undefined && member !== 'request' ? member!.toUpperCase() : undefined;
+    const first = call.arguments[0] === undefined ? undefined : values.resolve(substitute(call.arguments[0]));
+    const objectCall = client.library === 'axios' && fixed === undefined && (first === undefined || ts.isObjectLiteralExpression(first));
+    const configArgument = objectCall ? call.arguments[0] : call.arguments[fixed !== undefined && ['POST', 'PUT', 'PATCH'].includes(fixed) && client.library === 'axios' ? 2 : 1];
+    const configs = [...client.configs, values.config(configArgument === undefined ? undefined : substitute(configArgument))];
+    const url = objectCall ? configValue(configs, 'url') : call.arguments[0] === undefined ? undefined : substitute(call.arguments[0]);
+    return { library: client.library, configs, ...(url == null ? {} : { path: url }), ...(fixed === undefined ? {} : { forcedMethod: fixed }), unsafe: client.unsafe };
+  }
+  if (call.questionDotToken !== undefined) return undefined;
+  const forwarded = wrappers?.target(callee);
+  if (forwarded === undefined || forwarded.parameters.length !== call.arguments.length) return undefined;
+  const bindings = new Map<ts.Symbol, ts.Expression>();
+  for (let index = 0; index < forwarded.parameters.length; index++) {
+    const parameter = forwarded.parameters[index]!, argument = call.arguments[index];
+    const symbol = ts.isIdentifier(parameter.name) ? symbolAt(values.project.checker, parameter.name) : undefined;
+    if (symbol === undefined || argument === undefined || ts.isSpreadElement(argument)) return undefined;
+    bindings.set(symbol, substitute(argument));
+  }
+  return sinkOf(forwarded.call, values, wrappers, depth + 1, bindings);
+}
+
+/** proven wrapper body의 내부 호출은 outer invocation fact와 중복하지 않도록 표시한다. */
+function forwardedBodies(values: ClientValues, wrappers: ClientWrappers): ReadonlySet<ts.CallExpression> {
+  const bodies = new Set<ts.CallExpression>();
+  for (const target of wrappers.targets()) {
+    const coverage = wrappers.coverage(target);
+    if (!coverage.closed || coverage.calls.length === 0) continue;
+    let represented = true;
+    for (const call of coverage.calls) {
+      if (wrappers.target(call.expression) !== target || sinkOf(call, values, wrappers) === undefined) {
+        represented = false; break;
+      }
+    }
+    if (represented) bodies.add(target.call);
+  }
+  return bodies;
 }
 
 /** ky의 선언된 major만 읽는다. 모호한 버전 범위는 추측하지 않는다. */
@@ -133,20 +171,57 @@ function composition(sink: Sink, values: ClientValues, major: number | undefined
 export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date): ClientRouteDocument {
   const project = loadNodeProject(root);
   const values = new ClientValues(project, includeTests);
+  const preliminaryWrappers = new ClientWrappers(values, includeTests);
+  const deferredWrapperCalls: ts.CallExpression[] = [];
+  const escapeCall = (call: ts.CallExpression): void => {
+    for (const argument of call.arguments) values.markMutated(argument, true);
+    const callee = unwrap(call.expression);
+    if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+      if (clientOf(callee.expression, values) === undefined) values.markMutated(callee.expression, true);
+    }
+  };
   // 알 수 없는 함수에 넘긴 객체·클라이언트는 변경될 수 있다. 모듈 전역 순서와 무관하게 보수적으로 제외한다.
   for (const [path, source] of project.files) {
     if (!includeTests && isNodeTestPath(path)) continue;
     const inspect = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && sinkOf(node, values) === undefined && clientOf(node, values) === undefined) {
-        for (const argument of node.arguments) {
-          const resolved = values.resolve(argument);
-          if ((resolved !== undefined && ts.isObjectLiteralExpression(resolved)) || clientOf(argument, values) !== undefined) values.markMutated(argument);
+      if (ts.isCallExpression(node) && sinkOf(node, values, undefined) === undefined
+        && clientOf(node, values) === undefined) {
+        if (sinkOf(node, values, preliminaryWrappers) === undefined) escapeCall(node);
+        else deferredWrapperCalls.push(node);
+      } else if (ts.isNewExpression(node)) {
+        for (const argument of node.arguments ?? []) values.markMutated(argument, true);
+      } else if (ts.isTaggedTemplateExpression(node)) {
+        if (ts.isTemplateExpression(node.template)) {
+          for (const span of node.template.templateSpans) values.markMutated(span.expression, true);
+        }
+        const tag = unwrap(node.tag);
+        if (ts.isPropertyAccessExpression(tag) || ts.isElementAccessExpression(tag)) {
+          values.markMutated(tag.expression, true);
         }
       }
       ts.forEachChild(node, inspect);
     };
     inspect(source);
   }
+  let pendingWrappers = deferredWrapperCalls;
+  let escapeRechecks = 0;
+  while (pendingWrappers.length > 0 && !values.mutationAnalysisIncomplete) {
+    const rechecked = new ClientWrappers(values, includeTests);
+    const stillProven: ts.CallExpression[] = [];
+    const before = values.mutated.size;
+    for (const call of pendingWrappers) {
+      if (++escapeRechecks > MAX_ESCAPE_RECHECKS) {
+        values.mutationAnalysisIncomplete = true; break;
+      }
+      if (sinkOf(call, values, rechecked) === undefined) escapeCall(call);
+      else stillProven.push(call);
+    }
+    if (values.mutationAnalysisIncomplete || values.mutated.size === before) break;
+    pendingWrappers = stillProven;
+  }
+  const wrappers = new ClientWrappers(values, includeTests);
+  const activeWrappers = values.mutationAnalysisIncomplete ? undefined : wrappers;
+  const wrapperBodies = activeWrappers === undefined ? new Set<ts.CallExpression>() : forwardedBodies(values, activeWrappers);
   const major = kyMajor(root);
   const facts: ClientRouteFact[] = [];
   const limitations = new Set<string>(['route-call-coverage: only global fetch and symbol-proven axios/ky calls are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests']);
@@ -156,7 +231,8 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     if (hasParseErrors(source)) limitations.add('route-call-coverage: source syntax errors may hide requests');
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
-        const sink = sinkOf(node, values);
+        if (wrapperBodies.has(node)) return;
+        const sink = sinkOf(node, values, activeWrappers);
         if (sink !== undefined) {
           if (facts.length >= MAX_ROUTE_FACTS) throw new RouteFactLimitError();
           const methodExpression = configValue(sink.configs, 'method');
@@ -179,6 +255,8 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     };
     visit(source);
   }
+  if (wrappers.incomplete) limitations.add('route-call-coverage: wrapper alias or forwarding analysis exceeded fixed bounds; affected calls remain dynamic');
+  if (values.mutationAnalysisIncomplete) limitations.add('route-call-coverage: client configuration mutation analysis is incomplete because provenance was unsupported or fixed bounds were reached; affected configuration remains dynamic');
   if (Object.values(project.gaps).some((gap) => Boolean(gap))) limitations.add('route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped');
   return { format: 'bridge-facts', version: 1, tool: { name: 'tsograph', version: toolVersion }, generatedAt: formatBridgeTimestamp(generatedAt),
     platform: 'js', target: 'http', roles: ['client'], sourceSets: { tests: includeTests ? 'included' : 'excluded' }, project: root,

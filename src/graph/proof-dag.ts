@@ -51,8 +51,12 @@ export interface ProofRecipe<T> {
 export interface ProofLimits { readonly steps?: number; readonly depth?: number; readonly frames?: number }
 /** caller step 및 edge 위치를 함께 검증한다. */
 export interface ProofCaller { readonly step: () => void; readonly check: (depth: number, frames: number) => void }
-/** 현재 값이 proof entry에 포함되는 policy/default-library 조회다. */
-export interface ProofGuard { readonly read: () => boolean }
+/** 현재 값이 proof entry에 포함되는 policy/default-library 또는 재감사 가능한 열거 사실 조회다. */
+export interface ProofGuard {
+  readonly read: () => boolean;
+  /** 불일치한 현재 열거를 같은 bounded recipe로 다시 감사해도 되는 guard만 opt-in한다. */
+  readonly reconstruct?: boolean;
+}
 /** 순서가 보존된 proof work다. guard 조회는 callback 전에 청구하고 같은 edge 위치에서 재생한다. */
 export type ProofWork = ((depth?: number, frames?: number) => void) & {
   observe: (guard: ProofGuard, depth?: number, frames?: number) => boolean;
@@ -61,7 +65,10 @@ export type ProofWork = ((depth?: number, frames?: number) => void) & {
 /** 외부에 semantic negative로 전달하지 않는 내부 중단이다. */
 class ProofExhausted extends Error {}
 /** 현재 질의의 guard 불일치는 semantic rejection이 아니라 entry 무효화다. */
-class ProofEntryInvalid extends Error {}
+class ProofEntryInvalid extends Error {
+  readonly guard: ProofGuard;
+  constructor(guard: ProofGuard) { super(); this.guard = guard; }
+}
 /** 낮은 테스트 예산만 허용하고 잘못된 수치는 보수적으로 즉시 중단한다. */
 function boundedLimit(value: number | undefined, maximum: number): number {
   if (value === undefined) return maximum;
@@ -117,6 +124,8 @@ interface Completed {
   readonly localDepth: number;
   readonly localFrames: number;
   readonly edges: readonly ProofEdge[];
+  /** evaluate가 실제 소비한 child outcome이다. 재검증 결과가 바뀌면 parent도 다시 구성한다. */
+  readonly children: readonly ProofOutcome<unknown>[];
   readonly outcome: ProofOutcome<unknown>;
 }
 /** scoped identity에 한 번만 local work를 청구하며 완성된 AST 증명만 저장한다. */
@@ -148,7 +157,7 @@ export class ProofDag {
     for (const operation of operations) {
       if (operation.kind === 'guard') {
         const current = query.observeGuard(operation.guard.guard, depth + operation.guard.depth, frames + operation.guard.frames);
-        if (current !== operation.guard.expected) throw new ProofEntryInvalid();
+        if (current !== operation.guard.expected) throw new ProofEntryInvalid(operation.guard.guard);
         continue;
       }
       for (let i = 0; i < operation.work.cost; i++) {
@@ -160,6 +169,19 @@ export class ProofDag {
   private mismatched(recipe: ProofRecipe<unknown>, edges: readonly ProofEdge[]): boolean {
     return edges.some((edge) => edge.capability !== undefined && edge.capability !== edge.recipe.capability
       || (recipe.mode ?? 'legacy') !== (edge.recipe.mode ?? 'legacy'));
+  }
+  /** stale 완료 node만 버리고 이미 청구한 replay 뒤에 현재 entry를 한 번 다시 구성한다. */
+  private reconstruct(recipe: ProofRecipe<unknown>, cached: Completed, query: ProofQuery,
+    depth: number, frames: number): ProofOutcome<unknown> {
+    if (this.completed.get(recipe.id) === cached) this.completed.delete(recipe.id);
+    query.visited.delete(cached);
+    // pending ownership은 유지하되 새 node lookup의 step/depth/frame은 cold visit과 같이 청구한다.
+    query.step(); query.check(depth, frames);
+    try { return this.visitBody(recipe, query, depth, frames); }
+    catch (error) {
+      if (error instanceof ProofEntryInvalid) return { kind: 'incomplete', reason: 'entry' };
+      throw error;
+    }
   }
   /** depth/frame 검증은 lookup마다, local cost는 질의 내 identity마다 한 번 수행한다. */
   private visit(recipe: ProofRecipe<unknown>, query: ProofQuery, depth: number, frames: number): ProofOutcome<unknown> {
@@ -185,11 +207,30 @@ export class ProofDag {
       if (this.mismatched(recipe, cached.edges)) return { kind: 'rejected', reason: 'capability' };
       const fresh = !query.visited.has(cached);
       if (!fresh) query.check(depth + cached.localDepth, frames + cached.localFrames);
-      if (fresh) this.replay(cached.before, query, depth, frames);
+      if (fresh) {
+        try { this.replay(cached.before, query, depth, frames); }
+        catch (error) {
+          if (error instanceof ProofEntryInvalid && error.guard.reconstruct === true) {
+            return this.reconstruct(recipe, cached, query, depth, frames);
+          }
+          throw error;
+        }
+      }
       const children = cached.edges.map((edge) => this.visit(edge.recipe, query, depth + edge.depth, frames + edge.frames));
       const unstable = children.find((child) => child.kind === 'incomplete' || child.kind === 'cycle' || child.kind === 'exhausted');
       if (unstable !== undefined) return unstable;
-      if (fresh) this.replay(cached.after, query, depth, frames);
+      if (children.length !== cached.children.length || children.some((child, index) => child !== cached.children[index])) {
+        return this.reconstruct(recipe, cached, query, depth, frames);
+      }
+      if (fresh) {
+        try { this.replay(cached.after, query, depth, frames); }
+        catch (error) {
+          if (error instanceof ProofEntryInvalid && error.guard.reconstruct === true) {
+            return this.reconstruct(recipe, cached, query, depth, frames);
+          }
+          throw error;
+        }
+      }
       // guard·의존성 중단은 완료 방문이 아니므로 다음 확인에서 trace를 건너뛰지 않는다.
       query.visited.add(cached);
       return cached.outcome;
@@ -219,7 +260,7 @@ export class ProofDag {
         return value;
       };
       work.require = (guard, required, d = 0, f = 0) => {
-        if (work.observe(guard, d, f) !== required) throw new ProofEntryInvalid();
+        if (work.observe(guard, d, f) !== required) throw new ProofEntryInvalid(guard);
       };
       return work;
     };
@@ -240,7 +281,8 @@ export class ProofDag {
           dependencies: Object.freeze(children.flatMap((child) => child.kind === 'proved' ? [child.certificate] : [])) }),
       } : result;
       if (outcome.kind === 'proved') this.issued.set(outcome.certificate, recipe);
-      const node = { recipe, before: Object.freeze(before), after: Object.freeze(after), localDepth, localFrames, edges: Object.freeze(edges), outcome };
+      const node = { recipe, before: Object.freeze(before), after: Object.freeze(after), localDepth, localFrames,
+        edges: Object.freeze(edges), children: Object.freeze(children), outcome };
       this.completed.set(recipe.id, node);
       query.visited.add(node);
       return outcome;

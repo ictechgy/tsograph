@@ -12,6 +12,16 @@ import { runCli } from './run-cli.ts';
 const fixture = realpathSync(fileURLToPath(new URL('../../fixtures/graph/next-prisma/', import.meta.url)));
 const fixedNow = new Date('2026-09-27T00:00:00.000Z');
 
+test('들여쓰기만 출력 상한을 넘으면 사실을 보존한 압축 JSON으로 출력한다', () => {
+  const document = { z: [{ b: 2, a: 1 }, { b: 4, a: 3 }], a: '경로' };
+  const result = render(document, 65);
+  assert.equal(result.exitCode, 0, result.standardError);
+  assert.deepEqual(JSON.parse(result.standardOutput), document);
+  assert.ok(result.standardOutput.length <= 65);
+  assert.ok(result.standardOutput.endsWith('\n'));
+  assert.equal(render(document, 20).exitCode, 2);
+});
+
 /**
  * 실행 환경을 만든다.
  *

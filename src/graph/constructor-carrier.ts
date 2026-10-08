@@ -14,9 +14,10 @@ import { isMutationCleanView, type MutationSafetyContext } from './mutation-safe
 import { skipWrappers } from './node-collector.ts';
 import { hasPrimitiveHelperCandidates } from './effect-inventory.ts';
 import { collectPrimitivePlan, type PrimitivePlan } from './primitive-helper-sites.ts';
-import { PrimitiveHelpers, primitiveChildren, primitiveLiteral, type PrimitiveSummary } from './primitive-helpers.ts';
-import { auditSingletonCarrier, coversSingletonEffects, certifiesSingletonWrite,
+import { PrimitiveHelpers, primitiveChildren, primitiveErasedReference, primitiveLiteral, type PrimitiveSummary } from './primitive-helpers.ts';
+import { auditSingletonCarrier, coversSingletonEffects,
   type SingletonEffectModel, type SingletonWitness } from './singleton-carrier.ts';
+import { snapshotSterileLiteral, type SterileLiteralSnapshot } from './sterile-literals.ts';
 import type { FlowPolicy } from './value-flow.ts';
 import { ProofDag, ProofQuery, type ProofCaller, type ProofCertificate, type ProofOutcome, type ProofRecipe, type ProofEdge, type ProofGuard, type ProofWork } from './proof-dag.ts';
 
@@ -84,8 +85,136 @@ export interface ConstructorCarrierProof {
   readonly allowedMutationSites: ReadonlySet<ts.Node>;
 }
 
+/** helper summary를 공개 Map/Set과 분리해 descriptor producer가 소비하는 immutable snapshot이다. */
+interface HelperConfinementSnapshot {
+  readonly literals: readonly SterileLiteralSnapshot[];
+}
+
+interface SingletonWriteSnapshot {
+  readonly site: ts.Node;
+  readonly target: ts.Expression;
+  readonly key: string;
+  readonly keyNode: ts.Node;
+  readonly value: ts.Expression;
+}
+
+/** descriptor producer가 공개 witness보다 먼저 고정한 critical identity graph다. */
+interface DescriptorConfinementSnapshot {
+  readonly descriptorRecipe: ProofRecipe<SingletonWitness>;
+  readonly root: ts.ClassLikeDeclaration;
+  readonly origin: { readonly index: FlowIndex; readonly checker: ts.TypeChecker;
+    readonly inventory: FlowIndex['effectInventory'] };
+  readonly proof: {
+    readonly declaration: ts.ClassLikeDeclaration;
+    readonly constructor: ts.ConstructorDeclaration;
+    readonly bagParameter: ts.ParameterDeclaration;
+    readonly bagKeys: readonly string[];
+    readonly innerLiteral: ts.ObjectLiteralExpression;
+    readonly serviceUses: readonly ConstructorServiceUse[];
+    readonly projectionBindings: readonly ConstructorProjectionBinding[];
+    readonly allowedMutationSites: readonly ts.Node[];
+  };
+  readonly dependencies: readonly ts.ClassLikeDeclaration[];
+  readonly singletonWrites: readonly SingletonWriteSnapshot[];
+  readonly literals: readonly SterileLiteralSnapshot[];
+}
+
+/** primitive-effects coverage 완료 뒤에만 private registry에 게시하는 final snapshot이다. */
+interface PrimitiveConfinementSnapshot extends DescriptorConfinementSnapshot {
+  readonly primitiveRecipe: ProofRecipe<SingletonWitness>;
+  readonly effectRecords: readonly { readonly site: ts.Node; readonly operation: string }[];
+  readonly guards: readonly ProofGuard[];
+}
+
+const confinementIssue = Object.freeze({});
+
+/** analyzer-private snapshot만 세 mutation 소비자에게 전달하는 nominal runtime certificate다. */
+export class SterileConfinementCertificate {
+  readonly #context: MutationSafetyContext;
+  readonly #snapshot: PrimitiveConfinementSnapshot;
+  readonly #work: ProofWork;
+  readonly #singletonWrites = new Map<ts.Node, SingletonWriteSnapshot>();
+  readonly #literalWrites = new Map<ts.Node, SterileLiteralSnapshot['writes'][number]>();
+  readonly #arrays = new Map<ts.VariableDeclaration,
+    { readonly bindings: readonly ts.VariableDeclaration[]; readonly references: ReadonlySet<ts.Node> }>();
+
+  private constructor(issue: object, context: MutationSafetyContext,
+    snapshot: PrimitiveConfinementSnapshot, work: ProofWork) {
+    if (issue !== confinementIssue) throw new TypeError('sterile confinement authority was not issued by its analyzer');
+    this.#context = context; this.#snapshot = snapshot; this.#work = work;
+    for (const write of snapshot.singletonWrites) {
+      work(); this.#singletonWrites.set(write.site, write);
+    }
+    for (const literal of snapshot.literals) {
+      work();
+      for (const write of literal.writes) { work(); this.#literalWrites.set(write.site, write); }
+      if (literal.kind === 'array') {
+        const references = new Set<ts.Node>();
+        for (const reference of literal.references) { work(); references.add(reference); }
+        const closure = Object.freeze({ bindings: literal.bindings, references });
+        for (const binding of literal.bindings) { work(); this.#arrays.set(binding, closure); }
+      }
+    }
+    Object.freeze(this);
+  }
+
+  static isIssued(candidate: unknown): candidate is SterileConfinementCertificate {
+    return typeof candidate === 'object' && candidate !== null && #context in candidate;
+  }
+
+  write(candidate: MutationSafetyContext, record: MutationRecord): boolean | undefined {
+    this.#work();
+    if (!this.matchesContext(candidate)) return false;
+    const singleton = this.#singletonWrites.get(record.site);
+    if (singleton !== undefined) return this.matchesSingletonWrite(singleton, record);
+    const literal = this.#literalWrites.get(record.site);
+    return literal === undefined ? undefined : this.matchesLiteralWrite(literal, record);
+  }
+
+  array(candidate: MutationSafetyContext, binding: ts.VariableDeclaration): boolean | undefined {
+    this.#work();
+    if (!this.matchesContext(candidate)) return false;
+    const closure = this.#arrays.get(binding);
+    if (closure === undefined) return undefined;
+    for (const alias of closure.bindings) {
+      this.#work(); const symbol = candidate.checker.getSymbolAtLocation(alias.name);
+      if (symbol === undefined) return false;
+      this.#work(); if (candidate.index.exportedSymbols.has(symbol)) return false;
+      this.#work(); if ((candidate.index.identifierWrites.get(symbol)?.length ?? 0) !== 0) return false;
+      this.#work(); const references = candidate.index.references.get(symbol) ?? [];
+      for (const token of references) {
+        this.#work();
+        if (!closure.references.has(token) && !primitiveErasedReference(token, this.#work)) return false;
+      }
+    }
+    return true;
+  }
+
+  private matchesContext(candidate: MutationSafetyContext): boolean {
+    const origin = this.#snapshot.origin;
+    return candidate === this.#context && candidate.index === origin.index && candidate.checker === origin.checker
+      && candidate.index.effectInventory === origin.inventory && !candidate.openProgram && !candidate.openProperties;
+  }
+
+  private matchesSingletonWrite(write: SingletonWriteSnapshot, record: MutationRecord): boolean {
+    return record.operation === 'assignment' && record.effect === 'property' && record.confidence === 'known'
+      && record.target === write.target && record.staticKey === write.key && record.key === write.keyNode
+      && record.value === write.value && record.args.length === 0 && record.sources.length === 0
+      && record.source === undefined && record.descriptor === undefined && record.prototype === undefined;
+  }
+
+  private matchesLiteralWrite(write: SterileLiteralSnapshot['writes'][number], record: MutationRecord): boolean {
+    return record.effect === 'property' && record.operation === 'assignment' && record.confidence === 'known'
+      && record.target === write.target && record.staticKey === write.key && record.key === write.keyNode
+      && record.value === write.value && record.args.length === 0 && record.source === undefined
+      && record.sources.length === 0 && record.descriptor === undefined && record.prototype === undefined;
+  }
+}
+
 /** source-derived legacy obligation의 정적 노드 종류다. */
 type CarrierOperation = 'proof' | 'role' | 'lineage' | 'instance' | 'identity' | 'consumption' | 'receiver' | 'construction' | 'field' | 'extended-selection' | 'dependency-selection';
+type SingletonCapability = 'descriptor' | 'primitive-effects' | 'sterile-confinement'
+  | 'instance-family' | 'exact-bag' | 'concrete-dispatch';
 
 /** 생성자 carrier 분석기다. 완료한 AST 결과만 메모하고 재진입은 실패시킨다. */
 export class ConstructorCarrierAnalyzer {
@@ -99,17 +228,23 @@ export class ConstructorCarrierAnalyzer {
     readonly inventory: FlowIndex['effectInventory'];
     readonly manifest: object | undefined;
   };
-  private readonly dag: ProofDag;
+  readonly #dag: ProofDag;
   private readonly recipes = new Map<ts.ClassLikeDeclaration, Map<CarrierOperation, ProofRecipe<unknown>>>();
   private readonly bagRecipes = new Map<ts.ObjectLiteralExpression, Map<ts.ClassLikeDeclaration, ProofRecipe<ConstructorCarrierProof>>>();
   /** source/allocation별 정적 extended proof DAG recipe다. */
-  private readonly singletonRecipes = new Map<ts.Node, Map<string, ProofRecipe<SingletonWitness>>>();
+  readonly #singletonRecipes = new Map<ts.Node,
+    WeakMap<ts.ClassLikeDeclaration, Map<SingletonCapability, ProofRecipe<SingletonWitness>>>>();
   /** borrowed endpoint의 자기 singleton family를 root-scoped witness로 확인한다. */
   private readonly dependencyRecipes = new Map<ts.ClassLikeDeclaration, ProofRecipe<SingletonWitness>>();
   private readonly issuedProofs = new WeakMap<ProofCertificate, ConstructorCarrierProof>();
-  private readonly helpers: PrimitiveHelpers;
-  private readonly helperInventories = new Map<ts.ClassLikeDeclaration, ProofRecipe<PrimitiveSummary>>();
-  private query: ProofQuery | undefined;
+  readonly #helpers: PrimitiveHelpers;
+  readonly #helperInventories = new Map<ts.ClassLikeDeclaration, ProofRecipe<PrimitiveSummary>>();
+  readonly #helperSnapshots = new WeakMap<PrimitiveSummary, HelperConfinementSnapshot>();
+  readonly #descriptorRecipes = new WeakSet<ProofRecipe<SingletonWitness>>();
+  readonly #primitiveRecipes = new WeakSet<ProofRecipe<SingletonWitness>>();
+  readonly #descriptorSnapshots = new WeakMap<SingletonWitness, DescriptorConfinementSnapshot>();
+  readonly #primitiveSnapshots = new WeakMap<SingletonWitness, PrimitiveConfinementSnapshot>();
+  #query: ProofQuery | undefined;
   private work: ProofWork | undefined;
   private walkDepth = 0;
   private readonly files: ReadonlySet<ts.SourceFile>;
@@ -123,14 +258,14 @@ export class ConstructorCarrierAnalyzer {
       policy: context.policy, inventory: context.index.effectInventory, manifest: context.index.effectInventory?.manifest };
     this.files = new Set(context.index.files);
     this.sourceTexts = new Map(context.index.files.map((file) => [file, file.text]));
-    this.dag = new ProofDag({ program: context.program ?? context.checker, checker: context.checker,
+    this.#dag = new ProofDag({ program: context.program ?? context.checker, checker: context.checker,
       view: context.index.effectInventory?.manifest.view ?? 'whole', manifest: context.index.effectInventory?.manifest,
       policy: context.policy, version: 4, coverage: () => {
         const inventory = context.index.effectInventory;
         return inventory?.enumeration === 'complete' && inventory.referenceAliases === 'complete'
           && inventory.initialization === 'complete';
       } });
-    this.helpers = new PrimitiveHelpers(context, {
+    this.#helpers = new PrimitiveHelpers(context, {
       project: (source) => this.policyGuard('project', source),
       open: (node) => this.policyGuard('callable', node),
       intrinsic: (source) => this.policyGuard('default-library', source),
@@ -139,9 +274,19 @@ export class ConstructorCarrierAnalyzer {
   }
 
   /** 호출자 질의 경계마다 local-work 방문 집합을 새로 만든다. */
-  beginQuery(): void { this.query = new ProofQuery({}, this.context.caller); }
+  beginQuery(): void {
+    this.#helpers.beginQuery();
+    this.#query = new ProofQuery({}, this.context.caller);
+  }
   /** 중단된 질의의 자원 상태를 다음 질의로 넘기지 않는다. */
-  endQuery(): void { this.query = undefined; }
+  endQuery(): void { this.#query = undefined; }
+
+  /** 명시적 query 경계 없이 호출된 public API도 helper fact scope를 새로 연다. */
+  private currentQuery(): ProofQuery {
+    if (this.#query !== undefined) return this.#query;
+    this.#helpers.beginQuery();
+    return new ProofQuery({}, this.context.caller);
+  }
 
   /** repaired legacy 증명의 명시적 outcome이다. later-stage capability를 발급하지 않는다. */
   outcome(declaration: ts.ClassLikeDeclaration): ProofOutcome<ConstructorCarrierProof> {
@@ -177,14 +322,14 @@ export class ConstructorCarrierAnalyzer {
       && issued.innerLiteral === proof.innerLiteral && issued.constructor === proof.constructor
       && issued.bagParameter === proof.bagParameter && issued.allowedMutationSites === proof.allowedMutationSites
       && (literal === undefined || proof.innerLiteral === literal))) return false;
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
-    const previous = this.query;
-    this.query = query;
+    const query = this.currentQuery();
+    const previous = this.#query;
+    this.#query = query;
     try {
-      return this.dag.accepts(proof.certificate, 'legacy', declaration, query)
+      return this.#dag.accepts(proof.certificate, 'legacy', declaration, query)
         && this.context.index.hasOpaqueMutation !== true;
     }
-    finally { if (previous === undefined) this.query = undefined; }
+    finally { if (previous === undefined) this.#query = undefined; }
   }
 
   /** exact allocation bag 소비자는 class/family 또는 effect 권한을 빌리지 않는다. */
@@ -211,10 +356,10 @@ export class ConstructorCarrierAnalyzer {
       };
       byDeclaration.set(declaration, recipe);
     }
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    const query = this.currentQuery();
     const result = this.resolveRecipe(recipe, query);
     return result.kind === 'proved' && result.value.declaration === declaration
-      && this.dag.accepts(result.certificate, 'exact-bag', literal, query);
+      && this.#dag.accepts(result.certificate, 'exact-bag', literal, query);
   }
 
   /** unknown reflection에는 completed singleton family capability만 소비한다. */
@@ -250,7 +395,7 @@ export class ConstructorCarrierAnalyzer {
           work.require(this.policyGuard('project', declaration.getSourceFile()), true);
           work.require(this.policyGuard('callable', declaration), false);
           const owner = this.singletonDependencyOwner(declaration);
-          return owner === undefined ? [] : [{ recipe: this.singletonRecipe(owner, 'sterile-confinement'),
+          return owner === undefined ? [] : [{ recipe: this.#singletonRecipe(owner, 'sterile-confinement'),
             capability: 'sterile-confinement', depth: 1, frames: 0 }];
         }),
         evaluate: (work, children) => {
@@ -263,9 +408,9 @@ export class ConstructorCarrierAnalyzer {
       };
       this.dependencyRecipes.set(declaration, recipe);
     }
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    const query = this.currentQuery();
     const result = this.resolveRecipe(recipe, query);
-    return result.kind === 'proved' && this.dag.accepts(result.certificate, 'instance-family', declaration, query, 'extended');
+    return result.kind === 'proved' && this.#dag.accepts(result.certificate, 'instance-family', declaration, query, 'extended');
   }
 
   /** 직접 new→const→exact bag→new 경로만 따라가며 ValueFlow나 타입으로 owner를 추측하지 않는다. */
@@ -341,29 +486,32 @@ export class ConstructorCarrierAnalyzer {
   /** consumer별 opaque capability는 동일한 정적 witness DAG에 묶인다. */
   private extendedAuthority(declaration: ts.ClassLikeDeclaration,
     capability: 'instance-family' | 'exact-bag' | 'concrete-dispatch' | 'descriptor', identity: ts.Node): boolean {
-    const recipe = this.singletonRecipe(declaration, capability, identity);
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    if (!this.validEntry(declaration) || declaration.getSourceFile() !== identity.getSourceFile()) return false;
+    const recipe = this.#singletonRecipe(declaration, capability, identity);
+    const query = this.currentQuery();
     const result = this.resolveRecipe(recipe, query);
     if (result.kind === 'rejected' || result.kind === 'incomplete') {
       this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}(${result.reason}); extended isolation was not certified.`);
     }
-    return result.kind === 'proved' && this.dag.accepts(result.certificate, capability, identity, query, 'extended');
+    return result.kind === 'proved' && this.#dag.accepts(result.certificate, capability, identity, query, 'extended');
   }
 
   /** descriptor→named effects→confinement→consumer의 단방향 DAG다. legacy 성공은 의존에 포함하지 않는다. */
-  private singletonRecipe(declaration: ts.ClassLikeDeclaration,
-    capability: 'descriptor' | 'primitive-effects' | 'sterile-confinement' | 'instance-family' | 'exact-bag' | 'concrete-dispatch',
+  #singletonRecipe(declaration: ts.ClassLikeDeclaration,
+    capability: SingletonCapability,
     identity: ts.Node = declaration): ProofRecipe<SingletonWitness> {
-    let recipes = this.singletonRecipes.get(identity);
-    if (recipes === undefined) { recipes = new Map(); this.singletonRecipes.set(identity, recipes); }
-    const key = `${declaration.pos}:${capability}`;
-    const known = recipes.get(key); if (known !== undefined) return known;
+    let declarations = this.#singletonRecipes.get(identity);
+    if (declarations === undefined) { declarations = new WeakMap(); this.#singletonRecipes.set(identity, declarations); }
+    let recipes = declarations.get(declaration);
+    if (recipes === undefined) { recipes = new Map(); declarations.set(declaration, recipes); }
+    const known = recipes.get(capability); if (known !== undefined) return known;
     const source = declaration.getSourceFile();
     const program = this.context.program;
     const checker = this.context.checker;
     const baseEntry = this.recipe(declaration, 'proof');
     const recipe: ProofRecipe<SingletonWitness> = {
-      id: `${source.fileName}:${identity.pos}:stage3:${key}`, identity, capability, mode: 'extended',
+      id: `${source.fileName}:${identity.pos}:stage3:${declaration.pos}:${capability}`,
+      identity, capability, mode: 'extended',
       valid: () => baseEntry.valid() && program !== undefined && program.getTypeChecker() === checker
         && program.getSourceFile(source.fileName) === source
         && identity.getSourceFile() === source,
@@ -377,8 +525,8 @@ export class ConstructorCarrierAnalyzer {
         }
         const child = capability === 'descriptor' ? undefined : capability === 'primitive-effects' ? 'descriptor'
           : capability === 'sterile-confinement' ? 'primitive-effects' : 'sterile-confinement';
-        const edges: ProofEdge[] = child === undefined ? [] : [{ recipe: this.singletonRecipe(declaration, child), capability: child, depth: 1, frames: 0 }];
-        if (capability === 'descriptor' && hasPrimitiveHelperCandidates(this.context.index.effectInventory)) edges.push({ recipe: this.helperInventory(declaration), capability: 'primitive-effects', depth: 1, frames: 0 });
+        const edges: ProofEdge[] = child === undefined ? [] : [{ recipe: this.#singletonRecipe(declaration, child), capability: child, depth: 1, frames: 0 }];
+        if (capability === 'descriptor' && hasPrimitiveHelperCandidates(this.context.index.effectInventory)) edges.push({ recipe: this.#helperInventory(declaration), capability: 'primitive-effects', depth: 1, frames: 0 });
         return edges;
       },
       evaluate: (work, children) => this.withWork(work, () => {
@@ -387,39 +535,78 @@ export class ConstructorCarrierAnalyzer {
           return { kind: 'incomplete', reason: 'coverage' };
         }
         let witness: SingletonWitness | undefined;
+        let completedPrimitive: ProofOutcome<SingletonWitness> | undefined;
+        let helperSnapshot: HelperConfinementSnapshot | undefined;
         if (capability === 'descriptor') {
           const proof = this.proveClass(declaration, true, true);
           if (proof !== undefined) witness = auditSingletonCarrier(this.context, proof, work, {
             project: (file) => this.policyIsProjectFile(file), open: (node) => this.policyIsOpenCallable(node),
             intrinsic: (file) => this.policyIsDefaultLibraryFile(file),
-          });
+          }, (read, equal, reconstruct) => this.#currentFact(work, read, equal, reconstruct));
         } else {
           const child = children.find((child) => child.kind === 'proved' && child.certificate.capability === (capability === 'primitive-effects' ? 'descriptor'
             : capability === 'sterile-confinement' ? 'primitive-effects' : 'sterile-confinement'));
           witness = child?.kind === 'proved' ? child.value as SingletonWitness : undefined;
+          if (capability === 'sterile-confinement' && child?.kind === 'proved') {
+            completedPrimitive = child as ProofOutcome<SingletonWitness>;
+          }
         }
         if (witness === undefined) return { kind: 'rejected', reason: 'singleton-descriptor' };
         if (capability === 'descriptor') {
           const helper = children.find((child) => child.kind === 'proved' && child.certificate.identity === declaration
             && child.certificate.nodeId.endsWith(':stage4-inventory'));
           if (helper?.kind === 'proved') {
+            helperSnapshot = this.#helperSnapshots.get(helper.value as PrimitiveSummary);
+            if (helperSnapshot === undefined) return { kind: 'rejected', reason: 'primitive-helper-authority' };
             const models = new Map<ts.Node, SingletonEffectModel>();
             for (const [site, model] of witness.models) { work(); models.set(site, model); }
             for (const site of (helper.value as PrimitiveSummary).sites) { work(); models.set(site, 'primitive-helper'); }
-            witness = { ...witness, models };
+            witness = { ...witness, models, literals: (helper.value as PrimitiveSummary).literals };
           } else if (hasPrimitiveHelperCandidates(this.context.index.effectInventory)) {
             return { kind: 'rejected', reason: 'primitive-helper' };
           }
         }
-        if (capability === 'primitive-effects' && !coversSingletonEffects(this.context, witness, work)) {
-          return { kind: 'rejected', reason: 'unmodeled-effect' };
+        if (capability === 'descriptor') {
+          const snapshot = this.#captureDescriptorSnapshot(witness, recipe, helperSnapshot?.literals ?? [], work);
+          if (snapshot === undefined) return { kind: 'rejected', reason: 'descriptor-snapshot' };
+          work(); this.#descriptorSnapshots.set(witness, snapshot);
+        }
+        if (capability === 'primitive-effects') {
+          work();
+          const descriptor = this.#descriptorSnapshots.get(witness);
+          if (descriptor === undefined || !this.#descriptorRecipes.has(descriptor.descriptorRecipe)
+            || descriptor.root !== declaration || descriptor.proof.declaration !== declaration) {
+            return { kind: 'rejected', reason: 'descriptor-authority' };
+          }
+          if (!coversSingletonEffects(this.context, witness, work)) {
+            return { kind: 'rejected', reason: 'unmodeled-effect' };
+          }
+          const snapshot = this.#completePrimitiveSnapshot(descriptor, recipe, work);
+          if (snapshot === undefined) return { kind: 'rejected', reason: 'primitive-snapshot' };
+          work(); this.#primitiveSnapshots.set(witness, snapshot);
         }
         if (capability === 'sterile-confinement') {
           const safety: MutationSafetyContext = { checker, index: this.context.index,
             isDefaultLibraryFile: (file) => this.policyIsDefaultLibraryFile(file),
             openProgram: this.context.policy.openProperties, openProperties: this.context.policy.openProperties,
-            budgetStep: () => this.step() };
-          if (!isMutationCleanView(safety, { certifiedWrite: (record) => certifiesSingletonWrite(witness!, record) })) {
+            budgetStep: () => this.step(),
+            currentFact: (read, equal) => this.#currentFact(work, read, equal) };
+          const activeQuery = this.#query;
+          work();
+          const snapshot = this.#primitiveSnapshots.get(witness);
+          const primitiveRecipe = this.#singletonRecipe(declaration, 'primitive-effects');
+          work();
+          const authentic = snapshot !== undefined && completedPrimitive?.kind === 'proved'
+            && this.#primitiveRecipes.has(snapshot.primitiveRecipe) && snapshot.primitiveRecipe === primitiveRecipe
+            && snapshot.root === declaration && snapshot.proof.declaration === declaration
+            && activeQuery !== undefined && completedPrimitive.certificate.capability === 'primitive-effects'
+            && completedPrimitive.certificate.mode === 'extended'
+            && completedPrimitive.certificate.identity === declaration
+            && completedPrimitive.certificate.nodeId === primitiveRecipe.id
+            && this.#snapshotIsCurrent(snapshot, work);
+          const confinement = authentic && snapshot !== undefined
+            ? this.#issueConfinement(safety, snapshot, work) : undefined;
+          if (confinement === undefined || !isMutationCleanView(safety, { confinement })) {
             return { kind: 'rejected', reason: 'mutation' };
           }
         }
@@ -427,12 +614,15 @@ export class ConstructorCarrierAnalyzer {
         return { kind: 'proved', value: witness };
       }),
     };
-    recipes.set(key, recipe); return recipe;
+    if (capability === 'descriptor') this.#descriptorRecipes.add(recipe);
+    if (capability === 'primitive-effects') this.#primitiveRecipes.add(recipe);
+    Object.freeze(recipe);
+    recipes.set(capability, recipe); return recipe;
   }
 
   /** 열거 완료와 helper purity를 분리하고 각 실제 entry의 초기화 의무를 DAG 결과에 적용한다. */
-  private helperInventory(declaration: ts.ClassLikeDeclaration): ProofRecipe<PrimitiveSummary> {
-    const known = this.helperInventories.get(declaration);
+  #helperInventory(declaration: ts.ClassLikeDeclaration): ProofRecipe<PrimitiveSummary> {
+    const known = this.#helperInventories.get(declaration);
     if (known !== undefined) return known;
     const entry = this.recipe(declaration, 'proof');
     let plan: PrimitivePlan = { roots: [], entries: [], complete: true };
@@ -440,11 +630,12 @@ export class ConstructorCarrierAnalyzer {
       id: `${declaration.getSourceFile().fileName}:${declaration.pos}:stage4-inventory`,
       identity: declaration, capability: 'primitive-effects', mode: 'extended', valid: entry.valid,
       dependencies: (work) => {
-        plan = collectPrimitivePlan(this.context, declaration, work);
-        const edges: ProofEdge[] = plan.roots.map((root) => { work(); return { recipe: root.dependency === undefined ? this.helpers.recipe(root.node)
-          : this.helpers.instantiationRecipe(root.node as ts.CallExpression, root.dependency), capability: 'primitive-effects', depth: 1, frames: 1 }; });
+        plan = this.#helpers.withFactReads(work,
+          facts => collectPrimitivePlan(this.context, declaration, work, facts));
+        const edges: ProofEdge[] = plan.roots.map((root) => { work(); return { recipe: root.dependency === undefined ? this.#helpers.recipe(root.node)
+          : this.#helpers.instantiationRecipe(root.node as ts.CallExpression, root.dependency), capability: 'primitive-effects', depth: 1, frames: 1 }; });
         for (const entry of plan.entries) {
-          work(); edges.push({ recipe: this.helpers.entryRecipe(entry.method), capability: 'primitive-effects', depth: 1, frames: 1 });
+          work(); edges.push({ recipe: this.#helpers.entryRecipe(entry.method), capability: 'primitive-effects', depth: 1, frames: 1 });
         }
         return edges;
       },
@@ -455,14 +646,14 @@ export class ConstructorCarrierAnalyzer {
         for (const child of children) { work(); if (child.kind === 'proved') summaries.set(child.certificate.identity, child.value as PrimitiveSummary); }
         for (const root of plan.roots) {
           work(); const summary = summaries.get(root.node);
-          if (summary === undefined || root.entry !== undefined && !this.helpers.initialized(summary, root.entry, work)) {
+          if (summary === undefined || root.entry !== undefined && !this.#helpers.initialized(summary, root.entry, work)) {
             return { kind: 'rejected', reason: 'helper-initialization' };
           }
         }
         for (const entry of plan.entries) {
           work(); const summary = summaries.get(entry.method.name);
           if (summary === undefined || entry.initialize
-            && (entry.entry === undefined || !this.helpers.initialized(summary, entry.entry, work))) {
+            && (entry.entry === undefined || !this.#helpers.initialized(summary, entry.entry, work))) {
             return { kind: 'rejected', reason: 'primitive-entry-initialization' };
           }
         }
@@ -473,10 +664,346 @@ export class ConstructorCarrierAnalyzer {
             return { kind: 'rejected', reason: 'unproved-primitive-entry' };
           }
         }
+        const snapshot = this.#captureHelperSnapshot(summary, work);
+        if (snapshot === undefined) return { kind: 'rejected', reason: 'helper-snapshot' };
+        work(); this.#helperSnapshots.set(summary, snapshot);
         return { kind: 'proved', value: summary };
       },
     };
-    this.helperInventories.set(declaration, recipe); return recipe;
+    Object.freeze(recipe);
+    this.#helperInventories.set(declaration, recipe); return recipe;
+  }
+
+  /** 공개 helper Map/Set을 descriptor가 읽기 전에 immutable literal records로 복사한다. */
+  #captureHelperSnapshot(summary: PrimitiveSummary, work: ProofWork): HelperConfinementSnapshot | undefined {
+    const literals: SterileLiteralSnapshot[] = [];
+    for (const [identity, literal] of summary.literals ?? []) {
+      work();
+      if (identity !== literal.literal) return undefined;
+      const snapshot = snapshotSterileLiteral(literal, work);
+      if (snapshot === undefined) return undefined;
+      literals.push(snapshot);
+    }
+    return Object.freeze({ literals: Object.freeze(literals) });
+  }
+
+  /** descriptor witness의 critical identities를 공개 object/map과 분리한다. */
+  #captureDescriptorSnapshot(witness: SingletonWitness, descriptorRecipe: ProofRecipe<SingletonWitness>,
+    literals: readonly SterileLiteralSnapshot[], work: ProofWork): DescriptorConfinementSnapshot | undefined {
+    work();
+    if (!this.#descriptorRecipes.has(descriptorRecipe)) return undefined;
+    const proof = witness.proof;
+    const origin = witness.origin;
+    work(); const declaration = proof.declaration;
+    work(); const constructor = proof.constructor;
+    work(); const bagParameter = proof.bagParameter;
+    work(); const innerLiteral = proof.innerLiteral;
+    work(); const originIndex = origin.index;
+    work(); const originChecker = origin.checker;
+    work(); const originInventory = origin.inventory;
+    if (declaration !== descriptorRecipe.identity || originIndex !== this.context.index
+      || originChecker !== this.context.checker || originInventory !== this.context.index.effectInventory) return undefined;
+    const bagKeys: string[] = [];
+    for (const key of proof.bagKeys) { work(); bagKeys.push(key); }
+    const serviceUses: ConstructorServiceUse[] = [];
+    for (const use of proof.serviceUses) {
+      work(); serviceUses.push(Object.freeze({ propertyName: use.propertyName, methodName: use.methodName, call: use.call }));
+    }
+    const projectionBindings: ConstructorProjectionBinding[] = [];
+    for (const binding of proof.projectionBindings) { work(); projectionBindings.push(Object.freeze({ ...binding })); }
+    const allowedMutationSites: ts.Node[] = [];
+    for (const site of proof.allowedMutationSites) { work(); allowedMutationSites.push(site); }
+    const dependencies: ts.ClassLikeDeclaration[] = [];
+    for (const dependency of witness.dependencies) { work(); dependencies.push(dependency); }
+    const singletonWrites: SingletonWriteSnapshot[] = [];
+    for (const [site, write] of witness.writes) {
+      work();
+      const keyNode = ts.isBinaryExpression(site) && ts.isPropertyAccessExpression(site.left) ? site.left.name : undefined;
+      if (keyNode === undefined) return undefined;
+      singletonWrites.push(Object.freeze({ site, target: write.target, key: write.key, keyNode, value: write.value }));
+    }
+    const literalSnapshots: SterileLiteralSnapshot[] = [];
+    for (const literal of literals) { work(); literalSnapshots.push(literal); }
+    const proofSnapshot = Object.freeze({ declaration, constructor, bagParameter,
+      bagKeys: Object.freeze(bagKeys), innerLiteral, serviceUses: Object.freeze(serviceUses),
+      projectionBindings: Object.freeze(projectionBindings), allowedMutationSites: Object.freeze(allowedMutationSites) });
+    return Object.freeze({ descriptorRecipe, root: declaration,
+      origin: Object.freeze({ index: originIndex, checker: originChecker, inventory: originInventory }),
+      proof: proofSnapshot, dependencies: Object.freeze(dependencies),
+      singletonWrites: Object.freeze(singletonWrites), literals: Object.freeze(literalSnapshots) });
+  }
+
+  /** owning consumer의 실제 read step을 reconstructible current guard로 기록한다. */
+  #currentFact<T>(work: ProofWork, read: () => T,
+    equal: (current: T, expected: T) => boolean = (current, expected) => current === expected,
+    reconstruct = true): T {
+    let initialized = false;
+    let expected!: T;
+    let current!: T;
+    work.require(Object.freeze({ reconstruct, read: () => {
+      current = read();
+      if (!initialized) { expected = current; initialized = true; return true; }
+      return equal(current, expected);
+    } }), true);
+    return current;
+  }
+
+  /** 현재 값을 한 번 charged read하고 warm replay가 다시 읽을 guard를 남긴다. */
+  #snapshotScalarGuard<T>(guards: ProofGuard[], work: ProofWork, read: () => T): void {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+  }
+
+  /** list 자체를 매번 다시 조회해 길이와 각 원소 identity를 독립 guard로 고정한다. */
+  #snapshotListGuards<T>(guards: ProofGuard[], work: ProofWork, read: () => readonly T[]): void {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+    work(); const length = expected.length;
+    guards.push(Object.freeze({ read: () => read().length === length }));
+    for (let index = 0; index < length; index++) {
+      work(); const value = expected[index];
+      guards.push(Object.freeze({ read: () => read()[index] === value }));
+    }
+  }
+
+  /** record field guards가 따로 있을 때 list length만 current container에서 다시 확인한다. */
+  #snapshotListLengthGuard<T>(guards: ProofGuard[], work: ProofWork, read: () => readonly T[]): number {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+    work(); const length = expected.length;
+    guards.push(Object.freeze({ read: () => read().length === length }));
+    return length;
+  }
+
+  /** Set을 현재 property에서 다시 얻어 size와 각 expected member를 검사한다. */
+  #snapshotSetGuards<T>(guards: ProofGuard[], work: ProofWork, read: () => ReadonlySet<T>): void {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+    work(); const size = expected.size;
+    guards.push(Object.freeze({ read: () => read().size === size }));
+    for (const value of expected) {
+      work(); guards.push(Object.freeze({ read: () => read().has(value) }));
+    }
+  }
+
+  /** scalar Map은 현재 map/key lookup으로 size와 모든 key/value identity를 다시 확인한다. */
+  #snapshotMapGuards<K, V>(guards: ProofGuard[], work: ProofWork,
+    read: () => ReadonlyMap<K, V>): void {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+    work(); const size = expected.size;
+    guards.push(Object.freeze({ read: () => read().size === size }));
+    for (const [key, value] of expected) {
+      work(); guards.push(Object.freeze({ read: () => read().has(key) }));
+      work(); guards.push(Object.freeze({ read: () => read().get(key) === value }));
+    }
+  }
+
+  /** list-valued Map은 현재 map에서 key를 다시 조회해 list 교체와 in-place 수정을 함께 잡는다. */
+  #snapshotMapListGuards<K, V>(guards: ProofGuard[], work: ProofWork,
+    read: () => ReadonlyMap<K, readonly V[]>): void {
+    work(); const expected = read();
+    guards.push(Object.freeze({ read: () => read() === expected }));
+    work(); const size = expected.size;
+    guards.push(Object.freeze({ read: () => read().size === size }));
+    for (const [key] of expected) {
+      work(); guards.push(Object.freeze({ read: () => read().has(key) }));
+      work(); this.#snapshotListGuards(guards, work, () => read().get(key) ?? []);
+    }
+  }
+
+  /** reference index는 owning helper recipe 재감사 뒤의 exact current map/list를 고정한다. */
+  #snapshotReferenceGuards(guards: ProofGuard[], work: ProofWork): void {
+    this.#snapshotMapListGuards(guards, work, () => this.context.index.references);
+  }
+
+  /** final mutation consumer가 읽는 exact record fields를 index 위치별 guard로 고정한다. */
+  #snapshotMutationGuards(guards: ProofGuard[], work: ProofWork): void {
+    const length = this.#snapshotListLengthGuard(guards, work, () => this.context.index.mutations);
+    for (let index = 0; index < length; index++) {
+      const read = () => this.context.index.mutations[index];
+      this.#snapshotScalarGuard(guards, work, () => read()?.site);
+      this.#snapshotScalarGuard(guards, work, () => read()?.operation);
+      this.#snapshotScalarGuard(guards, work, () => read()?.confidence);
+      this.#snapshotScalarGuard(guards, work, () => read()?.effect);
+      this.#snapshotScalarGuard(guards, work, () => read()?.target);
+      this.#snapshotScalarGuard(guards, work, () => read()?.key);
+      this.#snapshotScalarGuard(guards, work, () => read()?.staticKey);
+      this.#snapshotScalarGuard(guards, work, () => read()?.value);
+      this.#snapshotScalarGuard(guards, work, () => read()?.source);
+      this.#snapshotScalarGuard(guards, work, () => read()?.descriptor);
+      this.#snapshotScalarGuard(guards, work, () => read()?.prototype);
+      this.#snapshotListGuards(guards, work, () => read()?.sources ?? []);
+      this.#snapshotListGuards(guards, work, () => read()?.args ?? []);
+    }
+  }
+
+  /** literal-free proof도 소비하는 manifest identity/view/coverage header를 고정한다. */
+  #snapshotManifestHeaderGuards(guards: ProofGuard[], work: ProofWork): void {
+    const manifest = () => this.context.index.effectInventory!.manifest;
+    this.#snapshotScalarGuard(guards, work, () => manifest());
+    this.#snapshotScalarGuard(guards, work, () => manifest().version);
+    this.#snapshotScalarGuard(guards, work, () => manifest().view);
+    this.#snapshotScalarGuard(guards, work, () => manifest().emitPolicy);
+    this.#snapshotScalarGuard(guards, work, () => manifest().emitPolicy.preserveTypeOnlySpecifiers);
+    this.#snapshotScalarGuard(guards, work, () => manifest().coverageComplete);
+    this.#snapshotScalarGuard(guards, work, () => manifest().complete);
+    this.#snapshotScalarGuard(guards, work, () => manifest().buildCapped);
+  }
+
+  /** manifest view/revision/runtime-module/module-edge와 coverage maps를 exact current key lookup에 묶는다. */
+  #snapshotManifestGuards(guards: ProofGuard[], work: ProofWork, deep: boolean): void {
+    const manifest = () => this.context.index.effectInventory!.manifest;
+    this.#snapshotManifestHeaderGuards(guards, work);
+    this.#snapshotMapGuards(guards, work, () => manifest().files);
+    this.#snapshotMapGuards(guards, work, () => manifest().revisions);
+    this.#snapshotSetGuards(guards, work, () => manifest().runtimeModules);
+    this.#snapshotMapGuards(guards, work, () => manifest().visited);
+    this.#snapshotMapGuards(guards, work, () => manifest().retained);
+    this.#snapshotMapGuards(guards, work, () => manifest().statuses);
+    this.#snapshotMapListGuards(guards, work, () => manifest().moduleEdges);
+    work(); const edgeEntries = [...manifest().moduleEdges.entries()];
+    for (const [file, edges] of edgeEntries) {
+      work();
+      for (let index = 0; index < edges.length; index++) {
+        this.#snapshotScalarGuard(guards, work, () => manifest().moduleEdges.get(file)?.[index]?.site);
+        this.#snapshotScalarGuard(guards, work, () => manifest().moduleEdges.get(file)?.[index]?.specifier);
+        this.#snapshotScalarGuard(guards, work, () => manifest().moduleEdges.get(file)?.[index]?.target);
+      }
+    }
+    if (!deep) return;
+    this.#snapshotMapListGuards(guards, work, () => manifest().records);
+    work(); const recordEntries = [...manifest().records.entries()];
+    for (const [file, records] of recordEntries) {
+      work();
+      for (let index = 0; index < records.length; index++) {
+        this.#snapshotScalarGuard(guards, work, () => manifest().records.get(file)?.[index]?.site);
+        this.#snapshotScalarGuard(guards, work, () => manifest().records.get(file)?.[index]?.operation);
+      }
+    }
+    this.#snapshotMapGuards(guards, work, () => manifest().closures);
+    work(); const closures = [...manifest().closures.entries()];
+    for (const [file, closure] of closures) {
+      work(); this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.unresolved);
+      this.#snapshotListGuards(guards, work, () => manifest().closures.get(file)?.references ?? []);
+      for (let index = 0; index < closure.references.length; index++) {
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.references[index]?.site);
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.references[index]?.target);
+      }
+      this.#snapshotListGuards(guards, work, () => manifest().closures.get(file)?.aliases ?? []);
+      for (let index = 0; index < closure.aliases.length; index++) {
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.aliases[index]?.name);
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.aliases[index]?.target);
+      }
+      this.#snapshotListGuards(guards, work, () => manifest().closures.get(file)?.tokens ?? []);
+      for (let index = 0; index < closure.tokens.length; index++) {
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.tokens[index]?.text);
+        this.#snapshotScalarGuard(guards, work, () => manifest().closures.get(file)?.tokens[index]?.site);
+      }
+    }
+  }
+
+  /** full symbol-map/set key union의 declaration list와 canonical value identity를 다시 확인한다. */
+  #snapshotSymbolDeclarationGuards(guards: ProofGuard[], work: ProofWork): void {
+    const symbols = new Set<ts.Symbol>();
+    for (const map of [this.context.index.references, this.context.index.identifierWrites,
+      this.context.index.aliasNames] as const) {
+      work(); for (const symbol of map.keys()) { work(); symbols.add(symbol); }
+    }
+    for (const set of [this.context.index.exportedSymbols, this.context.index.openModules] as const) {
+      work(); for (const symbol of set) { work(); symbols.add(symbol); }
+    }
+    for (const symbol of symbols) {
+      work();
+      this.#snapshotScalarGuard(guards, work, () => symbol.flags);
+      this.#snapshotScalarGuard(guards, work, () => symbol.valueDeclaration);
+      this.#snapshotListGuards(guards, work, () => symbol.declarations ?? []);
+    }
+  }
+
+  /** snapshot이 실제 사용한 symbol/name/key와 global openness sets를 current index에 묶는다. */
+  #snapshotIndexGuards(snapshot: DescriptorConfinementSnapshot, guards: ProofGuard[], work: ProofWork): void {
+    const hasLiteralConsumers = snapshot.literals.length > 0;
+    this.#snapshotScalarGuard(guards, work, () => this.validContext());
+    this.#snapshotScalarGuard(guards, work, () => this.context.program);
+    this.#snapshotScalarGuard(guards, work, () => this.context.checker);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy.openProperties);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy.isProjectFile);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy.isOpenCallable);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy.isOverridden);
+    this.#snapshotScalarGuard(guards, work, () => this.context.policy.isDefaultLibraryFile);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index.proofProgram);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index.hasOpaqueMutation);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index.hasIncompleteMutations);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index.mutationComplete);
+    this.#snapshotScalarGuard(guards, work, () => this.context.index.hasOpaqueImport);
+    this.#snapshotListGuards(guards, work, () => this.context.index.files);
+    this.#snapshotSetGuards(guards, work, () => this.context.index.newThisClasses);
+    if (hasLiteralConsumers) {
+      this.#snapshotListGuards(guards, work, () => this.context.index.reflectiveTargets);
+      this.#snapshotSetGuards(guards, work, () => this.context.index.openModules);
+    }
+    this.#snapshotSetGuards(guards, work, () => this.context.index.exportedSymbols);
+    this.#snapshotReferenceGuards(guards, work);
+    this.#snapshotMapListGuards(guards, work, () => this.context.index.identifierWrites);
+    this.#snapshotMapListGuards(guards, work, () => this.context.index.aliasNames);
+    if (hasLiteralConsumers) this.#snapshotMapListGuards(guards, work, () => this.context.index.tokenOccurrences);
+    this.#snapshotMapListGuards(guards, work, () => this.context.index.subclasses);
+    if (hasLiteralConsumers) {
+      this.#snapshotMapListGuards(guards, work, () => this.context.index.memberReads);
+      this.#snapshotMapListGuards(guards, work, () => this.context.index.propertyWrites);
+      this.#snapshotSymbolDeclarationGuards(guards, work);
+      work(); const propertyEntries = [...this.context.index.propertyWrites.entries()];
+      for (const [key, writes] of propertyEntries) {
+        work();
+        for (let index = 0; index < writes.length; index++) {
+          this.#snapshotScalarGuard(guards, work, () => this.context.index.propertyWrites.get(key)?.[index]?.target);
+          this.#snapshotScalarGuard(guards, work, () => this.context.index.propertyWrites.get(key)?.[index]?.value);
+        }
+      }
+    }
+  }
+
+  /** current-entry replay용 모든 mutable index/inventory/manifest guard를 ordered array로 만든다. */
+  #captureSnapshotGuards(snapshot: DescriptorConfinementSnapshot, work: ProofWork): readonly ProofGuard[] {
+    const guards: ProofGuard[] = [];
+    this.#snapshotIndexGuards(snapshot, guards, work);
+    this.#snapshotMutationGuards(guards, work);
+    if (snapshot.literals.length > 0) this.#snapshotManifestGuards(guards, work, true);
+    else this.#snapshotManifestHeaderGuards(guards, work);
+    return Object.freeze(guards);
+  }
+
+  /** effect coverage가 끝난 순간의 current inventory identities를 final primitive snapshot에 묶는다. */
+  #completePrimitiveSnapshot(descriptor: DescriptorConfinementSnapshot,
+    primitiveRecipe: ProofRecipe<SingletonWitness>, work: ProofWork): PrimitiveConfinementSnapshot | undefined {
+    work();
+    if (!this.#primitiveRecipes.has(primitiveRecipe) || primitiveRecipe.identity !== descriptor.root
+      || descriptor.origin.index !== this.context.index || descriptor.origin.checker !== this.context.checker
+      || descriptor.origin.inventory !== this.context.index.effectInventory) return undefined;
+    const inventory = this.context.index.effectInventory;
+    if (inventory === undefined) return undefined;
+    const effectRecords: { readonly site: ts.Node; readonly operation: string }[] = [];
+    for (const record of inventory.records) {
+      work(); effectRecords.push(Object.freeze({ site: record.site, operation: record.operation }));
+    }
+    const guards = this.#captureSnapshotGuards(descriptor, work);
+    return Object.freeze({ ...descriptor, primitiveRecipe, effectRecords: Object.freeze(effectRecords), guards });
+  }
+
+  /** cached primitive snapshot을 current analyzer/index/effect identities에 다시 대조한다. */
+  #snapshotIsCurrent(snapshot: PrimitiveConfinementSnapshot, work: ProofWork): boolean {
+    for (const guard of snapshot.guards) work.require(guard, true);
+    return true;
+  }
+
+  /** module-local key와 analyzer-private snapshot으로만 nominal certificate를 구성한다. */
+  #issueConfinement(context: MutationSafetyContext, snapshot: PrimitiveConfinementSnapshot,
+    work: ProofWork): SterileConfinementCertificate {
+    return Reflect.construct(SterileConfinementCertificate as unknown as Function,
+      [confinementIssue, context, snapshot, work]) as SterileConfinementCertificate;
   }
 
   /** 선택한 flow 모드의 concrete-dispatch 권한을 소비하며 repeated allocation의 ordinary union을 보존한다. */
@@ -685,20 +1212,20 @@ export class ConstructorCarrierAnalyzer {
   }
   /** static AST node는 ValueFlow를 재귀 호출하지 않는다. */
   private resolve<T>(declaration: ts.ClassLikeDeclaration, kind: CarrierOperation): ProofOutcome<T> {
-    const query = this.query ?? new ProofQuery({}, this.context.caller);
+    const query = this.currentQuery();
     return this.resolveRecipe<T>(this.recipe(declaration, kind) as ProofRecipe<T>, query);
   }
   private resolveRecipe<T>(recipe: ProofRecipe<T>, query: ProofQuery): ProofOutcome<T> {
-    const previous = this.query;
-    this.query = query;
+    const previous = this.#query;
+    this.#query = query;
     try {
-      const result = this.dag.resolve(recipe, query) as ProofOutcome<T>;
+      const result = this.#dag.resolve(recipe, query) as ProofOutcome<T>;
       if (result.kind === 'cycle' || result.kind === 'exhausted') {
         this.context.index.proofDiagnostics?.add(`carrier-proof: ${result.kind}; carrier proof was not completed.`);
       }
       return result;
     }
-    finally { if (previous === undefined) this.query = undefined; }
+    finally { if (previous === undefined) this.#query = undefined; }
   }
 
   /** 클래스 carrier의 모든 구조·소비·mutation 조건을 검사한다. */
@@ -1225,7 +1752,9 @@ export class ConstructorCarrierAnalyzer {
       }
       if (ts.isExpressionStatement(statement)) {
         const expression = parenthesizedCall(statement.expression);
-        if (primitiveHelpers && expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))) continue;
+        if (primitiveHelpers && (expression !== undefined && ts.isIdentifier(skipWrappers(expression.expression))
+          || ts.isBinaryExpression(skipWrappers(statement.expression))
+          || ts.isPropertyAccessExpression(skipWrappers(statement.expression)) || ts.isElementAccessExpression(skipWrappers(statement.expression)))) continue;
         if (expression === undefined
           || !this.scanCall(expression, bagParameter, bagShape, fields, dateFieldName, serviceUses, primitiveHelpers)) return false;
         continue;
@@ -1234,6 +1763,7 @@ export class ConstructorCarrierAnalyzer {
         if (statement.expression === undefined) continue;
         const value = skipWrappers(statement.expression);
         if (primitiveHelpers && (primitiveLiteral(value) || ts.isIdentifier(value)
+          || ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)
           || ts.isCallExpression(value) && ts.isIdentifier(skipWrappers(value.expression)))) continue;
         const expression = parenthesizedCall(statement.expression);
         if (expression === undefined
