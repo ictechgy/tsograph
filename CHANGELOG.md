@@ -2,7 +2,12 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다.
 
-## [Unreleased]
+## [0.9.0] - 2026-10-08
+
+### Changed
+
+- 승인된 확장 carrier 규칙에서 증명하지 못하는 dependency의 property·conditional 반환 및 인라인 할당은 이전 bound 대신 candidate와 rejection limitation으로 남는다. 확장 증명 실패 뒤 legacy 증명을 재시도하지 않는다.
+- 번들 TypeScript SDK AST는 내용 해시·컴파일러 옵션·format을 확인하는 제한된 DocumentRegistry로 재사용한다. 프로젝트 AST·checker·manifest·인증서는 공유하지 않으며 캐시 lease 정리와 fresh host 요청을 보존한다.
 
 ### Added
 
