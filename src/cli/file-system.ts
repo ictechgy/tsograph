@@ -5,7 +5,10 @@
  * 가짜 구현으로 재현하고, 실제 실행은 Node 구현을 쓴다.
  */
 
-import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+
+/** capped read가 한 번에 할당하고 읽는 고정 byte 상한이다. */
+const READ_CHUNK_BYTES = 64 * 1024;
 
 /** 경로 하나의 종류·크기·수정 시각이다. */
 export interface PathStatus {
@@ -26,8 +29,8 @@ export interface CommandFileSystem {
   realPath(path: string): Promise<string>;
   /** 경로의 종류·크기·mtime을 돌려준다. */
   status(path: string): Promise<PathStatus>;
-  /** 파일 바이트를 읽는다. */
-  readBytes(path: string): Promise<Uint8Array>;
+  /** 파일 바이트를 읽는다. 상한이 있으면 oversized 판정을 위해 최대 상한+1 byte만 돌려준다. */
+  readBytes(path: string, maximumBytes?: number): Promise<Uint8Array>;
   /** 디렉터리 항목을 읽는다(순서 보장 없음). symlink를 따라가지 않는다. */
   listDirectory(path: string): Promise<readonly DirectoryEntry[]>;
 }
@@ -45,12 +48,49 @@ export function createNodeFileSystem(): CommandFileSystem {
       const kind = stats.isFile() ? 'file' : stats.isDirectory() ? 'directory' : 'other';
       return { kind, size: stats.size, modifiedAt: stats.mtime };
     },
-    readBytes: (path) => readFile(path),
+    readBytes: (path, maximumBytes) => maximumBytes === undefined
+      ? readFile(path)
+      : readBytesWithin(path, maximumBytes),
     listDirectory: async (path) => {
       const entries = await readdir(path, { withFileTypes: true });
       return entries.map((entry) => ({ name: entry.name, kind: directoryEntryKind(entry) }));
     },
   };
+}
+
+/**
+ * 파일을 고정 크기 chunk로 상한+1 byte까지만 읽는다.
+ *
+ * @param path 읽을 파일
+ * @param maximumBytes 호출자가 허용하는 최대 byte 수
+ * @returns EOF까지의 bytes 또는 oversized를 증명하는 최대 `maximumBytes + 1` bytes
+ */
+async function readBytesWithin(path: string, maximumBytes: number): Promise<Uint8Array> {
+  const budget = readBudget(maximumBytes);
+  const handle = await open(path, 'r');
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total < budget) {
+      const length = Math.min(READ_CHUNK_BYTES, budget - total);
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** cap+1도 safe integer인 bounded read 예산으로 검증한다. */
+function readBudget(maximumBytes: number): number {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('maximumBytes must be a nonnegative safe integer smaller than Number.MAX_SAFE_INTEGER');
+  }
+  return maximumBytes + 1;
 }
 
 /**

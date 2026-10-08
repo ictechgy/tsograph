@@ -48,10 +48,10 @@ export interface NodeProject {
  * @param root 프로젝트 realpath
  * @returns 준비한 프로젝트
  */
-export function loadNodeProject(root: string): NodeProject {
+export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
   const walk = collectProjectFiles(root, { includeFile: isSourceFileName, excludedDirectories: new Set() });
   const candidates = [...walk.files].filter(([, absolute]) => !isOversized(absolute));
-  const { program, checker } = createGraphProgram(root, candidates.map(([, absolute]) => absolute));
+  const { program, checker } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
   const files = new Map<string, ts.SourceFile>();
   const pathBySourceFile = new Map<ts.SourceFile, string>();
   for (const [path, absolute] of candidates) {

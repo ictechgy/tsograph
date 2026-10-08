@@ -399,3 +399,53 @@ test('읽을 수 없는 compiler config는 ordinary graph를 보존하되 invent
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('parse-error limitation은 안전한 상대 파일 10개와 생략 수만 싣는다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-parse-error-files-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    for (let index = 0; index < 12; index++) {
+      writeFileSync(join(project, `src/bad${String(index).padStart(2, '0')}.ts`), 'export const = ;\n');
+    }
+    writeFileSync(join(project, 'src/bad\nunsafe.ts'), 'export const = ;\n');
+    const target = await buildCallGraph(project, fileSystem);
+    const limitation = target.limitations.find((line) => line.startsWith('parse-errors:'));
+    assert.equal(limitation,
+      'parse-errors: 13 source file(s) have syntax errors; their calls may be incomplete; '
+      + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
+      + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 3');
+    assert.ok(!limitation?.includes('\nunsafe'));
+    assert.ok(!limitation?.includes(project));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('indirect unresolved 통계는 관찰한 callee AST shape만 세분화한다', async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-indirect-shapes-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'src/main.ts'), [
+      'function first() { return 1; }',
+      'function second() { return 2; }',
+      'let identifier = first;',
+      'identifier = second;',
+      'const holder = { fn: first };',
+      'holder.fn = second;',
+      'holder["fn"] = first;',
+      'export function run() { identifier(); holder.fn(); holder["fn"](); }',
+      '',
+    ].join('\n'));
+    const target = await buildCallGraph(project, fileSystem);
+    assert.equal(target.statistics.calls.unresolved.indirect, 3);
+    assert.deepEqual(target.statistics.calls.indirectSites, {
+      identifier: 1,
+      property: 1,
+      element: 1,
+    });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

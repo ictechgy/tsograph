@@ -11,7 +11,7 @@ import { buildCallGraph } from '../../graph/build-graph.ts';
 /** 문서 경계에서 관찰할 사실이다. */
 interface Fact {
   kind: string; channel: string | null; method?: string; methodDynamic?: true;
-  dynamic: boolean; pathAnchor: string; authority?: string; queryTailStripped?: true;
+  dynamic: boolean; pathAnchor: string; authority?: string; service?: string; queryTailStripped?: true;
   channelPrefix?: string; maskedSegments?: number; testSource?: true;
   symbol?: { usr: string }; location: { path: string; line: number; column: number };
 }
@@ -38,6 +38,11 @@ async function scan(source: string, extra: readonly string[] = [], more: Record<
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/** 명시 모델을 함께 읽는 합성 프로젝트에서 실제 routes 명령을 실행한다. */
+async function scanTyped(source: string, model: unknown, extra: readonly string[] = [], more: Record<string, string> = {}) {
+  return scan(source, ['--client-model', 'client-model.json', ...extra], { ...more, 'client-model.json': JSON.stringify(model) });
+}
+
 test('fetch/RN: method, whole segments, query stripping, UTF-8 location and graph identity', async () => {
   const doc = await scan('export function load(id: string) { const 한글 = 1; return fetch(`https://API.example.com/v1/items/${id}?q=${id}`, { method: "post" }); }');
   assert.deepEqual(doc.roles, ['client']);
@@ -52,6 +57,144 @@ test('fetch/RN: method, whole segments, query stripping, UTF-8 location and grap
   assert.equal(fact.queryTailStripped, true);
   assert.equal(fact.symbol?.usr, 'src/client.ts#load');
   assert.equal(fact.location.column, Buffer.byteLength('export function load(id: string) { const 한글 = 1; return ') + 1);
+});
+
+test('typed model binds an opaque transport through an exact declared type', async () => {
+  const doc = await scanTyped(`
+    type CatalogClient = { getItem(path: string): unknown };
+    declare const client: CatalogClient;
+    export function load(id: string) { return client.getItem('/items/' + id); }
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'CatalogClient' }, methods: [
+      { name: 'getItem', method: 'GET', pathArgument: 0, base: 'https://api.example.test/v1', service: 'catalog' },
+    ] }],
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel, fact.authority, fact.service]), [['GET', '/v1/items/{}', 'api.example.test', 'catalog']]);
+});
+
+test('client routes use an explicit package config with workspace-relative graph ids', async () => {
+  const doc = await scanTyped("import type { CatalogPort } from '@lib/api'; declare const port: CatalogPort; export function load() { port.read('/items'); }", {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'packages/lib/api.ts', name: 'CatalogPort' },
+      methods: [{ name: 'read', method: 'GET', pathArgument: 0, base: '/v2' }] }],
+  }, ['--tsconfig', 'configs/client.json'], {
+    'configs/client.json': '{"compilerOptions":{"baseUrl":"..","paths":{"@lib/*":["packages/lib/*"]}}}',
+    'packages/lib/api.ts': 'export interface CatalogPort { read(path: string): unknown; }',
+  });
+  assert.equal(doc.facts[0]?.channel, '/v2/items');
+  assert.equal(doc.facts[0]?.symbol?.usr, 'src/client.ts#load');
+});
+
+test('typed model follows imports and aliases but rejects same-name, untyped and ambiguous receivers', async () => {
+  const doc = await scanTyped(`
+    import type { CatalogClient as Imported } from './api';
+    type Alias = Imported;
+    declare const typed: Alias;
+    declare const untyped: any;
+    declare const unknownValue: unknown;
+    declare const ambiguous: Imported | Other;
+    function load() { typed.getItem('/typed'); untyped.getItem('/any'); unknownValue.getItem('/unknown'); ambiguous.getItem('/ambiguous'); }
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/api.ts', name: 'CatalogClient' }, methods: [
+      { name: 'getItem', method: 'GET', pathArgument: 0, base: '/v1' },
+    ] }],
+  }, [], { 'src/api.ts': 'export interface CatalogClient { getItem(path: string): unknown; } interface Other { getItem(path: string): unknown; }' });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel]), [['GET', '/v1/typed']]);
+});
+
+test('typed model class identity and service conflict remain explicit', async () => {
+  const doc = await scanTyped(`
+    class CatalogClient { getItem(path: string) { return transport(path); } }
+    declare const transport: (path: string) => unknown;
+    export function load() { new CatalogClient().getItem('/items'); }
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'class', path: 'src/client.ts', name: 'CatalogClient' }, methods: [
+      { name: 'getItem', method: 'POST', pathArgument: 0, base: '/v2', service: 'catalog' },
+    ] }],
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel, fact.service]), [['POST', '/v2/items', 'catalog']]);
+});
+
+test('typed model follows a named Pick alias from its TypeReference declaration', async () => {
+  const doc = await scanTyped(`
+    type ConcretePort = { read(path: string): unknown };
+    type GatewayPort = Pick<ConcretePort, 'read'>;
+    declare const gateway: GatewayPort;
+    gateway.read('/pick');
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'GatewayPort' }, methods: [
+      { name: 'read', method: 'GET', pathArgument: 0, base: '/typed' },
+    ] }],
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel]), [['GET', '/typed/pick']]);
+});
+
+test('typed models prefer the declared alias before its expanded identity independent of file order', async () => {
+  const source = 'type ConcretePort = { read(path: string): unknown }; type GatewayPort = ConcretePort; declare const port: GatewayPort; port.read("/items");';
+  const model = (name: string, base: string) => ({ receiver: { kind: 'type', path: 'src/client.ts', name },
+    methods: [{ name: 'read', method: 'GET', pathArgument: 0, base }] });
+  for (const models of [[model('ConcretePort', '/expanded'), model('GatewayPort', '/declared')], [model('GatewayPort', '/declared'), model('ConcretePort', '/expanded')]]) {
+    const doc = await scanTyped(source, { format: 'http-client-models', version: 1, models });
+    assert.equal(doc.facts[0]?.channel, '/declared/items');
+  }
+});
+
+test('typed model missing path arguments remain dynamic and absolute paths use the declared base-URL rule', async () => {
+  const doc = await scanTyped('type CatalogPort = { read(path?: string): unknown }; declare const port: CatalogPort; port.read(); port.read("https://other.example.test/items");', {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'CatalogPort' },
+      methods: [{ name: 'read', method: 'GET', pathArgument: 0, base: 'https://api.example.test/v2' }] }],
+  });
+  assert.equal(doc.facts[0]?.dynamic, true);
+  assert.equal(doc.facts[0]?.channel, null);
+  assert.equal(doc.facts[1]?.authority, 'other.example.test');
+  assert.equal(doc.facts[1]?.channel, '/items');
+});
+
+test('typed model follows an imported named Pick alias by its declaration symbol', async () => {
+  const doc = await scanTyped(`
+    import type { GatewayPort as ImportedGateway } from './api';
+    declare const gateway: ImportedGateway;
+    gateway.read('/imported-pick');
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/api.ts', name: 'GatewayPort' }, methods: [
+      { name: 'read', method: 'GET', pathArgument: 0, base: '/typed' },
+    ] }],
+  }, [], { 'src/api.ts': 'type ConcretePort = { read(path: string): unknown }; export type GatewayPort = Pick<ConcretePort, \'read\'>;' });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel]), [['GET', '/typed/imported-pick']]);
+});
+
+test('typed model preserves the declared local alias identity before expanded type identity', async () => {
+  const doc = await scanTyped(`
+    import type { CatalogClient as Imported } from './api';
+    type GatewayPort = Imported;
+    declare const gateway: GatewayPort;
+    gateway.getItem('/declared-alias');
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'GatewayPort' }, methods: [
+      { name: 'getItem', method: 'GET', pathArgument: 0, base: '/typed' },
+    ] }],
+  }, [], { 'src/api.ts': 'export interface CatalogClient { getItem(path: string): unknown; }' });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel]), [['GET', '/typed/declared-alias']]);
+});
+
+test('typed model rejects reassigned receivers, replaced methods and nested same-name declarations', async () => {
+  const doc = await scanTyped(`
+    type GatewayPort = { read(path: string): unknown };
+    declare const replacement: GatewayPort;
+    let gateway: GatewayPort = replacement;
+    gateway = replacement;
+    gateway.read = replacement.read;
+    gateway.read('/replaced');
+    function nested() {
+      type GatewayPort = { read(path: string): unknown };
+      declare const inner: GatewayPort;
+      inner.read('/nested');
+    }
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'GatewayPort' }, methods: [
+      { name: 'read', method: 'GET', pathArgument: 0, base: '/typed' },
+    ] }],
+  });
+  assert.deepEqual(doc.facts, []);
 });
 
 test('axios aliases, instances, config overrides, config-call and default methods', async () => {

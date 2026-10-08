@@ -108,13 +108,38 @@ function parsedUrl(text: string, base?: string): { path: string; anchor: PathAnc
 
 /** 공통 규칙으로 호출 URL을 만든다. 확정하지 못하면 null 채널과 안전한 접두사만 낸다. */
 export function composeUrl(parts: readonly UrlPart[], join: UrlJoin = 'fetch', base: string | null = '', allowAbsolute = true): ComposedUrl {
-  const assembled = assemble(parts.filter((part) => !('literal' in part) || part.literal !== ''));
+  const expanded = expandBuildPlaceholders(parts);
+  const meaningful = expanded.parts.filter((part) => !('literal' in part) || part.literal !== '');
+  // 미상 선행 값은 경로 전체의 보장이 아니다. 복원한 꼬리는 dynamic/base로만 제공한다.
+  if (meaningful[0] !== undefined && 'value' in meaningful[0] && meaningful[1] !== undefined
+      && 'literal' in meaningful[1] && /^\/(?!\/)/u.test(meaningful[1].literal)) {
+    const tail = composeUrl(meaningful.slice(1), 'fetch');
+    return { ...tail, dynamic: true, pathAnchor: 'base' };
+  }
+  const assembled = assemble(meaningful);
   const joined = joinUrl(assembled.text, join, base, allowAbsolute);
   const common = { pathAnchor: joined?.anchor ?? 'base', ...(joined?.authority === undefined ? {} : { authority: joined.authority }) };
   if (assembled.partial || joined === undefined || normalize(joined.path).length > 2048) {
     const prefix = joined === undefined ? undefined : mask(normalize(joined.path), joined.authority).channel;
     return { ...common, channel: null, dynamic: true, ...(prefix === undefined || prefix.length > 2048 ? {} : { channelPrefix: prefix }) };
   }
-  return { ...common, ...mask(normalize(joined.path), joined.authority), dynamic: false,
+  return { ...common, ...mask(normalize(joined.path), joined.authority), dynamic: expanded.dynamic,
     ...(assembled.query ? { queryTailStripped: true } : {}) };
+}
+
+/** 이중 중괄호 빌드 토큰은 실행 전 값이므로 URL 인코딩 전에 보간 자리로 남긴다. */
+function expandBuildPlaceholders(parts: readonly UrlPart[]): { parts: UrlPart[]; dynamic: boolean } {
+  let dynamic = false;
+  const result: UrlPart[] = [];
+  for (const part of parts) {
+    if (!('literal' in part)) { result.push(part); continue; }
+    let start = 0;
+    for (const match of part.literal.matchAll(/\{\{[A-Za-z_][\w.-]*\}\}/gu)) {
+      dynamic = true;
+      result.push({ literal: part.literal.slice(start, match.index) }, { value: true });
+      start = match.index + match[0].length;
+    }
+    result.push({ literal: part.literal.slice(start) });
+  }
+  return { parts: result, dynamic };
 }

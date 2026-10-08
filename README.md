@@ -18,6 +18,7 @@ own language; isthmus joins the documents.
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` facts | Implemented |
 | `tsograph routes --role server`: Next.js App Router route handlers and Pages Router API routes → `route-decl` facts | Implemented |
+| `tsograph navigation`: Configured screen URL mappings → exact project graph identities ([rules](docs/NAVIGATION.md), Korean) | Implemented |
 | `tsograph routes --role server`: Node backends — Hono 4, Express 4/5, Fastify 4/5, Koa with @koa/router 12–15, NestJS 10–12 → `route-decl` facts ([rules](docs/NODE-ROUTES.md), Korean) | Implemented |
 | `tsograph schema`: Prisma schema, Prisma Client, and raw SQL → persistence `relation-use` facts | Implemented |
 | `tsograph schema`: Drizzle, TypeORM, Sequelize 6, knex, raw SQL drivers (`pg`, `mysql2`, SQLite, libSQL, postgres.js, Neon, Vercel Postgres, PlanetScale), Cloudflare D1 | Implemented ([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
@@ -60,6 +61,11 @@ statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
+
+Opaque injected transports can use `--client-model client-model.json` to declare an exact source
+type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
+than a global name or method shape. Unknown leading URL values and `{{NAME}}` build placeholders keep
+recovered paths dynamic. See [typed client models](docs/CLIENT-MODELS.md).
 
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
@@ -741,15 +747,31 @@ let `isthmus trace` follow a route to its tables and their database dependents
 ## `tsograph graph`, `tsograph reach`, `tsograph impact`
 
 ```sh
-tsograph graph  --project <root> [--generated-at <timestamp>] [--format json]
-tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
-tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
+tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
+tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
 ```
 
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
 `Program` and `TypeChecker` over the root `tsconfig.json`, else `jsconfig.json`, else bundler-style
 defaults; `allowJs` is always on). The analyzed code is never executed and no diagnostics are
 computed.
+
+`--tsconfig` selects a JSON compiler config relative to `--project`, using its own directory for relative options;
+an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
+source boundary and workspace-relative ids for calls across packages. The selected project's compiler
+options apply to all owned sources; separate package configurations are not merged, and a limitation
+records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. A PnP-only project is reported
+explicitly; the CLI never executes `.pnp.cjs`.
+
+The CLI streams graph JSON without a whole-document string; `--format ndjson` emits a
+`tsograph-graph-ndjson` v1 header followed by one `node` or `edge` record per line. The graph and
+compiler state still reside in memory. Bridge-facts and traversal outputs retain their exchange limits;
+the in-memory command API also retains its bounded String result. Saved traversal accepts validated
+JSON snapshots up to 128 MiB, without reading current sources, configs or Git. It preserves captured
+project/revision/hash and exact mode limitations when available. Older snapshots keep their global
+limitations with an explicit mode-information gap. NDJSON is an export format and is not a saved
+traversal input. Recapture after code changes.
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`
@@ -775,7 +797,7 @@ computed.
   an empty `reached`. The limitation and stderr tell the two kinds apart: `#model:`/`#typedsql:`
   [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
   traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
-- Exit codes: `0` success, `2` unreadable project or output over 16 Mi characters (no document), `64`
+- Exit codes: `0` success, `2` input/output failure or a bounded exchange/API output exceeding 16 Mi characters, `64`
   usage error (empty stdout) or root-not-found (document written).
 
 ### Nodes and edges

@@ -12,7 +12,9 @@ import {
   usageFailure,
 } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
+import type { GraphOutputSink } from '../graph/graph-output.ts';
 import { graphUsage, impactUsage, reachUsage, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
+import { navigationUsage, runNavigationCommand } from './navigation-command.ts';
 import { openApiUsage, runOpenApiCommand } from './openapi-command.ts';
 import { routesUsage, runRoutesCommand } from './routes-command.ts';
 import { runSchemaCommand, schemaUsage } from './schema-command.ts';
@@ -25,6 +27,8 @@ export interface CliEnvironment {
   readonly fileSystem: CommandFileSystem;
   /** 문서 추출 시각(`generatedAt`)을 정하는 시계다. */
   readonly now: () => Date;
+  /** graph 명령만 사용하는 선택적 스트리밍 출력 경계다. */
+  readonly graphOutput?: GraphOutputSink;
 }
 
 /** 명령 이름 → 사용법이다. */
@@ -33,6 +37,7 @@ const commandUsages: ReadonlyMap<string, string> = new Map([
   ['routes', routesUsage],
   ['schema', schemaUsage],
   ['graph', graphUsage],
+  ['navigation', navigationUsage],
   ['reach', reachUsage],
   ['impact', impactUsage],
 ]);
@@ -45,6 +50,7 @@ Commands:
   routes       Extract server route-decl or web/React Native client route-call facts
   schema       Extract Prisma/SQL relation-use facts for the isthmus persistence join
   graph        Build the TypeScript/JavaScript call graph snapshot
+  navigation   Extract configured screen URL mappings with project graph identities
   reach        Symbols reachable from ids (isthmus language-traversal, dependencies)
   impact       Symbols that reach ids (isthmus language-traversal, dependents)
   help         Show command help
@@ -74,6 +80,7 @@ export async function runCli(
   if (command === 'routes') return runRoutesCommand(rest, environment);
   if (command === 'schema') return runSchemaCommand(rest, environment);
   if (command === 'graph') return runGraphCommand(rest, environment);
+  if (command === 'navigation') return runNavigationCommand(rest, environment);
   if (command === 'reach') return runReachCommand(rest, environment);
   if (command === 'impact') return runImpactCommand(rest, environment);
   return usageFailure(`tsograph: unknown command; run 'tsograph --help' for the list.\n${rootHelp}`);

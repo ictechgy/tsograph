@@ -46,3 +46,19 @@ test('unsupported or malformed protocol cannot become an unknown-base HTTP fact'
   assert.equal(composeUrl([{literal:'http:/missing-host'}], 'axios-base-url', 'https://api.example.com').dynamic, true);
   assert.equal(composeUrl([{literal:'ftp://other.example.com/items'}], 'axios-base-url', 'https://api.example.com').dynamic, true);
 });
+
+test('unknown leading URL values retain a dynamic tail template without inventing an authority', () => {
+  const actual = composeUrl([{ value: true }, { literal: '/v2/catalog/' }, { value: true }, { literal: '?sort=name' }]);
+  assert.deepEqual(actual, { channel: '/v2/catalog/{}', dynamic: true, pathAnchor: 'base', queryTailStripped: true });
+  assert.equal(composeUrl([{ value: true }, { literal: 'catalog' }]).channel, null);
+});
+
+test('build placeholders remain dynamic and never become encoded static URL facts', () => {
+  const origin = composeUrl([{ literal: '{{SITE_ORIGIN}}/v2/catalog' }]);
+  assert.deepEqual(origin, { channel: '/v2/catalog', dynamic: true, pathAnchor: 'base' });
+  const segment = composeUrl([{ literal: '/catalog/{{ITEM_KEY}}' }]);
+  assert.deepEqual(segment, { channel: '/catalog/{}', dynamic: true, pathAnchor: 'root' });
+  const partial = composeUrl([{ literal: '/catalog/prefix{{ITEM_KEY}}suffix' }]);
+  assert.equal(partial.dynamic, true);
+  assert.equal(partial.channel, null);
+});

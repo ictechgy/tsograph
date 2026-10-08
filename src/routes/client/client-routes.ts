@@ -9,6 +9,7 @@ import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbo
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
 import { ClientValues, configValue, type ClientConfig } from './client-values.ts';
 import { ClientWrappers } from './client-wrappers.ts';
+import { typedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
 
 /** 호출 사실의 위치와 impact id다. */
@@ -33,7 +34,11 @@ export interface ClientRouteDocument {
 /** 패키지 provenance로 확인한 클라이언트와 누적 설정이다. */
 interface Client { readonly library: 'axios' | 'ky'; readonly configs: readonly ClientConfig[]; readonly unsafe: boolean }
 /** 요청 호출의 인자 바인딩이다. */
-interface Sink { readonly library: 'fetch' | 'axios' | 'ky'; readonly configs: readonly ClientConfig[]; readonly path?: ts.Expression | undefined; readonly forcedMethod?: string; readonly unsafe: boolean }
+interface Sink {
+  readonly library: 'fetch' | 'axios' | 'ky' | 'typed'; readonly configs: readonly ClientConfig[];
+  readonly path?: ts.Expression | undefined; readonly forcedMethod?: string; readonly unsafe: boolean;
+  readonly typedBase?: string; readonly typedService?: string;
+}
 /** 계약 동사 집합이다. */
 const methods = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']);
 const MAX_ESCAPE_RECHECKS = 20_000;
@@ -77,7 +82,7 @@ function isGlobal(expression: ts.Expression, name: string, values: ClientValues)
 }
 
 /** 라우트 요청만 선택한다. create·extend·일반 객체의 get은 요청이 아니다. */
-function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientWrappers | undefined, depth = 0,
+function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientWrappers | undefined, models: TypedClientModels | undefined, depth = 0,
   substitutions: ReadonlyMap<ts.Symbol, ts.Expression> = new Map()): Sink | undefined {
   if (depth > 8) { wrappers?.markIncomplete(); return undefined; }
   const callee = unwrap(call.expression);
@@ -100,6 +105,15 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
     const url = objectCall ? configValue(configs, 'url') : call.arguments[0] === undefined ? undefined : substitute(call.arguments[0]);
     return { library: client.library, configs, ...(url == null ? {} : { path: url }), ...(fixed === undefined ? {} : { forcedMethod: fixed }), unsafe: client.unsafe };
   }
+  const typed = typedClientMethodOf(call, models, values.project.checker, values.project.pathOf);
+  if (typed !== undefined) {
+    const pathArgument = call.arguments[typed.method.pathArgument];
+    const root = values.rootSymbol(typed.receiver);
+    if (values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root)) return undefined;
+    return { library: 'typed', configs: [], ...(pathArgument === undefined ? {} : { path: substitute(pathArgument) }),
+      forcedMethod: typed.method.method, typedBase: typed.method.base, ...(typed.method.service === undefined ? {} : { typedService: typed.method.service }),
+      unsafe: false };
+  }
   if (call.questionDotToken !== undefined) return undefined;
   const forwarded = wrappers?.target(callee);
   if (forwarded === undefined || forwarded.parameters.length !== call.arguments.length) return undefined;
@@ -110,18 +124,18 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
     if (symbol === undefined || argument === undefined || ts.isSpreadElement(argument)) return undefined;
     bindings.set(symbol, substitute(argument));
   }
-  return sinkOf(forwarded.call, values, wrappers, depth + 1, bindings);
+  return sinkOf(forwarded.call, values, wrappers, models, depth + 1, bindings);
 }
 
 /** proven wrapper body의 내부 호출은 outer invocation fact와 중복하지 않도록 표시한다. */
-function forwardedBodies(values: ClientValues, wrappers: ClientWrappers): ReadonlySet<ts.CallExpression> {
+function forwardedBodies(values: ClientValues, wrappers: ClientWrappers, models: TypedClientModels | undefined): ReadonlySet<ts.CallExpression> {
   const bodies = new Set<ts.CallExpression>();
   for (const target of wrappers.targets()) {
     const coverage = wrappers.coverage(target);
     if (!coverage.closed || coverage.calls.length === 0) continue;
     let represented = true;
     for (const call of coverage.calls) {
-      if (wrappers.target(call.expression) !== target || sinkOf(call, values, wrappers) === undefined) {
+      if (wrappers.target(call.expression) !== target || sinkOf(call, values, wrappers, models) === undefined) {
         represented = false; break;
       }
     }
@@ -144,6 +158,7 @@ function kyMajor(root: string): number | undefined {
 
 /** 요청 설정에서 결합 방식과 base를 정한다. 미상 값을 base 없음으로 바꾸지 않는다. */
 function composition(sink: Sink, values: ClientValues, major: number | undefined): { join: UrlJoin; base: string | null; unsafe: boolean; allowAbsolute: boolean } {
+  if (sink.library === 'typed') return { join: 'axios-base-url', base: sink.typedBase ?? '', unsafe: sink.unsafe, allowAbsolute: true };
   let kind: UrlJoin = sink.library === 'axios' ? 'axios-base-url' : 'fetch';
   let field = 'baseURL';
   let unsafe = sink.unsafe || configValue(sink.configs, 'hooks') !== undefined
@@ -168,8 +183,9 @@ function composition(sink: Sink, values: ClientValues, major: number | undefined
 }
 
 /** 호출 측 스캔과 사실 조립을 실행한다. */
-export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date): ClientRouteDocument {
-  const project = loadNodeProject(root);
+export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date,
+  typedModels?: TypedClientModels, tsconfig?: string): ClientRouteDocument {
+  const project = loadNodeProject(root, tsconfig);
   const values = new ClientValues(project, includeTests);
   const preliminaryWrappers = new ClientWrappers(values, includeTests);
   const deferredWrapperCalls: ts.CallExpression[] = [];
@@ -184,9 +200,9 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   for (const [path, source] of project.files) {
     if (!includeTests && isNodeTestPath(path)) continue;
     const inspect = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && sinkOf(node, values, undefined) === undefined
+      if (ts.isCallExpression(node) && sinkOf(node, values, undefined, typedModels) === undefined
         && clientOf(node, values) === undefined) {
-        if (sinkOf(node, values, preliminaryWrappers) === undefined) escapeCall(node);
+        if (sinkOf(node, values, preliminaryWrappers, typedModels) === undefined) escapeCall(node);
         else deferredWrapperCalls.push(node);
       } else if (ts.isNewExpression(node)) {
         for (const argument of node.arguments ?? []) values.markMutated(argument, true);
@@ -213,7 +229,7 @@ export function extractClientRoutes(root: string, service: string | undefined, i
       if (++escapeRechecks > MAX_ESCAPE_RECHECKS) {
         values.mutationAnalysisIncomplete = true; break;
       }
-      if (sinkOf(call, values, rechecked) === undefined) escapeCall(call);
+      if (sinkOf(call, values, rechecked, typedModels) === undefined) escapeCall(call);
       else stillProven.push(call);
     }
     if (values.mutationAnalysisIncomplete || values.mutated.size === before) break;
@@ -221,10 +237,12 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   }
   const wrappers = new ClientWrappers(values, includeTests);
   const activeWrappers = values.mutationAnalysisIncomplete ? undefined : wrappers;
-  const wrapperBodies = activeWrappers === undefined ? new Set<ts.CallExpression>() : forwardedBodies(values, activeWrappers);
+  const wrapperBodies = activeWrappers === undefined ? new Set<ts.CallExpression>() : forwardedBodies(values, activeWrappers, typedModels);
   const major = kyMajor(root);
   const facts: ClientRouteFact[] = [];
-  const limitations = new Set<string>(['route-call-coverage: only global fetch and symbol-proven axios/ky calls are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests']);
+  const limitations = new Set<string>([typedModels === undefined
+    ? 'route-call-coverage: only global fetch and symbol-proven axios/ky calls are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests'
+    : 'route-call-coverage: global fetch, symbol-proven axios/ky calls and explicit typed client model methods are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests']);
   for (const [path, source] of project.files) {
     const test = isNodeTestPath(path);
     if (test && !includeTests) continue;
@@ -232,7 +250,7 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         if (wrapperBodies.has(node)) return;
-        const sink = sinkOf(node, values, activeWrappers);
+        const sink = sinkOf(node, values, activeWrappers, typedModels);
         if (sink !== undefined) {
           if (facts.length >= MAX_ROUTE_FACTS) throw new RouteFactLimitError();
           const methodExpression = configValue(sink.configs, 'method');
@@ -244,10 +262,11 @@ export function extractClientRoutes(root: string, service: string | undefined, i
           if (url.dynamic) limitations.add('dynamic-route-calls: request path or configuration cannot be proven without execution');
           if (url.pathAnchor === 'base') limitations.add('unresolved-route-prefix: request base or relative URL prefix is not statically known');
           if (method === undefined || !methods.has(method)) limitations.add('route-call-coverage: some request methods cannot be proven');
+          const factService = sink.typedService ?? service;
           const id = scopeIdOf(node, path);
           facts.push({ kind: 'route-call', ...url,
             ...(method !== undefined && methods.has(method) ? { method: method as HttpMethod } : { methodDynamic: true }),
-            ...(service === undefined ? {} : { service }), ...(test ? { testSource: true } : {}),
+            ...(factService === undefined ? {} : { service: factService }), ...(test ? { testSource: true } : {}),
             location: project.locationOf(node), symbol: { qualifiedName: id, usr: id } });
         }
       }

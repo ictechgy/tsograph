@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { CallGraph } from '../graph/graph-model.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
@@ -45,6 +47,52 @@ const tinyGraph: CallGraph = {
   ]])) as unknown as CallGraph['limitationsByMode'],
   statistics: { files: 1, calls: { resolved: 2, external: 0, missingDependencies: 0, unresolved: { parameter: 1, interface: 0, untyped: 0, computed: 0, indirect: 0, 'unresolved-import': 0 }, dispatch: { bound: 0, boundPartial: 0, candidate: 0, candidatePartial: 0, overBudget: 0 } } },
 };
+
+test('graph streams JSON or NDJSON with backpressure and reports sink failures without leaking input', async () => {
+  for (const format of ['json', 'ndjson']) {
+    const chunks: string[] = [];
+    const result = await runGraphCommand(['--project', '.', '--format', format], environment({
+      buildGraph: async () => tinyGraph,
+      graphOutput: async (chunk) => { await Promise.resolve(); chunks.push(chunk); },
+    }));
+    assert.equal(result.exitCode, 0, result.standardError);
+    assert.equal(result.standardOutput, '');
+    const output = chunks.join('');
+    if (format === 'json') assert.equal(JSON.parse(output).nodes.length, 3);
+    else assert.equal(output.trim().split('\n').map((line) => JSON.parse(line)).filter((row) => row.record === 'node').length, 3);
+  }
+  const failed = await runGraphCommand(['--project', '.'], environment({ buildGraph: async () => tinyGraph,
+    graphOutput: async () => { throw new Error('/secret/output/path'); } }));
+  assert.equal(failed.exitCode, 2);
+  assert.match(failed.standardError, /graph output/);
+  assert.ok(!failed.standardError.includes('/secret'));
+});
+
+test('explicit config and workspace are passed only to live graph inputs', async () => {
+  let received: unknown;
+  const result = await runGraphCommand(['--project', '.', '--tsconfig', 'config/check.json', '--workspace', '.'], environment({
+    buildGraph: async (_project, _fs, options) => { received = options; return tinyGraph; },
+  }));
+  assert.equal(result.exitCode, 0, result.standardError);
+  assert.deepEqual(received, { tsconfig: 'config/check.json', workspace: '.' });
+  const failed = await runReachCommand(['--graph-file', 'file.json', '--tsconfig', 'config.json', 'a.ts#a'], environment());
+  assert.equal(failed.exitCode, 64);
+});
+
+test('explicit input failures keep actionable reasons and internal builder failures remain internal', async () => {
+  const invalid = await runGraphCommand(['--project', fixture, '--tsconfig', 'missing.json'], environment());
+  assert.equal(invalid.exitCode, 2);
+  assert.match(invalid.standardError, /explicit compiler config and its extends must be readable JSON files within 1 MiB/);
+  await assert.rejects(runGraphCommand(['--project', '.'], environment({ buildGraph: async () => { throw new TypeError('internal'); } })), TypeError);
+  const fake = { ...createNodeFileSystem(), realPath: async (path: string) => path === 'workspace' ? '/work/unsafe\n' : '/work/project',
+    status: async () => ({ kind: 'directory' as const, size: 0, modifiedAt: fixedNow }) };
+  let builds = 0;
+  const unsafe = await runGraphCommand(['--project', 'project', '--workspace', 'workspace'], environment({ fileSystem: fake,
+    buildGraph: async () => { builds++; return tinyGraph; } }));
+  assert.equal(unsafe.exitCode, 2);
+  assert.match(unsafe.standardError, /workspace path contains/);
+  assert.equal(builds, 0);
+});
 
 test('--generated-at은 시각을 고정하고 잘못된 값은 64다', async () => {
   const env = environment({ now: () => new Date('2030-01-01T00:00:00.000Z'), buildGraph: async () => tinyGraph });
@@ -314,4 +362,126 @@ test('근거 등급을 근사한 문서는 evidence-approximated limitation을 �
     result: { reached: [], truncationReasons: [], rootsTruncated: false, evidenceApproximated: true },
   });
   assert.ok(document.limitations.some((line) => line.startsWith('evidence-approximated: ')));
+});
+
+test('저장한 실제 그래프는 소스를 지운 뒤에도 재빌드 없이 reach와 impact를 순회한다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-saved-graph-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+    writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"target":"ES2022"},"include":["src"]}');
+    writeFileSync(join(root, 'src/index.ts'), 'export function start() { return finish(); }\nexport function finish() { return 1; }\n');
+    const snapshotResult = await runGraphCommand(['--project', root], environment());
+    assert.equal(snapshotResult.exitCode, 0, snapshotResult.standardError);
+    const graphFile = join(root, 'graph.json');
+    writeFileSync(graphFile, snapshotResult.standardOutput);
+    rmSync(join(root, 'src'), { recursive: true });
+
+    let builds = 0;
+    const savedEnvironment = environment({ buildGraph: async () => { builds++; throw new Error('must not build'); } });
+    const reach = await runReachCommand(['--graph-file', graphFile, 'src/index.ts#start'], savedEnvironment);
+    assert.equal(reach.exitCode, 0, reach.standardError);
+    const reached = JSON.parse(reach.standardOutput);
+    assert.deepEqual(reached.reached.map((row: { symbol: { usr: string } }) => row.symbol.usr), ['src/index.ts#finish']);
+    assert.equal(reached.project, root);
+    assert.equal('revision' in reached, false);
+    assert.equal(reached.graphRevision, JSON.parse(snapshotResult.standardOutput).graphRevision);
+    assert.ok(!reached.limitations.some((line: string) => line.startsWith('saved-graph-mode-limitations:')));
+
+    const legacy = JSON.parse(snapshotResult.standardOutput);
+    delete legacy.limitationsByMode;
+    writeFileSync(graphFile, JSON.stringify(legacy));
+    const legacyReach = await runReachCommand(['--graph-file', graphFile, 'src/index.ts#start'], savedEnvironment);
+    assert.ok(JSON.parse(legacyReach.standardOutput).limitations.some((line: string) => line.startsWith('saved-graph-mode-limitations:')));
+
+    const impact = await runImpactCommand(['--graph-file', graphFile, 'src/index.ts#finish'], savedEnvironment);
+    assert.equal(impact.exitCode, 0, impact.standardError);
+    assert.deepEqual(JSON.parse(impact.standardOutput).reached
+      .map((row: { symbol: { usr: string } }) => row.symbol.usr), ['src/index.ts#start']);
+    assert.equal(builds, 0);
+
+    const enhanced = JSON.parse(snapshotResult.standardOutput);
+    enhanced.revision = 'a'.repeat(40);
+    enhanced.limitations = ['snapshot-wide: retained'];
+    enhanced.limitationsByMode = {
+      direct: ['snapshot-wide: retained', 'direct-only: retained'],
+      bound: ['snapshot-wide: retained', 'bound-only: retained'],
+      candidates: ['snapshot-wide: retained', 'candidate-only: retained'],
+    };
+    writeFileSync(graphFile, JSON.stringify(enhanced));
+    const candidate = await runReachCommand(
+      ['--graph-file', graphFile, '--dispatch', 'candidates', 'src/index.ts#start'], savedEnvironment,
+    );
+    assert.equal(candidate.exitCode, 0, candidate.standardError);
+    const candidateDocument = JSON.parse(candidate.standardOutput);
+    assert.equal(candidateDocument.revision, 'a'.repeat(40));
+    assert.deepEqual(candidateDocument.limitations,
+      ['snapshot-wide: retained', 'candidate-only: retained',
+        `saved-graph-input: built by tsograph ${enhanced.tool.version} at ${enhanced.generatedAt}; sources were not re-read; graphRevision verifies topology, not limitation, location or statistics integrity`]);
+
+    const missing = await runReachCommand(['--graph-file', graphFile, 'src/index.ts#missing'], savedEnvironment);
+    assert.equal(missing.exitCode, 64);
+    assert.deepEqual(JSON.parse(missing.standardOutput).roots, [{ id: 'src/index.ts#missing' }]);
+
+    const exclusive = await runReachCommand(
+      ['--project', root, '--graph-file', graphFile, 'src/index.ts#start'], savedEnvironment,
+    );
+    assert.equal(exclusive.exitCode, 64);
+    assert.equal(exclusive.standardOutput, '');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('저장 그래프의 endpoint·revision·duplicate·UTF-8·크기·읽기 실패는 문서 없이 2다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-invalid-saved-graph-')));
+  try {
+    const result = await runGraphCommand(['--project', root], environment({ buildGraph: async () => tinyGraph }));
+    assert.equal(result.exitCode, 0, result.standardError);
+    const base = JSON.parse(result.standardOutput);
+    const cases: [string, (document: any) => void, RegExp][] = [
+      ['endpoint.json', (document) => { document.edges[0].to = 'a.ts#missing'; }, /endpoint/u],
+      ['revision.json', (document) => { document.graphRevision = `sha256:${'0'.repeat(64)}`; }, /graphRevision/u],
+      ['duplicate.json', (document) => { document.nodes.push(structuredClone(document.nodes[0])); }, /duplicate/u],
+      ['schema.json', (document) => { document.extra = true; }, /tsograph-graph version 1/u],
+    ];
+    for (const [name, mutate, diagnostic] of cases) {
+      const document = structuredClone(base);
+      mutate(document);
+      const path = join(root, name);
+      writeFileSync(path, JSON.stringify(document));
+      const loaded = await runReachCommand(['--graph-file', path, 'a.ts#a'], environment());
+      assert.equal(loaded.exitCode, 2, name);
+      assert.equal(loaded.standardOutput, '', name);
+      assert.match(loaded.standardError, diagnostic, name);
+      assert.doesNotMatch(loaded.standardError, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+    }
+
+    const invalidUtf8 = join(root, 'invalid-utf8.json');
+    writeFileSync(invalidUtf8, new Uint8Array([0xff]));
+    const utf8 = await runReachCommand(['--graph-file', invalidUtf8, 'a.ts#a'], environment());
+    assert.equal(utf8.exitCode, 2);
+    assert.equal(utf8.standardOutput, '');
+    assert.match(utf8.standardError, /UTF-8/u);
+
+    const unreadable = await runReachCommand(['--graph-file', join(root, 'missing.json'), 'a.ts#a'], environment());
+    assert.equal(unreadable.exitCode, 2);
+    assert.equal(unreadable.standardOutput, '');
+    assert.match(unreadable.standardError, /readable saved graph file/u);
+
+    let read = false;
+    const bounded = environment({ fileSystem: {
+      ...createNodeFileSystem(),
+      realPath: async () => '/virtual/graph.json',
+      status: async () => ({ kind: 'file' as const, size: 128 * 1024 * 1024 + 1, modifiedAt: fixedNow }),
+      readBytes: async () => { read = true; return new Uint8Array(); },
+    } });
+    const oversized = await runReachCommand(['--graph-file', 'graph.json', 'a.ts#a'], bounded);
+    assert.equal(oversized.exitCode, 2);
+    assert.equal(oversized.standardOutput, '');
+    assert.match(oversized.standardError, /134217728 bytes/u);
+    assert.equal(read, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
