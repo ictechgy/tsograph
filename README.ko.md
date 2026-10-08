@@ -17,6 +17,7 @@ Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScri
 |---|---|
 | `tsograph openapi`: OpenAPI 2.0/3.0/3.1 → `route-contract` 사실 | 구현됨 |
 | `tsograph routes --role server`: Next.js App Router route handler·Pages Router API route → `route-decl` 사실 | 구현됨 |
+| `tsograph navigation`: 설정한 화면 URL 매핑 → 정확한 프로젝트 그래프 identity ([규칙](docs/NAVIGATION.md)) | 구현됨 |
 | `tsograph routes --role server`: Node 백엔드 — Hono 4, Express 4·5, Fastify 4·5, Koa + @koa/router 12–15, NestJS 10–12 → `route-decl` 사실([규칙](docs/NODE-ROUTES.md)) | 구현됨 |
 | `tsograph schema`: Prisma 스키마·Prisma Client·원시 SQL → persistence `relation-use` 사실 | 구현됨 |
 | `tsograph schema`: Drizzle·TypeORM·Sequelize 6·knex·원시 SQL 드라이버(`pg`·`mysql2`·SQLite·libSQL·postgres.js·Neon·Vercel Postgres·PlanetScale)·Cloudflare D1 | 구현됨([docs/PERSISTENCE.md](docs/PERSISTENCE.md)) |
@@ -55,6 +56,11 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
+
+주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
+HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로
+매칭한다. 미상 URL 선행 값과 `{{NAME}}` 빌드 토큰에서 복원한 경로는 dynamic으로 유지한다.
+[명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
 
 JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
@@ -595,14 +601,28 @@ isthmus check --pairs js-facts.json sql-facts.json
 ## `tsograph graph`, `tsograph reach`, `tsograph impact`
 
 ```sh
-tsograph graph  --project <root> [--generated-at <timestamp>] [--format json]
-tsograph reach  --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
-tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--generated-at <timestamp>] [--format json] <id>...
+tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
+tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
 ```
 
 TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
 없으면 `jsconfig.json`, 둘 다 없으면 번들러식 기본값 위의 `Program`·`TypeChecker`, `allowJs`는 항상 켠다).
 분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다.
+
+`--tsconfig`는 `--project` 기준 JSON compiler 설정을 명시하고 상대 옵션은 그 파일의 디렉터리에서 해석한다.
+명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는
+소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
+적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
+symlink는 제외한다. PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
+
+CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
+`tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler
+상태는 여전히 메모리에 존재한다. bridge-facts·순회는 교환 상한을, in-memory 명령 API는 제한된
+String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증된 JSON 스냅샷을 읽으며 현재
+소스·설정·Git을 조회하지 않는다. 캡처된 project·revision·hash와 가능한 mode별 한계를 보존한다.
+옛 스냅샷은 전역 한계와 mode 정보 부재를 명시한다. NDJSON은 내보내기 형식이며 저장 순회
+입력은 아니다. 코드 변경 뒤에는 다시 캡처한다.
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,

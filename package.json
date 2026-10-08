@@ -38,7 +38,9 @@
     "dist",
     "LICENSE",
     "README.md",
-    "README.ko.md"
+    "README.ko.md",
+    "docs/CLIENT-MODELS.md",
+    "docs/NAVIGATION.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

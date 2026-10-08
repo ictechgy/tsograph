@@ -2,6 +2,21 @@
 
 이 프로젝트의 주요 변경 사항을 기록한다.
 
+## [Unreleased]
+
+### Added
+
+- source-owned 등록 함수를 설정해 화면 URL과 정확한 그래프 심볼을 `navigation-facts`로 내보낸다. 동적·변경·모호한 등록은 추측하지 않고 한계로 남긴다.
+
+- 선언 identity로 확인하는 명시적 typed HTTP client 모델을 제공한다. 주입형 transport의 동사·경로 인자·base·service를 JSON으로 지정하고 불명확한 수신자는 추측하지 않는다.
+- graph CLI의 JSON 스트리밍·NDJSON, 명시 compiler config·workspace 경계 및 저장 그래프의 소스 없는 reach/impact를 제공한다. 캡처 출처와 모드별 한계를 보존한다.
+- 구문 오류의 제한된 상대 파일 목록, 간접 호출의 관찰된 식 형태별 통계, PnP 전용 환경 한계를 제공한다.
+
+### Fixed
+
+- 빌드 URL 토큰과 미상 선행 URL 값에서 복원한 경로는 dynamic으로 남긴다. 모델 선택은 파일 순서 대신 선언된 별칭 identity를 우선한다.
+- 저장 그래프·모델 읽기에 byte 상한을 적용하고, JSON 숫자는 원문 suffix를 복사하지 않고 읽는다.
+
 ## [0.9.0] - 2026-10-08
 
 ### Changed

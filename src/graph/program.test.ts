@@ -7,7 +7,8 @@ import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
-import { createGraphProgram } from './program.ts';
+import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText } from './bounded-config-reader.ts';
+import { GraphProjectInputError, createGraphProgram } from './program.ts';
 import { SdkSourceFileCache, sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /**
@@ -16,7 +17,10 @@ import { SdkSourceFileCache, sdkSourceFileCache } from './sdk-source-file-cache.
  * @param files 상대 경로 → 내용
  * @param body 콜백
  */
-async function withProject(files: Record<string, string>, body: (root: string) => Promise<void> | void): Promise<void> {
+async function withProject(
+  files: Record<string, string | Uint8Array>,
+  body: (root: string) => Promise<void> | void,
+): Promise<void> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-')));
   try {
     for (const [path, content] of Object.entries(files)) {
@@ -49,6 +53,131 @@ test('tsconfig·jsconfig·설정 없음·깨진 설정을 구분한다', async (
   });
   await withProject({ 'tsconfig.json': '{ "compilerOptions": { "module": "nonsense" } }' }, (root) => {
     assert.deepEqual(createGraphProgram(root, []).status, { configName: 'tsconfig.json', configUnreadable: true });
+  });
+});
+
+test('explicit compiler config resolves aliases from its own directory for a selected source root', async () => {
+  await withProject({
+    'config/build.json': JSON.stringify({ compilerOptions: { baseUrl: '..', paths: { '@lib/*': ['lib/*'] } } }),
+    'lib/api.ts': 'export function request() {}',
+    'app/main.ts': "import { request } from '@lib/api'; export function load() { request(); }",
+  }, (root) => {
+    const result = createGraphProgram(join(root, 'app'), [join(root, 'app/main.ts')], ts.createProgram, join(root, 'config/build.json'));
+    assert.equal(result.status.configUnreadable, false);
+    assert.ok(result.program.getSourceFile(join(root, 'lib/api.ts')));
+    assert.equal(result.program.getCompilerOptions().baseUrl, root);
+  });
+});
+
+test('explicit missing config fails instead of silently selecting different compiler options', async () => {
+  await withProject({ 'a.ts': '' }, (root) => {
+    assert.throws(
+      () => createGraphProgram(root, [], ts.createProgram, join(root, 'missing.json')),
+      (error) => error instanceof GraphProjectInputError
+        && error.code === 'config-file'
+        && !error.message.includes(root),
+    );
+  });
+});
+
+test('bounded config reader accepts the exact byte cap and rejects one byte over it', async () => {
+  await withProject({
+    'exact.json': Buffer.from('12345678'),
+    'over.json': Buffer.from('123456789'),
+  }, (root) => {
+    assert.deepEqual(readBoundedConfigText(join(root, 'exact.json'), 8), { ok: true, text: '12345678' });
+    assert.deepEqual(readBoundedConfigText(join(root, 'over.json'), 8), { ok: false, reason: 'too-large' });
+  });
+});
+
+test('explicit config enforces the final byte count at exact cap and cap plus one', async () => {
+  const prefix = Buffer.from('{ "compilerOptions": { "strict": true } }');
+  const exact = Buffer.concat([prefix, Buffer.alloc(MAX_GRAPH_CONFIG_BYTES - prefix.byteLength, 0x20)]);
+  const over = Buffer.concat([exact, Buffer.from(' ')]);
+  await withProject({ 'exact.json': exact, 'over.json': over, 'a.ts': '' }, (root) => {
+    const accepted = createGraphProgram(root, [], ts.createProgram, join(root, 'exact.json'));
+    assert.equal(accepted.program.getCompilerOptions().strict, true);
+    assert.throws(
+      () => createGraphProgram(root, [], ts.createProgram, join(root, 'over.json')),
+      (error) => error instanceof GraphProjectInputError && error.code === 'config-file',
+    );
+  });
+});
+
+test('explicit config bounds missing and oversized extends while automatic config keeps fallback', async () => {
+  const oversized = Buffer.alloc(MAX_GRAPH_CONFIG_BYTES + 1, 0x20);
+  await withProject({
+    'tsconfig.json': JSON.stringify({ extends: './oversized.json' }),
+    'oversized.json': oversized,
+  }, (root) => {
+    assert.throws(
+      () => createGraphProgram(root, [], ts.createProgram, join(root, 'tsconfig.json')),
+      (error) => error instanceof GraphProjectInputError
+        && error.code === 'config-file'
+        && !error.message.includes(root),
+    );
+    assert.deepEqual(createGraphProgram(root, []).status, {
+      configName: 'tsconfig.json',
+      configUnreadable: true,
+    });
+  });
+  await withProject({
+    'tsconfig.json': JSON.stringify({ extends: './missing.json' }),
+  }, (root) => {
+    assert.throws(
+      () => createGraphProgram(root, [], ts.createProgram, join(root, 'tsconfig.json')),
+      (error) => error instanceof GraphProjectInputError && error.code === 'config-file',
+    );
+  });
+});
+
+test('bounded config reader preserves TypeScript BOM encodings', async () => {
+  const json = '{ "compilerOptions": { "strict": true } }';
+  const utf16le = Buffer.from(json, 'utf16le');
+  const utf16be = Buffer.from(utf16le);
+  for (let index = 0; index < utf16be.length; index += 2) {
+    [utf16be[index], utf16be[index + 1]] = [utf16be[index + 1]!, utf16be[index]!];
+  }
+  await withProject({
+    'utf8.json': Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(json)]),
+    'utf16le.json': Buffer.concat([Buffer.from([0xff, 0xfe]), utf16le]),
+    'utf16be.json': Buffer.concat([Buffer.from([0xfe, 0xff]), utf16be]),
+  }, (root) => {
+    for (const name of ['utf8.json', 'utf16le.json', 'utf16be.json']) {
+      const result = createGraphProgram(root, [], ts.createProgram, join(root, name));
+      assert.equal(result.program.getCompilerOptions().strict, true, name);
+    }
+  });
+});
+
+test('workspace roots connect imported package declarations with workspace-relative ids', async () => {
+  await withProject({
+    'apps/web/tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '../..', paths: { '@lib/*': ['packages/lib/*'] } } }),
+    'apps/web/main.ts': "import { request } from '@lib/api'; export function load() { request(); }",
+    'packages/lib/api.ts': 'export function request() {}',
+    'node_modules/other/a.ts': 'export function ignored() {}',
+  }, async (root) => {
+    const result = await buildCallGraph(join(root, 'apps/web'), createNodeFileSystem(), { workspace: root });
+    assert.ok(result.nodes.some((node) => node.id === 'packages/lib/api.ts#request'));
+    assert.ok(result.edges.some((edge) => edge.from === 'apps/web/main.ts#load' && edge.to === 'packages/lib/api.ts#request' && edge.evidence === 'direct'));
+    assert.ok(result.nodes.every((node) => !node.id.includes('node_modules')));
+    assert.ok(result.limitations.some((line) => line.startsWith('workspace-config:')));
+  });
+});
+
+test('workspace keeps automatic config fallback and rejects a project outside its owned root', async () => {
+  await withProject({ 'apps/web/tsconfig.json': '{', 'apps/web/main.ts': 'export function load() {}', 'other/a.ts': '' }, async (root) => {
+    const result = await buildCallGraph(join(root, 'apps/web'), createNodeFileSystem(), { workspace: root });
+    assert.ok(result.limitations.some((line) => line.startsWith('graph-config:')));
+    await assert.rejects(buildCallGraph(join(root, 'apps/web'), createNodeFileSystem(), { workspace: join(root, 'other') }), /workspace must/);
+  });
+});
+
+test('PnP-only project gets a specific limitation without executing its loader', async () => {
+  await withProject({ '.pnp.cjs': 'throw new Error("must never run");', 'src/a.ts': 'export function a() {}' }, async (root) => {
+    const result = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(result.limitations.some((line) => line.startsWith('pnp-dependencies:')));
+    assert.ok(result.limitationsByMode.bound.some((line) => line.startsWith('pnp-dependencies:')));
   });
 });
 
@@ -164,7 +293,7 @@ test('작은 프로젝트: 깨진 설정·구문 오류·과대 파일·깨진 v
     const graph = await buildCallGraph(root, createNodeFileSystem());
     assert.deepEqual(graph.limitations.filter((line) => !line.startsWith('unresolved-calls')), [
       'graph-config: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve',
-      'parse-errors: 1 source file(s) have syntax errors; their calls may be incomplete',
+      'parse-errors: 1 source file(s) have syntax errors; their calls may be incomplete; files: ["src/a.ts"]; omitted: 0',
       'oversized-sources: 1 file(s) larger than 4 MiB were skipped',
       'entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown',
       'effect-inventory: incomplete(coverage); coverage cannot certify ambient safety.',

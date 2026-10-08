@@ -114,9 +114,20 @@ export interface CallStatistics {
   missingDependencies: number;
   /** 잇지 못한 호출 수(이유별, direct 기준) */
   readonly unresolved: Record<UnresolvedReason, number>;
+  /** 완전히 indirect로 남은 호출의 관찰된 callee AST 모양. 없으면 키를 생략한다. */
+  indirectSites?: IndirectSiteCounts;
   /** 인터페이스·호출 가능 값 공백 호출 중 bound·candidate 간선으로 이은 수 */
   readonly dispatch: DispatchStatistics;
 }
+
+/** indirect 호출을 추측 없이 나누는 callee AST 모양이다. */
+export type IndirectSiteKind = 'identifier' | 'property' | 'element' | 'other';
+
+/** 실제로 관찰한 모양만 양수 count로 싣는다. */
+export type IndirectSiteCounts = Partial<Record<IndirectSiteKind, number>>;
+
+/** indirect site key의 계약 순서다. */
+export const INDIRECT_SITE_KINDS: readonly IndirectSiteKind[] = ['identifier', 'property', 'element', 'other'];
 
 /**
  * 인터페이스·호출 가능 값 공백 호출을 디스패치로 이은 수다.

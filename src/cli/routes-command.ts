@@ -7,10 +7,19 @@
  * 실행하지 않는다.
  */
 
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
+import { GraphProjectInputError } from '../graph/program.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
 import { extractClientRoutes } from '../routes/client/client-routes.ts';
+import {
+  MAX_TYPED_CLIENT_MODEL_BYTES,
+  parseTypedClientModels,
+  TypedClientModelError,
+  type TypedClientModels,
+} from '../routes/client/typed-client-model.ts';
 import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -18,7 +27,7 @@ import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
 
 /** routes 명령 사용법이다. */
-export const routesUsage = `Usage: tsograph routes --role server|client --project <root> [--service <name>] [--include-tests] [--format json]
+export const routesUsage = `Usage: tsograph routes --role server|client --project <root> [--service <name>] [--client-model <file>] [--include-tests] [--format json]
 
 Scan a Next.js project (App Router route handlers and Pages Router API routes) or a Node
 backend (Hono, Express, Fastify, Koa with @koa/router, NestJS) and write an isthmus
@@ -29,6 +38,9 @@ Options:
   --role <role>      server declarations or client HTTP calls
   --project <root>   Project root (the directory with package.json, next.config.*, app/ or pages/)
   --service <name>   Service identity recorded on the document and every fact
+  --client-model <file>
+                     Bounded JSON typed HTTP client model for opaque transports (client role only)
+  --tsconfig <file>   Compiler config relative to --project (client role only)
   --include-tests    Also emit routes declared in test sources (*.test.*, *.spec.*, __tests__/;
                      for Node backends also test/, tests/, e2e/) with testSource: true
   --format json      Output format (json is the only format)
@@ -49,6 +61,8 @@ interface RoutesArguments {
   readonly projectArgument: string;
   readonly service: string | undefined;
   readonly includeTests: boolean;
+  readonly clientModel: string | undefined;
+  readonly tsconfig: string | undefined;
 }
 
 /**
@@ -74,7 +88,7 @@ export async function runRoutesCommand(arguments_: readonly string[], environmen
  * @returns 검증한 인자, 'help', 또는 사용법 오류 이유
  */
 function parseRoutesArguments(arguments_: readonly string[]): RoutesArguments | 'help' | string {
-  const parsed = parseArguments(arguments_, ['--role', '--project', '--service', '--format'], ['--help', '--include-tests']);
+  const parsed = parseArguments(arguments_, ['--role', '--project', '--service', '--client-model', '--tsconfig', '--format'], ['--help', '--include-tests']);
   if (parsed === undefined) return 'unknown, repeated, or empty option.';
   if (parsed.booleanFlags.has('--help')) return 'help';
   if (parsed.positionals.length > 0) return 'routes takes no positional arguments; pass the project with --project.';
@@ -89,7 +103,11 @@ function parseRoutesArguments(arguments_: readonly string[]): RoutesArguments | 
   if (service !== undefined && (!isSafeIdentifier(service) || service.length > MAX_SERVICE_LENGTH)) {
     return `--service must be 1-${MAX_SERVICE_LENGTH} characters without control characters.`;
   }
-  return { role, projectArgument, service, includeTests: parsed.booleanFlags.has('--include-tests') };
+  const clientModel = parsed.valueFlags.get('--client-model');
+  if (clientModel !== undefined && role !== 'client') return '--client-model is available only with --role client.';
+  const tsconfig = parsed.valueFlags.get('--tsconfig');
+  if (tsconfig !== undefined && role !== 'client') return '--tsconfig is available only with --role client.';
+  return { role, projectArgument, service, includeTests: parsed.booleanFlags.has('--include-tests'), clientModel, tsconfig };
 }
 
 /**
@@ -123,7 +141,15 @@ async function resolveProject(fileSystem: CommandFileSystem, projectArgument: st
  * @returns 성공 또는 실패 결과
  */
 async function extractDocument(project: string, parsed: RoutesArguments, environment: RoutesEnvironment): Promise<CommandResult> {
-  if (parsed.role === 'client') return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now()));
+  if (parsed.role === 'client') {
+    const typedModels = parsed.clientModel === undefined ? undefined : await loadClientModel(environment.fileSystem, project, parsed.clientModel);
+    if (typedModels !== undefined && 'exitCode' in typedModels) return typedModels;
+    if (typedModels !== undefined && parsed.service !== undefined
+      && typedModels.models.some((model) => model.methods.some((method) => method.service !== undefined && method.service !== parsed.service))) {
+      return inputFailure('the client model declares a service that conflicts with --service; use one service identity.');
+    }
+    return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now(), typedModels, parsed.tsconfig));
+  }
   const routes = await extractProjectRoutes(environment.fileSystem, project, parsed.includeTests);
   return renderDocument(() => createRouteDocument({
     next: routes.next,
@@ -134,6 +160,36 @@ async function extractDocument(project: string, parsed: RoutesArguments, environ
     toolVersion: environment.toolVersion,
     generatedAt: environment.now(),
   }));
+}
+
+/** 명시 모델 파일을 프로젝트 안에서 bounded하게 읽고 JSON parser에 넘긴다. */
+async function loadClientModel(fileSystem: CommandFileSystem, project: string, argument: string): Promise<TypedClientModels | CommandResult> {
+  const requested = isAbsolute(argument) ? argument : resolve(project, argument);
+  let modelPath: string;
+  try { modelPath = await fileSystem.realPath(requested); }
+  catch { return inputFailure('unable to read the client model file; pass an existing readable JSON file.'); }
+  let status;
+  try { status = await fileSystem.status(modelPath); }
+  catch { return inputFailure('unable to read the client model file; pass an existing readable JSON file.'); }
+  if (status.kind !== 'file') return inputFailure('unable to read the client model file; pass an existing readable JSON file.');
+  const rel = relative(project, modelPath);
+  if (rel === '' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return usageFailure('tsograph: the client model file must be inside --project.');
+  }
+  if (!isSafeIdentifier(rel)) return inputFailure('the client model path contains characters the exchange format forbids; rename or move the file.');
+  if (status.size > MAX_TYPED_CLIENT_MODEL_BYTES) return inputFailure(`the client model exceeds ${MAX_TYPED_CLIENT_MODEL_BYTES} bytes; split the model file.`);
+  let bytes: Uint8Array;
+  try { bytes = await fileSystem.readBytes(modelPath, MAX_TYPED_CLIENT_MODEL_BYTES); }
+  catch { return inputFailure('unable to read the client model file; check file permissions.'); }
+  if (bytes.byteLength > MAX_TYPED_CLIENT_MODEL_BYTES) return inputFailure(`the client model exceeds ${MAX_TYPED_CLIENT_MODEL_BYTES} bytes; split the model file.`);
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { return inputFailure('the client model is not valid UTF-8; re-encode it as UTF-8.'); }
+  try { return parseTypedClientModels(text); }
+  catch (error) {
+    if (error instanceof TypedClientModelError) return inputFailure(error.message);
+    throw error;
+  }
 }
 
 /**
@@ -148,6 +204,7 @@ export function renderDocument(build: () => unknown, maxLength: number = MAX_OUT
   try {
     text = encodeSortedJsonWithinLimit(build(), maxLength);
   } catch (error) {
+    if (error instanceof GraphProjectInputError) return inputFailure(error.message);
     if (error instanceof RouteFactLimitError) {
       return inputFailure(`the project produces more than ${MAX_ROUTE_FACTS} route-decl facts, which isthmus rejects; scan a smaller project root.`);
     }

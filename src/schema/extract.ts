@@ -6,8 +6,9 @@
  * 사실로 만들지 못한 근거는 모두 계수로 남긴다 — 빈 결과를 완전성의 증거로 읽지 않게 한다.
  */
 
-import { basename, extname } from 'node:path';
+import { basename, extname, isAbsolute } from 'node:path';
 
+import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { ClientProvenance, PrismaModuleMatcher } from './client-provenance.ts';
 import { ClientUsageScanner, type UsageCounts } from './client-usage.ts';
 import { formatBreakdown, observeDbPackages, type PackageObservations } from './db-packages.ts';
@@ -34,8 +35,11 @@ export interface ExtractionResult {
 
 /** 추출 전체의 계수다. */
 interface ExtractionCounts extends UsageCounts {
-  parseErrors: number;
+  parseErrorFiles: string[];
 }
+
+/** limitation 한 줄에 싣는 parse-error 파일 수 상한이다. */
+const MAX_PARSE_ERROR_FILES = 10;
 
 /**
  * 프로젝트를 분석한다.
@@ -48,7 +52,8 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   const project = loadPrismaProject(root, reader);
   const sink = new RelationFactSink();
   const counts: ExtractionCounts = {
-    dynamicRelations: 0, skippedSqlLiterals: 0, unresolvedReceivers: 0, unknownDelegates: 0, parseErrors: 0,
+    dynamicRelations: 0, skippedSqlLiterals: 0, unresolvedReceivers: 0, unknownDelegates: 0,
+    parseErrorFiles: [],
   };
   const relational = isRelational(project.catalog);
   if (relational && project.catalog !== undefined) emitSchemaFacts(project.catalog, sink);
@@ -135,7 +140,7 @@ function parseModules(root: string, project: PrismaProject, reader: ProjectReade
     const text = reader.read(absolutePath)?.text;
     if (text === undefined) continue;
     const module = parseSourceModule(toPosixRelative(root, absolutePath), absolutePath, text);
-    if (module.hasParseErrors) counts.parseErrors++;
+    if (module.hasParseErrors) counts.parseErrorFiles.push(module.path);
     modules.push(module);
   }
   return modules;
@@ -325,8 +330,9 @@ function inputLimitations({ project, counts, reader, unreadableConfigs }: Limita
   if (reader.oversized > 0) {
     result.push(`oversized-sources: ${reader.oversized} file(s) larger than 4 MiB were skipped`);
   }
-  if (counts.parseErrors > 0) {
-    result.push(`parse-errors: ${counts.parseErrors} source file(s) could not be parsed completely`);
+  if (counts.parseErrorFiles.length > 0) {
+    result.push(`parse-errors: ${counts.parseErrorFiles.length} source file(s) could not be parsed completely`
+      + parseErrorFileSuffix(counts.parseErrorFiles));
   }
   if (unreadableConfigs > 0) {
     result.push(`unreadable-module-configs: ${unreadableConfigs} tsconfig/jsconfig file(s) could not be parsed; imports under them use default resolution`);
@@ -335,4 +341,17 @@ function inputLimitations({ project, counts, reader, unreadableConfigs }: Limita
   if (symlinks > 0) result.push(`skipped-symlinks: ${symlinks} symbolic link(s) were not followed`);
   if (walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   return result;
+}
+
+/** 안전한 프로젝트 상대 parse-error 파일만 10개 싣고 나머지를 정확히 센다. */
+function parseErrorFileSuffix(paths: readonly string[]): string {
+  const safe = [...new Set(paths)].filter(isSafeDiagnosticPath).sort();
+  const shown = safe.slice(0, MAX_PARSE_ERROR_FILES);
+  return `; files: ${JSON.stringify(shown)}; omitted: ${new Set(paths).size - shown.length}`;
+}
+
+/** limitation에 그대로 실어도 source/절대 경로/control 문자가 새지 않는 경로인지 본다. */
+function isSafeDiagnosticPath(path: string): boolean {
+  return isSafeIdentifier(path) && !isAbsolute(path) && !/^[A-Za-z]:/u.test(path)
+    && path.split(/[\\/]/u).every((part) => part.length > 0 && part !== '.' && part !== '..');
 }

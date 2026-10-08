@@ -10,14 +10,27 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import ts from 'typescript';
 
+import { readBoundedConfigText } from './bounded-config-reader.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
 const configNames = ['tsconfig.json', 'jsconfig.json'] as const;
+
+/** 명시 입력의 알려진 실패만 CLI가 안전한 원인별 메시지로 변환한다. */
+export class GraphProjectInputError extends Error {
+  readonly code: 'config-file' | 'config-parse' | 'workspace';
+  constructor(code: 'config-file' | 'config-parse' | 'workspace') {
+    super(code === 'config-file' ? 'explicit compiler config and its extends must be readable JSON files within 1 MiB'
+      : code === 'config-parse' ? 'explicit compiler config could not be parsed'
+        : 'workspace must be a readable directory containing the selected project');
+    this.name = 'GraphProjectInputError';
+    this.code = code;
+  }
+}
 
 /** 설정이 없을 때 쓰는 기본 컴파일러 옵션이다. 번들러 해석은 확장자 생략과 `.js`→`.ts`를 모두 받는다. */
 const defaultOptions: ts.CompilerOptions = {
@@ -50,14 +63,16 @@ export interface GraphProgram {
  * @param root 프로젝트 realpath
  * @param sourcePaths 루트로 넣을 프로젝트 소스 절대 경로(선언 파일 포함 가능)
  * @param createProgram TypeScript Program factory (기본값은 `ts.createProgram`)
+ * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config
  * @returns Program·checker·설정 상태
  */
 export function createGraphProgram(
   root: string,
   sourcePaths: readonly string[],
   createProgram: typeof ts.createProgram = ts.createProgram,
+  explicitConfig?: string,
 ): GraphProgram {
-  const config = readProjectConfig(root);
+  const config = readProjectConfig(root, explicitConfig);
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
@@ -94,17 +109,40 @@ interface ProjectConfig {
  * 프로젝트 루트의 설정 파일을 읽는다. 없거나 읽지 못하면 기본 옵션이다.
  *
  * @param root 프로젝트 realpath
+ * @param explicitConfig 자동 탐색 대신 사용할 root 기준 상대 경로나 절대 경로
  * @returns 옵션·루트 파일·상태
  */
-function readProjectConfig(root: string): ProjectConfig {
-  const configName = configNames.find((name) => existsSync(join(root, name)));
+function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig {
+  const configName = explicitConfig === undefined ? configNames.find((name) => existsSync(join(root, name))) : basename(explicitConfig);
   if (configName === undefined) return { options: defaultOptions, fileNames: [], status: { configName, configUnreadable: false } };
-  const path = join(root, configName);
-  const read = ts.readConfigFile(path, ts.sys.readFile);
-  if (read.error !== undefined) return unreadableConfig(configName);
-  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, root, configName === 'jsconfig.json' ? { allowJs: true } : undefined, path);
+  const path = explicitConfig === undefined ? join(root, configName) : resolve(root, explicitConfig);
+  let boundedReadFailed = false;
+  const readFile = (fileName: string): string | undefined => {
+    const result = readBoundedConfigText(fileName);
+    if (result.ok) return result.text;
+    boundedReadFailed = true;
+    return undefined;
+  };
+  const read = ts.readConfigFile(path, readFile);
+  if (read.error !== undefined) {
+    if (explicitConfig !== undefined) {
+      throw new GraphProjectInputError(boundedReadFailed ? 'config-file' : 'config-parse');
+    }
+    return unreadableConfig(configName);
+  }
+  const host: ts.ParseConfigHost = { ...ts.sys, readFile };
+  const parsed = ts.parseJsonConfigFileContent(
+    read.config,
+    host,
+    dirname(path),
+    configName === 'jsconfig.json' ? { allowJs: true } : undefined,
+    path,
+  );
   // "include 결과 없음"(18003)은 호출자가 소스를 따로 넣으므로 문제가 아니다. 그 밖의 오류는 기본값으로 떨어진다.
   if (parsed.errors.some((error) => error.code !== 18003 && error.category === ts.DiagnosticCategory.Error)) {
+    if (explicitConfig !== undefined) {
+      throw new GraphProjectInputError(boundedReadFailed ? 'config-file' : 'config-parse');
+    }
     return unreadableConfig(configName);
   }
   return { options: parsed.options, fileNames: parsed.fileNames, status: { configName, configUnreadable: false } };

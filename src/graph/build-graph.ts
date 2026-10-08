@@ -9,13 +9,13 @@
  * 가는 호출은 외부로 센다.
  */
 
-import { readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
 
 import type { CommandFileSystem } from '../cli/file-system.ts';
-import type { RouteDeclFact } from '../exchange/bridge-facts.ts';
+import { isSafeIdentifier, type RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
 import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
@@ -43,7 +43,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { createGraphProgram, type ProgramConfigStatus } from './program.ts';
+import { createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -51,6 +51,9 @@ const MAX_VERCEL_CONFIG_BYTES = 1024 * 1024;
 
 /** `package.json` 최대 크기(바이트)다. */
 const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+
+/** limitation 한 줄에 싣는 parse-error 파일 수 상한이다. */
+const MAX_PARSE_ERROR_FILES = 10;
 
 /** 패키지를 스캔 밖 코드가 가져다 쓰는 공개 패키지로 보게 하는 `package.json` 필드다. */
 const PUBLIC_ENTRY_FIELDS: readonly string[] = ['main', 'module', 'exports', 'bin', 'types', 'typings', 'browser'];
@@ -82,7 +85,7 @@ interface GraphCounts {
   readonly gaps: EdgeGaps;
   readonly config: ProgramConfigStatus;
   readonly inputs: GraphInputs;
-  readonly parseErrors: number;
+  readonly parseErrorFiles: readonly string[];
   readonly unresolvedExports: number;
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
@@ -101,10 +104,26 @@ type OpenProgramReason = 'public-package' | 'unreadable-manifest' | 'incomplete-
  * @param fileSystem 라우트 추출용 파일 시스템
  * @returns 그래프
  */
-export async function buildCallGraph(project: string, fileSystem: CommandFileSystem): Promise<CallGraph> {
+/** 명시 설정은 선택한 프로젝트의 checker에 적용하며 workspace는 노드 소유 경계를 넓힌다. */
+export interface GraphBuildOptions {
+  readonly tsconfig?: string;
+  readonly workspace?: string;
+}
+
+export async function buildCallGraph(project: string, fileSystem: CommandFileSystem, options: GraphBuildOptions = {}): Promise<CallGraph> {
+  const selectedProject = project;
+  const config = options.tsconfig;
+  if (options.workspace !== undefined) {
+    try {
+      const workspace = realpathSync(options.workspace);
+      const descendant = relative(workspace, realpathSync(project));
+      if (descendant.split(/[\\/]/u)[0] === '..' || isAbsolute(descendant) || !statSync(workspace).isDirectory()) throw new GraphProjectInputError('workspace');
+      project = workspace;
+    } catch { throw new GraphProjectInputError('workspace'); }
+  }
   const routes = await loadRouteInputs(project, fileSystem);
   const inputs = collectGraphInputs(project, routes.extraction);
-  const { program, checker, status } = createGraphProgram(project, [...inputs.sources.values(), ...inputs.declarations]);
+  const { program, checker, status } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
   const files = nodeFiles(program, inputs.sources);
   const walk = inputs.walk;
   const coverageComplete = !status.configUnreadable && !walk.truncated && inputs.oversized === 0
@@ -119,17 +138,20 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     pageExtensions: routes.pageExtensions,
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
-  const parseErrors = countParseErrors(files);
-  const openProgram = openProgramReason(project, inputs, parseErrors);
+  const parseErrorFiles = collectParseErrorFiles(files);
+  const openProgram = openProgramReason(project, inputs, parseErrorFiles.length);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
-    ...analysis, config: status, inputs, parseErrors, unmatchedCrons, openProgram,
+    ...analysis, config: status, inputs, parseErrorFiles, unmatchedCrons, openProgram,
     cronConfigUnreadable: crons.unreadable, routeFactsTruncated: routes.facts.length === 0 && routes.extraction.routes.length > 0,
   };
-  const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, buildLimitations(nodes, counts, mode)])) as Record<DispatchMode, string[]>;
-  const limitations = buildLimitations(nodes, counts, 'snapshot');
+  const environmentLimits: string[] = [];
+  if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
+  if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
+  const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
+  const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
   return { nodes, edges: analysis.store.edges(), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } };
 }
 
@@ -382,14 +404,16 @@ function createCallStatistics(): CallStatistics {
 }
 
 /**
- * 구문 오류가 있는 노드 파일 수다.
+ * 구문 오류가 있는 노드 파일의 프로젝트 상대 경로다.
  *
  * @param files 노드 파일
- * @returns 파일 수
+ * @returns 경로 순 파일 목록
  */
-function countParseErrors(files: ReadonlyMap<string, ts.SourceFile>): number {
-  return [...files.values()].filter((sourceFile) =>
-    ((sourceFile as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0) > 0).length;
+function collectParseErrorFiles(files: ReadonlyMap<string, ts.SourceFile>): string[] {
+  return [...files].filter(([, sourceFile]) =>
+    ((sourceFile as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length ?? 0) > 0)
+    .map(([path]) => path)
+    .sort(compareStrings);
 }
 
 /** `vercel.json`에서 읽은 cron 경로다. */
@@ -543,12 +567,15 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
  * @param counts 계수
  * @returns limitation 목록
  */
-function inputLimitations({ config, inputs, parseErrors, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
+function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
-  if (parseErrors > 0) result.push(`parse-errors: ${parseErrors} source file(s) have syntax errors; their calls may be incomplete`);
+  if (parseErrorFiles.length > 0) {
+    result.push(`parse-errors: ${parseErrorFiles.length} source file(s) have syntax errors; their calls may be incomplete`
+      + parseErrorFileSuffix(parseErrorFiles));
+  }
   if (inputs.oversized > 0) result.push(`oversized-sources: ${inputs.oversized} file(s) larger than 4 MiB were skipped`);
   if (inputs.walk.unreadableDirectories > 0) result.push(`unreadable-sources: ${inputs.walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
   if (inputs.walk.skippedSymlinks > 0) result.push(`skipped-symlinks: ${inputs.walk.skippedSymlinks} symbolic link(s) were not followed`);
@@ -556,6 +583,19 @@ function inputLimitations({ config, inputs, parseErrors, cronConfigUnreadable, r
   if (cronConfigUnreadable) result.push('entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown');
   if (routeFactsTruncated) result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');
   return result;
+}
+
+/** 안전한 프로젝트 상대 parse-error 파일만 10개 싣고 나머지를 정확히 센다. */
+function parseErrorFileSuffix(paths: readonly string[]): string {
+  const safe = [...new Set(paths)].filter(isSafeDiagnosticPath).sort(compareStrings);
+  const shown = safe.slice(0, MAX_PARSE_ERROR_FILES);
+  return `; files: ${JSON.stringify(shown)}; omitted: ${new Set(paths).size - shown.length}`;
+}
+
+/** limitation에 그대로 실어도 source/절대 경로/control 문자가 새지 않는 경로인지 본다. */
+function isSafeDiagnosticPath(path: string): boolean {
+  return isSafeIdentifier(path) && !isAbsolute(path) && !/^[A-Za-z]:/u.test(path)
+    && path.split(/[\\/]/u).every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 
 /**

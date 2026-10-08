@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -152,6 +152,7 @@ test('--help는 사용법을 성공으로 낸다', async () => {
   const result = await run(['--help']);
   assert.equal(result.exitCode, 0);
   assert.equal(result.standardOutput, routesUsage);
+  assert.match(result.standardOutput, /--client-model <file>/u);
 });
 
 test('잘못된 호출은 64다', async () => {
@@ -166,12 +167,34 @@ test('잘못된 호출은 64다', async () => {
     ['--role', 'server', '--project', project, '--service', 'bad\u0001name'],
     ['--role', 'server', '--project', project, '--service', 'x'.repeat(257)],
     ['--role', 'server', '--project', project, '--unknown'],
+    ['--role', 'server', '--project', project, '--client-model', 'model.json'],
   ];
   for (const arguments_ of cases) {
     const result = await run(arguments_);
     assert.equal(result.exitCode, 64, JSON.stringify(arguments_));
     assert.match(result.standardError, /Usage: tsograph routes/);
   }
+});
+
+test('client model option is wired through routes and service conflicts fail clearly', async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-model-cli-')));
+  try {
+    mkdirSync(join(directory, 'src'), { recursive: true });
+    writeFileSync(join(directory, 'package.json'), '{}');
+    writeFileSync(join(directory, 'src/client.ts'), 'type Api = { get(path: string): unknown }; declare const api: Api; api.get("/items");');
+    writeFileSync(join(directory, 'model.json'), JSON.stringify({
+      format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'Api' }, methods: [
+        { name: 'get', method: 'GET', pathArgument: 0, base: '/v1', service: 'other' },
+      ] }],
+    }));
+    const result = await run(['--role', 'client', '--project', directory, '--client-model', 'model.json']);
+    assert.equal(result.exitCode, 0, result.standardError);
+    assert.match(result.standardOutput, /"channel": "\/v1\/items"/u);
+    const conflict = await run(['--role', 'client', '--project', directory, '--client-model', 'model.json', '--service', 'catalog']);
+    assert.equal(conflict.exitCode, 2);
+    assert.match(conflict.standardError, /conflicts with --service/u);
+    assert.doesNotMatch(conflict.standardError, /other/u);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('읽을 수 없는 프로젝트는 2이고 경로 원문을 싣지 않는다', async () => {

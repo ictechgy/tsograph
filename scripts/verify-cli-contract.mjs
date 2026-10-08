@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ verifyRoutesSuccess();
 verifyRoutesErrors();
 verifySchema();
 verifyGraph();
+verifyNavigation();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -183,4 +184,32 @@ function run(arguments_) {
 /** 계약 위반을 검사 이름으로 보고한다. */
 function verify(condition, name) {
   if (!condition) throw new Error(`CLI contract failed: ${name}`);
+}
+
+/** 합성 등록을 배포 CLI로 추출해 graph의 같은 screen ID에 연결한다. */
+function verifyNavigation() {
+  const root = mkdtempSync(join(tmpdir(), 'tsograph-navigation-cli-'));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'src/router-api.ts'), 'export function registerScreens(input: unknown) { return input; }');
+    writeFileSync(join(root, 'src/screens.ts'), 'export function Catalog() { return null; }');
+    writeFileSync(join(root, 'src/router.ts'), `import { registerScreens } from './router-api';
+import { Catalog } from './screens';
+registerScreens([{ path: '/catalog/:item', screen: Catalog }]);`);
+    writeFileSync(join(root, 'router-model.json'), JSON.stringify({ format: 'router-models', version: 1,
+      models: [{ factory: { path: 'src/router-api.ts', name: 'registerScreens' }, routesArgument: 0,
+        pathProperty: 'path', screenProperty: 'screen', pathSyntax: 'colon' }] }));
+    const args = ['navigation', '--project', root, '--router-model', 'router-model.json'];
+    const result = run(args);
+    verify(result.status === 0, 'navigation success');
+    const document = JSON.parse(result.stdout);
+    verify(document.format === 'navigation-facts' && document.facts.length === 1, 'navigation document');
+    verify(document.facts[0].urlTemplate === '/catalog/{}' && document.facts[0].screen.usr === 'src/screens.ts#Catalog', 'navigation exact identity');
+    const graph = JSON.parse(run(['graph', '--project', root]).stdout);
+    verify(graph.nodes.some((node) => node.id === document.facts[0].screen.usr), 'navigation graph identity');
+    verify(run(['help', 'navigation']).status === 0, 'navigation help');
+    verify(run(['navigation']).status === 64, 'navigation usage');
+    writeFileSync(join(root, 'router-model.json'), '{');
+    verify(run(args).status === 2, 'navigation model failure');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 }

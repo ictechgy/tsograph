@@ -11,7 +11,13 @@
 import ts from 'typescript';
 
 import { isInlineCallback } from '../schema/inline-callback.ts';
-import type { CallStatistics, EdgeKind, GraphStore, UnresolvedReason } from './graph-model.ts';
+import type {
+  CallStatistics,
+  EdgeKind,
+  GraphStore,
+  IndirectSiteKind,
+  UnresolvedReason,
+} from './graph-model.ts';
 import { isFunctionValued, isTypeOnly, skipWrappers } from './node-collector.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
 import { isInterfaceGap, type Resolution, type TargetResolver } from './target-resolver.ts';
@@ -281,12 +287,34 @@ function recordCall(context: EdgeContext, path: string, site: ts.Node, resolutio
     if (resolution.missing === true) context.calls.missingDependencies++;
   } else if (resolution.kind === 'unresolved') {
     context.calls.unresolved[resolution.reason]++;
+    if (resolution.reason === 'indirect') countIndirectSite(context.calls, site);
   } else {
     context.calls.resolved++;
     if (resolution.partial !== undefined) context.gaps.partial[resolution.partial] = (context.gaps.partial[resolution.partial] ?? 0) + 1;
     const from = ensureScope(context.store, path, site);
     for (const id of resolution.ids) context.store.addEdge(from, id, kind);
   }
+}
+
+/** fully unresolved indirect 호출을 callee AST 모양 하나로 센다. */
+function countIndirectSite(calls: CallStatistics, site: ts.Node): void {
+  const kind = indirectSiteKind(site);
+  const sites = calls.indirectSites ??= {};
+  sites[kind] = (sites[kind] ?? 0) + 1;
+}
+
+/** 해석 결과나 이름을 보지 않고 호출 위치에 실제로 적힌 callee 모양만 분류한다. */
+function indirectSiteKind(site: ts.Node): IndirectSiteKind {
+  const expression = ts.isCallExpression(site) || ts.isNewExpression(site) ? site.expression
+    : ts.isTaggedTemplateExpression(site) ? site.tag
+      : ts.isDecorator(site) ? site.expression
+        : ts.isJsxOpeningElement(site) || ts.isJsxSelfClosingElement(site) ? site.tagName
+          : undefined;
+  if (expression === undefined) return 'other';
+  const callee = skipWrappers(expression as ts.Expression);
+  if (ts.isIdentifier(callee)) return 'identifier';
+  if (ts.isPropertyAccessExpression(callee)) return 'property';
+  return ts.isElementAccessExpression(callee) ? 'element' : 'other';
 }
 
 /**

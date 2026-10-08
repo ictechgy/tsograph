@@ -9,7 +9,7 @@
 import { createHash } from 'node:crypto';
 
 import { formatBridgeTimestamp } from '../exchange/bridge-facts.ts';
-import type { CallGraph, GraphEdge, GraphNode, GraphStatistics } from './graph-model.ts';
+import type { CallGraph, DispatchMode, GraphEdge, GraphNode, GraphStatistics } from './graph-model.ts';
 
 /** 문서 머리(도구·시각·프로젝트·revision)다. */
 export interface DocumentHeader {
@@ -33,6 +33,7 @@ export interface GraphSnapshotDocument {
   readonly edges: readonly GraphEdge[];
   readonly statistics: GraphStatistics;
   readonly limitations: readonly string[];
+  readonly limitationsByMode?: Readonly<Record<DispatchMode, readonly string[]>>;
 }
 
 /**
@@ -42,11 +43,19 @@ export interface GraphSnapshotDocument {
  * @returns `sha256:<hex>`
  */
 export function computeGraphRevision(graph: CallGraph): string {
-  const content = JSON.stringify([
-    graph.nodes.map((node) => [node.id, node.kind, node.entries ?? [], node.unresolvedCalls ?? {}]),
-    graph.edges.map((edge) => [edge.from, edge.to, edge.kinds, edge.evidence]),
-  ]);
-  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  const hash = createHash('sha256');
+  hash.update('[[');
+  graph.nodes.forEach((node, index) => {
+    if (index > 0) hash.update(',');
+    hash.update(JSON.stringify([node.id, node.kind, node.entries ?? [], node.unresolvedCalls ?? {}]));
+  });
+  hash.update('],[');
+  graph.edges.forEach((edge, index) => {
+    if (index > 0) hash.update(',');
+    hash.update(JSON.stringify([edge.from, edge.to, edge.kinds, edge.evidence]));
+  });
+  hash.update(']]');
+  return `sha256:${hash.digest('hex')}`;
 }
 
 /**
@@ -70,5 +79,6 @@ export function createGraphSnapshot(graph: CallGraph, header: DocumentHeader): G
     edges: graph.edges,
     statistics: graph.statistics,
     limitations: graph.limitations,
+    limitationsByMode: graph.limitationsByMode,
   };
 }

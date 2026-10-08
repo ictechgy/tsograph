@@ -12,15 +12,23 @@
  * 분석 대상 코드는 실행하지 않는다(TypeScript 컴파일러 API로 읽기만 한다).
  */
 
+import { isAbsolute, relative } from 'node:path';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
-import { buildCallGraph } from '../graph/build-graph.ts';
+import { buildCallGraph, type GraphBuildOptions } from '../graph/build-graph.ts';
 import { readGitRevision } from '../graph/git-revision.ts';
 import { computeGraphRevision, createGraphSnapshot, type DocumentHeader } from '../graph/graph-document.ts';
 import { DISPATCH_MODES, type CallGraph, type DispatchMode } from '../graph/graph-model.ts';
+import { graphOutputChunks, GraphOutputWriteError, writeGraphOutput, type GraphOutputSink } from '../graph/graph-output.ts';
+import { GraphProjectInputError } from '../graph/program.ts';
 import { EMPTY_TRAVERSAL_RESULT, remapRootIndices, resolveRoots, type RootResolution, type UnresolvedRootKind } from '../graph/root-resolution.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
 import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection, type TraversalResult } from '../graph/traversal.ts';
+import {
+  MAX_SAVED_GRAPH_BYTES,
+  SavedGraphError,
+  parseSavedGraphSnapshot,
+} from '../graph/saved-graph.ts';
 import { type CommandResult, inputFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH } from './openapi-command.ts';
@@ -39,7 +47,7 @@ export const DEFAULT_DISPATCH: DispatchMode = 'bound';
 const MAX_LISTED_UNKNOWN_IDS = 20;
 
 /** graph 명령 사용법이다. */
-export const graphUsage = `Usage: tsograph graph --project <root> [--generated-at <timestamp>] [--format json]
+export const graphUsage = `Usage: tsograph graph --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
 
 Build the TypeScript/JavaScript call graph of the project (TypeScript compiler API over the
 project's tsconfig/jsconfig) and write a tsograph-graph v1 snapshot: nodes (functions, methods,
@@ -49,15 +57,21 @@ call counts, edges (call, new, callback, reference, jsx, alias, initializer) wit
 
 Options:
   --project <root>            Project root; node ids are relative to it (required)
+  --tsconfig <file>           Config file relative to --project; its options use the config directory
+  --workspace <root>         Own sources below this enclosing workspace; ids are relative to it
   --generated-at <timestamp>  Fixed generatedAt (YYYY-MM-DDTHH:mm:ss.sssZ) for byte-identical output
-  --format json               Output format (json is the only format)
+  --format json|ndjson        Graph output format; the process streams graph records
 
-Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error.
+Exit codes: 0 success, 2 input/output failure, 64 usage error.
+Stream failures may leave partial graph output; discard it whenever the exit code is 2.
 `;
 
 /** reach·impact 공통 옵션 설명이다. */
 const traversalOptions = `Options:
-  --project <root>            Project root (required)
+  --project <root>            Build and traverse the project call graph (one input mode is required)
+  --tsconfig <file>           Explicit compiler config (live --project input only)
+  --workspace <root>         Enclosing workspace source boundary (live --project input only)
+  --graph-file <path>         Traverse an existing tsograph-graph v1 file without reading project sources
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
   --max-reached <n>           Emit at most n reached symbols (default and maximum: ${DEFAULT_MAX_REACHED})
   --dispatch <mode>           Edges to follow: direct (proven by the checker), bound (direct plus
@@ -80,7 +94,7 @@ Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error 
 `;
 
 /** reach 명령 사용법이다. */
-export const reachUsage = `Usage: tsograph reach --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+export const reachUsage = `Usage: tsograph reach (--project <root> | --graph-file <path>) [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols reachable from the given roots (direction "dependencies") as an isthmus
 language-traversal v1 document.
@@ -88,7 +102,7 @@ language-traversal v1 document.
 ${traversalOptions}`;
 
 /** impact 명령 사용법이다. */
-export const impactUsage = `Usage: tsograph impact --project <root> [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+export const impactUsage = `Usage: tsograph impact (--project <root> | --graph-file <path>) [--max-depth <n>] [--max-reached <n>] [--dispatch <mode>] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 
 Write the symbols that reach the given roots (direction "dependents") as an isthmus
 language-traversal v1 document.
@@ -101,7 +115,9 @@ export interface GraphEnvironment {
   readonly toolVersion: string;
   readonly now: () => Date;
   /** 그래프 생성기(테스트 주입용). 기본은 실제 생성기다. */
-  readonly buildGraph?: (project: string, fileSystem: CommandFileSystem) => Promise<CallGraph>;
+  readonly buildGraph?: (project: string, fileSystem: CommandFileSystem, options?: GraphBuildOptions) => Promise<CallGraph>;
+  /** 프로세스는 backpressure를 기다리는 sink를 주며 in-memory 호출자는 기존 결과 문자열을 받는다. */
+  readonly graphOutput?: GraphOutputSink;
 }
 
 /**
@@ -112,17 +128,33 @@ export interface GraphEnvironment {
  * @returns 프로세스 경계에 쓸 결과
  */
 export async function runGraphCommand(arguments_: readonly string[], environment: GraphEnvironment): Promise<CommandResult> {
-  const parsed = parseArguments(arguments_, ['--project', '--format', '--generated-at'], ['--help']);
+  const parsed = parseArguments(arguments_, ['--project', '--format', '--generated-at', '--tsconfig', '--workspace'], ['--help']);
   if (parsed?.booleanFlags.has('--help') === true) return success(graphUsage);
   const generatedAt = parseTimestamp(parsed?.valueFlags.get('--generated-at'));
   const problem = parsed === undefined ? 'unknown, repeated, or empty option.'
     : parsed.positionals.length > 0 ? 'graph takes no positional arguments; pass the root with --project.'
       : generatedAt === null ? '--generated-at takes a UTC timestamp such as 2026-09-27T00:00:00.000Z.'
-        : formatProblem(parsed.valueFlags.get('--format')) ?? (parsed.valueFlags.has('--project') ? undefined : '--project <root> is required.');
+        : !['json', 'ndjson'].includes(parsed.valueFlags.get('--format') ?? 'json') ? '--format takes json or ndjson.'
+          : (parsed.valueFlags.has('--project') ? undefined : '--project <root> is required.');
   if (problem !== undefined) return usageFailure(`tsograph: ${problem}\n${graphUsage}`);
-  const loaded = await loadGraph(parsed!.valueFlags.get('--project')!, withClock(environment, generatedAt ?? undefined));
+  const loaded = await loadGraph(parsed!.valueFlags.get('--project')!, withClock(environment, generatedAt ?? undefined), buildOptions(parsed!.valueFlags));
   if ('exitCode' in loaded) return loaded;
-  return render(createGraphSnapshot(loaded.graph, loaded.header));
+  const document = createGraphSnapshot(loaded.graph, loaded.header);
+  const format = parsed!.valueFlags.get('--format') === 'ndjson' ? 'ndjson' : 'json';
+  if (environment.graphOutput !== undefined) {
+    try { await writeGraphOutput(document, format, environment.graphOutput); return success(''); }
+    catch (error) {
+      if (error instanceof GraphOutputWriteError) return inputFailure('graph output could not be written; check the destination and discard any partial output.');
+      throw error;
+    }
+  }
+  if (format === 'json') return render(document);
+  let output = '';
+  for (const chunk of graphOutputChunks(document, format)) {
+    if (output.length + chunk.length > MAX_OUTPUT_LENGTH) return inputFailure('in-memory graph output exceeds its size limit; use the CLI streaming output.');
+    output += chunk;
+  }
+  return success(output);
 }
 
 /**
@@ -149,13 +181,14 @@ export function runImpactCommand(arguments_: readonly string[], environment: Gra
 
 /** 검증한 순회 인자다. */
 interface TraversalArguments {
-  readonly project: string;
+  readonly input: { readonly kind: 'project' | 'saved-graph'; readonly path: string };
   readonly rootIds: readonly string[];
   readonly maxDepth: number;
   readonly maxReached: number;
   readonly dispatch: DispatchMode;
   readonly generatedAt: Date | undefined;
   readonly entryPoints: boolean;
+  readonly buildOptions: GraphBuildOptions;
 }
 
 /**
@@ -176,12 +209,12 @@ async function runTraversalCommand(
   const parsed = parseTraversalArguments(arguments_);
   if (parsed === 'help') return success(usage);
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${usage}`);
-  const loaded = await loadGraph(parsed.project, withClock(environment, parsed.generatedAt));
+  const loaded = await loadTraversalInput(parsed.input, withClock(environment, parsed.generatedAt), parsed.buildOptions);
   if ('exitCode' in loaded) return loaded;
   const roots = resolveRoots(parsed.rootIds, new Set(loaded.graph.nodes.map((node) => node.id)));
   const rendered = render(createTraversalDocument({
     graph: loaded.graph,
-    graphRevision: computeGraphRevision(loaded.graph),
+    graphRevision: loaded.graphRevision,
     header: loaded.header,
     direction,
     dispatch: parsed.dispatch,
@@ -215,13 +248,18 @@ function traverseResolvedRoots(graph: CallGraph, parsed: TraversalArguments, dir
  * @returns 검증한 인자, 'help', 또는 사용법 오류 이유
  */
 function parseTraversalArguments(arguments_: readonly string[]): TraversalArguments | 'help' | string {
-  const parsed = parseArguments(arguments_, ['--project', '--format', '--max-depth', '--max-reached', '--dispatch', '--generated-at'], ['--help', '--entry-points']);
+  const parsed = parseArguments(arguments_, [
+    '--project', '--graph-file', '--format', '--max-depth', '--max-reached', '--dispatch', '--generated-at', '--tsconfig', '--workspace',
+  ], ['--help', '--entry-points']);
   if (parsed === undefined) return 'unknown, repeated, or empty option.';
   if (parsed.booleanFlags.has('--help')) return 'help';
   const format = formatProblem(parsed.valueFlags.get('--format'));
   if (format !== undefined) return format;
   const project = parsed.valueFlags.get('--project');
-  if (project === undefined) return '--project <root> is required.';
+  const graphFile = parsed.valueFlags.get('--graph-file');
+  if (project === undefined && graphFile === undefined) return 'exactly one of --project <root> and --graph-file <path> is required.';
+  if (project !== undefined && graphFile !== undefined) return '--project and --graph-file are mutually exclusive input modes.';
+  if (graphFile !== undefined && (parsed.valueFlags.has('--tsconfig') || parsed.valueFlags.has('--workspace'))) return '--tsconfig and --workspace require live --project input.';
   const rootIds = [...new Set(parsed.positionals)];
   if (rootIds.length === 0) return 'at least one symbol id is required.';
   if (rootIds.length > MAX_ROOT_IDS) return `at most ${MAX_ROOT_IDS} symbol ids are accepted.`;
@@ -236,8 +274,20 @@ function parseTraversalArguments(arguments_: readonly string[]): TraversalArgume
   const generatedAt = parseTimestamp(parsed.valueFlags.get('--generated-at'));
   if (generatedAt === null) return '--generated-at takes a UTC timestamp such as 2026-09-27T00:00:00.000Z.';
   return {
-    project, rootIds, maxDepth: maxDepth ?? MAX_TRAVERSAL_DEPTH, maxReached: maxReached ?? DEFAULT_MAX_REACHED,
+    input: project === undefined
+      ? { kind: 'saved-graph', path: graphFile! }
+      : { kind: 'project', path: project },
+    rootIds, maxDepth: maxDepth ?? MAX_TRAVERSAL_DEPTH, maxReached: maxReached ?? DEFAULT_MAX_REACHED,
     dispatch: dispatch as DispatchMode, generatedAt, entryPoints: parsed.booleanFlags.has('--entry-points'),
+    buildOptions: buildOptions(parsed.valueFlags),
+  };
+}
+
+/** 입력 모드에 해당하는 명시 옵션만 생성기에 전달한다. */
+function buildOptions(flags: ReadonlyMap<string, string>): GraphBuildOptions {
+  return {
+    ...(flags.has('--tsconfig') ? { tsconfig: flags.get('--tsconfig')! } : {}),
+    ...(flags.has('--workspace') ? { workspace: flags.get('--workspace')! } : {}),
   };
 }
 
@@ -313,7 +363,19 @@ function unresolvedRootsMessage(unresolved: ReadonlyMap<string, UnresolvedRootKi
 /** 읽은 그래프와 문서 머리다. */
 interface LoadedGraph {
   readonly graph: CallGraph;
+  readonly graphRevision: string;
   readonly header: DocumentHeader;
+}
+
+/** live 프로젝트 또는 저장 스냅샷 입력을 서로 섞지 않고 읽는다. */
+async function loadTraversalInput(
+  input: TraversalArguments['input'],
+  environment: GraphEnvironment,
+  options: GraphBuildOptions,
+): Promise<LoadedGraph | CommandResult> {
+  return input.kind === 'project'
+    ? loadGraph(input.path, environment, options)
+    : loadSavedGraph(input.path, environment);
 }
 
 /**
@@ -323,7 +385,7 @@ interface LoadedGraph {
  * @param environment 실행 환경
  * @returns 그래프와 머리, 또는 실패 결과
  */
-async function loadGraph(projectArgument: string, environment: GraphEnvironment): Promise<LoadedGraph | CommandResult> {
+async function loadGraph(projectArgument: string, environment: GraphEnvironment, options: GraphBuildOptions = {}): Promise<LoadedGraph | CommandResult> {
   let project: string;
   try {
     project = await environment.fileSystem.realPath(projectArgument);
@@ -335,8 +397,78 @@ async function loadGraph(projectArgument: string, environment: GraphEnvironment)
   if (!isSafeIdentifier(project)) {
     return inputFailure('the project path contains characters the exchange format forbids; rename or move the project.');
   }
-  const graph = await (environment.buildGraph ?? buildCallGraph)(project, environment.fileSystem);
-  return { graph, header: { toolVersion: environment.toolVersion, generatedAt: environment.now(), project, revision: readGitRevision(project) } };
+  let graph: CallGraph;
+  let identityRoot = project;
+  if (options.workspace !== undefined) {
+    try {
+      identityRoot = await environment.fileSystem.realPath(options.workspace);
+      if ((await environment.fileSystem.status(identityRoot)).kind !== 'directory') throw new GraphProjectInputError('workspace');
+    } catch { return inputFailure(new GraphProjectInputError('workspace').message); }
+    if (!isSafeIdentifier(identityRoot)) return inputFailure('the workspace path contains characters the exchange format forbids; rename or move the workspace.');
+    const descendant = relative(identityRoot, project);
+    if (descendant.split(/[\\/]/u)[0] === '..' || isAbsolute(descendant)) return inputFailure(new GraphProjectInputError('workspace').message);
+  }
+  try {
+    graph = await (environment.buildGraph ?? buildCallGraph)(project, environment.fileSystem, options);
+  } catch (error) {
+    if (error instanceof GraphProjectInputError) return inputFailure(error.message);
+    throw error;
+  }
+  return {
+    graph,
+    graphRevision: computeGraphRevision(graph),
+    header: { toolVersion: environment.toolVersion, generatedAt: environment.now(), project: identityRoot, revision: readGitRevision(identityRoot) },
+  };
+}
+
+/** 저장 그래프 파일만 bounded하게 읽고, 분석 소스나 환경 설정은 조회하지 않는다. */
+async function loadSavedGraph(
+  graphFileArgument: string,
+  environment: GraphEnvironment,
+): Promise<LoadedGraph | CommandResult> {
+  let graphFile: string;
+  let size: number;
+  try {
+    graphFile = await environment.fileSystem.realPath(graphFileArgument);
+    const status = await environment.fileSystem.status(graphFile);
+    if (status.kind !== 'file') throw new Error('not a file');
+    size = status.size;
+  } catch {
+    return inputFailure('--graph-file does not name a readable saved graph file; pass an existing tsograph-graph v1 JSON file.');
+  }
+  if (size > MAX_SAVED_GRAPH_BYTES) {
+    return inputFailure(`the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes; produce a smaller graph snapshot.`);
+  }
+  let bytes: Uint8Array;
+  try { bytes = await environment.fileSystem.readBytes(graphFile, MAX_SAVED_GRAPH_BYTES); }
+  catch { return inputFailure('the saved graph file could not be read; check file permissions.'); }
+  if (bytes.byteLength > MAX_SAVED_GRAPH_BYTES) {
+    return inputFailure(`the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes; produce a smaller graph snapshot.`);
+  }
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { return inputFailure('the saved graph is not valid UTF-8; re-encode it as UTF-8 JSON.'); }
+  try {
+    const parsed = parseSavedGraphSnapshot(text);
+    const provenance = `saved-graph-input: built by tsograph ${parsed.toolVersion} at ${parsed.generatedAt}; `
+      + 'sources were not re-read; graphRevision verifies topology, not limitation, location or statistics integrity';
+    const modeLimits = parsed.graph.limitationsByMode;
+    return {
+      graph: { ...parsed.graph, limitationsByMode: {
+        direct: [...modeLimits.direct, provenance], bound: [...modeLimits.bound, provenance], candidates: [...modeLimits.candidates, provenance],
+      } },
+      graphRevision: parsed.graphRevision,
+      header: {
+        toolVersion: environment.toolVersion,
+        generatedAt: environment.now(),
+        project: parsed.project,
+        revision: parsed.revision,
+      },
+    };
+  } catch (error) {
+    if (error instanceof SavedGraphError) return inputFailure(error.message);
+    throw error;
+  }
 }
 
 /**
