@@ -11,7 +11,7 @@ const coverageArguments = [
 ];
 // CI job의 10분 제한 안에서 전체 제품 테스트에 8분을 주고 build·CLI 검증 시간을 남긴다.
 const suiteTimeout = 8 * 60_000;
-const testArguments = ['--test', '--test-concurrency=2', ...coverageArguments, 'src/**/*.test.ts'];
+const testArguments = ['--test', '--test-concurrency=3', ...coverageArguments, 'src/**/*.test.ts'];
 const result = runChild(
   process.execPath,
   [...testArguments, ...process.argv.slice(2)],
