@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-09
+
 ### Added
 
 - source-owned 등록 함수를 설정해 화면 URL과 정확한 그래프 심볼을 `navigation-facts`로 내보낸다. 동적·변경·모호한 등록은 추측하지 않고 한계로 남긴다.

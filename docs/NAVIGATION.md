@@ -1,5 +1,7 @@
 # 선언된 등록 구조의 화면 URL
 
+tsograph 0.10.0부터 지원하며 연결 소비자는 isthmus-cli 0.13.0 이상이다.
+
 임의 라우터 구현을 추측하는 대신 source-owned 등록 함수와 객체 필드를 JSON으로 지정한다.
 
 ```json
