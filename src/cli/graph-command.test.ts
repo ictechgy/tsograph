@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { CallGraph } from '../graph/graph-model.ts';
+import { graphOutputChunks } from '../graph/graph-output.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { type GraphEnvironment, graphUsage, impactUsage, reachUsage, render, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
@@ -387,6 +388,16 @@ test('저장한 실제 그래프는 소스를 지운 뒤에도 재빌드 없이 
     assert.equal('revision' in reached, false);
     assert.equal(reached.graphRevision, JSON.parse(snapshotResult.standardOutput).graphRevision);
     assert.ok(!reached.limitations.some((line: string) => line.startsWith('saved-graph-mode-limitations:')));
+
+    const ndjsonFile = join(root, 'graph.ndjson');
+    writeFileSync(ndjsonFile, [...graphOutputChunks(JSON.parse(snapshotResult.standardOutput), 'ndjson')].join(''));
+    const ndjsonReach = await runReachCommand(['--graph-file', ndjsonFile, 'src/index.ts#start'], savedEnvironment);
+    assert.equal(ndjsonReach.exitCode, 0, ndjsonReach.standardError);
+    assert.deepEqual(JSON.parse(ndjsonReach.standardOutput), reached);
+    const ndjsonImpact = await runImpactCommand(['--graph-file', ndjsonFile, 'src/index.ts#finish'], savedEnvironment);
+    assert.equal(ndjsonImpact.exitCode, 0, ndjsonImpact.standardError);
+    assert.deepEqual(JSON.parse(ndjsonImpact.standardOutput).reached
+      .map((row: { symbol: { usr: string } }) => row.symbol.usr), ['src/index.ts#start']);
 
     const legacy = JSON.parse(snapshotResult.standardOutput);
     delete legacy.limitationsByMode;

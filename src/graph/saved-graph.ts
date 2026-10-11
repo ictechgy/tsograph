@@ -109,6 +109,61 @@ export function parseSavedGraphSnapshot(text: string): ParsedSavedGraph {
   return validateDocument(value);
 }
 
+/** JSON과 자체 NDJSON 내보내기를 같은 엄격한 그래프 계약으로 복원한다. */
+export function parseSavedGraphInput(text: string): ParsedSavedGraph {
+  if (Buffer.byteLength(text, 'utf8') > MAX_SAVED_GRAPH_BYTES) throw new SavedGraphError('too-large');
+  const end = text.indexOf('\n');
+  const firstLine = end < 0 ? text : text.slice(0, end);
+  // 형식 감지도 신뢰 경계 안에서 한다. JSON.parse 전에 깊이·값·중복 키를 검사한다.
+  // pretty JSON의 첫 행은 미완성일 수 있으므로 그 경우만 전체 JSON 검사로 돌아간다.
+  try { new JsonLimitsScanner(firstLine).scan(); }
+  catch (error) {
+    if (error instanceof SavedGraphError && error.code === 'invalid-json') return parseSavedGraphSnapshot(text);
+    throw error;
+  }
+  let header: unknown;
+  try { header = JSON.parse(firstLine) as unknown; }
+  catch { return parseSavedGraphSnapshot(text); }
+  if (!isRecord(header) || header.format !== 'tsograph-graph-ndjson') return parseSavedGraphSnapshot(text);
+  assertKeys(header, [
+    'format', 'version', 'tool', 'generatedAt', 'platform', 'project', 'revision', 'graphRevision',
+    'statistics', 'limitations', 'limitationsByMode', 'record', 'nodeCount', 'edgeCount',
+  ], 'invalid-schema');
+  if (header.record !== 'header' || !nonNegativeInteger(header.nodeCount)
+    || !nonNegativeInteger(header.edgeCount) || header.nodeCount > MAX_SAVED_GRAPH_NODES
+    || header.edgeCount > MAX_SAVED_GRAPH_EDGES) throw new SavedGraphError('invalid-schema');
+  const nodes: unknown[] = [];
+  const edges: unknown[] = [];
+  let readingEdges = false;
+  // split()로 전체 파일의 행 배열을 복제하지 않고 한 행만 처리한다.
+  let start = end < 0 ? text.length : end + 1;
+  while (start < text.length) {
+    const next = text.indexOf('\n', start);
+    const line = text.slice(start, next < 0 ? text.length : next);
+    new JsonLimitsScanner(line).scan();
+    let record: unknown;
+    try { record = JSON.parse(line) as unknown; }
+    catch { throw new SavedGraphError('invalid-json'); }
+    if (!isRecord(record)) throw new SavedGraphError('invalid-schema');
+    if (record.record === 'node' && !readingEdges) {
+      assertKeys(record, ['record', 'node'], 'invalid-schema');
+      if (nodes.length >= header.nodeCount) throw new SavedGraphError('invalid-schema');
+      nodes.push(record.node);
+    } else if (record.record === 'edge') {
+      assertKeys(record, ['record', 'edge'], 'invalid-schema');
+      if (edges.length >= header.edgeCount) throw new SavedGraphError('invalid-schema');
+      readingEdges = true;
+      edges.push(record.edge);
+    } else throw new SavedGraphError('invalid-schema');
+    start = next < 0 ? text.length : next + 1;
+  }
+  if (nodes.length !== header.nodeCount || edges.length !== header.edgeCount) {
+    throw new SavedGraphError('invalid-schema');
+  }
+  const { record: _record, nodeCount: _nodes, edgeCount: _edges, ...document } = header;
+  return validateDocument({ ...document, format: 'tsograph-graph', nodes, edges });
+}
+
 /** 닫힌 v1 문서를 검증하고 runtime 모델로 다시 만든다. */
 function validateDocument(value: unknown): ParsedSavedGraph {
   if (!isRecord(value) || value.format !== 'tsograph-graph' || value.version !== 1) {
