@@ -768,10 +768,11 @@ The CLI streams graph JSON without a whole-document string; `--format ndjson` em
 `tsograph-graph-ndjson` v1 header followed by one `node` or `edge` record per line. The graph and
 compiler state still reside in memory. Bridge-facts and traversal outputs retain their exchange limits;
 the in-memory command API also retains its bounded String result. Saved traversal accepts validated
-JSON snapshots up to 128 MiB, without reading current sources, configs or Git. It preserves captured
+JSON or NDJSON snapshots up to 128 MiB, without reading current sources, configs or Git. It preserves captured
 project/revision/hash and exact mode limitations when available. Older snapshots keep their global
-limitations with an explicit mode-information gap. NDJSON is an export format and is not a saved
-traversal input. Recapture after code changes.
+limitations with an explicit mode-information gap. NDJSON input validates its header counts, record order,
+node/edge integrity and graph hash; truncated or modified records fail rather than producing partial reachability.
+The reader still holds the bounded input and reconstructed graph in memory. Recapture after code changes.
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`

@@ -27,7 +27,7 @@ import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection, type TraversalR
 import {
   MAX_SAVED_GRAPH_BYTES,
   SavedGraphError,
-  parseSavedGraphSnapshot,
+  parseSavedGraphInput,
 } from '../graph/saved-graph.ts';
 import { type CommandResult, inputFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -71,7 +71,7 @@ const traversalOptions = `Options:
   --project <root>            Build and traverse the project call graph (one input mode is required)
   --tsconfig <file>           Explicit compiler config (live --project input only)
   --workspace <root>         Enclosing workspace source boundary (live --project input only)
-  --graph-file <path>         Traverse an existing tsograph-graph v1 file without reading project sources
+  --graph-file <path>         Traverse a saved JSON or NDJSON graph without reading project sources
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
   --max-reached <n>           Emit at most n reached symbols (default and maximum: ${DEFAULT_MAX_REACHED})
   --dispatch <mode>           Edges to follow: direct (proven by the checker), bound (direct plus
@@ -434,7 +434,7 @@ async function loadSavedGraph(
     if (status.kind !== 'file') throw new Error('not a file');
     size = status.size;
   } catch {
-    return inputFailure('--graph-file does not name a readable saved graph file; pass an existing tsograph-graph v1 JSON file.');
+    return inputFailure('--graph-file does not name a readable saved graph file; pass an existing tsograph-graph v1 JSON or NDJSON file.');
   }
   if (size > MAX_SAVED_GRAPH_BYTES) {
     return inputFailure(`the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes; produce a smaller graph snapshot.`);
@@ -449,7 +449,7 @@ async function loadSavedGraph(
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { return inputFailure('the saved graph is not valid UTF-8; re-encode it as UTF-8 JSON.'); }
   try {
-    const parsed = parseSavedGraphSnapshot(text);
+    const parsed = parseSavedGraphInput(text);
     const provenance = `saved-graph-input: built by tsograph ${parsed.toolVersion} at ${parsed.generatedAt}; `
       + 'sources were not re-read; graphRevision verifies topology, not limitation, location or statistics integrity';
     const modeLimits = parsed.graph.limitationsByMode;

@@ -33,13 +33,28 @@ export function* graphOutputChunks(document: GraphSnapshotDocument, format: Grap
 export async function writeGraphOutput(document: GraphSnapshotDocument, format: GraphOutputFormat, sink: GraphOutputSink): Promise<void> {
   let pending = '';
   for (const chunk of graphOutputChunks(document, format)) {
-    if (pending.length + chunk.length > 64 * 1024 && pending !== '') {
-      await writeChunk(sink, pending);
-      pending = '';
+    // UTF-16 한 단위는 UTF-8 최대 3 byte다. 보수적 문자 예산으로 각 write를 64 KiB 아래에 묶는다.
+    for (const part of boundedStringParts(chunk)) {
+      if (pending.length + part.length > 16 * 1024 && pending !== '') {
+        await writeChunk(sink, pending);
+        pending = '';
+      }
+      pending += part;
     }
-    pending += chunk;
   }
   if (pending !== '') await writeChunk(sink, pending);
+}
+
+/** 긴 문자열 token·NDJSON 행을 surrogate pair를 자르지 않는 조각으로 나눈다. */
+function* boundedStringParts(value: string): Generator<string> {
+  for (let start = 0; start < value.length;) {
+    let end = Math.min(start + 16 * 1024, value.length);
+    const last = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (end < value.length && last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+    yield value.slice(start, end);
+    start = end;
+  }
 }
 
 /** 생성기 오류는 바깥으로 전파하고 쓰기 경계의 오류만 명시 타입으로 감싼다. */

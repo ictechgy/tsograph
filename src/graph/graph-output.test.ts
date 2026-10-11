@@ -75,3 +75,16 @@ test('streamed graph can exceed the exchange String limit using bounded writes',
   assert.ok(bytes > 16 * 1024 * 1024);
   assert.ok(largest <= 64 * 1024);
 });
+
+test('oversized Unicode tokens and NDJSON records use bounded UTF-8 writes without corruption', async () => {
+  const large = { ...document, limitations: ['가'.repeat(65_535) + '😀'.repeat(20_000)] };
+  for (const format of ['json', 'ndjson'] as const) {
+    const writes: Buffer[] = [];
+    await writeGraphOutput(large, format, async (chunk) => {
+      const bytes = Buffer.from(chunk, 'utf8');
+      assert.ok(bytes.length <= 64 * 1024);
+      writes.push(bytes);
+    });
+    assert.equal(Buffer.concat(writes).toString('utf8'), [...graphOutputChunks(large, format)].join(''));
+  }
+});

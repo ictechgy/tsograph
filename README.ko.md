@@ -619,10 +619,11 @@ symlink는 제외한다. PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
 `tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler
 상태는 여전히 메모리에 존재한다. bridge-facts·순회는 교환 상한을, in-memory 명령 API는 제한된
-String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증된 JSON 스냅샷을 읽으며 현재
+String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증된 JSON·NDJSON 스냅샷을 읽으며 현재
 소스·설정·Git을 조회하지 않는다. 캡처된 project·revision·hash와 가능한 mode별 한계를 보존한다.
-옛 스냅샷은 전역 한계와 mode 정보 부재를 명시한다. NDJSON은 내보내기 형식이며 저장 순회
-입력은 아니다. 코드 변경 뒤에는 다시 캡처한다.
+옛 스냅샷은 전역 한계와 mode 정보 부재를 명시한다. NDJSON의 header 개수·행 순서·참조 무결성·
+그래프 해시를 검사하고 잘리거나 변조된 입력은 거부한다. 읽은 입력과 복원된 그래프는 여전히
+메모리에 존재한다. 코드 변경 뒤에는 다시 캡처한다.
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,

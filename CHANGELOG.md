@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
+
+### Fixed
+
+- Unicode와 긴 단일 JSON token·NDJSON 행도 출력 write의 64 KiB byte 상한을 지키며 surrogate pair를 보존한다.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
