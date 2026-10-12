@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 호출 그래프의 compiler host에도 파일별 4 MiB 읽기 상한을 적용한다. tsconfig 루트·전이 import·선언 파일이 수집기 제한을 우회하지 못하며, 생략된 compiler 입력을 한계와 불완전한 분석으로 알린다.
+
 ## [0.11.0] - 2026-10-12
 
 ### Added
