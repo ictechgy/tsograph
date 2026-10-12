@@ -515,7 +515,7 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
   `64` usage error. `1` is reserved.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
-  Prisma generator output directories, and files over 4 MiB (counted). `*.d.ts` files are not
+  Prisma generator output directories, and files over 4 MiB (counted). Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
 
 ### Facts
