@@ -817,3 +817,34 @@ test('Program 생성 primary error가 cleanup error에 가려지지 않고 clean
     }
   });
 });
+
+
+test('compiler host caps valid tsconfig roots, transitive imports and declaration dependencies', async () => {
+  const huge = `/*${'x'.repeat(4 * 1024 * 1024)}*/ export function huge() {}`;
+  await withProject({
+    'package.json': '{"private":true}',
+    'tsconfig.json': '{"files":["entry.ts","huge.ts"]}',
+    'entry.ts': 'import { hidden } from "./hidden"; import type { Shape } from "./types"; export function entry(a: Shape){ hidden(); }',
+    'huge.ts': huge,
+    'hidden.ts': huge.replace('huge()', 'hidden()'),
+    'types.d.ts': huge,
+  }, async (root) => {
+    const originalRead = ts.sys.readFile;
+    let unboundedReads = 0;
+    ts.sys.readFile = (path, encoding) => {
+      if (['huge.ts', 'hidden.ts', 'types.d.ts'].some((name) => path === join(root, name))) unboundedReads++;
+      return originalRead(path, encoding);
+    };
+    try {
+      const { program, status } = createGraphProgram(root, [join(root, 'entry.ts')]);
+      for (const name of ['huge.ts', 'hidden.ts', 'types.d.ts']) assert.equal(program.getSourceFile(join(root, name)), undefined);
+      assert.equal(status.oversizedCompilerInputs, 3);
+      assert.ok(program.getSourceFile(join(root, 'entry.ts')));
+      assert.ok(program.getSourceFiles().some((file) => file.fileName.endsWith('/lib.es5.d.ts')));
+      const graph = await buildCallGraph(root, createNodeFileSystem());
+      assert.ok(graph.limitations.some((line) => line.startsWith('oversized-compiler-inputs: 3')));
+      assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
+      assert.equal(unboundedReads, 0);
+    } finally { ts.sys.readFile = originalRead; }
+  });
+});

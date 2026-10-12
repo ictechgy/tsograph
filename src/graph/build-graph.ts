@@ -126,7 +126,8 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const { program, checker, status } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
   const files = nodeFiles(program, inputs.sources);
   const walk = inputs.walk;
-  const coverageComplete = !status.configUnreadable && !walk.truncated && inputs.oversized === 0
+  const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0;
+  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
@@ -139,7 +140,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = openProgramReason(project, inputs, parseErrorFiles.length);
+  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
@@ -571,6 +572,9 @@ function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadabl
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
+  }
+  if ((config.oversizedCompilerInputs ?? 0) > 0) {
+    result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
   }
   if (parseErrorFiles.length > 0) {
     result.push(`parse-errors: ${parseErrorFiles.length} source file(s) have syntax errors; their calls may be incomplete`

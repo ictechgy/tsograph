@@ -15,6 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
@@ -48,6 +49,8 @@ export interface ProgramConfigStatus {
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
   readonly configUnreadable: boolean;
+  /** compiler host가 크기 상한 때문에 읽지 못한 고유 입력 수다. */
+  readonly oversizedCompilerInputs?: number;
 }
 
 /** 만든 Program과 checker, 설정 상태다. */
@@ -76,12 +79,21 @@ export function createGraphProgram(
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
+  const oversized = new Set<string>();
+  // tsconfig 루트·전이 import·선언·package.json 모두 같은 bounded reader를 거친다.
+  // 수집 단계에서 제외한 파일이 compiler host를 통해 다시 무제한 읽히지 않게 한다.
+  host.readFile = (fileName) => {
+    const result = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
+    if (result.ok) return result.text;
+    if (result.reason === 'too-large') oversized.add(resolve(fileName));
+    return undefined;
+  };
   const cacheLease = sdkSourceFileCache.install(host, options);
   let primaryFailed = false;
   try {
     const program = createProgram({ rootNames, options, host });
     const checker = program.getTypeChecker();
-    return { program, checker, status: config.status };
+    return { program, checker, status: { ...config.status, ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}) } };
   } catch (error) {
     primaryFailed = true;
     throw error;
