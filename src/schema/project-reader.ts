@@ -4,7 +4,7 @@
  * "없다"와 "못 읽었다"를 구분하기 위한 장부다. 오류 문구에 경로·내용을 싣지 않고 개수만 센다.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs';
 
 import { decodeUtf8 } from './source-text.ts';
 
@@ -36,13 +36,13 @@ export class ProjectReader {
     let bytes: Uint8Array;
     let modifiedAt: Date;
     try {
-      const stats = statSync(path);
-      if (stats.size > MAX_SOURCE_BYTES) {
+      const result = readSourceBytes(path);
+      if (result === undefined) {
         this.oversized++;
         return undefined;
       }
-      modifiedAt = stats.mtime;
-      bytes = readFileSync(path);
+      modifiedAt = result.modifiedAt;
+      bytes = result.bytes;
     } catch {
       // 권한·경합으로 못 읽은 파일은 unreadable 계수로 보고한다.
       this.unreadable++;
@@ -55,6 +55,28 @@ export class ProjectReader {
     }
     if (this.newestModifiedAt === undefined || modifiedAt > this.newestModifiedAt) this.newestModifiedAt = modifiedAt;
     return { text, modifiedAt };
+  }
+}
+
+/** 일반 파일 핸들에서만 최대 상한+1 바이트를 읽어 변경 중인 파일도 무제한 읽지 않는다. */
+function readSourceBytes(path: string): { bytes: Uint8Array; modifiedAt: Date } | undefined {
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile()) throw new Error('source is not a regular file');
+    if (stats.size > MAX_SOURCE_BYTES) return undefined;
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (true) {
+      const count = readSync(descriptor, chunk, 0, Math.min(chunk.length, MAX_SOURCE_BYTES + 1 - total), null);
+      if (count === 0) return { bytes: Buffer.concat(chunks, total), modifiedAt: stats.mtime };
+      total += count;
+      if (total > MAX_SOURCE_BYTES) return undefined;
+      chunks.push(Buffer.from(chunk.subarray(0, count)));
+    }
+  } finally {
+    closeSync(descriptor);
   }
 }
 
