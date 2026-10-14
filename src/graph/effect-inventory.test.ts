@@ -34,8 +34,14 @@ function checkedSources(entries: Readonly<Record<string, string>>, options: ts.C
   host.readFile = (name) => texts.get(name) ?? readFile(name);
   host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) => {
     const text = texts.get(name);
-    return text === undefined ? getSourceFile(name, languageVersion, onError, shouldCreateNewSourceFile)
-      : ts.createSourceFile(name, text, languageVersion, true);
+    if (text !== undefined) return ts.createSourceFile(name, text, languageVersion, true);
+    // 진단·문서 주석을 검사하지 않는 fixture이므로 설치 선언의 타입 정보만 파싱한다. Program과 AST는 매번 새로 만든다.
+    const declarationOptions = /\.d\.[cm]?ts$/u.test(name) && /[/\\]node_modules[/\\]/u.test(name)
+      ? typeof languageVersion === 'object'
+        ? { ...languageVersion, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo }
+        : { languageVersion, jsDocParsingMode: ts.JSDocParsingMode.ParseForTypeInfo }
+      : languageVersion;
+    return getSourceFile(name, declarationOptions, onError, shouldCreateNewSourceFile);
   };
   const program = ts.createProgram([...texts.keys()], compilerOptions, host);
   return {
@@ -43,6 +49,19 @@ function checkedSources(entries: Readonly<Record<string, string>>, options: ts.C
     checker: program.getTypeChecker(),
   };
 }
+
+/** 설치 경로와 닮은 메모리 fixture도 호출마다 새 AST·checker와 현재 JSDoc을 보존한다. */
+test('메모리 선언 fixture는 설치 라이브러리 최적화와 분리된 새 Program을 유지한다', () => {
+  const path = '/node_modules/synthetic/index.d.ts';
+  const first = checkedSources({ [path]: '/** first fixture */ export declare const value: 1;' }, { noLib: true, types: [] });
+  const second = checkedSources({ [path]: '/** second fixture */ export declare const value: 2;' }, { noLib: true, types: [] });
+  const firstFile = first.files.get(path)!;
+  const secondFile = second.files.get(path)!;
+  assert.notEqual(firstFile, secondFile);
+  assert.notEqual(first.checker, second.checker);
+  assert.deepEqual(ts.getJSDocCommentsAndTags(firstFile.statements[0]!).map((comment) => comment.getText()), ['/** first fixture */']);
+  assert.deepEqual(ts.getJSDocCommentsAndTags(secondFile.statements[0]!).map((comment) => comment.getText()), ['/** second fixture */']);
+});
 
 /** 실제 IndexCollector의 map을 공급하며 manifest의 기대 witness를 복사하지 않는다. */
 function actualReferenceMaps(files: readonly ts.SourceFile[], resolve: () => ts.Symbol | undefined = () => undefined,
