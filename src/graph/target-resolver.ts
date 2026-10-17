@@ -30,6 +30,26 @@ const MAX_FOLLOW_DEPTH = 8;
 /** direct target 질의의 carrier 감사가 caller 상한을 넘었다는 내부 중단이다. */
 class CarrierCallerExhausted extends Error {}
 
+/**
+ * 반사적 쓰기 대상과 겹치는지 따질 때 쓰는 식의 정체성 요약이다. 식(AST 노드)이 같으면 값도 같으므로 식마다 한 번만
+ * 계산한다.
+ */
+interface IdentityFacts {
+  /** 식과 그 속성 사슬 접두사의 정체성 */
+  readonly identities: readonly (ts.Node | ts.Symbol)[];
+  /** 식 자체의 정체성 */
+  readonly primary: ts.Node | ts.Symbol | undefined;
+  /** primary가 나타내는 클래스(`this` 또는 `new C`)와 그 기반 클래스 계보. 클래스나 계보를 풀지 못하면 undefined */
+  readonly lineage: readonly ts.ClassLikeDeclaration[] | undefined;
+}
+
+/** 한 묶음(반사적 쓰기 전체, 또는 같은 이름 속성 쓰기)의 쓰기 대상 요약이다. */
+interface WriteTargets {
+  readonly targets: readonly IdentityFacts[];
+  /** 어떤 수신자와도 분리를 증명할 수 없는 대상이 있다(이때 모든 수신자가 겹칠 수 있다) */
+  readonly hasUnprovable: boolean;
+}
+
 /** 외부 결과(공유 상수)다. */
 const external: Resolution = { kind: 'external' };
 
@@ -59,6 +79,12 @@ export class TargetResolver {
   private carrierSteps = 0;
   /** whole/production graph가 공유하는 제한 진단 sink다. */
   private readonly proofDiagnostics: Set<string> | undefined;
+  /** 식 → 정체성 요약(수신자와 쓰기 대상이 함께 쓰는 메모) */
+  private readonly identityFacts = new Map<ts.Expression, IdentityFacts>();
+  /** 반사적 쓰기 대상 요약. 쓰기 색인은 resolver 수명 동안 바뀌지 않으므로 처음 쓸 때 한 번 만든다. */
+  private reflectiveWriteTargets: WriteTargets | undefined;
+  /** 속성 이름 → 그 이름 쓰기의 대상 요약 */
+  private readonly propertyWriteTargets = new Map<string, WriteTargets>();
 
   /**
    * @param checker TypeChecker
@@ -370,17 +396,16 @@ export class TargetResolver {
    */
   private resolveExpression(expression: ts.Expression, depth: number): Resolution {
     if (ts.isIdentifier(expression)) return this.resolveSymbol(this.checker.getSymbolAtLocation(expression), depth);
+    // 쓰기 대상과 겹치는지는 노드 결과를 지울 때만 쓰므로 그때만 따진다.
     if (ts.isPropertyAccessExpression(expression)) {
       const resolution = this.resolveSymbol(this.checker.getSymbolAtLocation(expression.name), depth);
-      const mutable = this.isReflectivelyMutable(expression.expression)
-        || this.hasPotentialPropertyWrite(expression.expression, expression.name.text);
-      return resolution.kind === 'nodes' && mutable ? unresolved('indirect') : resolution;
+      return resolution.kind === 'nodes' && (this.isReflectivelyMutable(expression.expression)
+        || this.hasPotentialPropertyWrite(expression.expression, expression.name.text)) ? unresolved('indirect') : resolution;
     }
     if (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression)) {
       const resolution = this.resolveSymbol(this.checker.getSymbolAtLocation(expression.argumentExpression), depth);
-      const mutable = this.isReflectivelyMutable(expression.expression)
-        || this.hasPotentialPropertyWrite(expression.expression, expression.argumentExpression.text);
-      return resolution.kind === 'nodes' && mutable ? unresolved('indirect') : resolution;
+      return resolution.kind === 'nodes' && (this.isReflectivelyMutable(expression.expression)
+        || this.hasPotentialPropertyWrite(expression.expression, expression.argumentExpression.text)) ? unresolved('indirect') : resolution;
     }
     return unresolved('computed');
   }
@@ -544,8 +569,8 @@ export class TargetResolver {
     if (initializer === undefined) return undefined;
     const property = this.checker.getPropertyOfType(this.checker.getTypeAtLocation(initializer), access.name.text);
     const proven = this.resolveSymbol(property, 1);
-    const mutable = this.isReflectivelyMutable(receiver) || this.hasPotentialPropertyWrite(receiver, access.name.text);
-    return proven.kind === 'nodes' && proven.partial === undefined && !mutable ? proven : undefined;
+    if (proven.kind !== 'nodes' || proven.partial !== undefined) return undefined;
+    return this.isReflectivelyMutable(receiver) || this.hasPotentialPropertyWrite(receiver, access.name.text) ? undefined : proven;
   }
 
   /**
@@ -585,8 +610,14 @@ export class TargetResolver {
 
   /** 같은 이름 쓰기 중 호출 수신자와 겹칠 수 있는 것이 있는지 본다. */
   private hasPotentialPropertyWrite(receiver: ts.Expression, name: string): boolean {
-    return (this.writes.propertyWrites.get(name) ?? [])
-      .some((write) => !this.expressionsProvablyDisjoint(receiver, write.target.expression));
+    const writes = this.writes.propertyWrites.get(name);
+    if (writes === undefined) return false;
+    let targets = this.propertyWriteTargets.get(name);
+    if (targets === undefined) {
+      targets = this.summarizeTargets(writes.map((write) => write.target.expression));
+      this.propertyWriteTargets.set(name, targets);
+    }
+    return this.mayOverlap(receiver, targets);
   }
 
   /**
@@ -595,27 +626,55 @@ export class TargetResolver {
    */
   private isReflectivelyMutable(receiver: ts.Expression): boolean {
     if (this.writes.hasOpaqueMutation === true) return true;
-    if (this.writes.reflectiveTargets.length === 0) return false;
-    return this.writes.reflectiveTargets.some((target) => !this.expressionsProvablyDisjoint(receiver, target));
+    this.reflectiveWriteTargets ??= this.summarizeTargets(this.writes.reflectiveTargets);
+    return this.mayOverlap(receiver, this.reflectiveWriteTargets);
   }
 
-  /** 두 수신자 식이 같은 객체를 가리킬 수 없음을 할당·클래스 정체성으로 증명한다. */
-  private expressionsProvablyDisjoint(left: ts.Expression, right: ts.Expression): boolean {
-    const leftIdentities = this.expressionIdentities(left);
-    const rightIdentities = this.expressionIdentities(right);
-    if (leftIdentities.length === 0 || rightIdentities.length === 0) return false;
-    if (leftIdentities.some((identity) => rightIdentities.includes(identity))) return false;
-    const leftPrimary = this.expressionIdentity(left);
-    const rightPrimary = this.expressionIdentity(right);
-    if (leftPrimary === undefined || rightPrimary === undefined) return false;
-    if (isObjectAllocation(leftPrimary) && isObjectAllocation(rightPrimary)) return leftPrimary !== rightPrimary;
-    const leftClass = this.identityClass(leftPrimary);
-    const rightClass = this.identityClass(rightPrimary);
-    if (leftClass === undefined || rightClass === undefined) return false;
-    const leftLineage = this.classLineage(leftClass);
-    const rightLineage = this.classLineage(rightClass);
-    return leftLineage !== undefined && rightLineage !== undefined
-      && !leftLineage.some((declaration) => rightLineage.includes(declaration));
+  /**
+   * 쓰기 대상 식들의 정체성을 한 번 계산해 둔다. 호출마다 대상마다 정체성·계보를 다시 풀면 비용이 호출 수 × 대상 수로
+   * 커지기 때문이다. 어떤 수신자와도 분리를 증명할 수 없는 대상이 있는지도 함께 본다.
+   *
+   * @param expressions 쓰기 대상 식
+   * @returns 대상 요약
+   */
+  private summarizeTargets(expressions: readonly ts.Expression[]): WriteTargets {
+    const targets = expressions.map((expression) => this.identityFactsOf(expression));
+    return { targets, hasUnprovable: targets.some(isUnprovableTarget) };
+  }
+
+  /**
+   * 수신자가 쓰기 대상 중 하나와 같은 객체일 수 있는지 본다. 분리를 증명하지 못한 대상이 하나라도 있으면 true다.
+   *
+   * @param receiver 수신자 식
+   * @param writes 쓰기 대상 요약
+   * @returns 겹칠 수 있으면 true
+   */
+  private mayOverlap(receiver: ts.Expression, writes: WriteTargets): boolean {
+    if (writes.targets.length === 0) return false;
+    if (writes.hasUnprovable) return true;
+    const facts = this.identityFactsOf(receiver);
+    return writes.targets.some((target) => !provablyDisjoint(facts, target));
+  }
+
+  /**
+   * 식의 정체성 요약(정체성 목록, primary, 클래스 계보)이다. 식마다 한 번만 계산한다.
+   *
+   * @param expression 수신자·쓰기 대상 식
+   * @returns 정체성 요약
+   */
+  private identityFactsOf(expression: ts.Expression): IdentityFacts {
+    let facts = this.identityFacts.get(expression);
+    if (facts === undefined) {
+      const primary = this.expressionIdentity(expression);
+      const identityClass = primary === undefined ? undefined : this.identityClass(primary);
+      facts = {
+        identities: this.expressionIdentities(expression),
+        primary,
+        lineage: identityClass === undefined ? undefined : this.classLineage(identityClass),
+      };
+      this.identityFacts.set(expression, facts);
+    }
+    return facts;
   }
 
   /** 정체성이 나타내는 클래스(`this` 또는 `new C`)다. */
@@ -811,6 +870,36 @@ function isNodeIdentity(identity: ts.Node | ts.Symbol): identity is ts.Node {
 /** 정체성 값이 매 평가마다 고유한 객체 할당인지 본다. */
 function isObjectAllocation(identity: ts.Node | ts.Symbol): identity is ts.ObjectLiteralExpression | ts.NewExpression {
   return isNodeIdentity(identity) && (ts.isObjectLiteralExpression(identity) || ts.isNewExpression(identity));
+}
+
+/**
+ * 두 식(정체성 요약)이 같은 객체를 가리킬 수 없음을 할당·클래스 정체성으로 증명한다. 정체성이 겹치면 같을 수 있고,
+ * 둘 다 객체 할당이면 서로 다른 할당일 때 분리되며, 그 밖에는 클래스 계보가 서로소일 때만 분리된다.
+ *
+ * @param left 수신자 요약
+ * @param right 쓰기 대상 요약
+ * @returns 분리를 증명하면 true
+ */
+function provablyDisjoint(left: IdentityFacts, right: IdentityFacts): boolean {
+  if (left.identities.length === 0 || right.identities.length === 0) return false;
+  if (left.identities.some((identity) => right.identities.includes(identity))) return false;
+  if (left.primary === undefined || right.primary === undefined) return false;
+  if (isObjectAllocation(left.primary) && isObjectAllocation(right.primary)) return left.primary !== right.primary;
+  const rightLineage = right.lineage;
+  return left.lineage !== undefined && rightLineage !== undefined
+    && !left.lineage.some((declaration) => rightLineage.includes(declaration));
+}
+
+/**
+ * 어떤 수신자와도 분리를 증명할 수 없는 쓰기 대상인지 본다: 정체성이나 primary가 없거나, primary가 객체 할당이 아니면서
+ * 클래스 계보도 풀리지 않는다(`provablyDisjoint`가 수신자와 무관하게 false다).
+ *
+ * @param target 쓰기 대상 요약
+ * @returns 증명할 수 없으면 true
+ */
+function isUnprovableTarget(target: IdentityFacts): boolean {
+  return target.identities.length === 0 || target.primary === undefined
+    || (!isObjectAllocation(target.primary) && target.lineage === undefined);
 }
 
 /** 멤버나 소유 클래스의 데코레이터가 런타임 값을 바꿀 수 있는지 본다. */
