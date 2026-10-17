@@ -322,7 +322,7 @@ function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated,
  * @returns limitation 목록
  */
 function inputLimitations({ project, counts, reader, unreadableConfigs }: LimitationInput): string[] {
-  const { walk, location } = project;
+  const { walk } = project;
   const result: string[] = [];
   if (reader.unreadable + walk.unreadableDirectories > 0) {
     result.push(`unreadable-sources: ${reader.unreadable} file(s) and ${walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
@@ -337,7 +337,8 @@ function inputLimitations({ project, counts, reader, unreadableConfigs }: Limita
   if (unreadableConfigs > 0) {
     result.push(`unreadable-module-configs: ${unreadableConfigs} tsconfig/jsconfig file(s) could not be parsed; imports under them use default resolution`);
   }
-  const symlinks = walk.skippedSymlinks + location.skippedSymlinks;
+  // Prisma 탐색 계수는 걷기가 이미 센 링크를 빼고 셌으므로 더해도 같은 링크를 두 번 세지 않는다.
+  const symlinks = walk.skippedSymlinks + project.counts.skippedSymlinks;
   if (symlinks > 0) result.push(`skipped-symlinks: ${symlinks} symbolic link(s) were not followed`);
   if (walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   return result;

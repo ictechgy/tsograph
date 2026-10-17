@@ -11,6 +11,7 @@
  *
  * 기준 디렉터리는 프로젝트 루트, 설정 파일이 있는 디렉터리, Prisma에 의존하는 package.json이 있는
  * 디렉터리다(모노레포 패키지). 설정 값이 리터럴이 아니면 추측하지 않고 limitation으로 알린다.
+ * 후보 경로는 걷기를 거치지 않고 조립하므로 `LinkFreePaths`로 판정해 디렉터리 링크를 따라가지 않는다.
  */
 
 import { readdirSync, lstatSync } from 'node:fs';
@@ -19,7 +20,7 @@ import { dirname, join, resolve } from 'node:path';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { PRISMA_CONFIG_CANDIDATES, readPrismaConfig, type ConfigValue } from './prisma-config.ts';
 import { type ObservedVersion, parseVersion } from './prisma-version.ts';
-import { pathKind, type ProjectReader } from './project-reader.ts';
+import { type LinkFreePathKind, type LinkFreePaths, pathKind, type ProjectReader } from './project-reader.ts';
 
 /** 찾은 스키마 루트 하나다. */
 export interface SchemaRoot {
@@ -38,8 +39,6 @@ export interface SchemaLocation {
   readonly unresolvedConfigs: number;
   /** 설정·package.json이 가리켰지만 없는 스키마 경로 수다. */
   readonly missingSchemas: number;
-  /** 스키마 폴더 안에서 따라가지 않은 심볼릭 링크 수다. */
-  readonly skippedSymlinks: number;
 }
 
 /** 탐색 입력이다. */
@@ -50,6 +49,8 @@ export interface LocateInput {
   readonly packageFiles: readonly string[];
   readonly observedVersions: readonly ObservedVersion[];
   readonly reader: ProjectReader;
+  /** 링크를 따라가지 않는 경로 판정기다. 따라가지 않은 링크(스키마 폴더 안 링크 포함)를 모은다. */
+  readonly paths: LinkFreePaths;
 }
 
 /**
@@ -59,7 +60,7 @@ export interface LocateInput {
  * @returns 스키마 루트와 계수
  */
 export function locatePrismaSchemas(input: LocateInput): SchemaLocation {
-  const state = { unresolvedConfigs: 0, missingSchemas: 0, skippedSymlinks: 0 };
+  const state = { unresolvedConfigs: 0, missingSchemas: 0 };
   const roots = new Map<string, SchemaRoot>();
   for (const base of baseDirectories(input)) {
     const root = locateInBase(base, input, state);
@@ -74,7 +75,6 @@ export function locatePrismaSchemas(input: LocateInput): SchemaLocation {
 interface LocateState {
   unresolvedConfigs: number;
   missingSchemas: number;
-  skippedSymlinks: number;
 }
 
 /**
@@ -120,7 +120,7 @@ function dependsOnPrisma(path: string, reader: ProjectReader): boolean {
  */
 function locateInBase(base: string, input: LocateInput, state: LocateState): SchemaRoot | undefined {
   const configPath = PRISMA_CONFIG_CANDIDATES.map((candidate) => join(base, candidate))
-    .find((candidate) => pathKind(candidate) === 'file');
+    .find((candidate) => input.paths.kind(candidate) === 'file');
   if (configPath !== undefined) {
     const text = input.reader.read(configPath)?.text;
     const config = text === undefined ? undefined : readPrismaConfig(configPath, text);
@@ -129,7 +129,9 @@ function locateInBase(base: string, input: LocateInput, state: LocateState): Sch
       return undefined;
     }
     const typedSql = typedSqlDirectory(config.typedSqlPath, dirname(configPath));
-    if (config.schema.kind === 'literal') return schemaAt(resolve(dirname(configPath), config.schema.value), typedSql, state);
+    if (config.schema.kind === 'literal') {
+      return schemaAt(resolve(dirname(configPath), config.schema.value), typedSql, state, input.paths);
+    }
     return defaultSchema(base, typedSql, input, state);
   }
   return defaultSchema(base, undefined, input, state);
@@ -163,9 +165,11 @@ function defaultSchema(
   state: LocateState,
 ): SchemaRoot | undefined {
   const manifestSchema = legacyManifestSchema(base, input);
-  if (manifestSchema !== undefined) return schemaAt(resolve(base, manifestSchema), typedSql, state);
+  if (manifestSchema !== undefined) return schemaAt(resolve(base, manifestSchema), typedSql, state, input.paths);
   for (const candidate of [join(base, 'schema.prisma'), join(base, 'prisma', 'schema.prisma')]) {
-    if (pathKind(candidate) === 'file') return { files: [candidate], rootDirectory: dirname(candidate), typedSqlDirectory: typedSql };
+    if (input.paths.kind(candidate) === 'file') {
+      return { files: [candidate], rootDirectory: dirname(candidate), typedSqlDirectory: typedSql };
+    }
   }
   return undefined;
 }
@@ -189,35 +193,57 @@ function legacyManifestSchema(base: string, input: LocateInput): string | undefi
 }
 
 /**
- * 설정·package.json이 가리킨 경로의 스키마를 읽는다.
+ * 설정·package.json이 가리킨 경로의 스키마를 읽는다. 링크를 거치는 경로는 없는 경로로 세지 않는다
+ * (따라가지 않은 링크로 `paths`가 센다).
  *
  * @param path 절대 경로(파일 또는 폴더)
  * @param typedSql TypedSQL 경로 설정
  * @param state 계수(갱신된다)
+ * @param paths 링크를 따라가지 않는 경로 판정기
  * @returns 스키마 루트 또는 undefined(없으면 계수)
  */
-function schemaAt(path: string, typedSql: string | 'unresolved' | undefined, state: LocateState): SchemaRoot | undefined {
-  const kind = pathKind(path);
+function schemaAt(
+  path: string,
+  typedSql: string | 'unresolved' | undefined,
+  state: LocateState,
+  paths: LinkFreePaths,
+): SchemaRoot | undefined {
+  const kind = schemaPathKind(path, paths);
+  if (kind === 'symlink') return undefined;
   if (kind === 'file') return { files: [path], rootDirectory: dirname(path), typedSqlDirectory: typedSql };
   if (kind === 'directory') {
-    const files = prismaFilesUnder(path, state);
+    const files = prismaFilesUnder(path, paths);
     if (files.length > 0) return { files, rootDirectory: path, typedSqlDirectory: typedSql };
   }
   state.missingSchemas++;
   return undefined;
 }
 
+/**
+ * 설정이 가리킨 스키마 경로의 종류다. 어휘적으로 프로젝트 밖인 경로는 읽지 않고 개수만 세므로
+ * (`schema-outside-project:`) 지금처럼 `stat` 종류로 본다.
+ *
+ * @param path 절대 경로
+ * @param paths 링크를 따라가지 않는 경로 판정기
+ * @returns 경로 종류('outside'는 나오지 않는다)
+ */
+function schemaPathKind(path: string, paths: LinkFreePaths): Exclude<LinkFreePathKind, 'outside'> {
+  const kind = paths.kind(path);
+  return kind === 'outside' ? pathKind(path) : kind;
+}
+
 /** 스키마 폴더 재귀 탐색의 항목 상한이다. */
 const MAX_SCHEMA_DIRECTORY_ENTRIES = 10_000;
 
 /**
- * 폴더 아래 `.prisma` 파일을 재귀로 모은다. 심볼릭 링크는 따라가지 않고 센다.
+ * 폴더 아래 `.prisma` 파일을 재귀로 모은다. 심볼릭 링크는 따라가지 않고 `paths`에 모은다(걷기가 이미 센
+ * 링크와 같은 경로라 두 번 세지 않는다).
  *
- * @param directory 절대 경로
- * @param state 계수(갱신된다)
+ * @param directory 절대 경로(링크를 거치지 않는다고 판정한 폴더)
+ * @param paths 따라가지 않은 링크를 모으는 경로 판정기
  * @returns 정렬된 절대 경로 목록
  */
-function prismaFilesUnder(directory: string, state: LocateState): string[] {
+function prismaFilesUnder(directory: string, paths: LinkFreePaths): string[] {
   const files: string[] = [];
   const pending = [directory];
   let visited = 0;
@@ -228,7 +254,7 @@ function prismaFilesUnder(directory: string, state: LocateState): string[] {
       const path = join(current, name);
       const stats = safeLstat(path);
       if (stats === undefined) continue;
-      if (stats.isSymbolicLink()) state.skippedSymlinks++;
+      if (stats.isSymbolicLink()) paths.skippedLinks.add(path);
       else if (stats.isDirectory()) pending.push(path);
       else if (stats.isFile() && name.endsWith('.prisma')) files.push(path);
     }

@@ -25,6 +25,11 @@ export interface ProjectFiles {
   readonly files: ReadonlyMap<string, string>;
   /** 따라가지 않은 심볼릭 링크 수다. */
   readonly skippedSymlinks: number;
+  /**
+   * 따라가지 않은 심볼릭 링크의 절대 경로다(개수는 skippedSymlinks). 걷기 밖에서 조립한 경로를 판정하는
+   * 단계(Prisma 스키마 탐색 등)가 같은 링크를 다시 만나도 두 번 세지 않게 한다.
+   */
+  readonly skippedSymlinkPaths: ReadonlySet<string>;
   /** 읽지 못한 디렉터리 수다. */
   readonly unreadableDirectories: number;
   /** 항목 상한에 걸려 스캔을 멈췄는지 여부다. */
@@ -47,7 +52,7 @@ export interface CollectOptions {
  * @returns 정렬된 파일 목록과 계수
  */
 export function collectProjectFiles(root: string, options: CollectOptions): ProjectFiles {
-  const state = { visited: 0, skippedSymlinks: 0, unreadableDirectories: 0, truncated: false };
+  const state = { visited: 0, skippedSymlinkPaths: new Set<string>(), unreadableDirectories: 0, truncated: false };
   const found: [string, string][] = [];
   const pending = [root];
   while (pending.length > 0 && !state.truncated) {
@@ -64,7 +69,8 @@ export function collectProjectFiles(root: string, options: CollectOptions): Proj
   found.sort(([left], [right]) => compareStrings(left, right));
   return {
     files: new Map(found),
-    skippedSymlinks: state.skippedSymlinks,
+    skippedSymlinks: state.skippedSymlinkPaths.size,
+    skippedSymlinkPaths: state.skippedSymlinkPaths,
     unreadableDirectories: state.unreadableDirectories,
     truncated: state.truncated,
   };
@@ -73,7 +79,8 @@ export function collectProjectFiles(root: string, options: CollectOptions): Proj
 /** 스캔 중 누적하는 계수다. */
 interface WalkState {
   visited: number;
-  skippedSymlinks: number;
+  /** 따라가지 않은 링크의 절대 경로다(항목마다 한 번만 방문하므로 크기가 곧 개수다). */
+  skippedSymlinkPaths: Set<string>;
   unreadableDirectories: number;
   truncated: boolean;
 }
@@ -122,7 +129,7 @@ function classifyEntry(
     return;
   }
   if (stats.isSymbolicLink()) {
-    state.skippedSymlinks++;
+    state.skippedSymlinkPaths.add(path);
   } else if (stats.isDirectory()) {
     if (!isSkippedDirectory(name) && !options.excludedDirectories.has(path)) pending.push(path);
   } else if (stats.isFile() && options.includeFile(name)) {

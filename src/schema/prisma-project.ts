@@ -21,7 +21,7 @@ import {
   versionsFromLockfile,
 } from './prisma-version.ts';
 import { collectProjectFiles, type ProjectFiles, toPosixRelative } from './project-files.ts';
-import { pathKind, type ProjectReader } from './project-reader.ts';
+import { LinkFreePaths, type ProjectReader } from './project-reader.ts';
 import { isSourceFileName } from './source-module.ts';
 import { SourceText } from './source-text.ts';
 
@@ -49,6 +49,8 @@ export interface PrismaProjectCounts {
   schemasOutsideProject: number;
   unresolvedGeneratorOutputs: number;
   unresolvedTypedSql: number;
+  /** 스키마·설정·TypedSQL 탐색이 따라가지 않은 링크 중 걷기가 세지 않은 수다(걷기 계수에 더한다). */
+  skippedSymlinks: number;
 }
 
 /**
@@ -65,17 +67,21 @@ export function loadPrismaProject(root: string, reader: ProjectReader): PrismaPr
   const packageFiles = byName((name) => name === 'package.json');
   const observed = observeVersions(root, byName((name) => LOCKFILE_NAMES.includes(name)), packageFiles, reader);
   const naming = decideNamingRules(observed);
+  const paths = new LinkFreePaths(root);
   const location = locatePrismaSchemas({
     root,
     configFiles: byName((name) => /^prisma\.config\.[cm]?[jt]s$/u.test(name)),
     packageFiles,
     observedVersions: observed,
     reader,
+    paths,
   });
-  const counts: PrismaProjectCounts = { schemasOutsideProject: 0, unresolvedGeneratorOutputs: 0, unresolvedTypedSql: 0 };
+  const counts: PrismaProjectCounts = { schemasOutsideProject: 0, unresolvedGeneratorOutputs: 0, unresolvedTypedSql: 0, skippedSymlinks: 0 };
   const schemaFiles = loadSchemaFiles(root, location, reader, counts);
   const catalog = schemaFiles.length === 0 ? undefined : buildPrismaCatalog(schemaFiles, naming.rules);
   const generators = generatorBlocks(root, schemaFiles);
+  const sqlFiles = typedSqlFiles(root, location, generators, counts, paths);
+  counts.skippedSymlinks = [...paths.skippedLinks].filter((link) => !walk.skippedSymlinkPaths.has(link)).length;
   return {
     walk,
     naming,
@@ -83,7 +89,7 @@ export function loadPrismaProject(root: string, reader: ProjectReader): PrismaPr
     schemaFiles,
     catalog,
     outputDirectories: outputDirectories(generators, counts),
-    typedSqlFiles: typedSqlFiles(root, location, generators, counts),
+    typedSqlFiles: sqlFiles,
     usesPrisma: observed.length > 0 || packageFiles.some((path) => manifestUsesPrisma(path, reader)),
     counts,
   };
@@ -240,9 +246,16 @@ function outputDirectories(generators: readonly GeneratorBlock[], counts: Prisma
  * @param location 스키마 탐색 결과
  * @param generators generator 블록
  * @param counts 계수(갱신된다)
+ * @param paths 링크를 따라가지 않는 경로 판정기
  * @returns `.sql` 파일 절대 경로(정렬)
  */
-function typedSqlFiles(root: string, location: SchemaLocation, generators: readonly GeneratorBlock[], counts: PrismaProjectCounts): string[] {
+function typedSqlFiles(
+  root: string,
+  location: SchemaLocation,
+  generators: readonly GeneratorBlock[],
+  counts: PrismaProjectCounts,
+  paths: LinkFreePaths,
+): string[] {
   const enabled = generators.some(({ block }) => {
     const features = block.properties.get('previewFeatures');
     return features?.kind === 'list' && features.items.some((item) => item.kind === 'string' && item.value === 'typedSql');
@@ -255,24 +268,26 @@ function typedSqlFiles(root: string, location: SchemaLocation, generators: reado
       continue;
     }
     const directory = schemaRoot.typedSqlDirectory ?? join(schemaRoot.rootDirectory, 'sql');
-    for (const file of sqlFilesIn(directory)) if (!toPosixRelative(root, file).startsWith('..')) files.add(file);
+    for (const file of sqlFilesIn(directory, paths)) if (!toPosixRelative(root, file).startsWith('..')) files.add(file);
   }
   return [...files].sort(compareStrings);
 }
 
 /**
- * 디렉터리 최상위의 `.sql` 파일이다.
+ * 디렉터리 최상위의 `.sql` 파일이다. 링크를 거치거나 프로젝트 밖인 디렉터리는 목록을 읽지 않는다
+ * (`prisma/sql` 링크 하나로 밖 파일이 TypedSQL 사실이 되지 않게 한다).
  *
  * @param directory 절대 경로
+ * @param paths 링크를 따라가지 않는 경로 판정기
  * @returns 파일 절대 경로
  */
-function sqlFilesIn(directory: string): string[] {
-  if (pathKind(directory) !== 'directory') return [];
+function sqlFilesIn(directory: string, paths: LinkFreePaths): string[] {
+  if (paths.kind(directory) !== 'directory') return [];
   try {
     return readdirSync(directory)
       .filter((name) => name.endsWith('.sql'))
       .map((name) => join(directory, name))
-      .filter((path) => pathKind(path) === 'file');
+      .filter((path) => paths.kind(path) === 'file');
   } catch {
     // 읽지 못한 TypedSQL 디렉터리는 파일이 없는 것과 같게 본다(스키마 사실에는 영향이 없다).
     return [];
