@@ -611,7 +611,10 @@ Verified against Prisma's source for the pinned versions (prisma-engines at the 
 CLI and is ignored). When the version is unknown, unverified (for example rc.13+ or 8.0.0), or
 several rules are installed, every candidate rule is evaluated: names that agree are emitted,
 names that differ become dynamic facts without columns, and the document carries
-`prisma-naming-unverified:`. Prisma 8 contract files and its client API are not scanned
+`prisma-naming-unverified:`. That limitation quotes unverified versions only as semver strings or
+short range and tag specifiers (`^7`, `latest`, `workspace:*`); Git, URL, file, and `npm:` alias
+specifiers are reduced to a category such as `<git specifier>` so credentials and local paths are
+not copied, and at most 10 entries are listed. Prisma 8 contract files and its client API are not scanned
 (`prisma-8-surface-unscanned:`).
 
 ### Prisma Client usage

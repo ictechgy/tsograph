@@ -484,8 +484,10 @@ package.json이 있는 패키지마다:
 명세에서 읽는다. `prisma`·`@prisma/client` 2.x–7.x는 Prisma 7 규칙, `@prisma/orm-family-sql`은 8.x
 규칙을 고른다(8.x `prisma` 패키지는 다른 CLI라 무시한다). 버전을 모르거나 확인하지 않은 버전
 (예: rc.13 이상, 8.0.0)이거나 규칙이 여럿 설치됐으면 후보 규칙을 모두 평가해, 같은 이름은 내고 갈리는
-이름은 컬럼 없는 dynamic 사실로 내며 `prisma-naming-unverified:`를 싣는다. Prisma 8 contract 파일과
-클라이언트 API는 읽지 않는다(`prisma-8-surface-unscanned:`).
+이름은 컬럼 없는 dynamic 사실로 내며 `prisma-naming-unverified:`를 싣는다. 이 limitation은 확인하지 않은
+버전을 semver와 짧은 범위·태그 명세(`^7`, `latest`, `workspace:*`)만 원문으로 적고, git·URL·파일·`npm:` 별칭
+명세는 자격 증명과 로컬 경로를 옮기지 않도록 `<git specifier>` 같은 범주로 바꾸며 최대 10개만 적는다.
+Prisma 8 contract 파일과 클라이언트 API는 읽지 않는다(`prisma-8-surface-unscanned:`).
 
 ### Prisma Client 사용
 
