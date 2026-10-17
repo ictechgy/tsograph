@@ -8,6 +8,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { readdirSync } from 'node:fs';
 
 import { compareStrings } from '../exchange/sorted-json.ts';
+import { isWithinDirectory } from './module-resolver.ts';
 import { buildPrismaCatalog, type LoadedSchemaFile, type PrismaCatalog, stringProperty } from './prisma-catalog.ts';
 import { locatePrismaSchemas, readManifest, type SchemaLocation } from './prisma-locate.ts';
 import { parsePrismaSchema, type PrismaBlock } from './prisma-schema.ts';
@@ -48,6 +49,8 @@ export interface PrismaProject {
 export interface PrismaProjectCounts {
   schemasOutsideProject: number;
   unresolvedGeneratorOutputs: number;
+  /** 프로젝트 루트이거나 그 조상이라 소스 제외·출처 판정에 쓰지 않은 generator output 수다. */
+  generatorOutputsContainingProject: number;
   unresolvedTypedSql: number;
   /** 스키마·설정·TypedSQL 탐색이 따라가지 않은 링크 중 걷기가 세지 않은 수다(걷기 계수에 더한다). */
   skippedSymlinks: number;
@@ -76,7 +79,9 @@ export function loadPrismaProject(root: string, reader: ProjectReader): PrismaPr
     reader,
     paths,
   });
-  const counts: PrismaProjectCounts = { schemasOutsideProject: 0, unresolvedGeneratorOutputs: 0, unresolvedTypedSql: 0, skippedSymlinks: 0 };
+  const counts: PrismaProjectCounts = {
+    schemasOutsideProject: 0, unresolvedGeneratorOutputs: 0, generatorOutputsContainingProject: 0, unresolvedTypedSql: 0, skippedSymlinks: 0,
+  };
   const schemaFiles = loadSchemaFiles(root, location, reader, counts);
   const catalog = schemaFiles.length === 0 ? undefined : buildPrismaCatalog(schemaFiles, naming.rules);
   const generators = generatorBlocks(root, schemaFiles);
@@ -88,7 +93,7 @@ export function loadPrismaProject(root: string, reader: ProjectReader): PrismaPr
     location,
     schemaFiles,
     catalog,
-    outputDirectories: outputDirectories(generators, counts),
+    outputDirectories: outputDirectories(root, generators, counts),
     typedSqlFiles: sqlFiles,
     usesPrisma: observed.length > 0 || packageFiles.some((path) => manifestUsesPrisma(path, reader)),
     counts,
@@ -222,19 +227,24 @@ function generatorBlocks(root: string, files: readonly LoadedSchemaFile[]): Gene
 
 /**
  * 클라이언트 generator의 output 디렉터리를 절대 경로로 모은다(스키마 파일 기준 상대 경로).
+ * 프로젝트 루트이거나 그 조상인 output은 빼고 센다 — 소스 제외에 쓰면 모든 소스가 조용히 빠지고,
+ * 출처 판정에 쓰면 모든 상대 import가 Prisma 클라이언트로 보인다.
  *
+ * @param root 프로젝트 realpath
  * @param generators generator 블록
  * @param counts 계수(갱신된다)
  * @returns 절대 디렉터리(정렬, 중복 없음)
  */
-function outputDirectories(generators: readonly GeneratorBlock[], counts: PrismaProjectCounts): string[] {
+function outputDirectories(root: string, generators: readonly GeneratorBlock[], counts: PrismaProjectCounts): string[] {
   const directories = new Set<string>();
   for (const { block, directory } of generators) {
     const provider = stringProperty(block, 'provider');
     if (provider === undefined || !clientGenerators.has(provider) || !block.properties.has('output')) continue;
     const output = stringProperty(block, 'output');
-    if (output === undefined) counts.unresolvedGeneratorOutputs++;
-    else directories.add(resolve(directory, output));
+    const resolved = output === undefined ? undefined : resolve(directory, output);
+    if (resolved === undefined) counts.unresolvedGeneratorOutputs++;
+    else if (isWithinDirectory(root, resolved)) counts.generatorOutputsContainingProject++;
+    else directories.add(resolved);
   }
   return [...directories].sort(compareStrings);
 }

@@ -252,6 +252,9 @@ function prismaLimitations({ project, relational }: LimitationInput): string[] {
   if (counts.unresolvedGeneratorOutputs > 0) {
     result.push(`unresolved-generator-outputs: ${counts.unresolvedGeneratorOutputs} Prisma generator output(s) are not string literals; imports of those clients are not traced`);
   }
+  if (counts.generatorOutputsContainingProject > 0) {
+    result.push(`unresolved-generator-outputs: ${counts.generatorOutputsContainingProject} Prisma generator output(s) resolve to the project root or one of its ancestors; they were not excluded from the source scan and imports of those clients are not traced`);
+  }
   if (counts.unresolvedTypedSql > 0) {
     result.push(`unresolved-typed-sql: ${counts.unresolvedTypedSql} prisma.config typedSql path(s) are not string literals; TypedSQL files there were not read`);
   }

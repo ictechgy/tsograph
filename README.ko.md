@@ -402,7 +402,7 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
   사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다.
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
-  generator 출력 디렉터리, 4 MiB 넘는 파일(개수로 센다). 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
+  generator 출력 디렉터리(프로젝트 루트나 그 조상으로 풀리는 output은 이 제외에도 클라이언트 출처 판정에도 쓰지 않고 `unresolved-generator-outputs:`로 알린다), 4 MiB 넘는 파일(개수로 센다). 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
   선언을 찾을 때만 읽는다.
 
 ### 사실
