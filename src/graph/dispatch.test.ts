@@ -12,12 +12,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runReachCommand } from '../cli/graph-command.ts';
 import { buildCallGraph } from './build-graph.ts';
+import { CandidateFinder } from './dispatch-candidates.ts';
 import { computeGraphRevision } from './graph-document.ts';
-import type { CallGraph } from './graph-model.ts';
+import { type CallGraph, GraphStore } from './graph-model.ts';
+import { collectFileNodes } from './node-collector.ts';
+import { TargetResolver } from './target-resolver.ts';
 
 const fixture = realpathSync(fileURLToPath(new URL('../../fixtures/graph/di-dispatch/', import.meta.url)));
 const fileSystem = createNodeFileSystem();
@@ -51,6 +55,30 @@ async function graphOf(files: Record<string, string>): Promise<CallGraph> {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * 메모리 소스 하나(`main.ts`)로 프로그램을 만들고 노드를 등록한 대상 해석기와 함께 돌려준다. 후보 탐색기를
+ * 직접 부르는 단위 검사용이다(그래프 전체를 만들면 그 안의 checker를 감쌀 수 없다).
+ *
+ * @param source `main.ts` 내용
+ * @param extra 덧붙일 컴파일러 옵션(예: `noLib`)
+ * @returns 소스 파일, checker, 대상 해석기
+ */
+function inMemoryProgram(source: string, extra: ts.CompilerOptions = {}): { readonly file: ts.SourceFile; readonly checker: ts.TypeChecker; readonly resolver: TargetResolver } {
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, strict: true, types: [], lib: ['lib.es2022.d.ts'], ...extra };
+  const host = ts.createCompilerHost(options);
+  const original = host.getSourceFile;
+  host.getSourceFile = (name, version, onError, fresh) => name === 'main.ts'
+    ? ts.createSourceFile(name, source, version, true)
+    : original.call(host, name, version, onError, fresh);
+  const program = ts.createProgram({ rootNames: ['main.ts'], options, host });
+  const file = program.getSourceFile('main.ts');
+  assert.ok(file);
+  const checker = program.getTypeChecker();
+  const store = new GraphStore();
+  collectFileNodes(store, 'main.ts', file);
+  return { file, checker, resolver: new TargetResolver(checker, store, (candidate) => candidate === file ? 'main.ts' : undefined, () => false) };
 }
 
 /** 임시 프로젝트들이 공유하는 인터페이스와 구현 두 개다. */
@@ -877,6 +905,123 @@ test('공개 패키지와 불완전 스캔에서는 내보낸 선언의 흐름�
   const broken = await graphOf({ ...files, 'src/broken.ts': 'export const x = (;\n' });
   assert.ok(broken.limitations.some((line) => line.startsWith('bound-dispatch: the scan is incomplete')));
   assert.equal(dispatchEdges(broken).filter((line) => line.endsWith(' bound')).length, 0);
+});
+
+test('candidate 간선은 구조 대입·상속·mixin·프로젝트 밖 기반 클래스·명목 구현을 모두 잇는다', async () => {
+  const published = await graphOf({
+    'package.json': '{ "name": "candidates", "main": "dist/index.js" }',
+    'src/external.d.ts': 'export declare class ExternalBase { connect(): void; }',
+    'src/main.ts': [
+      'import { ExternalBase } from "./external";',
+      'export interface Store { connect(): void; find(): number; }',
+      // implements 없이 구조로만 대입된다.
+      'export class Structural { connect() {} find() { return 1; } }',
+      // 기반 클래스만으로는 connect가 없어 대입되지 않는다. 메서드를 상속한 파생 클래스로만 후보가 된다.
+      'export class Base { find() { return 2; } }',
+      'export class Derived extends Base { connect() {} }',
+      // 호출한 메서드를 mixin이 준다.
+      'export class Plain {}',
+      'type Constructor = new (...args: any[]) => object;',
+      'export function Findable<T extends Constructor>(base: T) { return class extends base { find() { return 3; } }; }',
+      'export class Mixed extends Findable(Plain) { connect() {} }',
+      // 필수 멤버 connect를 프로젝트 밖 기반 클래스에서 상속한다.
+      'export class External extends ExternalBase { find() { return 4; } }',
+      // 명목 구현은 멤버가 모자라도(타입 오류) 후보다.
+      'export class Incomplete implements Store { find() { return 5; } }',
+      'export class Unrelated { find() { return 6; } }',
+      'export function lookup(store: Store) { return store.find(); }',
+    ].join('\n'),
+  });
+  assert.deepEqual(dispatchEdges(published), [
+    'src/main.ts#lookup -> src/main.ts#Base.find candidate',
+    'src/main.ts#lookup -> src/main.ts#External.find candidate',
+    'src/main.ts#lookup -> src/main.ts#Findable.find candidate',
+    'src/main.ts#lookup -> src/main.ts#Incomplete.find candidate',
+    'src/main.ts#lookup -> src/main.ts#Structural.find candidate',
+  ]);
+});
+
+test('candidate 탐색은 메서드와 필수 멤버를 가질 수 있는 클래스만 대입 검사하고 결과를 수신자 타입별로 재사용한다', () => {
+  const count = 25;
+  const source = [
+    ...Array.from({ length: count }, (_, index) => [
+      `interface Port${index} { run${index}(): number; close(): void; }`,
+      `class Impl${index} { run${index}() { return ${index}; } close() {} }`,
+      `export function call${index}(port: Port${index}) { port.run${index}(); port.close(); }`,
+    ].join('\n')),
+    // 명목 구현은 멤버가 모자라도(타입 오류) 후보이고 대입 검사를 거치지 않는다.
+    'class Nominal implements Port0 { run0() { return -1; } }',
+    // union 수신자는 필수 이름으로 좁히지 않고 메서드 이름을 가진 클래스를 모두 대입 검사한다.
+    'export function either(port: Port0 | Port1) { port.close(); }',
+  ].join('\n');
+  const { file, checker, resolver } = inMemoryProgram(source);
+  let checks = 0;
+  const counted = new Proxy(checker, {
+    get: (target, property, receiver) => property === 'isTypeAssignableTo'
+      ? (sourceType: ts.Type, targetType: ts.Type) => {
+        checks++;
+        return target.isTypeAssignableTo(sourceType, targetType);
+      }
+      : Reflect.get(target, property, receiver),
+  });
+  const finder = new CandidateFinder(counted, resolver, [file]);
+  const targets = new Map<string, readonly string[]>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const owner = ts.findAncestor(node, ts.isFunctionDeclaration)?.name?.text;
+      targets.set(`${owner}:${node.expression.name.text}`, finder.targetsFor(node.expression.expression, node.expression.name.text));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.deepEqual(targets.get('call0:run0'), ['main.ts#Impl0.run0', 'main.ts#Nominal.run0']);
+  assert.deepEqual(targets.get('call0:close'), ['main.ts#Impl0.close']);
+  for (let index = 1; index < count; index++) {
+    assert.deepEqual(targets.get(`call${index}:run${index}`), [`main.ts#Impl${index}.run${index}`]);
+    assert.deepEqual(targets.get(`call${index}:close`), [`main.ts#Impl${index}.close`]);
+  }
+  assert.deepEqual(targets.get('either:close'), ['main.ts#Impl0.close', 'main.ts#Impl1.close']);
+  // 수정 전에는 (수신자 타입, 메서드)마다 모든 클래스를 대입 검사해 1,300번이 넘었다(타입 × 메서드 × 클래스).
+  // 이제 일반 객체 수신자는 필수 이름을 모두 가진 클래스만, union 수신자는 메서드 이름을 가진 클래스만 검사한다.
+  assert.ok(checks <= 2 * count, `${checks} assignability checks`);
+});
+
+test('candidate 탐색은 전역 Object 멤버가 채우는 필수 이름으로 후보를 거르지 않는다', () => {
+  const source = [
+    'interface Port { run(): number; toString(): string; }',
+    'class Impl { run() { return 1; } }',
+    'export function call(port: Port) { port.run(); }',
+  ].join('\n');
+  const targetsOf = (extra: ts.CompilerOptions): readonly string[] => {
+    const { file, checker, resolver } = inMemoryProgram(source, extra);
+    const finder = new CandidateFinder(checker, resolver, [file]);
+    let found: readonly string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+        found = finder.targetsFor(node.expression.expression, node.expression.name.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return found;
+  };
+  // Impl은 toString을 선언하지 않았지만 TypeScript는 전역 Object의 toString으로 대입을 인정한다.
+  assert.deepEqual(targetsOf({}), ['main.ts#Impl.run']);
+  // 전역 lib가 없으면 그 보강도 없어 대입되지 않는다.
+  assert.deepEqual(targetsOf({ noLib: true }), []);
+});
+
+test('candidate 탐색은 기반 클래스가 순환해도 끝난다', async () => {
+  const published = await graphOf({
+    'package.json': '{ "name": "cycle", "main": "dist/index.js" }',
+    'src/main.ts': [
+      'export interface Store { find(): number; }',
+      'export class First extends Second { find() { return 1; } }',
+      'export class Second extends First { other() { return 2; } }',
+      'export function lookup(store: Store) { return store.find(); }',
+    ].join('\n'),
+  });
+  assert.deepEqual(dispatchEdges(published), ['src/main.ts#lookup -> src/main.ts#First.find candidate']);
 });
 
 test('몽키 패치·반사적 쓰기·데코레이터·동적 import·값으로 쓰인 네임스페이스는 흐름을 연다', async () => {
