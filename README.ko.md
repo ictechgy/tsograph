@@ -399,7 +399,8 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
 `platform: "sql"` 문서(schemagraph `facts --document <catalog>`)와 조인한다.
 
 - `--project`(필수): 조인 루트. `project`는 그 POSIX realpath이고 모든 `location.path`는 그 기준
-  상대 경로다. 심볼릭 링크는 따라가지 않는다.
+  상대 경로다. 소스를 모을 때 심볼릭 링크는 따라가지 않는다. 모듈 해석은 실제 경로가 프로젝트 안에
+  머무는 링크로만 설정과 `package.json`을 읽는다.
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
   사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다.
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
@@ -506,7 +507,11 @@ Prisma 8 contract 파일과 클라이언트 API는 읽지 않는다(`prisma-8-su
   생성자 매개변수 속성(`this.db`)
 - 파일 사이 바인딩: 이름·default·이름공간 import, 재수출, `export *`, CommonJS
   `require`·`module.exports`, `await import(...)`. TypeScript 모듈 해석기와 가장 가까운
-  `tsconfig.json`/`jsconfig.json`(프로젝트 안으로 제한)으로 풀고 고정점까지 반복한다.
+  `tsconfig.json`/`jsconfig.json`(프로젝트 안으로 제한)으로 풀고 고정점까지 반복한다. 설정과 그
+  `extends` 사슬, `package.json`은 실제 경로가 프로젝트 안인 1 MiB 이하 일반 파일만 읽는다. 프로젝트 안
+  링크(링크로 둔 tsconfig, pnpm `node_modules` 링크)는 따라가고 프로젝트 밖으로 나가는 링크는 읽지
+  않는다. 상한을 넘거나 읽을 수 없거나 프로젝트 밖인 설정(그 `extends` 사슬의 파일 포함)은
+  `unreadable-module-configs:`로 세고, 그 아래 import는 기본 해석을 쓴다.
 
 지역 변수·매개변수는 바깥 클라이언트를 가린다. 출처를 추적하지 못한 수신자의
 `x.<delegate>.<operation>(...)` 모양 호출은 내지 않고 `unresolved-client-receivers:`로 센다. 증명된

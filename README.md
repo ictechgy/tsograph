@@ -511,7 +511,9 @@ joins it with a `platform: "sql"` document (schemagraph `facts --document <catal
 persistence rules of `docs/GRAPH-EXCHANGE.md`.
 
 - `--project` (required): the join root. `project` is its POSIX realpath and every
-  `location.path` is relative to it. Symbolic links are never followed.
+  `location.path` is relative to it. Symbolic links are never followed to collect sources; module
+  resolution reads configs and `package.json` through a link only when the real path stays inside
+  the project.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness),
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
   `64` usage error. `1` is reserved.
@@ -636,7 +638,12 @@ and nothing is executed:
 - bindings imported across files: named, default, namespace, re-exports, `export *`,
   CommonJS `require`/`module.exports`, and `await import(...)`, resolved with the TypeScript
   module resolver and the nearest `tsconfig.json`/`jsconfig.json` (restricted to the project),
-  iterated to a fixed point.
+  iterated to a fixed point. A config, its `extends` chain, and `package.json` are read only as
+  regular files of at most 1 MiB whose real path stays inside the project: links inside the project
+  (a symlinked tsconfig, pnpm `node_modules` links) are followed, and a link that leaves the project
+  is not read. A config that is oversized, unreadable, or outside the project, including any file of
+  its `extends` chain, counts under `unreadable-module-configs:`, and imports under it use default
+  resolution.
 
 Local variables and parameters shadow outer clients. A call shaped like
 `x.<delegate>.<operation>(...)` on an untraced receiver is not emitted and is counted under
