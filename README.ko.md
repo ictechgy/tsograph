@@ -48,7 +48,8 @@ fetch·axios·ky 호출에 그대로 넘기면 따라간다. 불변 함수 별�
 진입이 있으면 내부의 dynamic 요청도 남겨 알려진 호출이 다른 가능한 진입을 가리지 않게 한다.
 
 axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 isthmus 공유 벡터와 실제
-로컬 HTTP 요청 27개로 검증했다. ky 설정은 선언된 major가 명확해야 한다. 전체 세그먼트 보간만 `{}`가
+로컬 HTTP 요청 27개로 검증했다. ky 설정은 1 MiB 안의 symlink가 아닌 일반 파일인 루트 `package.json`에 선언된 major가
+명확해야 한다(symlink·FIFO·장치는 따라가거나 기다리지 않는다). 전체 세그먼트 보간만 `{}`가
 되고 부분 보간은 dynamic이다. query·fragment·userinfo를 제거하고 고엔트로피·웹훅 경로를 마스킹한다.
 
 미상 전개, 변경되거나 외부로 넘겨진 설정, interceptor·hook·adapter 및 미확정 동사는 `dynamic`·

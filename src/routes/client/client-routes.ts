@@ -1,8 +1,8 @@
 /** fetch·axios·ky 호출을 JS route-call 문서로 만든다. 분석 대상 코드는 실행하지 않는다. */
-import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { formatBridgeTimestamp, type BridgeLocation, type HttpMethod } from '../../exchange/bridge-facts.ts';
+import { readBoundedFileBytes } from '../../graph/bounded-config-reader.ts';
 import { scopeIdOf } from '../../graph/symbol-ids.ts';
 import { hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
@@ -42,6 +42,8 @@ interface Sink {
 /** 계약 동사 집합이다. */
 const methods = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']);
 const MAX_ESCAPE_RECHECKS = 20_000;
+/** ky major를 읽는 루트 `package.json` 최대 크기(바이트)다. */
+const MAX_KY_MANIFEST_BYTES = 1024 * 1024;
 
 /** const 별칭·import·create/extend를 심볼로 따라가 클라이언트를 식별한다. */
 function clientOf(expression: ts.Expression, values: ClientValues, depth = 0): Client | undefined {
@@ -144,16 +146,24 @@ function forwardedBodies(values: ClientValues, wrappers: ClientWrappers, models:
   return bodies;
 }
 
-/** ky의 선언된 major만 읽는다. 모호한 버전 범위는 추측하지 않는다. */
+/**
+ * ky의 선언된 major만 읽는다. 모호한 버전 범위는 추측하지 않는다.
+ *
+ * 루트 `package.json`은 server 역할처럼 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. FIFO에서 기다리거나
+ * 장치를 끝없이 읽지 않고, 읽지 못하면 major를 모름으로 둔다(호출부가 limitation으로 알린다).
+ */
 function kyMajor(root: string): number | undefined {
+  const read = readBoundedFileBytes(join(root, 'package.json'), MAX_KY_MANIFEST_BYTES, { noFollow: true });
+  if (!read.ok) return undefined;
   try {
-    const path = join(root, 'package.json');
-    if (statSync(path).size > 1024 * 1024) return undefined;
-    const manifest = JSON.parse(readFileSync(path, 'utf8')) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
+    const manifest = JSON.parse(read.bytes.toString('utf8')) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
     const version = manifest.dependencies?.['ky'] ?? manifest.devDependencies?.['ky'];
     const match = typeof version === 'string' ? /^(?:\^|~)?([12])\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.exec(version) : null;
     return match === null ? undefined : Number(match[1]);
-  } catch { return undefined; }
+  } catch {
+    // JSON 객체가 아닌 manifest에서는 선언된 major를 알 수 없다.
+    return undefined;
+  }
 }
 
 /** 요청 설정에서 결합 방식과 base를 정한다. 미상 값을 base 없음으로 바꾸지 않는다. */

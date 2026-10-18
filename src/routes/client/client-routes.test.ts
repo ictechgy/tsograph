@@ -1,11 +1,12 @@
 /** 웹·RN 호출부 추출의 외부 계약을 합성 프로젝트로 검증한다. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
+import { linkToDevZero, makeFifo, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
 
 /** 문서 경계에서 관찰할 사실이다. */
@@ -224,6 +225,59 @@ test('ky 2 prefix/baseUrl and legacy ky 1 prefixUrl are distinct joins', async (
   });
   assert.equal(legacy.facts[0]?.channel, '/v1/items');
   assert.equal(legacy.facts[1]?.dynamic, true);
+});
+
+/** ky 2 `prefix` 결합을 쓰는 호출이다(major를 모르면 결합 방식을 정하지 않는다). */
+const kyPrefixSource = "import ky from 'ky';\nexport function load() { return ky('items', { prefix: 'https://api.example.com/v1' }); }\n";
+
+/** 선언 major를 모를 때 ky 호출에 싣는 limitation이다. */
+const kyMajorUnknown = 'route-call-coverage: ky URL option dialect requires an unambiguous declared major version (1 or 2)';
+
+test('FIFO or device-link package.json is neither awaited nor read without bound and leaves the ky major unknown', {
+  skip: process.platform === 'win32',
+}, async () => {
+  for (const place of [makeFifo, linkToDevZero]) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-special-')));
+    try {
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
+      place(join(root, 'package.json'));
+      // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 추출한다.
+      const result = await runMainGuarded(['routes', '--role', 'client', '--project', root]);
+      assert.equal(result.stopped, undefined, place.name);
+      assert.equal(result.status, 0, result.stderr);
+      const document = JSON.parse(result.stdout) as { facts: Fact[]; limitations: string[] };
+      assert.ok(document.limitations.includes(kyMajorUnknown), place.name);
+      assert.equal(document.facts[0]?.dynamic, true, place.name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a symlinked package.json is not followed for the ky major while a regular one keeps the declared dialect', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  const regular = await scan(kyPrefixSource);
+  assert.equal(regular.limitations.includes(kyMajorUnknown), false);
+  assert.equal(regular.facts[0]?.channel, '/v1/items');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-linked-')));
+  try {
+    mkdirSync(join(root, 'config'));
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'config/package.json'), '{"dependencies":{"ky":"2.1.0"}}');
+    symlinkSync(join(root, 'config/package.json'), join(root, 'package.json'));
+    writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
+    const result = await runRoutesCommand(['--role', 'client', '--project', root], {
+      fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date('2026-10-01T00:00:00Z'),
+    });
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
+    assert.ok(document.limitations.includes(kyMajorUnknown));
+    assert.equal(document.facts[0]?.dynamic, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('dynamic path/method/config and unknown base retain honest limitations without source leakage', async () => {

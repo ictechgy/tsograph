@@ -52,7 +52,8 @@ invocations retain the inner dynamic request so known calls do not hide other po
 
 URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`baseUrl`), with shared
 isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
-major version. Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
+major version in a regular, non-symlink root `package.json` within 1 MiB (a symlink, FIFO, or device there
+is not followed or waited on). Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
 fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
 
 Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
