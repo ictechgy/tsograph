@@ -616,7 +616,8 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는
 소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
 적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
-symlink는 제외한다. PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
+symlink는 제외한다. 루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
+실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
 `tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler
@@ -998,7 +999,8 @@ isthmus-cli 0.11.0은 `symbol.entries`를 거부하므로 소비자를 먼저 �
   초과도 `rootsTruncated`로 알린다.
 - `graphRevision`은 노드 id·종류·진입점·모드별 미해석 호출 수와 간선(근거 포함)의 `sha256:` 해시다(위치 제외).
   같은 그래프의 `graph`·`reach`·`impact`는 `--dispatch` 모드와 관계없이 같은 값을 싣는다. `revision`은 `.git`에서 읽은 프로젝트 루트의 git `HEAD` 커밋이다
-  (작업 트리 변경은 반영하지 않는다).
+  (작업 트리 변경은 반영하지 않는다). git 메타데이터는 symlink여도 따라가지만(옛 symlink `HEAD`) 1 MiB 안의 일반 파일일 때만
+  읽고, FIFO·장치면 `revision`을 싣지 않는다.
 - `limitations`는 모드의 그래프 limitation과 이 문서 범위의 `non-http-entries:`다. `unresolved-calls:`·
   `partial-dispatch:` 계수는 모드가 이은 인터페이스 호출을 빼고, `bound-dispatch:`·`candidate-dispatch:`는 모드의
   디스패치 간선이 이은 호출 수를 알린다. 스냅샷은 `unresolved-calls:`를 `direct` 기준으로 세고 두 디스패치 줄을

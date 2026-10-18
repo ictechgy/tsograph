@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
+import { linkToDevZero, makeFifo, runMainGuarded } from '../cli/testing.test.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
@@ -445,6 +446,76 @@ test('indirect unresolved 통계는 관찰한 callee AST shape만 세분화한�
       property: 1,
       element: 1,
     });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+/** 읽지 못한 루트 vercel.json limitation이다. */
+const unreadableCronConfig = 'entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown';
+
+/** 읽지 못한 루트 package.json 때문에 callable 흐름을 여는 limitation이다. */
+const unreadableManifest = 'bound-dispatch: package.json could not be read as a JSON object within 1 MiB, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound';
+
+/** callable 매개변수 공백이 있어 열린 프로그램 limitation이 실리는 소스다. */
+const callableGapSource = 'export function run(callback: () => string) { return callback(); }\n';
+
+test('FIFO·장치 링크인 루트 package.json·vercel.json은 기다리거나 끝없이 읽지 않고 기존 limitation으로 알린다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  for (const place of [makeFifo, linkToDevZero]) {
+    const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-special-roots-')));
+    try {
+      mkdirSync(join(project, 'src'));
+      writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+      place(join(project, 'package.json'));
+      place(join(project, 'vercel.json'));
+      const result = await runMainGuarded(['graph', '--project', project, '--generated-at', '2026-01-01T00:00:00.000Z']);
+      assert.equal(result.stopped, undefined, place.name);
+      assert.equal(result.status, 0, result.stderr);
+      const { limitations } = JSON.parse(result.stdout) as { limitations: string[] };
+      assert.ok(limitations.includes(unreadableCronConfig), place.name);
+      assert.ok(limitations.includes(unreadableManifest), place.name);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  }
+});
+
+test('루트 package.json·vercel.json symlink는 프로젝트 안 일반 파일을 가리켜도 따라가지 않는다', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-linked-roots-')));
+  try {
+    mkdirSync(join(project, 'config'));
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'config/package.json'), '{"name":"lib","main":"src/main.ts"}');
+    writeFileSync(join(project, 'config/vercel.json'), '{"crons":[{"path":"/api/jobs","schedule":"0 0 * * *"}]}');
+    symlinkSync(join(project, 'config/package.json'), join(project, 'package.json'));
+    symlinkSync(join(project, 'config/vercel.json'), join(project, 'vercel.json'));
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    const target = await buildCallGraph(project, fileSystem);
+    assert.ok(target.limitations.includes(unreadableCronConfig));
+    assert.ok(target.limitations.includes(unreadableManifest));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('권한 때문에 읽지 못한 루트 vercel.json·package.json은 cron 없음·비공개로 숨기지 않는다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-locked-roots-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'vercel.json'), '{"crons":[]}');
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    chmodSync(join(project, 'package.json'), 0o000);
+    chmodSync(join(project, 'vercel.json'), 0o000);
+    const target = await buildCallGraph(project, fileSystem);
+    assert.ok(target.limitations.includes(unreadableCronConfig));
+    assert.ok(target.limitations.includes(unreadableManifest));
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

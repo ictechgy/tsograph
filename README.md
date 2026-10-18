@@ -764,7 +764,9 @@ computed.
 an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
 source boundary and workspace-relative ids for calls across packages. The selected project's compiler
 options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. A PnP-only project is reported
+records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. The root `package.json`
+and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
+failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
 explicitly; the CLI never executes `.pnp.cjs`.
 
 The CLI streams graph JSON without a whole-document string; `--format ndjson` emits a
@@ -1235,7 +1237,8 @@ compatibility; released isthmus-cli 0.11.0 rejects `symbol.entries`, so upgrade 
 - `graphRevision` is `sha256:` over node ids, kinds, entries, per-mode unresolved-call counts, and edges
   with their evidence (locations excluded), so `graph`, `reach`, and `impact` over the same graph agree
   whatever the `--dispatch` mode. `revision` is the project root's git
-  `HEAD` commit read from `.git` (working-tree changes are not reflected).
+  `HEAD` commit read from `.git` (working-tree changes are not reflected). Git metadata may be a symlink (a legacy
+  symlinked `HEAD`) but is read only as regular files within 1 MiB; a FIFO or device omits `revision`.
 - `limitations` carries the graph's limitations for the mode plus the document-scoped
   `non-http-entries:`. The `unresolved-calls:` and `partial-dispatch:` counts exclude the interface
   calls the mode links, and `bound-dispatch:`/`candidate-dispatch:` report how many calls the mode's

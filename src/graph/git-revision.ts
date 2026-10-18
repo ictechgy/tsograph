@@ -6,11 +6,16 @@
  * `.git`이 파일이면(worktree·submodule) `gitdir:`를 따라가고, ref는 gitdir → commondir → packed-refs 순으로 찾는다.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+
+import { readBoundedFileBytes } from './bounded-config-reader.ts';
 
 /** 커밋 id 형식(SHA-1 40자, SHA-256 64자)이다. */
 const objectId = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+/** HEAD·ref·packed-refs·commondir·`.git` 포인터 파일 하나의 최대 byte 수다. */
+const MAX_GIT_METADATA_BYTES = 1024 * 1024;
 
 /**
  * HEAD 커밋 id를 읽는다.
@@ -70,15 +75,13 @@ function readReference(directory: string, reference: string): string | undefined
 /**
  * 작은 텍스트 파일을 읽어 앞뒤 공백을 뗀다.
  *
+ * 옛 git의 symlink HEAD와 호환하도록 symlink는 따라가지만, FIFO·장치 같은 일반 파일이 아닌 대상과 1 MiB를 넘는
+ * 파일은 기다리거나 끝없이 읽지 않고 읽지 못한 것으로 본다.
+ *
  * @param path 절대 경로
- * @returns 텍스트 또는 undefined(없음·읽기 실패)
+ * @returns 텍스트 또는 undefined(없음·읽기 실패). 없는 ref 파일은 호출자가 다음 후보(commondir·packed-refs)에서 찾는다.
  */
 function readText(path: string): string | undefined {
-  try {
-    if (statSync(path).size > 1024 * 1024) return undefined;
-    return readFileSync(path, 'utf8').trim();
-  } catch {
-    // 없는 ref 파일은 다음 후보(commondir·packed-refs)에서 찾는다.
-    return undefined;
-  }
+  const read = readBoundedFileBytes(path, MAX_GIT_METADATA_BYTES);
+  return read.ok ? read.bytes.toString('utf8').trim() : undefined;
 }

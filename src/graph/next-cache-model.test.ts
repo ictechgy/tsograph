@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { linkToDevZero, makeFifo, runMainGuarded } from '../cli/testing.test.ts';
 import { buildCallGraph } from './build-graph.ts';
 import type { CallGraph } from './graph-model.ts';
 
@@ -389,6 +390,39 @@ test('factory provenance and public mutation guards fail closed', async () => {
   for (const [name, files, version] of cases) {
     const graph = await graphOf(files, version);
     assert.deepEqual(allBound(graph), [], name);
+  }
+});
+
+test('FIFO or device-link next package.json is neither awaited nor read without bound and proves no SDK', {
+  skip: process.platform === 'win32',
+}, async () => {
+  for (const place of [makeFifo, linkToDevZero]) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-next-cache-special-')));
+    try {
+      const files = {
+        'tsconfig.json': '{ "compilerOptions": { "strict": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+        'node_modules/next/cache.d.ts': cacheDeclaration,
+        'src/main.ts': [
+          'import { unstable_cache } from "next/cache";',
+          'function original(value: string) { return value; }',
+          'export function run() { return unstable_cache(original, [])("x"); }',
+        ].join('\n'),
+      };
+      for (const [path, content] of Object.entries(files)) {
+        mkdirSync(join(root, path, '..'), { recursive: true });
+        writeFileSync(join(root, path), content);
+      }
+      place(join(root, 'node_modules/next/package.json'));
+      // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 그래프를 만든다.
+      const result = await runMainGuarded(['graph', '--project', root, '--generated-at', '2026-01-01T00:00:00.000Z']);
+      assert.equal(result.stopped, undefined, place.name);
+      assert.equal(result.status, 0, result.stderr);
+      const graph = JSON.parse(result.stdout) as CallGraph;
+      assert.ok(graph.nodes.some((node) => node.id === 'src/main.ts#run'), place.name);
+      assert.deepEqual(allBound(graph), [], place.name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

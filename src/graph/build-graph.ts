@@ -9,7 +9,7 @@
  * 가는 호출은 외부로 센다.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
@@ -25,6 +25,7 @@ import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
 import { isSourceFileName } from '../schema/source-module.ts';
+import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
@@ -176,23 +177,18 @@ function openProgramReason(project: string, inputs: GraphInputs, parseErrors: nu
 /**
  * 프로젝트 루트 `package.json`이 공개 진입점 필드(main·module·exports·bin·types·typings·browser)를 선언했는지
  * 본다. 파일이 없으면 공개 표식도 없다. 있는데 1 MiB를 넘거나 JSON 객체로 읽지 못하면 판단할 수 없으므로
- * 열린 쪽으로 본다(추측하지 않는다).
+ * 열린 쪽으로 본다(추측하지 않는다). symlink·FIFO·장치 같은 일반 파일이 아닌 것도 읽지 못한 것으로 본다.
  *
  * @param project 프로젝트 realpath
  * @returns 공개 패키지·판단 불가·비공개
  */
 function readManifestEntry(project: string): 'public-package' | 'unreadable-manifest' | 'private' {
-  const path = join(project, 'package.json');
-  let text: string;
+  const read = readBoundedFileBytes(join(project, 'package.json'), MAX_PACKAGE_JSON_BYTES, { noFollow: true });
+  // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한·링크·비일반 파일·상한)는 판단할 수 없다.
+  if (!read.ok) return read.reason === 'missing' ? 'private' : 'unreadable-manifest';
   try {
-    if (statSync(path).size > MAX_PACKAGE_JSON_BYTES) return 'unreadable-manifest';
-    text = readFileSync(path, 'utf8');
-  } catch (error) {
-    // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한 등)는 판단할 수 없다.
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'private' : 'unreadable-manifest';
-  }
-  try {
-    const manifest: unknown = JSON.parse(text);
+    // BOM을 지우지 않고 UTF-8로 읽는다. routes의 manifest 읽기처럼 BOM이 붙은 파일은 JSON으로 보지 않는다.
+    const manifest: unknown = JSON.parse(read.bytes.toString('utf8'));
     if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return 'unreadable-manifest';
     return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
   } catch {
@@ -420,7 +416,7 @@ function collectParseErrorFiles(files: ReadonlyMap<string, ts.SourceFile>): stri
 /** `vercel.json`에서 읽은 cron 경로다. */
 interface CronPaths {
   readonly paths: readonly string[];
-  /** 파일이 있지만 JSON으로 읽지 못했는지 여부 */
+  /** 파일이 있지만 1 MiB 안의 일반 파일 JSON으로 읽지 못했는지 여부 */
   readonly unreadable: boolean;
 }
 
@@ -431,17 +427,11 @@ interface CronPaths {
  * @returns cron 경로와 읽기 실패 여부
  */
 function readCronPaths(project: string): CronPaths {
-  let text: string;
+  const read = readBoundedFileBytes(join(project, 'vercel.json'), MAX_VERCEL_CONFIG_BYTES, { noFollow: true });
+  // vercel.json이 없으면 cron도 없다. 있는데 읽지 못하면(권한·링크·비일반 파일·상한) cron을 알 수 없다고 알린다.
+  if (!read.ok) return { paths: [], unreadable: read.reason !== 'missing' };
   try {
-    const path = join(project, 'vercel.json');
-    if (statSync(path).size > MAX_VERCEL_CONFIG_BYTES) return { paths: [], unreadable: true };
-    text = readFileSync(path, 'utf8');
-  } catch {
-    // vercel.json이 없으면 cron도 없다.
-    return { paths: [], unreadable: false };
-  }
-  try {
-    const crons: unknown = (JSON.parse(text) as { crons?: unknown }).crons;
+    const crons: unknown = (JSON.parse(read.bytes.toString('utf8')) as { crons?: unknown }).crons;
     const entries = Array.isArray(crons) ? crons : [];
     return { paths: entries.flatMap((entry) => (typeof entry?.path === 'string' ? [entry.path as string] : [])), unreadable: false };
   } catch {

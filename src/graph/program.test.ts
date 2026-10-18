@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { linkToDevZero, makeFifo } from '../cli/testing.test.ts';
 import { buildCallGraph } from './build-graph.ts';
-import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText } from './bounded-config-reader.ts';
+import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText, readBoundedFileBytes } from './bounded-config-reader.ts';
 import { GraphProjectInputError, createGraphProgram } from './program.ts';
 import { SdkSourceFileCache, sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
@@ -147,6 +148,45 @@ test('bounded config reader preserves TypeScript BOM encodings', async () => {
       const result = createGraphProgram(root, [], ts.createProgram, join(root, name));
       assert.equal(result.program.getCompilerOptions().strict, true, name);
     }
+  });
+});
+
+test('bounded reader는 없는 파일만 missing으로 두고 FIFO·장치·디렉터리는 기다리지 않고 unreadable로 본다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  await withProject({ 'directory/x.json': '{}' }, (root) => {
+    makeFifo(join(root, 'pipe.json'));
+    linkToDevZero(join(root, 'zero.json'));
+    assert.deepEqual(readBoundedConfigText(join(root, 'missing.json')), { ok: false, reason: 'missing' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'missing.json'), 8), { ok: false, reason: 'missing' });
+    for (const name of ['pipe.json', 'zero.json', 'directory']) {
+      assert.deepEqual(readBoundedFileBytes(join(root, name), 8), { ok: false, reason: 'unreadable' }, name);
+      assert.deepEqual(readBoundedConfigText(join(root, name), 8), { ok: false, reason: 'unreadable' }, name);
+    }
+  });
+});
+
+test('bounded bytes reader는 상한을 지키고 BOM을 지우지 않으며 상한 인자를 검증한다', async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{}')]);
+  await withProject({ 'bom.json': bom, 'over.json': Buffer.from('123456789') }, (root) => {
+    const read = readBoundedFileBytes(join(root, 'bom.json'), 8);
+    assert.equal(read.ok && read.bytes.equals(bom), true);
+    assert.deepEqual(readBoundedFileBytes(join(root, 'over.json'), 8), { ok: false, reason: 'too-large' });
+    assert.throws(() => readBoundedFileBytes(join(root, 'bom.json'), -1), RangeError);
+  });
+});
+
+test('noFollow는 마지막 symlink를 열지 않고 기본값은 일반 파일 대상을 따라간다', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  await withProject({ 'target.json': '{}' }, (root) => {
+    symlinkSync(join(root, 'target.json'), join(root, 'link.json'));
+    symlinkSync(join(root, 'absent.json'), join(root, 'dangling.json'));
+    assert.deepEqual(readBoundedConfigText(join(root, 'link.json')), { ok: true, text: '{}' });
+    assert.deepEqual(readBoundedConfigText(join(root, 'link.json'), 8, { noFollow: true }), { ok: false, reason: 'unreadable' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'dangling.json'), 8), { ok: false, reason: 'missing' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'dangling.json'), 8, { noFollow: true }), { ok: false, reason: 'unreadable' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'target.json'), 8, { noFollow: true }), { ok: true, bytes: Buffer.from('{}') });
   });
 });
 
