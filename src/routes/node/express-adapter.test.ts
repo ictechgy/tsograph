@@ -3,8 +3,11 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { test } from 'node:test';
 
+import { MAX_SOURCE_BYTES } from '../../schema/project-reader.ts';
 import { factLines, limitationsWith, packageJson, scanNodeProject } from './testing.test.ts';
 
 test('CommonJS exports·클래스 필드·설정 순서·정규식 경로·배열 경로를 다룬다', async () => {
@@ -29,6 +32,44 @@ test('CommonJS exports·클래스 필드·설정 순서·정규식 경로·배�
   });
   // 생성자에서 만든 앱은 독립 프레임이지만 요청을 받는 앱이다. 라우터는 자기 strict(기본 false)를 쓴다.
   assert.deepEqual(factLines(document), ['GET root /r/a optional #0', 'GET root /r/b optional #1', 'GET root /r{dynamic} - dynamic{"templatePrefixes":["/r"]} #2', 'GET root /s/ strict #3']);
+});
+
+/**
+ * `require('./routes')`가 디렉터리 package.json의 `main`으로 풀리는 Express 프로젝트다.
+ *
+ * @param manifestPadding package.json 뒤에 붙일 공백 바이트 수
+ * @returns 프로젝트 기준 경로 → 내용
+ */
+function directoryRequireProject(manifestPadding: number): Record<string, string> {
+  const router = (path: string): string => `const express = require('express');\nconst router = express.Router();\nrouter.get('${path}', (req, res) => res.send('x'));\nmodule.exports = router;\n`;
+  return {
+    'package.json': packageJson({ express: '4.21.2' }),
+    'src/app.js': "const express = require('express');\nconst app = express();\napp.use('/api', require('./routes'));\nmodule.exports = app;\n",
+    'src/routes/package.json': `{"main":"other.js"}${' '.repeat(manifestPadding)}`,
+    'src/routes/index.js': router('/index'),
+    'src/routes/other.js': router('/other'),
+  };
+}
+
+test('require 해석은 compiler host와 같은 package.json 상한을 지키고 상한을 넘으면 대체 경로를 추측하지 않는다', async (t) => {
+  assert.ok(factLines(await scanNodeProject(directoryRequireProject(0))).some((line) => line.startsWith('GET root /api/other ')));
+  const originalReadFileSync = fs.readFileSync;
+  const unboundedManifestReads: string[] = [];
+  t.mock.method(fs, 'readFileSync', function readFileSync(this: unknown, ...arguments_: Parameters<typeof fs.readFileSync>) {
+    if (String(arguments_[0]).endsWith('/src/routes/package.json')) unboundedManifestReads.push(String(arguments_[0]));
+    return originalReadFileSync.apply(this, arguments_);
+  });
+  syncBuiltinESMExports();
+  try {
+    const document = await scanNodeProject(directoryRequireProject(MAX_SOURCE_BYTES));
+    assert.deepEqual(unboundedManifestReads, []);
+    assert.deepEqual(factLines(document).filter((line) => line.includes('/api/')), []);
+    assert.ok(document.limitations.some((line) => line.startsWith('route-coverage: 1 registration(s) of a value passed to use() that tsograph could not resolve')));
+    assert.ok(document.limitations.some((line) => line.startsWith('unresolved-route-prefix: 2 route declaration(s)')));
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });
 
 test('설정은 첫 등록 전에 바꾼 값만 쓰고, 모르는 값이면 규칙을 싣지 않는다', async () => {

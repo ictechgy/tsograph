@@ -82,12 +82,7 @@ export function createGraphProgram(
   const oversized = new Set<string>();
   // tsconfig 루트·전이 import·선언·package.json 모두 같은 bounded reader를 거친다.
   // 수집 단계에서 제외한 파일이 compiler host를 통해 다시 무제한 읽히지 않게 한다.
-  host.readFile = (fileName) => {
-    const result = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
-    if (result.ok) return result.text;
-    if (result.reason === 'too-large') oversized.add(resolve(fileName));
-    return undefined;
-  };
+  host.readFile = boundedInputReader((fileName) => oversized.add(fileName));
   const cacheLease = sdkSourceFileCache.install(host, options);
   let primaryFailed = false;
   try {
@@ -108,6 +103,38 @@ export function createGraphProgram(
       cacheLease.release();
     }
   }
+}
+
+/**
+ * `ts.resolveModuleName`에 넘길 모듈 해석 host를 만든다. `ts.sys`와 같되 `readFile`은 compiler host와 같은
+ * 4 MiB bounded reader다.
+ *
+ * `ts.sys.readFile`은 크기 상한 없이 파일 전체를 읽는다. 그대로 넘기면 Program이 상한 때문에 읽지 않은
+ * package.json을 별도 해석이 통째로 읽고, 그 `main`·`exports`로 Program과 다른 파일을 고를 수 있다.
+ *
+ * @param onOversized 상한을 넘어 읽지 않은 파일의 절대 경로를 받는다
+ * @returns 모듈 해석 host
+ */
+export function createBoundedResolutionHost(onOversized: (fileName: string) => void): ts.ModuleResolutionHost {
+  return { ...ts.sys, readFile: boundedInputReader(onOversized) };
+}
+
+/**
+ * compiler host와 모듈 해석 host가 함께 쓰는 bounded 입력 reader를 만든다.
+ *
+ * 상한을 넘은 파일은 읽지 않은 것(undefined)으로 두고 `onOversized`에 알린다. TypeScript는 읽지 못한 파일을
+ * 없는 것으로 보고 계속하므로, 공백을 알리는 일은 호출자가 맡는다.
+ *
+ * @param onOversized 상한을 넘어 읽지 않은 파일의 절대 경로를 받는다
+ * @returns `readFile` 구현
+ */
+function boundedInputReader(onOversized: (fileName: string) => void): (fileName: string) => string | undefined {
+  return (fileName) => {
+    const result = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
+    if (result.ok) return result.text;
+    if (result.reason === 'too-large') onOversized(resolve(fileName));
+    return undefined;
+  };
 }
 
 /** 설정 파일에서 읽은 옵션·루트 파일·상태다. */

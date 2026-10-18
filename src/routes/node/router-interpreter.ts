@@ -16,6 +16,7 @@
 
 import ts from 'typescript';
 
+import { createBoundedResolutionHost } from '../../graph/program.ts';
 import { resolveHandler } from './handler-ref.ts';
 import type { NodeProject } from './node-project.ts';
 import {
@@ -140,6 +141,12 @@ class RouterInterpreter implements InterpreterContext {
   private readonly interpretedFunctions = new Set<ts.Node>();
   private readonly activeFunctions = new Set<ts.Node>();
   private readonly routerSyntaxCache = new Map<ts.Node, boolean>();
+  /** 포함 파일·지정자별 `require` 해석 결과다. 같은 require를 프레임마다 다시 해석하지 않는다. */
+  private readonly requiredModules = new Map<string, ts.SourceFile | undefined>();
+  /** 지금 해석 중인 `require`가 상한을 넘은 package.json을 만났는지 여부다. */
+  private resolutionOversized = false;
+  /** compiler host와 같은 상한으로 package.json을 읽는 해석 host다. */
+  private readonly resolutionHost = createBoundedResolutionHost(() => { this.resolutionOversized = true; });
   private frameCount = 0;
   private truncatedCalls = 0;
 
@@ -497,8 +504,28 @@ class RouterInterpreter implements InterpreterContext {
   private requiredModule(call: ts.CallExpression): ts.SourceFile | undefined {
     const binding = requireBinding(call);
     if (binding === undefined || !binding.module.startsWith('.')) return undefined;
-    const resolved = ts.resolveModuleName(binding.module, call.getSourceFile().fileName, this.project.program.getCompilerOptions(), ts.sys).resolvedModule;
-    const sourceFile = resolved === undefined ? undefined : this.project.program.getSourceFile(resolved.resolvedFileName);
+    const containingFile = call.getSourceFile().fileName;
+    const key = `${containingFile}\u0000${binding.module}`;
+    if (!this.requiredModules.has(key)) this.requiredModules.set(key, this.resolveRequire(binding.module, containingFile));
+    return this.requiredModules.get(key);
+  }
+
+  /**
+   * 상대 `require` 지정자를 Program과 같은 옵션·바이트 상한으로 풀어 프로젝트 소스를 찾는다.
+   *
+   * 해석 중 상한을 넘은 package.json을 만나면 TypeScript는 그 파일을 없는 것으로 보고 `index` 같은 대체 경로로
+   * 이어 간다. 실제 `main`과 다를 수 있는 그 결과를 추측해 쓰지 않고 미해석으로 둔다. ModuleResolutionCache를
+   * 쓰지 않는 것도 그래서다: 캐시는 package.json 내용을 해석 사이에 공유해 상한 초과가 첫 해석에서만 보인다.
+   *
+   * @param module 상대 지정자
+   * @param containingFile require가 있는 파일
+   * @returns 소스 또는 undefined
+   */
+  private resolveRequire(module: string, containingFile: string): ts.SourceFile | undefined {
+    this.resolutionOversized = false;
+    const resolved = ts.resolveModuleName(module, containingFile, this.project.program.getCompilerOptions(), this.resolutionHost).resolvedModule;
+    if (this.resolutionOversized || resolved === undefined) return undefined;
+    const sourceFile = this.project.program.getSourceFile(resolved.resolvedFileName);
     return sourceFile !== undefined && this.isProjectNode(sourceFile) ? sourceFile : undefined;
   }
 
