@@ -2,7 +2,8 @@
  * schema 모듈 해석기(`ModuleResolver`)의 설정 읽기 경계와 해석 캐시 회귀 테스트다.
  *
  * tsconfig·jsconfig·`extends`·package.json은 1 MiB 상한 안에서, 링크를 따라간 실제 경로가 프로젝트 안일 때만
- * 읽어야 한다.
+ * 읽어야 한다. TypeScript 해석 캐시를 써도 같은 package.json을 디렉터리마다 다시 읽지 않되, tsconfig 범위끼리
+ * 결과가 섞이면 안 된다.
  */
 
 import assert from 'node:assert/strict';
@@ -199,5 +200,51 @@ test('실제 경로를 확인하지 못한 설정은 읽지 않고 읽지 못한
     } finally {
       t.mock.restoreAll();
     }
+  });
+});
+
+test('여러 디렉터리·tsconfig 범위의 같은 bare 지정자는 package.json을 한 번만 읽는다', async (t) => {
+  const sources = ['src/a/x.ts', 'src/b/y.ts', 'src/c/d/z.ts', 'packages/lib/src/w.ts'];
+  await withProjectAsync({
+    'node_modules/shared/package.json': JSON.stringify({ name: 'shared', version: '1.0.0', main: 'index.js' }),
+    'node_modules/shared/index.js': 'exports.value = 1;\n',
+    'packages/lib/tsconfig.json': JSON.stringify({ compilerOptions: { module: 'esnext' } }),
+    ...Object.fromEntries(sources.map((path) => [path, "import { value } from 'shared';\n"])),
+  }, async (root) => {
+    const resolver = resolverFor(root, sources);
+    const { value: resolved, log } = await countReads(t, () => sources.map((path) => resolver.resolve('shared', join(root, path))));
+    // 의존성 패키지는 스캔한 소스가 아니므로 해석 결과는 없고, package.json 읽기는 실행에 한 번이다.
+    assert.deepEqual(resolved, [undefined, undefined, undefined, undefined]);
+    assert.equal(log.counts.get(join(root, 'node_modules/shared/package.json')), 1);
+  });
+});
+
+test('한 tsconfig 범위의 paths 결과가 다른 범위의 node_modules 탐색 결과로 새지 않는다', () => {
+  // node10 해석의 node_modules 조상 탐색은 다른 디렉터리에서 캐시한 bare 지정자 결과를 다시 쓴다. 캐시 하나를
+  // 두 범위가 함께 쓰면 a의 paths 결과(apps 아래)를 b가 조상 `apps`에서 그대로 받는다.
+  withProject({
+    'apps/a/tsconfig.json': JSON.stringify({ compilerOptions: { moduleResolution: 'node', paths: { '@db/*': ['../shared/*'] } } }),
+    'apps/a/src/x.ts': "import { db } from '@db/client';\n",
+    'apps/b/tsconfig.json': JSON.stringify({ compilerOptions: { moduleResolution: 'node', paths: { '@other/*': ['./other/*'] } } }),
+    'apps/b/src/y.ts': "import { db } from '@db/client';\n",
+    'apps/shared/client.ts': 'export const db = 1;\n',
+  }, (root) => {
+    const resolver = resolverFor(root, ['apps/a/src/x.ts', 'apps/b/src/y.ts', 'apps/shared/client.ts']);
+    assert.equal(resolver.resolve('@db/client', join(root, 'apps/a/src/x.ts')), join(root, 'apps/shared/client.ts'));
+    assert.equal(resolver.resolve('@db/client', join(root, 'apps/b/src/y.ts')), undefined);
+    assert.equal(resolver.unreadableConfigs, 0);
+  });
+});
+
+test('stat이 없음 밖의 오류(링크 순환)로 실패한 경로는 없는 것으로 보고 해석을 계속한다', {
+  skip: process.platform === 'win32',
+}, () => {
+  withProject({ 'src/use.ts': "import { x } from 'cycle';\nimport { y } from './loop';\n" }, (root) => {
+    mkdirSync(join(root, 'node_modules'));
+    symlinkSync('cycle', join(root, 'node_modules', 'cycle'));
+    symlinkSync('loop.ts', join(root, 'src', 'loop.ts'));
+    const resolver = resolverFor(root, ['src/use.ts']);
+    assert.equal(resolver.resolve('cycle', join(root, 'src/use.ts')), undefined);
+    assert.equal(resolver.resolve('./loop', join(root, 'src/use.ts')), undefined);
   });
 });
