@@ -161,13 +161,27 @@ export function looksLikeSql(text: string, strict = false): boolean {
  * @returns 관계 목록과 미해석 피연산자 수
  */
 export function sqlRelations(text: string, strict = false): SqlRelationsResult {
-  const tokens = lexSql(text);
+  return tokenRelations(lexSql(text), strict);
+}
+
+/**
+ * 어휘 목록에서 관계 이름을 읽는다(`sqlRelations`의 본체). 어휘를 위치마다 다시 훑지 않는지(작업량이 어휘 수에
+ * 비례하는지) 테스트가 원소 읽기를 세는 목록을 넘길 수 있게 따로 둔다.
+ *
+ * @param tokens `lexSql` 어휘 목록
+ * @param strict 관계 키워드와 동사가 대문자일 때만 발화할지 여부
+ * @returns 관계 목록과 미해석 피연산자 수
+ */
+export function tokenRelations(tokens: readonly SqlToken[], strict = false): SqlRelationsResult {
   const scan = new RelationScan(tokens, strict);
   for (let index = 0; index < tokens.length; index++) scan.visitKeyword(index);
   return { relations: scan.out, unresolved: scan.unresolved };
 }
 
-/** `sqlRelations` 한 번의 스캔 상태다. 포트 원본의 필드·메서드와 한 줄씩 대응한다. */
+/**
+ * `sqlRelations` 한 번의 스캔 상태다. 포트 원본의 필드·메서드와 한 줄씩 대응한다. 다만 원본이 키워드마다 다시
+ * 훑는 앞선 단어 탐색(`segmentBefore`)과 괄호 짝 찾기(`skipParens`)는 생성자에서 한 번 계산해 조회한다(결과는 같다).
+ */
 class RelationScan {
   /** 어휘 목록이다. */
   private readonly tokens: readonly SqlToken[];
@@ -179,6 +193,16 @@ class RelationScan {
   private readonly statementHead: boolean[];
   /** 각 토큰이 속한 문장의 (대문자 게이트를 통과한) 동사다. */
   private readonly statementVerb: (string | undefined)[];
+  /**
+   * 비인용 `(` 위치 → 짝이 맞는 `)` 다음 위치다(닫히지 않으면 undefined). 괄호 피연산자마다 끝까지 다시 훑으면
+   * 닫히지 않은 괄호가 반복되는 입력에서 어휘 수의 제곱이 된다.
+   */
+  private readonly closeAfter: (number | undefined)[];
+  /**
+   * 각 위치 앞쪽 같은 구간(직전 `;` 토큰 뒤)에 대문자 게이트를 통과한 단어 부류(`PRECEDING_*` 비트)가 있었는지다.
+   * 키워드마다 구간을 거꾸로 다시 훑으면 세미콜론 없는 반복 INTO·ON 입력에서 어휘 수의 제곱이 된다.
+   */
+  private readonly precedingWords: Uint8Array;
   /** 같은 키워드의 피연산자 목록 안에서만 중복을 막는 키다(`FROM a, a`). */
   private readonly seen = new Set<string>();
   /** 읽은 관계다. */
@@ -196,6 +220,8 @@ class RelationScan {
     this.consumed = tokens.map(() => false);
     this.statementHead = tokens.map(() => false);
     this.statementVerb = tokens.map(() => undefined);
+    this.closeAfter = matchParens(tokens);
+    this.precedingWords = this.markPrecedingWords();
     this.markStatements();
   }
 
@@ -254,19 +280,21 @@ class RelationScan {
   }
 
   /**
-   * `end` 앞쪽으로 같은 문장 안의 토큰들을 가까운 것부터 돌려준다.
+   * 위치마다 앞쪽 같은 구간에 나온 단어 부류를 누적한다. 구간은 포트 원본 `segmentBefore`처럼 인용 여부와 무관하게
+   * `;` 토큰에서 끊는다(문장 머리를 정하는 `markStatements`는 비인용 `;`만 본다 — 둘을 섞지 않는다).
    *
-   * @param end 기준 위치(포함하지 않는다)
-   * @returns 역순 토큰 목록
+   * @returns 위치 → 앞선 단어 부류 비트
    */
-  private segmentBefore(end: number): SqlToken[] {
-    const result: SqlToken[] = [];
-    for (let index = end - 1; index >= 0; index--) {
+  private markPrecedingWords(): Uint8Array {
+    const flags = new Uint8Array(this.tokens.length);
+    let seen = 0;
+    for (let index = 0; index < this.tokens.length; index++) {
       const token = this.tokens[index]!;
-      if (token.text === ';') break;
-      result.push(token);
+      flags[index] = seen;
+      if (token.text === ';') seen = 0;
+      else if (!token.quoted && this.upperOk(token)) seen |= wordClasses(token.text.toLowerCase());
     }
-    return result;
+    return flags;
   }
 
   /**
@@ -286,15 +314,14 @@ class RelationScan {
   }
 
   /**
-   * 같은 문장 안의 앞선 비인용 토큰 중 조건을 만족하는 것이 있는지 본다.
+   * 같은 구간 안의 앞선 비인용 토큰 중 대문자 게이트를 통과한 부류 단어가 있는지 본다.
    *
    * @param index 기준 위치
-   * @param test 소문자 단어 판정 함수
+   * @param wordClass 단어 부류(`PRECEDING_*`)
    * @returns 있으면 true
    */
-  private precededBy(index: number, test: (lower: string) => boolean): boolean {
-    return this.segmentBefore(index)
-      .some((token) => !token.quoted && this.upperOk(token) && test(token.text.toLowerCase()));
+  private precededBy(index: number, wordClass: number): boolean {
+    return (this.precedingWords[index]! & wordClass) !== 0;
   }
 
   /**
@@ -311,7 +338,7 @@ class RelationScan {
       case 'update': return this.statementHead[index]! && this.segmentAfterHas(index + 1, 'set');
       case 'truncate': return this.statementHead[index]!;
       // "merged the branch into main" 같은 산문을 막는다.
-      case 'into': return this.precededBy(index, (lower) => intoVerbs.has(lower));
+      case 'into': return this.precededBy(index, PRECEDING_INTO_VERB);
       case 'table': return this.tableKeywordContext(index);
       case 'on': return this.onFires(index, grantStatement);
       // grant·revoke의 FROM은 권한 주체 자리다.
@@ -331,9 +358,8 @@ class RelationScan {
    * @returns 관계 자리를 열면 true
    */
   private onFires(index: number, grantStatement: boolean): boolean {
-    const grantOn = grantStatement && this.precededBy(index, (lower) => grantPrivileges.has(lower));
-    const createOn = this.statementVerb[index] === 'create'
-      && this.precededBy(index, (lower) => createOnKinds.has(lower));
+    const grantOn = grantStatement && this.precededBy(index, PRECEDING_GRANT_PRIVILEGE);
+    const createOn = this.statementVerb[index] === 'create' && this.precededBy(index, PRECEDING_CREATE_ON_KIND);
     return grantOn || createOn;
   }
 
@@ -434,7 +460,7 @@ class RelationScan {
     while (index < this.tokens.length) {
       const token = this.tokens[index]!;
       if (!token.quoted && token.text === '(') {
-        const next = skipParens(this.tokens, index);
+        const next = this.closeAfter[index];
         if (next === undefined) {
           this.unresolved++; // 닫히지 않은 괄호.
           return;
@@ -487,7 +513,7 @@ class RelationScan {
    */
   private readOperand(index: number, keyword: SqlToken, buffer: string[] | undefined): number | undefined {
     if (this.isSymbol(index, '(')) {
-      const next = skipParens(this.tokens, index);
+      const next = this.closeAfter[index];
       if (next === undefined) this.unresolved++; // 닫히지 않은 괄호.
       return next;
     }
@@ -504,7 +530,7 @@ class RelationScan {
     if (['from', 'join'].includes(keyword.text.toLowerCase()) && this.isSymbol(read.next, '(')) {
       this.unresolved++;
       for (let consumed = index; consumed < read.next; consumed++) this.consumed[consumed] = true;
-      return skipParens(this.tokens, read.next);
+      return this.closeAfter[read.next];
     }
     if (buffer === undefined) this.emit(read.name, keyword);
     else buffer.push(read.name);
@@ -564,6 +590,27 @@ const intoVerbs = new Set(['insert', 'select', 'merge', 'replace']);
 /** CREATE 문에서 ON이 관계 자리가 되는 객체 종류다. */
 const createOnKinds = new Set(['index', 'trigger', 'policy']);
 
+/** `precededBy`가 보는 앞선 단어 부류 비트다: INTO 앞 동사. */
+const PRECEDING_INTO_VERB = 1;
+
+/** `precededBy`가 보는 앞선 단어 부류 비트다: GRANT/REVOKE 권한 단어. */
+const PRECEDING_GRANT_PRIVILEGE = 2;
+
+/** `precededBy`가 보는 앞선 단어 부류 비트다: CREATE 문 ON 앞 객체 종류. */
+const PRECEDING_CREATE_ON_KIND = 4;
+
+/**
+ * 소문자 단어가 속한 앞선 단어 부류 비트를 모은다(한 단어가 여러 부류일 수 있다 — `select`·`trigger`).
+ *
+ * @param lower 소문자 단어
+ * @returns 부류 비트
+ */
+function wordClasses(lower: string): number {
+  return (intoVerbs.has(lower) ? PRECEDING_INTO_VERB : 0)
+    | (grantPrivileges.has(lower) ? PRECEDING_GRANT_PRIVILEGE : 0)
+    | (createOnKinds.has(lower) ? PRECEDING_CREATE_ON_KIND : 0);
+}
+
 /** `table`을 키워드로 만드는 직전 DDL 동사다. */
 const tableVerbs = new Set([
   'alter', 'drop', 'create', 'truncate', 'rename', 'lock', 'unlock', 'describe', 'desc', 'analyze', 'vacuum',
@@ -612,24 +659,25 @@ function isNameModifier(word: string, afterTruncate: boolean): boolean {
 }
 
 /**
- * `(` 토큰부터 짝이 맞는 `)` 다음 위치를 돌려준다.
+ * 비인용 `(`마다 짝이 맞는 `)` 다음 위치를 한 번에 구한다. 인용 괄호는 세지 않고, 짝 없는 `)`는 건너뛴다 —
+ * `(`부터 깊이를 세어 0이 되는 `)`를 찾던 원본 `skipParens`와 같은 짝이다.
  *
  * @param tokens 어휘 목록
- * @param start `(` 위치
- * @returns `)` 다음 위치. 닫히지 않으면 undefined
+ * @returns 위치 → `)` 다음 위치(`(`가 아니거나 닫히지 않으면 undefined)
  */
-function skipParens(tokens: readonly SqlToken[], start: number): number | undefined {
-  let depth = 0;
-  for (let index = start; index < tokens.length; index++) {
+function matchParens(tokens: readonly SqlToken[]): (number | undefined)[] {
+  const closeAfter: (number | undefined)[] = tokens.map(() => undefined);
+  const open: number[] = [];
+  for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token.quoted) continue;
-    if (token.text === '(') depth++;
+    if (token.text === '(') open.push(index);
     else if (token.text === ')') {
-      depth--;
-      if (depth === 0) return index + 1;
+      const start = open.pop();
+      if (start !== undefined) closeAfter[start] = index + 1;
     }
   }
-  return undefined;
+  return closeAfter;
 }
 
 /**
