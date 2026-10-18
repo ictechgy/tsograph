@@ -42,6 +42,13 @@ export const UNKNOWN: OrmValue = { kind: 'unknown' };
 /** 평가 깊이 상한이다. 긴 초기값·반환 사슬을 끊는다. */
 const MAX_DEPTH = 48;
 
+/** 깊이 상한·순환 감지에 걸리지 않고 계산한 타입 값이다. */
+interface SettledType {
+  readonly value: OrmValue;
+  /** 계산 안에서 가장 깊게 진입한 평가 깊이와 이 타입의 진입 깊이의 차다. */
+  readonly span: number;
+}
+
 /**
  * ORM별 판정 규칙이다. 각 메서드는 판정하지 못하면 undefined를 돌려 다음 규칙에 넘긴다.
  */
@@ -74,10 +81,30 @@ export class OrmEvaluator {
   private readonly rules: OrmValueRules[] = [];
   /** 식 노드 → 값 메모다. */
   private readonly memo = new Map<ts.Node, OrmValue>();
+  /**
+   * 타입 노드 → 값 메모다. 깊이 상한·순환 감지에 한 번도 걸리지 않고 계산한 값만 둔다. 같은 별칭을 여러 번
+   * 참조하는 합 타입 사슬을 참조마다 다시 펼치면 비용이 분기^깊이로 커진다. 깊이 폭을 함께 둬, 더 깊은 위치에서
+   * 다시 계산했다면 상한에 걸렸을 자리에는 쓰지 않는다.
+   */
+  private readonly typeMemo = new Map<ts.TypeNode, SettledType>();
+  /**
+   * 깊이 상한·순환 감지에 걸려 문맥에 기댄 타입 값을 진입 깊이별로 둔 메모다. 노드만으로 메모하면 깊은 위치에서
+   * 끊긴 값이 얕은 위치의 평가를 덮으므로 진입 깊이가 같을 때만 다시 쓴다(노드마다 최대 `MAX_DEPTH`개).
+   */
+  private readonly cutTypeMemo = new Map<ts.TypeNode, Map<number, OrmValue>>();
+  /**
+   * 타입 표기 멤버 탐색 메모다: 타입 노드·인터페이스 선언 → `깊이:이름` → 멤버 타입(없으면 null).
+   * 탐색은 구문과 이름 해석만 보는 순수 함수라 `resetCache` 뒤에도 그대로 맞는다.
+   */
+  private readonly memberTypeMemo = new Map<ts.Node, Map<string, ts.TypeNode | null>>();
   /** 계산 중인 노드다(순환 감지). */
   private readonly computing = new Set<ts.Node>();
   /** 현재 평가 깊이다. */
   private depth = 0;
+  /** 지금 계산 중인 타입 값 안에서 가장 깊게 진입한 평가 깊이다(메모한 값의 깊이 폭을 잰다). */
+  private reach = 0;
+  /** 깊이 상한·순환 감지로 평가를 끊은 누적 횟수다. 계산 전후 값이 다르면 그 결과는 문맥에 기댄 것이다. */
+  private cutoffs = 0;
 
   /**
    * @param binder 이름 해석기
@@ -98,6 +125,8 @@ export class OrmEvaluator {
   /** 메모를 비운다. 선언 수집이 끝나 규칙의 답이 바뀔 수 있을 때 부른다. */
   resetCache(): void {
     this.memo.clear();
+    this.typeMemo.clear();
+    this.cutTypeMemo.clear();
   }
 
   /**
@@ -109,9 +138,9 @@ export class OrmEvaluator {
   valueOf(expression: ts.Expression): OrmValue {
     const cached = this.memo.get(expression);
     if (cached !== undefined) return cached;
-    if (this.computing.has(expression) || this.depth >= MAX_DEPTH) return UNKNOWN;
+    if (this.computing.has(expression) || this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
     this.computing.add(expression);
-    this.depth++;
+    this.descend();
     try {
       const value = this.compute(expression);
       this.memo.set(expression, value);
@@ -123,19 +152,91 @@ export class OrmEvaluator {
   }
 
   /**
-   * 타입 표기의 값을 돌려준다.
+   * 타입 표기의 값을 돌려준다. 같은 노드는 한 번만 계산한다(문맥에 기댄 값은 같은 진입 깊이에서만 다시 쓴다).
    *
    * @param type 타입 노드
    * @returns 값
    */
   typeValue(type: ts.TypeNode): OrmValue {
-    if (this.depth >= MAX_DEPTH) return UNKNOWN;
-    this.depth++;
+    const settled = this.settledType(type);
+    if (settled !== undefined) return settled;
+    if (this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
+    const cut = this.cutTypeMemo.get(type)?.get(this.depth);
+    if (cut !== undefined) return this.cutOff(cut);
+    return this.computeTypeValue(type);
+  }
+
+  /**
+   * 문맥과 무관하게 메모한 타입 값을 돌려준다. 지금 깊이에서 다시 계산했다면 깊이 상한에 걸렸을 값이면
+   * undefined다(그때는 다시 계산해 상한이 끊는 위치를 메모 전과 같게 둔다).
+   *
+   * @param type 타입 노드
+   * @returns 값 또는 undefined
+   */
+  private settledType(type: ts.TypeNode): OrmValue | undefined {
+    const settled = this.typeMemo.get(type);
+    if (settled === undefined || this.depth + settled.span >= MAX_DEPTH) return undefined;
+    this.reach = Math.max(this.reach, this.depth + settled.span);
+    return settled.value;
+  }
+
+  /**
+   * 타입 값을 계산해 메모에 둔다. 계산 안에서 닿은 가장 깊은 진입 깊이를 바깥 계산에 넘긴다.
+   *
+   * @param type 타입 노드
+   * @returns 값
+   */
+  private computeTypeValue(type: ts.TypeNode): OrmValue {
+    const entry = this.depth;
+    const outerReach = this.reach;
+    const cutoffsBefore = this.cutoffs;
+    this.reach = entry;
+    this.descend();
     try {
-      return this.computeType(type);
+      const value = this.computeType(type);
+      this.rememberType(type, entry, value, this.cutoffs !== cutoffsBefore);
+      return value;
     } finally {
       this.depth--;
+      this.reach = Math.max(outerReach, this.reach);
     }
+  }
+
+  /**
+   * 평가 깊이를 한 단계 내린다. 진입 깊이를 `reach`에 반영해 메모한 타입 값의 깊이 폭을 잴 수 있게 한다.
+   */
+  private descend(): void {
+    this.reach = Math.max(this.reach, this.depth);
+    this.depth++;
+  }
+
+  /**
+   * 타입 값을 메모에 둔다. 문맥에 기댄 값은 진입 깊이별 메모에만 둔다.
+   *
+   * @param type 타입 노드
+   * @param entry 진입 깊이
+   * @param value 값
+   * @param contextual 계산 중 깊이 상한·순환 감지에 걸렸는지 여부
+   */
+  private rememberType(type: ts.TypeNode, entry: number, value: OrmValue, contextual: boolean): void {
+    if (!contextual) {
+      this.typeMemo.set(type, { value, span: this.reach - entry });
+      return;
+    }
+    const byDepth = this.cutTypeMemo.get(type) ?? new Map<number, OrmValue>();
+    byDepth.set(entry, value);
+    this.cutTypeMemo.set(type, byDepth);
+  }
+
+  /**
+   * 깊이 상한·순환 감지로 끊었음을 기록하고 값을 그대로 돌려준다. 바깥 계산이 문맥에 기댄 결과임을 알게 한다.
+   *
+   * @param value 끊은 자리의 값
+   * @returns 같은 값
+   */
+  private cutOff(value: OrmValue): OrmValue {
+    this.cutoffs++;
+    return value;
   }
 
   /**
@@ -145,9 +246,9 @@ export class OrmEvaluator {
    * @returns 값
    */
   declarationValue(declaration: ts.Declaration): OrmValue {
-    if (this.computing.has(declaration) || this.depth >= MAX_DEPTH) return UNKNOWN;
+    if (this.computing.has(declaration) || this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
     this.computing.add(declaration);
-    this.depth++;
+    this.descend();
     try {
       return this.computeDeclaration(declaration);
     } finally {
@@ -370,6 +471,18 @@ export class OrmEvaluator {
    */
   private memberType(type: ts.TypeNode, name: string, depth: number): ts.TypeNode | undefined {
     if (depth > 8) return undefined;
+    return this.memoizedMember(type, name, depth, () => this.findMemberType(type, name, depth));
+  }
+
+  /**
+   * `memberType`의 계산 본문이다(메모 없이 한 단계를 푼다).
+   *
+   * @param type 타입 노드
+   * @param name 멤버 이름
+   * @param depth 깊이
+   * @returns 멤버 타입 노드 또는 undefined
+   */
+  private findMemberType(type: ts.TypeNode, name: string, depth: number): ts.TypeNode | undefined {
     if (ts.isParenthesizedTypeNode(type)) return this.memberType(type.type, name, depth + 1);
     if (ts.isTypeLiteralNode(type)) return memberSignatureType(type.members, name);
     if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
@@ -395,6 +508,42 @@ export class OrmEvaluator {
    * @returns 멤버 타입 노드 또는 undefined
    */
   private interfaceMember(declaration: ts.InterfaceDeclaration, name: string, depth: number): ts.TypeNode | undefined {
+    return this.memoizedMember(declaration, name, depth, () => this.findInterfaceMember(declaration, name, depth));
+  }
+
+  /**
+   * (노드, 이름, 깊이)마다 멤버 타입 탐색을 한 번만 한다. 같은 인터페이스·별칭을 여러 경로로 만나는 선언이
+   * 분기^깊이로 다시 탐색되지 않게 한다. 깊이까지 키에 넣어 깊이 상한이 끊는 위치를 그대로 지킨다.
+   *
+   * @param node 타입 노드 또는 인터페이스 선언
+   * @param name 멤버 이름
+   * @param depth 깊이
+   * @param find 메모가 없을 때의 탐색
+   * @returns 멤버 타입 노드 또는 undefined
+   */
+  private memoizedMember(node: ts.Node, name: string, depth: number, find: () => ts.TypeNode | undefined): ts.TypeNode | undefined {
+    let byKey = this.memberTypeMemo.get(node);
+    if (byKey === undefined) {
+      byKey = new Map();
+      this.memberTypeMemo.set(node, byKey);
+    }
+    const key = `${depth}:${name}`;
+    const known = byKey.get(key);
+    if (known !== undefined) return known ?? undefined;
+    const found = find();
+    byKey.set(key, found ?? null);
+    return found;
+  }
+
+  /**
+   * `interfaceMember`의 계산 본문이다(자기 멤버, 그다음 확장한 프로젝트 인터페이스 순).
+   *
+   * @param declaration 인터페이스
+   * @param name 멤버 이름
+   * @param depth 깊이
+   * @returns 멤버 타입 노드 또는 undefined
+   */
+  private findInterfaceMember(declaration: ts.InterfaceDeclaration, name: string, depth: number): ts.TypeNode | undefined {
     const own = memberSignatureType(declaration.members, name);
     if (own !== undefined) return own;
     for (const clause of declaration.heritageClauses ?? []) {
