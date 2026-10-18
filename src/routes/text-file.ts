@@ -28,7 +28,8 @@ export async function readTextFile(fileSystem: CommandFileSystem, path: string, 
     const status = await fileSystem.status(path);
     if (status.kind !== 'file') return failure('unreadable');
     if (status.size > maxBytes) return failure('too-large');
-    bytes = await fileSystem.readBytes(path);
+    // 크기 확인 뒤 파일이 커져도 상한+1 바이트까지만 읽는다.
+    bytes = await fileSystem.readBytes(path, maxBytes);
   } catch {
     // 읽기 실패는 호출자가 route-coverage 공백으로 센다(실패 이유 문자열이 신호다).
     return failure('unreadable');

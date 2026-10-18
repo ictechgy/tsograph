@@ -169,7 +169,8 @@ async function resolveProject(
 async function readSpecText(fileSystem: CommandFileSystem, specReal: string): Promise<string | CommandResult> {
   let bytes: Uint8Array;
   try {
-    bytes = await fileSystem.readBytes(specReal);
+    // 크기 확인 뒤 스펙이 커져도 상한+1 바이트까지만 읽는다.
+    bytes = await fileSystem.readBytes(specReal, MAX_SPEC_BYTES);
   } catch (error) {
     return inputFailure(`unable to read the spec file (${errorCode(error)}); check file permissions.`);
   }

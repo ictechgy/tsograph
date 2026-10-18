@@ -172,6 +172,20 @@ function fakeFileSystem(overrides: Partial<CommandFileSystem>): CommandFileSyste
   return { ...createNodeFileSystem(), ...overrides };
 }
 
+test('스펙 읽기는 파일 시스템에 스펙 상한을 넘겨 메타데이터 확인 뒤 자란 파일도 상한+1 바이트까지만 읽게 한다', async () => {
+  const base = createNodeFileSystem();
+  const caps: (number | undefined)[] = [];
+  const observed = fakeFileSystem({
+    readBytes: async (path, maximumBytes) => {
+      caps.push(maximumBytes);
+      return base.readBytes(path, maximumBytes);
+    },
+  });
+  const result = await run([join(fixtures, 'swagger-2.0.json'), '--service', 'demo'], observed);
+  assert.equal(result.exitCode, 0, result.standardError);
+  assert.deepEqual(caps, [MAX_SPEC_BYTES]);
+});
+
 test('크기 상한·읽기 실패·금지 문자 경로·alias 폭탄·사실 상한을 2로 보고한다', async () => {
   const spec = join(fixtures, 'swagger-2.0.json');
   const arguments_ = [spec, '--service', 'demo'];
