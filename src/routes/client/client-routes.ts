@@ -111,10 +111,11 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
   if (typed !== undefined) {
     const pathArgument = call.arguments[typed.method.pathArgument];
     const root = values.rootSymbol(typed.receiver);
-    if (values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root)) return undefined;
+    // 변경을 확인한 수신자는 모델 호출로 승격하지 않는다. 변경 분석이 미완이면 사실을 버리지 않고 모델 동사의 dynamic 사실로 남긴다.
+    if (root !== undefined && values.mutated.has(root)) return undefined;
     return { library: 'typed', configs: [], ...(pathArgument === undefined ? {} : { path: substitute(pathArgument) }),
       forcedMethod: typed.method.method, typedBase: typed.method.base, ...(typed.method.service === undefined ? {} : { typedService: typed.method.service }),
-      unsafe: false };
+      unsafe: values.mutationAnalysisIncomplete };
   }
   if (call.questionDotToken !== undefined) return undefined;
   const forwarded = wrappers?.target(callee);

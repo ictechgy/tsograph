@@ -65,7 +65,8 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
 HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로
 매칭한다. 미상 URL 선행 값과 `{{NAME}}` 빌드 토큰에서 복원한 경로는 dynamic으로 유지한다.
-[명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
+변경 분석이 미완이면 모델 호출은 사라지지 않고 모델의 동사·`service`와 `channel: null`·`pathAnchor: "base"`의
+dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
 
 JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면

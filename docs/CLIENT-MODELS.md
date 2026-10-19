@@ -24,6 +24,8 @@ tsograph routes --role client --project . --tsconfig apps/web/tsconfig.json --cl
 메서드 모양만으로 매칭하지 않는다. import alias와 선언된 타입 별칭을 따라가며
 주입 매개변수와 named utility-type alias도 정확한 선언 identity를 확인해야 한다.
 `any`·`unknown`·union·모호한 선언·수신자 변경은 확정된 HTTP 호출로 승격하지 않는다.
+설정 변경 분석이 고정 상한이나 지원하지 않는 출처 때문에 미완이면, 모델 호출은 사라지지 않고 모델의 동사·`service`와
+`channel: null`·`dynamic: true`·`pathAnchor: "base"`로 남는다. 변경을 확인한 수신자는 그때도 승격하지 않는다.
 
 workspace를 `--project`로 쓰면 모든 소유 소스와 id가 그 기준이다. `--tsconfig` 파일도
 그 루트에서 해석해 경로 별칭을 적용한다. graph에서 같은 workspace와 compiler 설정을

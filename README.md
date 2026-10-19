@@ -71,7 +71,9 @@ The libraries are development-only dependencies for the oracle; the CLI does not
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
 than a global name or method shape. Unknown leading URL values and `{{NAME}}` build placeholders keep
-recovered paths dynamic. See [typed client models](docs/CLIENT-MODELS.md).
+recovered paths dynamic. When the mutation analysis is incomplete, model calls stay as dynamic facts
+(`channel: null`, `pathAnchor: "base"`) with the model's method and `service` instead of disappearing.
+See [typed client models](docs/CLIENT-MODELS.md).
 
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and

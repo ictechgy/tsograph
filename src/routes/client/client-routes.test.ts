@@ -198,6 +198,29 @@ test('typed model rejects reassigned receivers, replaced methods and nested same
   assert.deepEqual(doc.facts, []);
 });
 
+test('typed model calls stay as dynamic facts when mutation analysis is incomplete', async () => {
+  // 예전에는 변경 분석이 미완(여기서는 증명하지 못한 변경 수신자)이면 typed 호출 사실이 문서에서 사라졌다. 지금은 모델
+  // 동사·service의 dynamic 사실로 남긴다. 변경을 확인한 수신자(`replaced`)는 그때도 승격하지 않는다.
+  const doc = await scanTyped(`
+    type CatalogPort = { read(path: string): unknown };
+    declare const port: CatalogPort;
+    declare const replaced: CatalogPort;
+    declare function runtime(): { method: string };
+    runtime().method = 'POST';
+    replaced.read = port.read;
+    port.read('/items');
+    replaced.read('/replaced');
+  `, {
+    format: 'http-client-models', version: 1, models: [{ receiver: { kind: 'type', path: 'src/client.ts', name: 'CatalogPort' }, methods: [
+      { name: 'read', method: 'GET', pathArgument: 0, base: '/v2', service: 'catalog' },
+    ] }],
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel, fact.dynamic, fact.pathAnchor, fact.service]), [
+    ['GET', null, true, 'base', 'catalog'],
+  ]);
+  assert.ok(doc.limitations.some((limitation) => limitation.includes('configuration mutation analysis is incomplete')));
+});
+
 test('axios aliases, instances, config overrides, config-call and default methods', async () => {
   const doc = await scan(`import http from 'axios';
     const client = http.create({ baseURL: 'https://api.example.com/v1/' });
