@@ -89,10 +89,13 @@ export class DrizzleCatalog {
    * 모듈에서 casing·테이블·관계 선언을 모은다. casing을 먼저 모아야 키 이름 컬럼을 풀 수 있다.
    *
    * @param modules 소스 모듈
+   * @param scanCalls 호출 식을 하나하나 평가해 `drizzle()`·테이블·관계 선언을 찾을지 여부다. Drizzle 값은 `drizzle-orm`
+   *   지정자에서만 생기므로, 프로젝트에 그 지정자가 없으면 false로 넘겨 늘 빈 결과인 평가를 건너뛴다. 그래도
+   *   `drizzle.config.*`의 casing은 읽는다(설정 파일은 보통 `drizzle-kit`만 가져온다).
    */
-  discover(modules: readonly SourceModule[]): void {
+  discover(modules: readonly SourceModule[], scanCalls: boolean): void {
     const calls: ts.CallExpression[] = [];
-    for (const module of modules) walk(module.sourceFile, (node) => { if (ts.isCallExpression(node)) calls.push(node); });
+    if (scanCalls) for (const module of modules) walk(module.sourceFile, (node) => { if (ts.isCallExpression(node)) calls.push(node); });
     this.casing = this.projectCasing(calls, modules);
     for (const call of calls) this.discoverCall(call);
   }

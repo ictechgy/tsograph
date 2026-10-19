@@ -1028,12 +1028,13 @@ function classMember(owner: ts.ClassLikeDeclaration, name: string): ts.Declarati
 }
 
 /**
- * 호출이 `require('…')`·`import('…')`면 지정자를 돌려준다.
+ * 호출이 `require('…')`·`import('…')`면 지정자를 돌려준다. ORM 단계 게이트도 같은 판정을 쓴다(평가기가 외부 값으로
+ * 읽는 모듈 로드와 게이트가 보는 모듈 로드가 어긋나지 않게).
  *
  * @param call 호출 식
  * @returns 지정자 또는 undefined
  */
-function moduleLoadSpecifier(call: ts.CallExpression): string | undefined {
+export function moduleLoadSpecifier(call: ts.CallExpression): string | undefined {
   const isLoad = call.expression.kind === ts.SyntaxKind.ImportKeyword
     || (ts.isIdentifier(call.expression) && call.expression.text === 'require');
   const [argument] = call.arguments;
