@@ -595,9 +595,10 @@ Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터�
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
-`unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
-`invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
-`unreadable-module-configs:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
+`unreadable-orm-declarations:`, `orm-evaluation-truncated:`, `provenance-truncated:`,
+`missing-relation-usrs:`, `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`,
+`parse-errors:`, `unreadable-module-configs:`, `skipped-symlinks:`, `unsafe-names:`,
+`scan-truncated:`. 모두 호출 측 한계라 isthmus가
 심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
 
 ### 카탈로그와 조인
@@ -1016,7 +1017,9 @@ isthmus-cli 0.11.0은 `symbol.entries`를 거부하므로 소비자를 먼저 �
   넘으면 작은 64개만 싣고 `rootsTruncated: true`를 단다.
 - 순회는 root마다 따로 도는 탐색이 아니라 모든 root를 한 번에 출발시키는 단계 동기 단일 패스다. 더 작은 root
   인덱스를 이미 65개 가진 심볼에서는 더 큰 root가 전파를 멈춘다 — 싣는 `roots`·`depth`·`via`를 더는 바꾸지
-  못하기 때문이며, root가 10,000개여도 심볼당 작업이 묶인다. root별 알고리즘과의 동등성은 무작위 테스트로
+  못하기 때문이다. 이 규칙은 작은 인덱스 root가 먼저 닿는 심볼에서만 root 기록을 65개 남짓으로 묶는다. 큰 인덱스
+  root가 먼저 닿는 심볼은 작은 인덱스 65개가 차기 전에 들어온 root를 모두 들므로, 심볼당 작업은 root 수에 따라
+  늘 수 있다. root별 알고리즘과의 동등성은 무작위 테스트로
   확인한다. root 인덱스가 넘치면(`rootsTruncated: true`) `depth` 이유는 깊이 상한 때문에 심볼이 빠졌을 때
   싣고, 한 root의 출처만 잘린 경우에는 싣지 않는다. `max-reached`로도 잘린 문서에서는 버린 심볼의 root
   초과도 `rootsTruncated`로 알린다.

@@ -2,9 +2,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { BridgeLocation } from '../exchange/bridge-facts.ts';
 import { encodeSortedJson } from '../exchange/sorted-json.ts';
 import { createGraphSnapshot } from './graph-document.ts';
-import type { CallGraph } from './graph-model.ts';
+import type { CallGraph, GraphEdge, GraphNode, UnresolvedCallCounts } from './graph-model.ts';
 import { graphOutputChunks, writeGraphOutput, GraphOutputWriteError } from './graph-output.ts';
 
 const graph: CallGraph = {
@@ -74,6 +75,77 @@ test('streamed graph can exceed the exchange String limit using bounded writes',
   });
   assert.ok(bytes > 16 * 1024 * 1024);
   assert.ok(largest <= 64 * 1024);
+});
+
+/** 모든 선택 필드를 채운 노드다. 노드·위치·계수 타입에 필드가 늘면 타입 검사가 이 표본도 늘리게 한다. */
+const fullNode = {
+  entries: ['page', 'route-handler'],
+  id: 'src/a "b"\\c.ts#run\u2028😀',
+  kind: 'method',
+  location: { column: 7, line: 12, path: 'src/a "b"\\c.ts' } satisfies Required<BridgeLocation>,
+  unresolvedCalls: { direct: 3, bound: 2, candidates: 1 } satisfies Required<UnresolvedCallCounts>,
+} satisfies Required<GraphNode>;
+/** 모든 필드를 채운 간선이다. */
+const fullEdge = { evidence: 'bound', from: fullNode.id, kinds: ['call', 'reference'], to: 'src/a.ts#load' } satisfies Required<GraphEdge>;
+/** 선택 필드가 없거나 비었거나 일부만 찬 노드다. */
+const partialNodes: GraphNode[] = [
+  { id: 'src/a.ts#bare', kind: 'function', location: { path: 'src/a.ts', line: 1, column: 1 } },
+  { id: 'src/a.ts#empty', kind: 'class', location: { path: 'src/a.ts', line: 2, column: 3 }, entries: [], unresolvedCalls: {} },
+  { id: 'src/a.ts#some', kind: 'export', location: { path: 'src/a.ts', line: 4, column: 5 }, unresolvedCalls: { direct: 1 } },
+];
+/** 노드·간선 레코드 표본을 담은 문서다. */
+const recordSample = { ...document, nodes: [fullNode, ...partialNodes], edges: [fullEdge, { from: 'a', to: 'b', kinds: ['call'], evidence: 'direct' }] } satisfies typeof document;
+
+test('fixed-order node and edge records match the generic sorted JSON bytes', () => {
+  assert.equal([...graphOutputChunks(recordSample, 'json')].join(''), encodeSortedJson(recordSample));
+  const compact = (value: unknown): string => `${JSON.stringify(JSON.parse(encodeSortedJson(value)))}\n`;
+  assert.deepEqual([...graphOutputChunks(recordSample, 'ndjson')].slice(1), [
+    ...recordSample.nodes.map((node) => compact({ record: 'node', node })),
+    ...recordSample.edges.map((edge) => compact({ record: 'edge', edge })),
+  ]);
+});
+
+test('node and edge records are serialized without enumerating or sorting their keys', () => {
+  let enumerations = 0;
+  const watched = <T extends object>(value: T): T => new Proxy(value, {
+    ownKeys(target) {
+      enumerations++;
+      return Reflect.ownKeys(target);
+    },
+  });
+  const proxied = { ...recordSample, nodes: recordSample.nodes.map(watched), edges: recordSample.edges.map(watched) };
+  for (const format of ['json', 'ndjson'] as const) {
+    assert.equal([...graphOutputChunks(proxied, format)].join(''), [...graphOutputChunks(recordSample, format)].join(''));
+  }
+  assert.equal(enumerations, 0);
+});
+
+test('JSON output yields one chunk per node and edge record', () => {
+  const chunks = (count: number): number => [...graphOutputChunks({
+    ...document,
+    nodes: Array.from({ length: count }, (_, index) => ({ ...fullNode, id: `n${index}` })),
+    edges: Array.from({ length: count }, (_, index) => ({ ...fullEdge, from: `n${index}` })),
+  }, 'json')].length;
+  // 레코드가 는 만큼만 조각이 는다(토큰 단위로 내면 레코드마다 조각 수십 개).
+  assert.equal(chunks(20) - chunks(10), 20);
+});
+
+test('records longer than one write are split without breaking surrogate pairs', async () => {
+  // 앞 글자 수의 홀짝이 다른 두 노드라 어느 형식에서든 한쪽은 16K 경계가 surrogate pair 가운데에 걸린다.
+  const large = { ...document, nodes: [{ ...fullNode, id: '😀'.repeat(12_000) }, { ...fullNode, id: `x${'😀'.repeat(12_000)}` }] };
+  for (const format of ['json', 'ndjson'] as const) {
+    const writes: string[] = [];
+    await writeGraphOutput(large, format, async (chunk) => {
+      writes.push(chunk);
+    });
+    for (const chunk of writes) {
+      const last = chunk.charCodeAt(chunk.length - 1);
+      assert.ok(Buffer.byteLength(chunk) <= 64 * 1024 && !(last >= 0xd800 && last <= 0xdbff), format);
+    }
+    assert.ok(writes.length > 4, format);
+    assert.equal(writes.join(''), [...graphOutputChunks(large, format)].join(''));
+  }
+  assert.equal([...graphOutputChunks(large, 'json')].join(''), encodeSortedJson(large));
 });
 
 test('oversized Unicode tokens and NDJSON records use bounded UTF-8 writes without corruption', async () => {

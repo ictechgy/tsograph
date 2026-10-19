@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { escapeName, escapeQualified, lexSql, looksLikeSql, sqlRelations } from './sql-relations.ts';
+import { escapeName, escapeQualified, lexSql, looksLikeSql, type SqlToken, sqlRelations, tokenRelations } from './sql-relations.ts';
 
 // 기대값은 cartograph `SqlRelationsTests`·dartograph `sql_relations_test`와 같은 공유 벡터다.
 // 가족 생산자가 같은 SQL을 같게 읽어야 isthmus 조인 결과가 생산자 언어와 무관해진다.
@@ -149,4 +149,65 @@ test('table-valued functions are unresolved operands, not table names', () => {
   assert.deepEqual(relations("SELECT * FROM pragma_table_info('t') AS p, users"), ['users']);
   assert.equal(sqlRelations("SELECT * FROM pragma_table_info('t')").unresolved, 1);
   assert.deepEqual(relations('INSERT INTO users (id) VALUES (1)'), ['users']);
+});
+
+test('앞선 동사·권한·종류어 탐색은 인용 여부와 무관하게 `;` 토큰에서 끊고, 괄호 짝은 비인용 괄호만 센다', () => {
+  // 문장 머리·동사는 비인용 `;`에서만 끊지만, INTO·ON 앞 단어 탐색은 인용된 `;`(`[;]`·`";"`)에서도 끊는다(포트 원본 규칙).
+  const cases: readonly (readonly [string, readonly string[], number])[] = [
+    ['INSERT [;] INTO t', [], 0],
+    ['INSERT ";" INTO t', [], 0],
+    ['INSERT INTO a; INTO b', ['a'], 0],
+    ['GRANT SELECT [;] ON t TO r', [], 0],
+    ['GRANT SELECT ON a TO r; GRANT USAGE [;] ON b TO r', ['a'], 0],
+    ['CREATE INDEX i [;] ON t (x)', [], 0],
+    ['CREATE TRIGGER x AFTER INSERT ON t', ['t'], 0],
+    ['INSERT INTO "a;b" SELECT * FROM `;` JOIN d', ['a;b', ';', 'd'], 0],
+    ['SELECT * FROM (a)) JOIN b ON true', ['b'], 0],
+    ['SELECT * FROM ) JOIN (SELECT 1 FROM c) d', ['c'], 1],
+    ['SELECT * FROM f(1, (2)) x JOIN y ON true', ['y'], 1],
+    ['SELECT * FROM f(1 JOIN y', ['y'], 1],
+    ['SELECT * FROM ("(") x JOIN y ON true', ['y'], 0],
+    ['SELECT * FROM (SELECT 1 FROM (SELECT 2 FROM c', ['c'], 2],
+    ['GRANT EXECUTE ON FUNCTION f(int, (x)) TO r', [], 0],
+  ];
+  for (const [sql, names, unresolved] of cases) {
+    const result = sqlRelations(sql);
+    assert.deepEqual([result.relations.map((relation) => relation.name), result.unresolved], [names, unresolved], sql);
+  }
+  assert.deepEqual(relations('insert INTO t', true), []);
+  assert.deepEqual(relations('insert INTO t'), ['t']);
+});
+
+/**
+ * 어휘 목록 원소를 읽은 횟수를 세는 목록을 만든다. 구현이 위치마다 앞뒤를 다시 훑으면 읽기 수가 어휘 수의
+ * 제곱으로 늘어나므로, 실행 시간 대신 이 수로 작업량을 결정적으로 본다.
+ *
+ * @param sql SQL 텍스트
+ * @returns 세는 어휘 목록과 지금까지의 읽기 수
+ */
+function countedTokens(sql: string): { readonly tokens: readonly SqlToken[]; readonly reads: () => number } {
+  let reads = 0;
+  const tokens = new Proxy(lexSql(sql), {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/u.test(key)) reads++;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  return { tokens, reads: () => reads };
+}
+
+test('반복 INTO·ON과 닫히지 않거나 중첩된 괄호도 어휘를 위치마다 다시 훑지 않는다', () => {
+  const inputs = [
+    `INSERT${' INTO t'.repeat(2000)}`,
+    `SELECT 1${' FROM ('.repeat(2000)}`,
+    `GRANT SELECT${' ON t'.repeat(2000)}`,
+    `CREATE INDEX i${' ON t'.repeat(2000)}`,
+    `${'SELECT * FROM ('.repeat(1000)}SELECT 1${')'.repeat(1000)}`,
+  ];
+  for (const sql of inputs) {
+    const counted = countedTokens(sql);
+    assert.deepEqual(tokenRelations(counted.tokens, true), sqlRelations(sql, true));
+    const tokens = counted.tokens.length;
+    assert.ok(counted.reads() <= 64 * tokens, `${sql.slice(0, 16)}…: ${counted.reads()} reads for ${tokens} tokens`);
+  }
 });

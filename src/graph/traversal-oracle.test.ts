@@ -244,6 +244,30 @@ test('root 80개가 한 허브로 모이는 그래프(전파 중단 경로)도 �
   assert.equal(r05.roots.at(-1), 64);
 });
 
+test('큰 인덱스 root가 먼저 65개를 채운 정점에 작은 인덱스 root가 나중에 닿아도 오라클과 같다', () => {
+  // 인덱스 30 이상 root는 허브에 깊이 1, 30 미만 root는 중간 정점을 거쳐 깊이 2로 닿는다. 허브가 65개를 채운 뒤에도
+  // 작은 인덱스는 지배되지 않아 들어가고, 허브 너머 정점은 작은 인덱스 64개를 싣는다.
+  const roots = Array.from({ length: 100 }, (_, index) => `r${String(index).padStart(2, '0')}`);
+  const edge = (from: string, to: string, evidence: EdgeEvidence = 'direct'): GraphEdge => ({ from, to, kinds: ['call'], evidence });
+  const edges = [
+    ...roots.map((root, index) => (index >= 30 ? edge(root, 'hub') : edge(root, `mid${root}`))),
+    ...roots.slice(0, 30).map((root, index) => edge(`mid${root}`, 'hub', index % 7 === 0 ? 'bound' : 'direct')),
+    edge('hub', 'tail'), edge('tail', 'end', 'candidate'), edge('hub', 'r40'),
+  ].sort((left, right) => compareStrings(left.from, right.from) || compareStrings(left.to, right.to));
+  const ids = [...new Set(edges.flatMap((item) => [item.from, item.to]))].sort(compareStrings);
+  const graph: CallGraph = { ...randomCase(random(1), 1, 0, 1).graph, nodes: ids.map((id) => ({ id, kind: 'function', location: { path: 'a.ts', line: 1, column: 1 } })), edges };
+  for (const rootIds of [roots, [...roots].reverse()]) {
+    for (const maxDepth of [1, 2, 3, 128]) {
+      for (const dispatch of ['direct', 'bound', 'candidates'] as const) {
+        compare(`late small ${rootIds[0]} ${maxDepth} ${dispatch}`, graph, { rootIds, direction: 'dependencies', maxDepth, maxReached: 100_000, dispatch });
+      }
+    }
+  }
+  const tail = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 100_000, dispatch: 'bound' }).reached.find((row) => row.id === 'tail')!;
+  assert.deepEqual(tail.roots, Array.from({ length: MAX_ROOTS_PER_NODE }, (_, index) => index));
+  assert.equal(tail.evidence, 'bound');
+});
+
 test('작은 무작위 그래프에서 단일 패스는 root별 오라클과 같다', () => {
   const next = random(20260927);
   for (let iteration = 0; iteration < 1500; iteration++) {
