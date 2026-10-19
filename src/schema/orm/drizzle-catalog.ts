@@ -68,6 +68,12 @@ export class DrizzleCatalog {
   private readonly relationCalls: ts.CallExpression[] = [];
   /** 테이블 → 관계 키 → 대상 테이블 메모다. */
   private readonly relationMemo = new Map<DrizzleTable, ReadonlyMap<string, DrizzleTable>>();
+  /**
+   * 관계형 쿼리 스키마 식·타입(없으면 undefined) → 키 → 테이블 메모다. 메모가 없으면 `db.query.<key>` 호출마다 스키마의
+   * 모든 export를 다시 평가해, 비용이 호출 수 × export 수가 된다. 선언 탐색이 끝난 사용 스캔에서만 묻고 그동안 평가기
+   * 메모를 비우지 않으므로, 깊이 상한·순환 감지에 걸리지 않고 만든 표는 다시 계산해도 같다(걸린 표는 두지 않는다).
+   */
+  private readonly relationalMemo = new Map<ts.Expression | ts.TypeNode | undefined, ReadonlyMap<string, DrizzleTable>>();
   /** 프로젝트 casing(여럿이거나 비리터럴이면 undefined)이다. */
   private casing: Casing | undefined = 'none';
 
@@ -89,22 +95,42 @@ export class DrizzleCatalog {
    * 모듈에서 casing·테이블·관계 선언을 모은다. casing을 먼저 모아야 키 이름 컬럼을 풀 수 있다.
    *
    * @param modules 소스 모듈
+   * @param scanCalls 호출 식을 하나하나 평가해 `drizzle()`·테이블·관계 선언을 찾을지 여부다. Drizzle 값은 `drizzle-orm`
+   *   지정자에서만 생기므로, 프로젝트에 그 지정자가 없으면 false로 넘겨 늘 빈 결과인 평가를 건너뛴다. 그래도
+   *   `drizzle.config.*`의 casing은 읽는다(설정 파일은 보통 `drizzle-kit`만 가져온다).
    */
-  discover(modules: readonly SourceModule[]): void {
+  discover(modules: readonly SourceModule[], scanCalls: boolean): void {
     const calls: ts.CallExpression[] = [];
-    for (const module of modules) walk(module.sourceFile, (node) => { if (ts.isCallExpression(node)) calls.push(node); });
+    if (scanCalls) for (const module of modules) walk(module.sourceFile, (node) => { if (ts.isCallExpression(node)) calls.push(node); });
     this.casing = this.projectCasing(calls, modules);
     for (const call of calls) this.discoverCall(call);
   }
 
   /**
-   * 관계형 쿼리 스키마(`drizzle(c, { schema })`의 값 또는 `typeof schema` 타입)의 키 → 테이블 표다.
-   * 스키마를 풀지 못하면 프로젝트의 export 이름이 유일한 테이블로 대신한다(스키마 키는 export 이름이다).
+   * 관계형 쿼리 스키마(`drizzle(c, { schema })`의 값 또는 `typeof schema` 타입)의 키 → 테이블 표다. 스키마 식·타입마다
+   * 한 번만 만든다(평가 깊이 상한·순환 감지에 걸린 표만 다시 만든다). 스키마를 풀지 못하면 프로젝트의 export 이름이
+   * 유일한 테이블로 대신한다(스키마 키는 export 이름이다).
+   *
+   * @param schema 스키마 식·타입 또는 undefined
+   * @returns 키 → 테이블(읽기 전용, 호출자끼리 공유한다)
+   */
+  relationalTables(schema: ts.Expression | ts.TypeNode | undefined): ReadonlyMap<string, DrizzleTable> {
+    const cached = this.relationalMemo.get(schema);
+    if (cached !== undefined) return cached;
+    const cutoffsBefore = this.evaluator.cutoffCount;
+    const tables = this.schemaTables(schema);
+    // 평가를 끊은 표는 계산 순서에 기대므로 메모하지 않는다(다음 호출이 예전처럼 다시 계산한다).
+    if (this.evaluator.cutoffCount === cutoffsBefore) this.relationalMemo.set(schema, tables);
+    return tables;
+  }
+
+  /**
+   * `relationalTables`의 계산 본문이다(메모 없이 스키마 값을 풀어 표를 만든다).
    *
    * @param schema 스키마 식·타입 또는 undefined
    * @returns 키 → 테이블
    */
-  relationalTables(schema: ts.Expression | ts.TypeNode | undefined): ReadonlyMap<string, DrizzleTable> {
+  private schemaTables(schema: ts.Expression | ts.TypeNode | undefined): ReadonlyMap<string, DrizzleTable> {
     const value = schema === undefined ? UNKNOWN : ts.isTypeNode(schema) ? this.evaluator.typeValue(schema) : this.evaluator.valueOf(schema);
     const tables = new Map<string, DrizzleTable>();
     if (this.collectSchemaTables(value, tables, 0)) return tables;

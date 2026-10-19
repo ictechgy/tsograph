@@ -165,3 +165,127 @@ test('등급 비교(root 3,000개·정점 6,000개)는 direct 순회 대비 작�
   // 등급 비교는 비교 대상 root의 비트 집합 전파 두세 번이다. 기준 순회의 3배 + 2초를 넘으면 회귀다.
   assert.ok(candidates.elapsed < direct.elapsed * 3 + 2_000, `direct ${Math.round(direct.elapsed)} ms, candidates ${Math.round(candidates.elapsed)} ms`);
 });
+
+/**
+ * 동기 함수를 실행하는 동안 전역 `Uint32Array` 생성 횟수를 센다(끝나면 원래 생성자로 되돌린다).
+ *
+ * @param run 실행할 함수
+ * @returns 생성 횟수
+ */
+function countBitSetAllocations(run: () => void): number {
+  const original = globalThis.Uint32Array;
+  let created = 0;
+  globalThis.Uint32Array = new Proxy(original, {
+    construct(target, args) {
+      created++;
+      return Reflect.construct(target, args);
+    },
+  });
+  try {
+    run();
+  } finally {
+    globalThis.Uint32Array = original;
+  }
+  return created;
+}
+
+/**
+ * 동기 함수를 실행하는 동안 `Map.prototype.keys` 호출 횟수를 센다(끝나면 원래 메서드로 되돌린다).
+ *
+ * @param run 실행할 함수
+ * @returns 호출 횟수
+ */
+function countMapKeyScans(run: () => void): number {
+  const original = Map.prototype.keys;
+  let calls = 0;
+  Map.prototype.keys = function keys(this: Map<unknown, unknown>) {
+    calls++;
+    return original.call(this);
+  };
+  try {
+    run();
+  } finally {
+    Map.prototype.keys = original;
+  }
+  return calls;
+}
+
+test('등급 비교의 비트 집합은 정점·단계 수와 무관한 고정 개수만 만든다', () => {
+  // root 40개가 허브로 모이고, 허브 너머 bound 간선 뒤로 정점 사슬이 이어진다(모든 root가 비교 대상).
+  const allocations = (length: number): number => {
+    const roots = Array.from({ length: 40 }, (_, index) => `r${String(index).padStart(2, '0')}`);
+    const chain = Array.from({ length }, (_, index) => `c${index}>c${index + 1}`);
+    const graph = graphOf([...roots.map((root) => `${root}>hub`), 'hub>c0:call:bound', 'hub>side', ...chain]);
+    let evidence: string[] = [];
+    const created = countBitSetAllocations(() => {
+      evidence = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 1000, dispatch: 'bound' })
+        .reached.map((row) => `${row.id} ${row.evidence}`);
+    });
+    assert.ok(evidence.includes('side direct') && evidence.includes(`c${length} bound`), evidence.join('\n'));
+    return created;
+  };
+  const short = allocations(60);
+  const long = allocations(120);
+  // 예전에는 단계마다 새로 닿은 정점마다 비트 집합을 만들어 정점 수에 비례했다.
+  assert.equal(long, short);
+  assert.ok(short <= 8, `${short} bit sets`);
+});
+
+test('지배 판정은 정점이 이미 든 root 목록을 판정마다 다시 훑지 않는다', () => {
+  // root 200개가 정점 40개에 모두 닿는다. 정점마다 root 65개가 찬 뒤 오는 root 135개는 전파를 멈춘다.
+  const roots = Array.from({ length: 200 }, (_, index) => `r${String(index).padStart(3, '0')}`);
+  const layer = Array.from({ length: 40 }, (_, index) => `m${String(index).padStart(2, '0')}`);
+  const graph = graphOf([...roots.flatMap((root) => layer.map((node) => `${root}>${node}`)), ...layer.map((node) => `${node}>sink`)]);
+  let result: ReturnType<typeof traverse> | undefined;
+  const scans = countMapKeyScans(() => {
+    result = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 1000, dispatch: 'direct' });
+  });
+  assert.equal(result?.rootsTruncated, true);
+  assert.deepEqual(result?.reached.find((row) => row.id === 'sink')?.roots, Array.from({ length: MAX_ROOTS_PER_NODE }, (_, index) => index));
+  // 정점마다 root 기록을 많아야 두 번(65개가 처음 찼을 때, 도달 행을 만들 때) 연다. 예전에는 멈춘 root마다 열었다.
+  const nodes = roots.length + layer.length + 1;
+  assert.ok(scans <= 2 * nodes, `${scans} scans for ${nodes} nodes`);
+});
+
+/**
+ * 동기 함수를 실행하는 동안 전역 `Uint32Array`를 길이로 만든 배열의 바이트 합을 센다(끝나면 원래 생성자로 되돌린다).
+ *
+ * @param run 실행할 함수
+ * @returns 할당한 바이트 수
+ */
+function bitSetBytes(run: () => void): number {
+  const original = globalThis.Uint32Array;
+  let bytes = 0;
+  globalThis.Uint32Array = new Proxy(original, {
+    construct(target, args) {
+      if (typeof args[0] === 'number') bytes += args[0] * original.BYTES_PER_ELEMENT;
+      return Reflect.construct(target, args);
+    },
+  });
+  try {
+    run();
+  } finally {
+    globalThis.Uint32Array = original;
+  }
+  return bytes;
+}
+
+test('등급 비교의 비트 배열은 정확 비교를 허용한 메모리 판정식 안에 든다(bound·candidates)', () => {
+  // root 40개(32비트 단어 2개)가 허브로 모이고, 허브 너머 bound·candidate 간선 뒤로 정점 사슬이 이어진다(모든 root가 비교 대상).
+  const roots = Array.from({ length: 40 }, (_, index) => `r${String(index).padStart(2, '0')}`);
+  const chain = (prefix: string): string[] => Array.from({ length: 50 }, (_, index) => `${prefix}${index}>${prefix}${index + 1}`);
+  const graph = graphOf([...roots.map((root) => `${root}>hub`), 'hub>b0:call:bound', 'hub>k0:call:candidate', ...chain('b'), ...chain('k')]);
+  for (const [dispatch, tiers] of [['bound', 2], ['candidates', 3]] as const) {
+    // 판정식(정점 수 × 단어 수 × 4바이트 × (등급 수 + 1))과 같은 상한이면 정확 비교가 허용된다. 예전에는 bound 모드가
+    // 평면 배열을 판정식보다 한 벌 더(4벌) 만들었다.
+    const budget = graph.nodes.length * Math.ceil(roots.length / 32) * 4 * (tiers + 1);
+    let result: ReturnType<typeof traverse> | undefined;
+    const bytes = bitSetBytes(() => {
+      result = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 1000, dispatch, evidenceMemoryBytes: budget });
+    });
+    assert.equal(result?.evidenceApproximated, false, dispatch);
+    const evidence = ['hub', 'b50', 'k50'].map((id) => result?.reached.find((row) => row.id === id)?.evidence);
+    assert.deepEqual(evidence, dispatch === 'bound' ? ['direct', 'bound', undefined] : ['direct', 'bound', 'candidate'], dispatch);
+    assert.ok(bytes <= budget, `${dispatch}: ${bytes} bytes of bit sets for a ${budget}-byte budget`);
+  }
+});

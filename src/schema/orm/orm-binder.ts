@@ -34,6 +34,29 @@ export type BindingOrigin =
 /** 해석하지 못한 결과의 공유 값이다. */
 export const UNKNOWN_ORIGIN: BindingOrigin = { kind: 'unknown' };
 
+/**
+ * require 재수출 사슬이 `require`로 들어간 모듈 파일 목록이다(앞이 바깥). 꼬리를 공유하는 연결 목록이라 사슬을
+ * 이을 때 복사하지 않는다.
+ */
+interface RequireTrail {
+  readonly file: ts.SourceFile;
+  readonly rest: RequireTrail | undefined;
+}
+
+/** 모듈 export 하나(파일, 이름)를 따라간 결과다. */
+interface ExportChain {
+  readonly origin: BindingOrigin;
+  /** 이 사슬이 require로 들어간 파일이다(첫 원소가 이 export의 파일). 바깥 사슬이 이 안의 파일이면 순환이다. */
+  readonly trail: RequireTrail;
+}
+
+/** 별칭 사슬 하나를 따라간 결과다. */
+interface Resolution {
+  readonly origin: BindingOrigin;
+  /** 사슬 끝이 `require('./m').name` 꼴이면 그 export의 사슬이다(바깥 export의 순환 판정에 쓴다). */
+  readonly via?: ExportChain;
+}
+
 /** 파일 확장자 → 컴파일러 확장자 종류다. */
 const extensions: ReadonlyMap<string, ts.Extension> = new Map([
   ['.ts', ts.Extension.Ts], ['.tsx', ts.Extension.Tsx], ['.mts', ts.Extension.Mts], ['.cts', ts.Extension.Cts],
@@ -48,6 +71,21 @@ export class OrmBinder {
   private readonly modulesByPath: ReadonlyMap<string, SourceModule>;
   /** 모듈 해석기다. */
   private readonly resolver: ModuleResolver;
+  /**
+   * 모듈 파일 → export 이름 → 대상 메모다. Program은 실행 중 바뀌지 않고 export 사슬 결과도 파일마다 늘 같다. 메모가
+   * 없으면 `schema.users` 같은 이름공간 접근·require 구조 분해마다 모든 export를 다시 따라가, 비용이 참조 수 × export
+   * 수가 된다.
+   */
+  private readonly exportsMemo = new Map<ts.SourceFile, ReadonlyMap<string, BindingOrigin>>();
+  /** 모듈 파일 → export 이름 → 심볼이다(`getExportsOfModule` 순서, 같은 이름은 뒤의 심볼). */
+  private readonly exportSymbolsMemo = new Map<ts.SourceFile, ReadonlyMap<string, ts.Symbol>>();
+  /**
+   * (모듈 파일, export 이름) → 사슬 메모다. 사슬 결과는 시작한 곳과 무관하다: 바깥 사슬이 이 사슬의 파일로 다시
+   * 들어가는지는 `trail`로 바깥이 판정한다. 그래서 서로를 require로 재수출하는 고리에서도 export마다 한 번만 따라간다.
+   */
+  private readonly chainMemo = new Map<ts.SourceFile, Map<string, ExportChain>>();
+  /** 따라가는 중인 (모듈 파일, export 이름)이다. 같은 export로 돌아오는 고리를 끊는다. */
+  private readonly following = new Map<ts.SourceFile, Set<string>>();
 
   /**
    * @param modules 스캔한 소스 모듈(이미 파싱한 트리를 그대로 Program에 넣는다)
@@ -80,17 +118,75 @@ export class OrmBinder {
   }
 
   /**
-   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함).
+   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함). 파일마다 한 번만 계산해 같은 표를 다시 준다.
+   * 사슬이 이미 require로 들어간 파일로 다시 들어가면(순환 require 재수출) 그 export는 모르는 대상이다(CommonJS
+   * 순환 require도 실행 시 그 자리에 값이 없다).
    *
    * @param sourceFile 모듈 파일
-   * @returns export 이름 → 대상
+   * @returns export 이름 → 대상(읽기 전용, 호출자끼리 공유한다)
    */
-  exportsOf(sourceFile: ts.SourceFile): Map<string, BindingOrigin> {
+  exportsOf(sourceFile: ts.SourceFile): ReadonlyMap<string, BindingOrigin> {
+    const cached = this.exportsMemo.get(sourceFile);
+    if (cached !== undefined) return cached;
     const result = new Map<string, BindingOrigin>();
-    const moduleSymbol = this.checker.getSymbolAtLocation(sourceFile);
-    if (moduleSymbol === undefined) return result;
-    for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) result.set(symbol.name, this.followSymbol(symbol));
+    for (const name of this.exportSymbols(sourceFile).keys()) result.set(name, this.exportChain(sourceFile, name).origin);
+    this.exportsMemo.set(sourceFile, result);
     return result;
+  }
+
+  /**
+   * 모듈 파일의 export 이름 → 심볼이다. 파일마다 한 번만 묻는다.
+   *
+   * @param sourceFile 모듈 파일
+   * @returns export 이름 → 심볼(모듈이 아닌 스크립트면 비어 있다)
+   */
+  private exportSymbols(sourceFile: ts.SourceFile): ReadonlyMap<string, ts.Symbol> {
+    const cached = this.exportSymbolsMemo.get(sourceFile);
+    if (cached !== undefined) return cached;
+    const symbols = new Map<string, ts.Symbol>();
+    const moduleSymbol = this.checker.getSymbolAtLocation(sourceFile);
+    if (moduleSymbol !== undefined) for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) symbols.set(symbol.name, symbol);
+    this.exportSymbolsMemo.set(sourceFile, symbols);
+    return symbols;
+  }
+
+  /**
+   * export 하나를 따라간 사슬이다. (파일, 이름)마다 한 번만 따라간다. 따라가는 중인 같은 export로 돌아오면 그 고리의
+   * 모든 사슬이 자기 파일로 다시 들어가므로 모르는 대상이다(모르는 사슬을 이은 바깥 사슬도 모르는 대상이라, 고리
+   * 자리의 `trail`은 자기 파일만 둔다).
+   *
+   * @param sourceFile 모듈 파일
+   * @param name export 이름
+   * @returns 사슬
+   */
+  private exportChain(sourceFile: ts.SourceFile, name: string): ExportChain {
+    const known = this.chainMemo.get(sourceFile)?.get(name);
+    if (known !== undefined) return known;
+    const active = this.following.get(sourceFile) ?? new Set<string>();
+    if (active.has(name)) return { origin: UNKNOWN_ORIGIN, trail: { file: sourceFile, rest: undefined } };
+    active.add(name);
+    this.following.set(sourceFile, active);
+    try {
+      const symbol = this.exportSymbols(sourceFile).get(name);
+      return this.rememberChain(sourceFile, name, enterTrail(sourceFile, symbol === undefined ? { origin: UNKNOWN_ORIGIN } : this.followChain(symbol)));
+    } finally {
+      active.delete(name);
+    }
+  }
+
+  /**
+   * 사슬을 메모에 두고 그대로 돌려준다.
+   *
+   * @param sourceFile 모듈 파일
+   * @param name export 이름
+   * @param chain 사슬
+   * @returns 같은 사슬
+   */
+  private rememberChain(sourceFile: ts.SourceFile, name: string, chain: ExportChain): ExportChain {
+    const byName = this.chainMemo.get(sourceFile) ?? new Map<string, ExportChain>();
+    byName.set(name, chain);
+    this.chainMemo.set(sourceFile, byName);
+    return chain;
   }
 
   /**
@@ -138,31 +234,41 @@ export class OrmBinder {
    * @returns 대상
    */
   private followSymbol(start: ts.Symbol): BindingOrigin {
+    return this.followChain(start).origin;
+  }
+
+  /**
+   * 심볼의 별칭 사슬을 따라간다. 끝이 프로젝트 모듈 export의 require면 그 export의 사슬도 돌려준다.
+   *
+   * @param start 시작 심볼
+   * @returns 대상과 require로 이은 사슬
+   */
+  private followChain(start: ts.Symbol): Resolution {
     let symbol = start;
     for (let step = 0; step < MAX_ALIAS_STEPS; step++) {
       const declaration = symbol.declarations?.[0];
-      if (declaration === undefined) return UNKNOWN_ORIGIN;
-      if (ts.isSourceFile(declaration)) return { kind: 'module', sourceFile: declaration };
+      if (declaration === undefined) return { origin: UNKNOWN_ORIGIN };
+      if (ts.isSourceFile(declaration)) return { origin: { kind: 'module', sourceFile: declaration } };
       if ((symbol.flags & ts.SymbolFlags.Alias) === 0) return this.plainDeclaration(declaration);
       const next = this.checker.getImmediateAliasedSymbol(symbol);
       if (next === undefined || next.declarations === undefined || next.declarations.length === 0) {
-        return this.aliasOrigin(declaration);
+        return { origin: this.aliasOrigin(declaration) };
       }
       symbol = next;
     }
-    return UNKNOWN_ORIGIN;
+    return { origin: UNKNOWN_ORIGIN };
   }
 
   /**
    * 별칭이 아닌 선언의 대상이다. `const x = require('pkg')`는 TS 파일에서 별칭이 아니라 여기서 푼다.
    *
    * @param declaration 선언
-   * @returns 대상
+   * @returns 대상과 require로 이은 사슬
    */
-  private plainDeclaration(declaration: ts.Declaration): BindingOrigin {
+  private plainDeclaration(declaration: ts.Declaration): Resolution {
     const required = requireOrigin(declaration);
     if (required !== undefined) return this.requiredBinding(declaration, required);
-    return { kind: 'declaration', declaration };
+    return { origin: { kind: 'declaration', declaration } };
   }
 
   /**
@@ -170,14 +276,15 @@ export class OrmBinder {
    *
    * @param declaration 변수 선언 또는 구조 분해 원소
    * @param required require 호출 정보
-   * @returns 대상
+   * @returns 대상과, 프로젝트 모듈 export를 꺼냈으면 그 export의 사슬
    */
-  private requiredBinding(declaration: ts.Declaration, required: RequireSite): BindingOrigin {
+  private requiredBinding(declaration: ts.Declaration, required: RequireSite): Resolution {
     const module = this.moduleOrigin(required.specifier, declaration.getSourceFile());
-    if (required.member === undefined) return module;
-    if (module.kind === 'external') return { kind: 'external', module: module.module, name: required.member };
-    if (module.kind === 'module') return this.exportsOf(module.sourceFile).get(required.member) ?? UNKNOWN_ORIGIN;
-    return UNKNOWN_ORIGIN;
+    if (required.member === undefined) return { origin: module };
+    if (module.kind === 'external') return { origin: { kind: 'external', module: module.module, name: required.member } };
+    if (module.kind !== 'module') return { origin: UNKNOWN_ORIGIN };
+    const via = this.exportChain(module.sourceFile, required.member);
+    return { origin: via.origin, via };
   }
 
   /**
@@ -227,6 +334,34 @@ export class OrmBinder {
     if (target === undefined || extension === undefined) return { resolvedModule: undefined };
     return { resolvedModule: { resolvedFileName: target, extension, isExternalLibraryImport: false } };
   }
+}
+
+/**
+ * export 하나의 사슬을 만든다. 이어 받은 사슬이 이 파일로 다시 들어가면(require 순환) 대상은 모른다 — 시작한 곳과
+ * 무관하게, 사슬이 require로 이미 들어간 파일을 다시 만나는 자리에서 끊는다.
+ *
+ * @param sourceFile export의 파일
+ * @param resolution export 심볼을 따라간 결과
+ * @returns 사슬
+ */
+function enterTrail(sourceFile: ts.SourceFile, resolution: Resolution): ExportChain {
+  const rest = resolution.via?.trail;
+  const trail: RequireTrail = { file: sourceFile, rest };
+  return { origin: trailIncludes(rest, sourceFile) ? UNKNOWN_ORIGIN : resolution.origin, trail };
+}
+
+/**
+ * 사슬이 그 파일로 require해 들어갔는지 본다.
+ *
+ * @param trail 사슬이 들어간 파일 목록
+ * @param sourceFile 찾을 파일
+ * @returns 들어갔으면 true
+ */
+function trailIncludes(trail: RequireTrail | undefined, sourceFile: ts.SourceFile): boolean {
+  for (let current = trail; current !== undefined; current = current.rest) {
+    if (current.file === sourceFile) return true;
+  }
+  return false;
 }
 
 /**
