@@ -76,6 +76,17 @@ test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없
 });
 
 /**
+ * 분석 기본 옵션(graph program.ts의 defaultOptions)에 `types: []`만 더한 compiler 설정이다.
+ *
+ * tsconfig가 없으면 TypeScript 자동 타입 포함(typeRoots 기본값)이 현재 디렉터리(npm test·CI에서는 저장소 루트)의
+ * `node_modules/@types`를 읽어, Program을 만드는 명령마다 저장소 자신의 @types/node(선언 67개)를 다시 파싱한다. 커버리지
+ * 실행에서 그 비용이 이 검사 시간의 8할을 넘었다. 스택 초과 분류와 무관하므로 설정으로 끈다.
+ */
+const deepFixtureConfig = JSON.stringify({ compilerOptions: {
+  target: 'es2022', module: 'esnext', moduleResolution: 'bundler', jsx: 'preserve', esModuleInterop: true, resolveJsonModule: true, types: [],
+} });
+
+/**
  * 깊이 중첩된 생성 파일 하나와 다섯 명령이 각각 분석할 소스(Express 앱·fetch 호출·navigation 등록)를 둔 합성 프로젝트를 만든다.
  *
  * @param root 프로젝트 루트
@@ -84,6 +95,7 @@ test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없
 function writeDeeplyNestedProject(root: string, generated: string): void {
   const files: Record<string, string> = {
     'package.json': JSON.stringify({ name: 'deep-fixture', private: true, dependencies: { express: '4.21.2' } }),
+    'tsconfig.json': deepFixtureConfig,
     'src/app.ts': "import express from 'express';\nconst app = express();\napp.get('/ok', (req, res) => res.send('ok'));\nexport default app;\n",
     'src/client.ts': "export function load() { return fetch('/api/items'); }\n",
     'src/router-api.ts': 'export function registerScreens(input: unknown) { return input; }\n',
