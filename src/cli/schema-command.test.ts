@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { runCli } from './run-cli.ts';
 import { MAX_SCHEMA_OUTPUT_LENGTH, runSchemaCommand, type SchemaEnvironment } from './schema-command.ts';
@@ -100,6 +101,16 @@ test('잘못된 호출은 64, 읽을 수 없는 프로젝트·과대 출력은 2
   }));
   assert.equal(many.exitCode, 2);
   assert.match(many.standardError, /100000 relation-use facts/u);
+});
+
+test('추출 중 스택 초과는 공용 원인 문구의 2이고 다른 RangeError는 내부 오류로 전파한다', async () => {
+  const exhausted = await runSchemaCommand(['--project', '.'], environment({
+    extract: () => { throw new RangeError('Maximum call stack size exceeded'); },
+  }));
+  assert.deepEqual(exhausted, stackExhaustionFailure());
+  await assert.rejects(runSchemaCommand(['--project', '.'], environment({
+    extract: () => { throw new RangeError('Map maximum size exceeded'); },
+  })), { name: 'RangeError', message: 'Map maximum size exceeded' });
 });
 
 test('분배기가 schema 명령과 도움말을 안다', async () => {

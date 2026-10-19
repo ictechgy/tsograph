@@ -3,8 +3,8 @@
  *
  * 흐름: 인자 검증 → 프로젝트 경로 정규화 → package.json·next.config 읽기 → Next.js route 파일 스캔과 Node 백엔드
  * 라우터 해석 → 문서 조립 → 키 정렬 JSON 출력. 파일 하나를 읽지 못하는 것은 limitation이고, 프로젝트 자체를 읽지
- * 못하거나 출력이 상한을 넘으면 코드 2, 잘못된 호출은 사용법과 코드 64다. 분석 대상 코드는
- * 실행하지 않는다.
+ * 못하거나 출력이 상한을 넘으면 코드 2, 잘못된 호출은 사용법과 코드 64다. 분석이 호출 스택을 넘기면(깊이 중첩된
+ * 생성 코드 등) 다른 명령과 같은 원인 문구의 코드 2다. 분석 대상 코드는 실행하지 않는다.
  */
 
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -12,7 +12,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { GraphProjectInputError } from '../graph/program.ts';
-import { extractProjectRoutes } from '../routes/project-routes.ts';
+import { extractProjectRoutes, type ProjectRoutes } from '../routes/project-routes.ts';
 import { extractClientRoutes } from '../routes/client/client-routes.ts';
 import {
   MAX_TYPED_CLIENT_MODEL_BYTES,
@@ -21,7 +21,7 @@ import {
   type TypedClientModels,
 } from '../routes/client/typed-client-model.ts';
 import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
-import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
+import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
@@ -141,16 +141,14 @@ async function resolveProject(fileSystem: CommandFileSystem, projectArgument: st
  * @returns 성공 또는 실패 결과
  */
 async function extractDocument(project: string, parsed: RoutesArguments, environment: RoutesEnvironment): Promise<CommandResult> {
-  if (parsed.role === 'client') {
-    const typedModels = parsed.clientModel === undefined ? undefined : await loadClientModel(environment.fileSystem, project, parsed.clientModel);
-    if (typedModels !== undefined && 'exitCode' in typedModels) return typedModels;
-    if (typedModels !== undefined && parsed.service !== undefined
-      && typedModels.models.some((model) => model.methods.some((method) => method.service !== undefined && method.service !== parsed.service))) {
-      return inputFailure('the client model declares a service that conflicts with --service; use one service identity.');
-    }
-    return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now(), typedModels, parsed.tsconfig));
+  if (parsed.role === 'client') return extractClientDocument(project, parsed, environment);
+  let routes: ProjectRoutes;
+  try {
+    routes = await extractProjectRoutes(environment.fileSystem, project, parsed.includeTests);
+  } catch (error) {
+    if (isStackExhaustion(error)) return stackExhaustionFailure();
+    throw error;
   }
-  const routes = await extractProjectRoutes(environment.fileSystem, project, parsed.includeTests);
   return renderDocument(() => createRouteDocument({
     next: routes.next,
     node: routes.node,
@@ -160,6 +158,31 @@ async function extractDocument(project: string, parsed: RoutesArguments, environ
     toolVersion: environment.toolVersion,
     generatedAt: environment.now(),
   }));
+}
+
+/**
+ * client 역할 문서를 만든다. client 추출은 Program 생성·분석·문서 조립을 한 함수(renderDocument의 build)에서 하므로,
+ * 그 단계에서 난 호출 스택 초과를 분석 실패의 공용 문구로 바꾼다. 직렬화 단계의 RangeError는 renderDocument가
+ * 출력 초과로 처리하므로 여기까지 오지 않는다.
+ *
+ * @param project 프로젝트 realpath
+ * @param parsed 검증한 인자
+ * @param environment 실행 환경
+ * @returns 성공 또는 실패 결과
+ */
+async function extractClientDocument(project: string, parsed: RoutesArguments, environment: RoutesEnvironment): Promise<CommandResult> {
+  const typedModels = parsed.clientModel === undefined ? undefined : await loadClientModel(environment.fileSystem, project, parsed.clientModel);
+  if (typedModels !== undefined && 'exitCode' in typedModels) return typedModels;
+  if (typedModels !== undefined && parsed.service !== undefined
+    && typedModels.models.some((model) => model.methods.some((method) => method.service !== undefined && method.service !== parsed.service))) {
+    return inputFailure('the client model declares a service that conflicts with --service; use one service identity.');
+  }
+  try {
+    return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now(), typedModels, parsed.tsconfig));
+  } catch (error) {
+    if (isStackExhaustion(error)) return stackExhaustionFailure();
+    throw error;
+  }
 }
 
 /** 명시 모델 파일을 프로젝트 안에서 bounded하게 읽고 JSON parser에 넘긴다. */
@@ -195,21 +218,42 @@ async function loadClientModel(fileSystem: CommandFileSystem, project: string, a
 /**
  * 문서를 만들어 JSON으로 직렬화한다. 사실·출력 상한을 넘으면 부분 문서 대신 코드 2다.
  *
+ * 조립(build)과 직렬화를 다른 단계로 다룬다. 조립 단계는 알려진 입력 실패(설정·사실 상한)만 바꾸고 그 밖의 예외는
+ * 호출자에게 그대로 던진다 — client 역할은 분석 전체가 build 안에 있어, 분석 중 RangeError(스택 초과 등)를 출력
+ * 크기 초과로 보고하면 원인과 해결 방향이 모두 틀리기 때문이다. RangeError를 출력 초과로 보는 것은 직렬화 단계뿐이다.
+ *
  * @param build 문서 조립 함수
  * @param maxLength 출력 최대 길이(테스트 주입용). 기본은 isthmus 입력 상한
  * @returns 성공 또는 실패 결과
+ * @throws build가 던진 그 밖의 예외(GraphProjectInputError·RouteFactLimitError가 아닌 것)
  */
 export function renderDocument(build: () => unknown, maxLength: number = MAX_OUTPUT_LENGTH): CommandResult {
-  let text: string | undefined;
+  let document: unknown;
   try {
-    text = encodeSortedJsonWithinLimit(build(), maxLength);
+    document = build();
   } catch (error) {
     if (error instanceof GraphProjectInputError) return inputFailure(error.message);
     if (error instanceof RouteFactLimitError) {
       return inputFailure(`the project produces more than ${MAX_ROUTE_FACTS} route-decl facts, which isthmus rejects; scan a smaller project root.`);
     }
+    throw error;
+  }
+  return encodeDocument(document, maxLength);
+}
+
+/**
+ * 조립한 문서를 출력 상한 안에서 키 정렬 JSON으로 직렬화한다. 직렬화 중 엔진 문자열 길이 한계(RangeError)도 출력 초과다.
+ *
+ * @param document 조립한 문서
+ * @param maxLength 출력 최대 길이
+ * @returns 성공 또는 출력 초과 결과
+ */
+function encodeDocument(document: unknown, maxLength: number): CommandResult {
+  let text: string | undefined;
+  try {
+    text = encodeSortedJsonWithinLimit(document, maxLength);
+  } catch (error) {
     if (error instanceof RangeError) return outputTooLarge(maxLength);
-    /* node:coverage ignore next */
     throw error;
   }
   return text === undefined ? outputTooLarge(maxLength) : success(text);

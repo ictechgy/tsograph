@@ -70,3 +70,36 @@ export function inputFailure(message: string): CommandResult {
   const text = message.endsWith('\n') ? message : `${message}\n`;
   return { standardOutput: '', standardError: `tsograph: ${text}`, exitCode: 2 };
 }
+
+/** V8이 호출 스택을 다 썼을 때 던지는 RangeError의 메시지다. */
+const STACK_EXHAUSTION_MESSAGE = /Maximum call stack size exceeded/u;
+
+/**
+ * 분석 중 잡은 예외가 호출 스택 초과인지 판정한다.
+ *
+ * 생성·압축 코드의 긴 메서드 사슬이나 수천 항의 쉼표 연결처럼 깊이 중첩된 식은 TypeScript 바인더·검사기와
+ * tsograph 방문기의 재귀를 중첩 깊이만큼 쌓아 엔진 스택을 넘긴다. 같은 RangeError라도 Map 크기·문자열 길이·
+ * 잘못된 시각은 다른 원인(내부 한계·버그·출력 크기)이라 메시지까지 확인해 이 분류에 넣지 않는다 — 그런
+ * 예외는 각 명령의 기존 처리(내부 오류로 전파 등)를 따른다.
+ *
+ * @param error 잡은 예외
+ * @returns 호출 스택 초과면 true
+ */
+export function isStackExhaustion(error: unknown): boolean {
+  return error instanceof RangeError && STACK_EXHAUSTION_MESSAGE.test(error.message);
+}
+
+/**
+ * 분석이 호출 스택을 넘긴 실패(종료 코드 2)를 만든다.
+ *
+ * schema·routes(server·client)·graph(reach·impact의 프로젝트 입력 포함)·navigation이 같은 문구를 쓴다. 명령마다
+ * 내부 오류·출력 크기 초과·일반 분석 실패로 달리 보고되면 원인과 해결 방향이 사라지고 자동화가 재시도·제외를
+ * 구분할 수 없기 때문이다. 어느 파일이 넘쳤는지는 예외로 알 수 없고 경로 원문도 싣지 않으므로 원인 종류와 해결
+ * 방향만 적는다. 넘친 파일만 빼고 부분 문서를 내는 격리는 하지 않는다(설계 결정 대기).
+ *
+ * @returns 종료 코드 2 결과
+ */
+export function stackExhaustionFailure(): CommandResult {
+  return inputFailure('the analysis exceeded the call stack, typically because a source file nests expressions too deeply '
+    + '(for example generated or minified code); exclude or split such files and retry.');
+}

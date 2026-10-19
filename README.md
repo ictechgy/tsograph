@@ -74,7 +74,9 @@ recovered paths dynamic. See [typed client models](docs/CLIENT-MODELS.md).
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
 data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
-document. Large traversals can use `--max-depth` and `--max-reached` to return explicit truncation.
+document. An analysis that exceeds the call stack (typically on a deeply nested generated or minified
+source) is reported with that cause, not as oversized output. Large traversals can use `--max-depth`
+and `--max-reached` to return explicit truncation.
 
 ## Requirements
 
@@ -286,6 +288,10 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
 - Exit codes: `0` success (zero facts is still success, not proof of completeness), `2`
   unreadable project or oversized output (more than 100,000 facts, or more than 16 Mi
   characters), `64` usage error. A single unreadable route file is a limitation, not a failure.
+  An analysis that exceeds the call stack (typically on a deeply nested generated or minified
+  source) also exits `2`, with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`,
+  and `navigation` that names the cause and asks to exclude or split such files; no partial
+  document is written.
 
 ### Verified Next.js semantics (next 16.2.7)
 
@@ -519,7 +525,10 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   the project.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness),
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
-  `64` usage error. `1` is reserved.
+  `64` usage error. `1` is reserved. An analysis that exceeds the call stack (typically on a
+  deeply nested generated or minified source) also exits `2`, with one message shared by `schema`,
+  `routes`, `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or
+  split such files; no partial document is written.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
   Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
@@ -815,7 +824,10 @@ The reader still holds the bounded input and reconstructed graph in memory. Reca
   [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
   traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
 - Exit codes: `0` success, `2` input/output failure or a bounded exchange/API output exceeding 16 Mi characters, `64`
-  usage error (empty stdout) or root-not-found (document written).
+  usage error (empty stdout) or root-not-found (document written). An analysis that exceeds the
+  call stack (typically on a deeply nested generated or minified source) also exits `2`, with one
+  message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that names the
+  cause and asks to exclude or split such files; no partial document is written.
 
 ### Nodes and edges
 

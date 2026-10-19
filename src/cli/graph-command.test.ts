@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { CallGraph } from '../graph/graph-model.ts';
 import { graphOutputChunks } from '../graph/graph-output.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
+import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { type GraphEnvironment, graphUsage, impactUsage, reachUsage, render, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { runCli } from './run-cli.ts';
@@ -93,6 +94,15 @@ test('explicit input failures keep actionable reasons and internal builder failu
   assert.equal(unsafe.exitCode, 2);
   assert.match(unsafe.standardError, /workspace path contains/);
   assert.equal(builds, 0);
+});
+
+test('그래프 생성 중 스택 초과는 graph·reach·impact 모두 공용 원인 문구의 2이고 다른 RangeError는 전파한다', async () => {
+  const exhausted = environment({ buildGraph: async () => { throw new RangeError('Maximum call stack size exceeded'); } });
+  assert.deepEqual(await runGraphCommand(['--project', '.'], exhausted), stackExhaustionFailure());
+  assert.deepEqual(await runReachCommand(['--project', '.', 'a.ts#a'], exhausted), stackExhaustionFailure());
+  assert.deepEqual(await runImpactCommand(['--project', '.', 'a.ts#a'], exhausted), stackExhaustionFailure());
+  await assert.rejects(runGraphCommand(['--project', '.'], environment({ buildGraph: async () => { throw new RangeError('Map maximum size exceeded'); } })),
+    { name: 'RangeError', message: 'Map maximum size exceeded' });
 });
 
 test('--generated-at은 시각을 고정하고 잘못된 값은 64다', async () => {

@@ -11,7 +11,7 @@ import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { extractPersistenceFacts, type ExtractionResult } from '../schema/extract.ts';
 import { createPersistenceDocument, MAX_SCHEMA_FACTS, SchemaFactLimitError } from '../schema/schema-document.ts';
-import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
+import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { parseArguments } from './parse-arguments.ts';
 
@@ -53,7 +53,14 @@ export async function runSchemaCommand(arguments_: readonly string[], environmen
   if (parsed.error !== undefined) return usageFailure(`tsograph: ${parsed.error}\n${schemaUsage}`);
   const project = await resolveProject(environment.fileSystem, parsed.project);
   if (typeof project !== 'string') return project;
-  const extraction = (environment.extract ?? extractPersistenceFacts)(project);
+  let extraction: ExtractionResult;
+  try {
+    extraction = (environment.extract ?? extractPersistenceFacts)(project);
+  } catch (error) {
+    // 깊이 중첩된 소스로 분석이 호출 스택을 넘기면 다른 명령과 같은 원인 문구로 알린다. 그 밖의 예외는 내부 오류다.
+    if (isStackExhaustion(error)) return stackExhaustionFailure();
+    throw error;
+  }
   return encodeDocument(project, extraction, environment);
 }
 

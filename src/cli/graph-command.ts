@@ -29,7 +29,7 @@ import {
   SavedGraphError,
   parseSavedGraphInput,
 } from '../graph/saved-graph.ts';
-import { type CommandResult, inputFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
+import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
@@ -412,6 +412,8 @@ async function loadGraph(projectArgument: string, environment: GraphEnvironment,
     graph = await (environment.buildGraph ?? buildCallGraph)(project, environment.fileSystem, options);
   } catch (error) {
     if (error instanceof GraphProjectInputError) return inputFailure(error.message);
+    // 깊이 중첩된 소스로 바인더·분석이 호출 스택을 넘긴 경우다. 그 밖의 RangeError는 내부 오류로 전파한다.
+    if (isStackExhaustion(error)) return stackExhaustionFailure();
     throw error;
   }
   return {
