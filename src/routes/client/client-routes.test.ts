@@ -8,6 +8,9 @@ import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
+import { extractClientRoutes } from './client-routes.ts';
+import { DEFAULT_CLIENT_MUTATION_BUDGET, type ClientMutationBudget } from './client-values.ts';
+import { parseTypedClientModels } from './typed-client-model.ts';
 
 /** 문서 경계에서 관찰할 사실이다. */
 interface Fact {
@@ -564,6 +567,107 @@ test('client mutation work exhaustion stays conservative and reports incomplete 
     [null, undefined, true], [null, 'GET', undefined],
   ]);
   assert.ok(doc.limitations.some((limitation) => limitation.includes('configuration mutation analysis is incomplete')));
+});
+
+/** 변경 분석 예산 검사의 고정 HTTP 코드다: axios 인스턴스, init을 준 fetch, typed 모델 호출, 닫힌 wrapper 호출. */
+const budgetHttpSource = `import axios from 'axios';
+  type CatalogPort = { read(path: string): unknown };
+  declare const port: CatalogPort;
+  const api = axios.create({ baseURL: '/api' });
+  function request(url: string) { return axios.get(url); }
+  export function load() { api.get('/users'); fetch('/v1/orders', { method: 'POST' }); port.read('/items'); request('/w/a'); }`;
+/** {@link budgetHttpSource}의 typed 모델이다. */
+const budgetModel = { format: 'http-client-models', version: 1, models: [{
+  receiver: { kind: 'type', path: 'src/client.ts', name: 'CatalogPort' },
+  methods: [{ name: 'read', method: 'GET', pathArgument: 0, base: '/v2', service: 'catalog' }],
+}] };
+/** 변경 분석이 끝까지 돌았을 때 {@link budgetHttpSource}가 내는 정적 사실(method, channel, dynamic, service)이다. */
+const budgetStaticFacts = [
+  ['GET', '/api/users', false, undefined], ['POST', '/v1/orders', false, undefined],
+  ['GET', '/v2/items', false, 'catalog'], ['GET', '/w/a', false, undefined],
+];
+/** 예산 검사에서 비교하는 사실의 모양이다. */
+const budgetFactShape = (fact: Fact) => [fact.method, fact.channel, fact.dynamic, fact.service];
+/** 변경 분석 미완 limitation이 있는지다. */
+const mutationIncomplete = (limitations: readonly string[]) =>
+  limitations.some((limitation) => limitation.includes('configuration mutation analysis is incomplete'));
+
+/**
+ * HTTP와 무관한 모듈들이다. 지점마다 알 수 없는 함수로 콜백을 넘기는 탈출 질의 하나와, 배열 대입의 색인·변경 표시 질의를
+ * 하나씩 만든다(지점마다 색인 3단위·변경 12단위 안팎).
+ */
+function unrelatedModules(modules: number, sites: number): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (let module = 0; module < modules; module++) {
+    const lines = ['export {};', 'declare function register(value: unknown): void;'];
+    for (let site = 0; site < sites; site++) {
+      lines.push(`const o${site} = { a: ${site} }; register(() => o${site}); let v${site} = 0; [v${site}] = [${site}];`);
+    }
+    files[`src/unrelated/m${module}.ts`] = lines.join('\n');
+  }
+  return files;
+}
+
+/** 변경 분석 예산을 주입해 {@link budgetHttpSource}와 추가 파일로 만든 합성 프로젝트의 호출 문서를 직접 만든다. */
+function extractWithBudget(more: Record<string, string>, budget: ClientMutationBudget) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-budget-')));
+  try {
+    const files = { 'package.json': '{"dependencies":{"axios":"1.20.0"}}', 'tsconfig.json': ambientTypesFreeConfig,
+      'src/client.ts': budgetHttpSource, ...more };
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), content);
+    }
+    return extractClientRoutes(root, undefined, false, '0.0.0-test', new Date('2026-10-01T00:00:00Z'),
+      parseTypedClientModels(JSON.stringify(budgetModel)), undefined, budget);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test('unrelated escape sites across many modules keep axios, init fetch, typed and wrapper calls static', async () => {
+  // 예전에는 변경 분석 예산 20,000을 프로젝트 전체가 함께 써서, HTTP와 무관한 지점 2,000개(변경 작업 약 24,000)만으로
+  // axios·init을 준 fetch가 dynamic이 되고 typed·wrapper 호출 사실이 사라졌다. 지금은 질의마다 예산을 따로 둔다.
+  const doc = await scanTyped(budgetHttpSource, budgetModel, [], { 'tsconfig.json': ambientTypesFreeConfig, ...unrelatedModules(20, 100) });
+  assert.deepEqual(doc.facts.map(budgetFactShape), budgetStaticFacts);
+  assert.equal(mutationIncomplete(doc.limitations), false);
+});
+
+test('a fixed per-query mutation budget yields the same calls regardless of unrelated module count', () => {
+  // 지점 하나는 64단위 안이지만 지점 합은 색인·변경 모두 64단위를 크게 넘는다. 무관한 모듈 수가 결과를 바꾸지 않는다.
+  const budget = { ...DEFAULT_CLIENT_MUTATION_BUDGET, queryWork: 64 };
+  const few = extractWithBudget(unrelatedModules(2, 10), budget);
+  const many = extractWithBudget(unrelatedModules(12, 40), budget);
+  assert.deepEqual(many.facts.map(budgetFactShape), budgetStaticFacts);
+  assert.deepEqual(many.facts, few.facts);
+  assert.deepEqual(many.limitations, few.limitations);
+  assert.equal(mutationIncomplete(many.limitations), false);
+});
+
+test('one mutation query over its budget is cut conservatively and typed calls stay as dynamic facts', () => {
+  // 끊긴 질의가 무엇을 바꿀 수 있었는지 증명하지 못하므로 분석 전체를 미완으로 둔다. 클라이언트·설정은 dynamic,
+  // wrapper는 안쪽 dynamic 요청으로 남고, typed 호출은 사라지지 않고 모델 동사·service의 dynamic 사실이 된다.
+  const budget = { ...DEFAULT_CLIENT_MUTATION_BUDGET, queryWork: 64 };
+  const properties = Array.from({ length: 100 }, (_, index) => `p${index}: ${index}`).join(', ');
+  const escape = extractWithBudget({
+    'src/large.ts': `export {}; declare function register(value: unknown): void; register({ ${properties} });`,
+  }, budget);
+  const names = Array.from({ length: 100 }, (_, index) => `v${index}`).join(', ');
+  const index = extractWithBudget({ 'src/large.ts': `export {}; let ${names}; [${names}] = [${names}];` }, budget);
+  for (const doc of [escape, index]) {
+    assert.deepEqual(doc.facts.map((fact) => [...budgetFactShape(fact), fact.pathAnchor]), [
+      ['GET', null, true, undefined, 'base'], ['GET', null, true, undefined, 'base'],
+      [undefined, null, true, undefined, 'base'], ['GET', null, true, 'catalog', 'base'],
+    ]);
+    assert.equal(doc.facts[2]?.methodDynamic, true);
+    assert.ok(mutationIncomplete(doc.limitations));
+  }
+});
+
+test('the per-phase mutation work cap scales with the analyzed source size', () => {
+  // 지점마다 예산을 새로 채워도 단계 전체 작업은 max(질의 예산, 소스 길이 × 계수)를 넘지 않는다(입력에 선형인 시간 상한).
+  const tight = extractWithBudget(unrelatedModules(2, 10), { ...DEFAULT_CLIENT_MUTATION_BUDGET, queryWork: 64, workPerSourceUnit: 0 });
+  assert.ok(mutationIncomplete(tight.limitations));
+  const scaled = extractWithBudget(unrelatedModules(2, 10), { ...DEFAULT_CLIENT_MUTATION_BUDGET, queryWork: 64 });
+  assert.equal(mutationIncomplete(scaled.limitations), false);
 });
 
 test('array spread positions cannot certify a numeric configuration projection', async () => {

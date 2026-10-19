@@ -7,7 +7,7 @@ import { scopeIdOf } from '../../graph/symbol-ids.ts';
 import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
-import { ClientValues, configValue, type ClientConfig } from './client-values.ts';
+import { ClientValues, configValue, type ClientConfig, type ClientMutationBudget } from './client-values.ts';
 import { ClientWrappers } from './client-wrappers.ts';
 import { typedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
@@ -193,14 +193,20 @@ function composition(sink: Sink, values: ClientValues, major: number | undefined
   return { join: kind, base, unsafe, allowAbsolute: resolved?.kind !== ts.SyntaxKind.FalseKeyword };
 }
 
-/** 호출 측 스캔과 사실 조립을 실행한다. */
+/**
+ * 호출 측 스캔과 사실 조립을 실행한다.
+ *
+ * `mutationBudget`은 설정 변경 분석의 질의·단계 예산이다. CLI는 기본값을 쓰고, 테스트만 작은 값을 주입한다.
+ */
 export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date,
-  typedModels?: TypedClientModels, tsconfig?: string): ClientRouteDocument {
+  typedModels?: TypedClientModels, tsconfig?: string, mutationBudget?: ClientMutationBudget): ClientRouteDocument {
   const project = loadNodeProject(root, tsconfig);
-  const values = new ClientValues(project, includeTests);
+  const values = new ClientValues(project, includeTests, mutationBudget);
   const preliminaryWrappers = new ClientWrappers(values, includeTests);
   const deferredWrapperCalls: ts.CallExpression[] = [];
+  // 알 수 없는 호출 지점 하나(인자 전체와 수신자)가 변경 질의 하나이고, 질의마다 고정 예산을 새로 쓴다.
   const escapeCall = (call: ts.CallExpression): void => {
+    values.beginMutationQuery();
     for (const argument of call.arguments) values.markMutated(argument, true);
     const callee = unwrap(call.expression);
     if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
@@ -216,8 +222,10 @@ export function extractClientRoutes(root: string, service: string | undefined, i
         if (sinkOf(node, values, preliminaryWrappers, typedModels) === undefined) escapeCall(node);
         else deferredWrapperCalls.push(node);
       } else if (ts.isNewExpression(node)) {
+        values.beginMutationQuery();
         for (const argument of node.arguments ?? []) values.markMutated(argument, true);
       } else if (ts.isTaggedTemplateExpression(node)) {
+        values.beginMutationQuery();
         if (ts.isTemplateExpression(node.template)) {
           for (const span of node.template.templateSpans) values.markMutated(span.expression, true);
         }
