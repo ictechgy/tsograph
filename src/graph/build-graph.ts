@@ -20,7 +20,7 @@ import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
 import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
-import { createRouteDocument, RouteFactLimitError } from '../routes/route-document.ts';
+import { createRouteDocument, type RouteFactLimitCause, RouteFactLimitError } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
@@ -77,8 +77,11 @@ interface RouteInputs {
   readonly extraction: NextRoutesResult;
   readonly facts: readonly RouteDeclFact[];
   readonly pageExtensions: readonly string[];
-  /** 라우트 사실이 사실 상한을 넘어 facts가 비었는지(Next 라우트가 없는 Node 백엔드도 포함) */
-  readonly factsOverLimit: boolean;
+  /**
+   * 라우트 문서가 사실 상한 실패로 끝나 facts가 비었으면 그 원인이다(Next 라우트가 없는 Node 백엔드도 포함). 사실 수 초과와
+   * Node 라우터 펼치기 상한 초과를 나눠 진입점 한계 문장이 실제 원인을 가리키게 한다. 상한 안이면 undefined다.
+   */
+  readonly factLimitCause: RouteFactLimitCause | undefined;
 }
 
 /** limitation을 만드는 데 필요한 계수다. */
@@ -94,7 +97,8 @@ interface GraphCounts {
   readonly unresolvedExports: number;
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
-  readonly routeFactsTruncated: boolean;
+  /** 라우트 사실을 진입점 표식에 쓰지 못한 사실 상한 실패의 원인(없으면 undefined) */
+  readonly routeFactLimit: RouteFactLimitCause | undefined;
   /** bound의 열린 프로그램 판정 이유(없으면 닫힌 프로그램) */
   readonly openProgram: OpenProgramReason | undefined;
 }
@@ -154,7 +158,8 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
     ...analysis, config: status, inputs, parseErrorFiles, unreadableSources, unmatchedCrons, openProgram,
-    cronConfigUnreadable: crons.unreadable, routeFactsTruncated: routes.factsOverLimit || (routes.facts.length === 0 && routes.extraction.routes.length > 0),
+    cronConfigUnreadable: crons.unreadable,
+    routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
   const environmentLimits: string[] = [];
   if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
@@ -307,18 +312,18 @@ async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): 
   const config = routes.next?.config;
   const pageExtensions = config?.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
   let facts: readonly RouteDeclFact[] = [];
-  let factsOverLimit = false;
+  let factLimitCause: RouteFactLimitCause | undefined;
   try {
     facts = createRouteDocument({
       next: routes.next, node: routes.node, project, service: undefined, includeTests: false, toolVersion: '', generatedAt: new Date(0),
     }).facts;
   } catch (error) {
-    // 사실 상한 초과면 진입점 표식 없이 계속하고 limitation으로 알린다(buildLimitations의 routeFactsTruncated).
-    // Next 라우트가 없는 Node 백엔드도 알리도록 상한 초과를 따로 기록한다.
-    factsOverLimit = error instanceof RouteFactLimitError;
+    // 사실 상한 초과면 진입점 표식 없이 계속하고 limitation으로 알린다(buildLimitations의 routeFactLimit).
+    // Next 라우트가 없는 Node 백엔드도 알리도록 상한 초과와 그 원인을 따로 기록한다.
+    factLimitCause = error instanceof RouteFactLimitError ? error.limitCause : undefined;
     facts = [];
   }
-  return { extraction, facts, pageExtensions, factsOverLimit };
+  return { extraction, facts, pageExtensions, factLimitCause };
 }
 
 /**
@@ -572,7 +577,7 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
  * @param counts 계수
  * @returns limitation 목록
  */
-function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
+function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactLimit }: GraphCounts): string[] {
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
@@ -593,7 +598,11 @@ function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, 
   }
   if (inputs.walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   if (cronConfigUnreadable) result.push('entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown');
-  if (routeFactsTruncated) result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');
+  if (routeFactLimit === 'facts') result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');
+  if (routeFactLimit === 'flattened-routes') {
+    result.push("entry-points: the project's routers expand to more route registrations than the flattening limit when routers mounted at "
+      + 'several paths are flattened; route handlers are not marked');
+  }
   return result;
 }
 

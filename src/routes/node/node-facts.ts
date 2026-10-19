@@ -14,6 +14,7 @@
 import type { HttpMethod, ParamConstraint, RouteDeclFact, RouteDeclMethod } from '../../exchange/bridge-facts.ts';
 import { dynamicScopeProblem } from '../../exchange/dynamic-scope.ts';
 import { sanitizeDynamicChannel } from '../../openapi/path-template.ts';
+import type { RouteFactLimitCause } from '../route-document.ts';
 import type { FlatProvided, FlatRoute, FrameworkRoutes } from './flat-route.ts';
 import { isNodeTestPath, type NodeProject } from './node-project.ts';
 import { expandVariant, type ExpandedTemplate, MAX_TEMPLATE_VARIANTS, prefixTemplates } from './path-model.ts';
@@ -472,7 +473,8 @@ export const MAX_FLATTENED_ROUTES_PER_FACT = 2;
  *
  * 같은 사실로 합쳐지는 라우트도 펼치는 데 시간과 메모리가 든다. 하한만 세면 정규화하면 같은 경로에 거듭 붙인 DAG가 상한에
  * 걸리지 않고 라우트 수백만 개를 다 펼치다 힙이 바닥나므로, 펼친 라우트 수 자체도 [MAX_FLATTENED_ROUTES_PER_FACT]배 상한으로
- * 센다. 넘으면 같은 사실 상한 실패로 끝난다(중복 제거 전 사실 수가 상한을 넘은 것이다).
+ * 센다. 넘으면 사실 상한 실패로 끝나되 원인은 펼친 등록 수다({@link NodeFactBudget.exceededCause}) — 사실을 내지 않는 조건부
+ * 등록과 같은 사실로 합쳐질 등록도 세므로, 사실 수 초과로 알리면 사실이 거의 없는 프로젝트에 거짓 원인이 된다.
  */
 export class NodeFactBudget {
   private readonly keys = new Set<string>();
@@ -496,7 +498,16 @@ export class NodeFactBudget {
 
   /** 하한이나 펼친 라우트 수가 상한을 넘었는지다. 넘었으면 어댑터는 남은 사건을 펼치지 않는다. */
   get isExceeded(): boolean {
-    return this.keys.size > this.limit || this.flattened > this.routeLimit;
+    return this.exceededCause !== undefined;
+  }
+
+  /**
+   * 상한을 넘은 원인이다. 서로 다른 사실 하한이 넘었으면 `facts`, 아니고 펼친 라우트 수가 넘었으면 `flattened-routes`, 둘 다
+   * 아니면 undefined다. 사실 하한을 먼저 보는 것은 그쪽이 문서의 사실이 실제로 상한을 넘는다는 증거이기 때문이다.
+   */
+  get exceededCause(): RouteFactLimitCause | undefined {
+    if (this.keys.size > this.limit) return 'facts';
+    return this.flattened > this.routeLimit ? 'flattened-routes' : undefined;
   }
 
   /**

@@ -340,15 +340,37 @@ test('정규화하면 같은 경로에 거듭 붙인 DAG는 펼친 라우트가 
   assert.deepEqual(factLines(document), [`GET root ${prefix}/x optional #0 ci`, `GET root ${prefix}{dynamic} - dynamic{"templatePrefixes":["${prefix}"]} #1 ci`]);
 });
 
-test('정규화하면 같은 경로로 합쳐지는 라우트도 펼친 수가 상한을 넘으면 다 펼치기 전에 멈춘다', async () => {
+/** 펼친 등록 수 상한 때문에 라우트 핸들러를 진입점으로 표시하지 못했다는 graph 한계다. */
+const flatteningEntryPoints = "entry-points: the project's routers expand to more route registrations than the flattening limit "
+  + 'when routers mounted at several paths are flattened; route handlers are not marked';
+
+test('정규화하면 같은 경로로 합쳐지는 라우트도 펼친 수가 상한을 넘으면 다 펼치기 전에 멈추고 펼친 등록 수를 원인으로 알린다', async () => {
   // 서로 다른 사실 하한만 세면 같은 사실로 합쳐지는 라우트는 상한에 걸리지 않아, 2^22 = 4,194,304개를 다 펼치다 V8 힙이 바닥난다.
-  // 펼친 라우트 수 자체에도 상한을 두면 사실 상한 실패(종료 2)로 끝난다.
-  const files = { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22, '%61') };
-  const result = await runGuardedProject(files, ['routes', '--role', 'server']);
-  assert.equal(result.stopped, undefined);
-  assert.equal(result.status, 2, result.stderr);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /more than 100000 route-decl facts/u);
+  // 펼친 라우트 수 자체에도 상한(200,000)을 두면 종료 2로 끝난다. 이때 사실은 하나뿐이고, 조건부 등록만 둔 2^18 DAG는 사실이
+  // 0개(예전에는 종료 0)라 사실 수 초과 문구는 거짓 원인이다. 세 명령은 감시하는 자식 하나에서 차례로 실행한다.
+  const sameFact = { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22, '%61') };
+  const conditionalOnly = {
+    'package.json': packageJson({ express: '4.21.2' }),
+    'src/app.js': routerDagSource(18).replace("r18.get('/x'", "if (process.env.C) r18.get('/x'"),
+  };
+  const { child, results } = await runGuardedProjects([
+    [sameFact, ['routes', '--role', 'server']],
+    [conditionalOnly, ['routes', '--role', 'server']],
+    [sameFact, ['graph', '--generated-at', '2026-01-01T00:00:00.000Z']],
+  ]);
+  assert.equal(child.stopped, undefined, child.stderr);
+  assert.equal(child.status, 0, child.stderr);
+  for (const [index, name] of ['same fact', 'conditional only'].entries()) {
+    const result = results[index];
+    assert.ok(result !== undefined, name);
+    assert.equal(result.exitCode, 2, `${name}: ${result.standardError}`);
+    assert.equal(result.standardOutput, '', name);
+    assert.match(result.standardError, /more than 200000 route registrations when routers mounted at several paths are flattened/u, name);
+    assert.doesNotMatch(result.standardError, /route-decl facts/u, name);
+  }
+  const graph = JSON.parse(results[2]!.standardOutput) as { limitations: string[] };
+  assert.ok(graph.limitations.includes(flatteningEntryPoints));
+  assert.ok(!graph.limitations.some((line) => line.includes('route-decl facts')));
 });
 
 test('사실 상한 아래의 라우터 DAG는 예전처럼 모두 펼친다', async () => {

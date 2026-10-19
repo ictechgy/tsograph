@@ -290,6 +290,9 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
 - Exit codes: `0` success (zero facts is still success, not proof of completeness), `2`
   unreadable project or oversized output (more than 100,000 facts, or more than 16 Mi
   characters), `64` usage error. A single unreadable route file is a limitation, not a failure.
+  Node routers mounted at several paths are flattened at most to 200,000 route registrations, counting
+  registrations that merge into one fact or emit none (conditional ones); past that the command exits
+  `2` with a message that names the flattened registrations, not the fact count, as the cause.
   An analysis that exceeds the call stack (typically on a deeply nested generated or minified
   source) also exits `2`, with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`,
   and `navigation` that names the cause and asks to exclude or split such files; no partial

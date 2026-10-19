@@ -239,6 +239,12 @@ test('사실·출력 상한을 넘으면 부분 문서 대신 2다', () => {
   const tooMany = renderDocument(() => { throw new RouteFactLimitError(); });
   assert.equal(tooMany.exitCode, 2);
   assert.match(tooMany.standardError, /more than 100000 route-decl facts/);
+  // 펼친 등록 수 상한으로 멈춘 실패는 사실 수가 아니라 펼친 등록 수를 원인으로 든다(사실이 거의 없을 수 있다).
+  const tooManyFlattened = renderDocument(() => { throw new RouteFactLimitError('flattened-routes'); });
+  assert.equal(tooManyFlattened.exitCode, 2);
+  assert.equal(tooManyFlattened.standardOutput, '');
+  assert.match(tooManyFlattened.standardError, /more than 200000 route registrations when routers mounted at several paths are flattened, which exceeds the flattening limit; scan a smaller project root\.\n$/u);
+  assert.doesNotMatch(tooManyFlattened.standardError, /route-decl facts/u);
   const tooLong = renderDocument(() => ({ text: 'x'.repeat(100) }), 50);
   assert.equal(tooLong.exitCode, 2);
   assert.match(tooLong.standardError, /would exceed/);

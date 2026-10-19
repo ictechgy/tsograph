@@ -20,7 +20,13 @@ import {
   TypedClientModelError,
   type TypedClientModels,
 } from '../routes/client/typed-client-model.ts';
-import { createRouteDocument, MAX_ROUTE_FACTS, RouteFactLimitError } from '../routes/route-document.ts';
+import {
+  createRouteDocument,
+  MAX_FLATTENED_ROUTES,
+  MAX_ROUTE_FACTS,
+  type RouteFactLimitCause,
+  RouteFactLimitError,
+} from '../routes/route-document.ts';
 import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH } from './openapi-command.ts';
@@ -233,12 +239,25 @@ export function renderDocument(build: () => unknown, maxLength: number = MAX_OUT
     document = build();
   } catch (error) {
     if (error instanceof GraphProjectInputError) return inputFailure(error.message);
-    if (error instanceof RouteFactLimitError) {
-      return inputFailure(`the project produces more than ${MAX_ROUTE_FACTS} route-decl facts, which isthmus rejects; scan a smaller project root.`);
-    }
+    if (error instanceof RouteFactLimitError) return inputFailure(routeFactLimitMessage(error.limitCause));
     throw error;
   }
   return encodeDocument(document, maxLength);
+}
+
+/**
+ * 사실 상한 실패의 원인별 문구다. 펼치기 상한은 사실을 내지 않는 조건부 등록과 같은 사실로 합쳐질 등록도 세므로, 그때는
+ * 사실 수가 아니라 펼친 등록 수를 원인으로 든다(사실 수로 적으면 사실이 거의 없는 프로젝트에 거짓 원인이 된다).
+ *
+ * @param cause 실패 원인
+ * @returns 실패 문구
+ */
+function routeFactLimitMessage(cause: RouteFactLimitCause): string {
+  if (cause === 'flattened-routes') {
+    return `the project's routers expand to more than ${MAX_FLATTENED_ROUTES} route registrations when routers mounted at `
+      + 'several paths are flattened, which exceeds the flattening limit; scan a smaller project root.';
+  }
+  return `the project produces more than ${MAX_ROUTE_FACTS} route-decl facts, which isthmus rejects; scan a smaller project root.`;
 }
 
 /**

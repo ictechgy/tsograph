@@ -7,7 +7,7 @@
  */
 
 import type { CommandFileSystem } from '../../cli/file-system.ts';
-import { MAX_ROUTE_FACTS } from '../route-document.ts';
+import { MAX_ROUTE_FACTS, type RouteFactLimitCause } from '../route-document.ts';
 import { readProjectDependencies } from './dependency-versions.ts';
 import { expressAdapter, flattenExpress } from './express-adapter.ts';
 import { fastifyAdapter, flattenFastify } from './fastify-adapter.ts';
@@ -38,10 +38,11 @@ export interface NodeRoutesResult {
     /** 분석한(테스트 제외 등) 파일 중 구문 오류가 있는 파일 수 */
     readonly syntaxErrorFiles: number;
     /**
-     * 펼친 라우트가 낼 사실의 하한이 사실 상한을 넘어 펼치기를 멈췄는지다. true면 frameworks는 일부뿐이고, 문서 조립은
-     * 사실 상한 실패(RouteFactLimitError)로 끝난다.
+     * 펼치기를 상한에서 멈췄으면 그 원인이다: 펼친 라우트가 낼 사실의 하한이 사실 상한을 넘었거나(`facts`), 펼친 라우트 수가
+     * 펼치기 상한을 넘었다(`flattened-routes`). 원인이 있으면 frameworks는 일부뿐이고, 문서 조립은 그 원인을 실은 사실 상한
+     * 실패(RouteFactLimitError)로 끝난다. 상한 안이면 undefined다.
      */
-    readonly factLimitExceeded: boolean;
+    readonly factLimitCause: RouteFactLimitCause | undefined;
   };
 }
 
@@ -81,7 +82,7 @@ export async function extractNodeRoutes(input: NodeRoutesInput, detected?: Detec
   if (frameworks.fastify !== undefined) results.push(flattenFastify(project, interpretation.instances, interpretation.events));
   if (frameworks.nest !== undefined) results.push(...extractNestRoutes(project, frameworks.nest, includeFile));
   const syntaxErrorFiles = [...project.files].filter(([path, sourceFile]) => includeFile(path) && hasParseErrors(sourceFile)).length;
-  return { detected: frameworks, analysis: { project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles, factLimitExceeded: budget.isExceeded } };
+  return { detected: frameworks, analysis: { project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles, factLimitCause: budget.exceededCause } };
 }
 
 /**

@@ -34,18 +34,37 @@ import { MAX_ROUTE_FILE_BYTES } from './next-routes.ts';
 import { type ChannelPolicy, channelFor, dynamicChannel, normalizeBasePath, type RouteChannel } from './route-channel.ts';
 import { joinTemplate } from './next-path.ts';
 import { MAX_SCAN_DEPTH, MAX_SCANNED_ENTRIES } from './project-scan.ts';
-import { buildNodeFacts, type LimitationEntry as NodeLimitationEntry } from './node/node-facts.ts';
+import { buildNodeFacts, type LimitationEntry as NodeLimitationEntry, MAX_FLATTENED_ROUTES_PER_FACT } from './node/node-facts.ts';
 import { nodeProjectLimitations } from './node/node-limitations.ts';
 import type { NodeRoutesResult } from './node/node-routes.ts';
 
 /** 문서 하나에 담는 최대 사실 수다. isthmus 입력 상한과 같다. */
 export const MAX_ROUTE_FACTS = 100_000;
 
-/** 사실 수가 상한을 넘었다. 부분 문서를 내지 않고 실패한다. */
+/** Node 라우터를 펼친 등록 수의 상한이다(사실 상한의 {@link MAX_FLATTENED_ROUTES_PER_FACT}배). 넘으면 펼치기를 멈춘다. */
+export const MAX_FLATTENED_ROUTES = MAX_ROUTE_FACTS * MAX_FLATTENED_ROUTES_PER_FACT;
+
+/**
+ * 사실 상한 실패의 원인이다. `facts`는 문서가 낼 서로 다른 사실이 상한을 넘은 경우다. `flattened-routes`는 Node 라우터를
+ * 펼친 등록 수가 {@link MAX_FLATTENED_ROUTES}를 넘어 펼치기를 멈춘 경우다 — 같은 사실로 합쳐지거나 사실을 내지 않는(조건부)
+ * 등록도 세므로 사실 수와 다르다. 사실이 거의 없는 프로젝트에 사실 수 초과를 알리면 거짓 원인이 되므로 둘을 나눈다.
+ */
+export type RouteFactLimitCause = 'facts' | 'flattened-routes';
+
+/** 사실 수나 Node 라우터 펼치기가 상한을 넘었다. 부분 문서를 내지 않고 실패한다. */
 export class RouteFactLimitError extends Error {
-  constructor() {
-    super(`project produces more than ${MAX_ROUTE_FACTS} route-decl facts`);
+  /** 실패 원인이다. 호출자가 원인에 맞는 문구를 고른다. */
+  readonly limitCause: RouteFactLimitCause;
+
+  /**
+   * @param limitCause 실패 원인. 기본은 사실 수 초과다
+   */
+  constructor(limitCause: RouteFactLimitCause = 'facts') {
+    super(limitCause === 'facts'
+      ? `project produces more than ${MAX_ROUTE_FACTS} route-decl facts`
+      : `project routers expand to more than ${MAX_FLATTENED_ROUTES} route registrations`);
     this.name = 'RouteFactLimitError';
+    this.limitCause = limitCause;
   }
 }
 
@@ -172,14 +191,15 @@ function nextFacts(part: NextDocumentPart, service: string | undefined): { facts
  * @param input 조립 입력
  * @param registrationOrder registration-order 문서인지
  * @returns 사실과 한계
- * @throws RouteFactLimitError 펼치는 동안 사실 하한이 상한을 넘어 펼치기를 멈췄을 때(펼친 일부로 사실을 만들지 않는다)
+ * @throws RouteFactLimitError 펼치는 동안 사실 하한이나 펼친 등록 수가 상한을 넘어 펼치기를 멈췄을 때(펼친 일부로 사실을
+ *   만들지 않는다). 원인은 펼치기가 멈춘 이유를 그대로 싣는다
  */
 function nodeFacts(input: RouteDocumentInput, registrationOrder: boolean): { facts: RouteDeclFact[]; limitations: NodeLimitationEntry[] } {
   if (input.node === undefined) return { facts: [], limitations: [] };
   const projectLimitations = nodeProjectLimitations(input.node);
   const analysis = input.node.analysis;
   if (analysis === undefined) return { facts: [], limitations: projectLimitations };
-  if (analysis.factLimitExceeded) throw new RouteFactLimitError();
+  if (analysis.factLimitCause !== undefined) throw new RouteFactLimitError(analysis.factLimitCause);
   const built = buildNodeFacts({ project: analysis.project, frameworks: analysis.frameworks, service: input.service, includeTests: input.includeTests, registrationOrder });
   return { facts: built.facts, limitations: [...projectLimitations, ...built.limitations] };
 }
