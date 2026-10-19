@@ -48,6 +48,11 @@ export class OrmBinder {
   private readonly modulesByPath: ReadonlyMap<string, SourceModule>;
   /** 모듈 해석기다. */
   private readonly resolver: ModuleResolver;
+  /**
+   * export 표를 계산 중인 모듈 파일이다. `export const x = require('./b').x`처럼 require로 재수출하는 모듈이 서로를
+   * 가리키면 표 계산이 끝없이 서로를 부르므로, 계산 중인 파일을 다시 만나면 빈 표로 끊는다.
+   */
+  private readonly exporting = new Set<ts.SourceFile>();
 
   /**
    * @param modules 스캔한 소스 모듈(이미 파싱한 트리를 그대로 Program에 넣는다)
@@ -80,7 +85,8 @@ export class OrmBinder {
   }
 
   /**
-   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함).
+   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함). 계산 중인 파일을 다시 만나면(순환 require
+   * 재수출) 빈 표라, 순환으로만 이어진 멤버는 모르는 대상이 된다.
    *
    * @param sourceFile 모듈 파일
    * @returns export 이름 → 대상
@@ -88,8 +94,13 @@ export class OrmBinder {
   exportsOf(sourceFile: ts.SourceFile): Map<string, BindingOrigin> {
     const result = new Map<string, BindingOrigin>();
     const moduleSymbol = this.checker.getSymbolAtLocation(sourceFile);
-    if (moduleSymbol === undefined) return result;
-    for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) result.set(symbol.name, this.followSymbol(symbol));
+    if (moduleSymbol === undefined || this.exporting.has(sourceFile)) return result;
+    this.exporting.add(sourceFile);
+    try {
+      for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) result.set(symbol.name, this.followSymbol(symbol));
+    } finally {
+      this.exporting.delete(sourceFile);
+    }
     return result;
   }
 
