@@ -318,3 +318,24 @@ test('mount 접두사 대안이 단계마다 16배로 느는 6단 체인도 대�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('선택 그룹이 수만 겹인 경로 한 줄이 있어도 그 라우트만 상한 초과 dynamic이고 다른 라우트를 잃지 않는다', async () => {
+  // 예전에는 path-to-regexp 8 파서가 `{`마다 재귀해 8,000겹 안팎에서 호출 스택을 넘었고, routes 문서 전체가 실패해
+  // `/ok`까지 잃었다.
+  const depth = 20_000;
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '5.1.0' }),
+    'src/app.js': [
+      "const express = require('express');",
+      'const app = express();',
+      `app.get('/${'{'.repeat(depth)}a${'}'.repeat(depth)}', (req, res) => res.send('deep'));`,
+      "app.get('/ok', (req, res) => res.send('ok'));",
+      'module.exports = app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(document).map((line) => line.replace(/^GET root \/\{+ /u, 'GET root <nested> ')), [
+    'GET root /ok optional #1 ci',
+    'GET root <nested> - dynamic{"templatePrefixes":["/"]} #0 ci',
+  ]);
+  assert.equal(limitationsWith(document, 'route-template-expansion-capped: 1 route path(s)').length, 1);
+});
