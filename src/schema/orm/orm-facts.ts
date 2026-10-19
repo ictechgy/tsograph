@@ -27,7 +27,7 @@ export interface OrmCounts {
   readonly namingUnverified: Set<string>;
   /** 정적으로 읽지 못한 선언 조각(스프레드·계산된 키·비리터럴 이름) 수(표면별)다. */
   readonly unreadableDeclarations: Map<string, number>;
-  /** 값 평가가 순환 타입 참조의 재계산 상한에 닿아 일부 값을 모르는 값으로 끊었는지 여부다. */
+  /** 값 평가가 문맥에 기댄(순환 감지·깊이 상한으로 끊긴) 타입 값의 재계산 상한에 닿아 일부 값을 모르는 값으로 끊었는지 여부다. */
   evaluationTruncated: boolean;
 }
 

@@ -25,7 +25,7 @@ export function ormLimitations(counts: OrmCounts): string[] {
     result.push(`unreadable-orm-declarations: ${unreadable} ORM declaration part(s) (spreads, computed keys, non-literal names or options) could not be read statically and were not emitted: ${formatBreakdown(counts.unreadableDeclarations)}`);
   }
   if (counts.evaluationTruncated) {
-    result.push('orm-evaluation-truncated: ORM value evaluation reached its re-evaluation limit for type references that depend on cyclic declarations; some values were treated as unknown and their uses may be missing');
+    result.push('orm-evaluation-truncated: ORM value evaluation reached its limit for re-evaluating context-dependent type references (cut by cyclic or depth-limited declarations); some values were treated as unknown and their uses may be missing');
   }
   return result;
 }
