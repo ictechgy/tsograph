@@ -715,9 +715,9 @@ Oracle, and slonik queries are not interpreted. Files using them are counted und
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
-`unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
-`invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
-`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
+`unreadable-orm-declarations:`, `orm-evaluation-truncated:`, `provenance-truncated:`,
+`missing-relation-usrs:`, `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`,
+`parse-errors:`, `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
 itself (`unjoined-dynamic-relations`).
 

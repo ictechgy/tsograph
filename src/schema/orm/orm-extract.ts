@@ -116,6 +116,7 @@ export function extractOrmFacts(input: OrmExtractionInput): OrmExtraction {
     sequelize: new SequelizeUsage(context, sequelize), knex: new KnexUsage(context), driver: new DriverUsage(context),
   };
   for (const module of input.modules) scanModule(module, scanners);
+  counts.evaluationTruncated = evaluator.evaluationTruncated;
   return { counts, consumed };
 }
 

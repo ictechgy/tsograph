@@ -42,11 +42,50 @@ export const UNKNOWN: OrmValue = { kind: 'unknown' };
 /** 평가 깊이 상한이다. 긴 초기값·반환 사슬을 끊는다. */
 const MAX_DEPTH = 48;
 
+/**
+ * 문맥에 기댄 타입 값을 다시 계산하는 횟수 상한이다. 정확한 재사용 조건이 맞지 않는 넓은 순환(여러 선언이 서로의
+ * `typeof`를 합 타입으로 참조)은 계산 중인 선언 집합마다 다시 계산해야 해서 선언 수에 지수적으로 늘어난다. 상한을
+ * 넘으면 그런 재계산을 모르는 값으로 끊고 limitation으로 알린다. 보통 코드는 다시 계산할 일이 거의 없다.
+ */
+const MAX_CONTEXTUAL_RECOMPUTATIONS = 10_000;
+
+/** 비어 있는 노드 집합이다(문맥 조건이 없는 자리에 공유한다). */
+const NO_NODES: ReadonlySet<ts.Node> = new Set();
+
+/** 비어 있는 식 집합이다(깊이로 끊은 식이 없는 자리에 공유한다). */
+const NO_EXPRESSIONS: ReadonlySet<ts.Expression> = new Set();
+
 /** 깊이 상한·순환 감지에 걸리지 않고 계산한 타입 값이다. */
 interface SettledType {
   readonly value: OrmValue;
   /** 계산 안에서 가장 깊게 진입한 평가 깊이와 이 타입의 진입 깊이의 차다. */
   readonly span: number;
+}
+
+/**
+ * 깊이 상한·순환 감지에 걸려 문맥에 기댄 타입 값과, 그 값을 다시 써도 되는 문맥 조건이다. 같은 진입 깊이에서 아래
+ * 조건이 모두 맞으면 다시 계산해도 같은 길로 같은 자리에서 끊기므로 값이 같다.
+ */
+interface CutType {
+  readonly value: OrmValue;
+  /** 계산이 순환 감지로 끊은 바깥 노드(진입 전부터 계산 중이던 노드)다. 모두 지금도 계산 중이어야 한다. */
+  readonly outer: ReadonlySet<ts.Node>;
+  /** 계산이 끝까지 계산한 선언이다. 하나라도 지금 계산 중이면 다시 계산할 때 그 자리에서 끊긴다. */
+  readonly inner: ReadonlySet<ts.Node>;
+  /** 계산이 깊이 상한으로 끊은 식이다. 그 뒤 메모되면 다시 계산할 때 그 자리에서 메모를 읽으므로 값이 달라질 수 있다. */
+  readonly depthCuts: ReadonlySet<ts.Expression>;
+}
+
+/** 계산 중인 타입 값 하나가 모으는 문맥 조건이다(필요할 때만 집합을 만든다). */
+interface TypeFrame {
+  /** 이 타입 값의 진입 깊이다. */
+  readonly entry: number;
+  /** `CutType.outer`의 재료다. */
+  outer: Set<ts.Node> | undefined;
+  /** `CutType.inner`의 재료다. */
+  inner: Set<ts.Node> | undefined;
+  /** `CutType.depthCuts`의 재료다. */
+  depthCuts: Set<ts.Expression> | undefined;
 }
 
 /**
@@ -89,22 +128,30 @@ export class OrmEvaluator {
   private readonly typeMemo = new Map<ts.TypeNode, SettledType>();
   /**
    * 깊이 상한·순환 감지에 걸려 문맥에 기댄 타입 값을 진입 깊이별로 둔 메모다. 노드만으로 메모하면 깊은 위치에서
-   * 끊긴 값이 얕은 위치의 평가를 덮으므로 진입 깊이가 같을 때만 다시 쓴다(노드마다 최대 `MAX_DEPTH`개).
+   * 끊긴 값이 얕은 위치의 평가를 덮으므로 진입 깊이가 같고, 계산 중인 노드와 식 메모가 `CutType`의 조건에 맞을
+   * 때만 다시 쓴다. 순환으로 끊긴 값은 그 순간 계산 중이던 선언에, 깊이로 끊긴 값은 그 식이 아직 메모되지 않았음에
+   * 기대므로, 깊이만 같다고 다시 쓰면 평가 순서에 따라 사실이 사라진다.
    */
-  private readonly cutTypeMemo = new Map<ts.TypeNode, Map<number, OrmValue>>();
+  private readonly cutTypeMemo = new Map<ts.TypeNode, Map<number, CutType[]>>();
   /**
    * 타입 표기 멤버 탐색 메모다: 타입 노드·인터페이스 선언 → `깊이:이름` → 멤버 타입(없으면 null).
    * 탐색은 구문과 이름 해석만 보는 순수 함수라 `resetCache` 뒤에도 그대로 맞는다.
    */
   private readonly memberTypeMemo = new Map<ts.Node, Map<string, ts.TypeNode | null>>();
-  /** 계산 중인 노드다(순환 감지). */
-  private readonly computing = new Set<ts.Node>();
+  /** 계산 중인 노드 → 계산을 시작한 평가 깊이다(순환 감지, 끊은 노드가 어느 타입 값의 바깥인지 판정). */
+  private readonly computing = new Map<ts.Node, number>();
+  /** 계산 중인 타입 값의 문맥 조건이다(안쪽이 뒤). */
+  private readonly typeFrames: TypeFrame[] = [];
   /** 현재 평가 깊이다. */
   private depth = 0;
   /** 지금 계산 중인 타입 값 안에서 가장 깊게 진입한 평가 깊이다(메모한 값의 깊이 폭을 잰다). */
   private reach = 0;
   /** 깊이 상한·순환 감지로 평가를 끊은 누적 횟수다. 계산 전후 값이 다르면 그 결과는 문맥에 기댄 것이다. */
   private cutoffs = 0;
+  /** 문맥에 기댄 타입 값을 조건이 맞지 않아 다시 계산한 누적 횟수다. */
+  private recomputations = 0;
+  /** 재계산 상한을 넘어 타입 값을 모르는 값으로 끊은 적이 있는지 여부다. */
+  private truncated = false;
 
   /**
    * @param binder 이름 해석기
@@ -119,6 +166,14 @@ export class OrmEvaluator {
    */
   get cutoffCount(): number {
     return this.cutoffs;
+  }
+
+  /**
+   * 문맥에 기댄 타입 값의 재계산이 상한(`MAX_CONTEXTUAL_RECOMPUTATIONS`)을 넘어 일부 값을 모르는 값으로 끊었는지
+   * 여부다. 참이면 그 값에 기댄 사용이 빠졌을 수 있으므로 호출자가 limitation으로 알린다.
+   */
+  get evaluationTruncated(): boolean {
+    return this.truncated;
   }
 
   /**
@@ -146,21 +201,21 @@ export class OrmEvaluator {
   valueOf(expression: ts.Expression): OrmValue {
     const cached = this.memo.get(expression);
     if (cached !== undefined) return cached;
-    if (this.computing.has(expression) || this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
-    this.computing.add(expression);
-    this.descend();
+    if (this.computing.has(expression)) return this.cycleCut(expression);
+    if (this.depth >= MAX_DEPTH) return this.depthCut(expression);
+    this.enter(expression);
     try {
       const value = this.compute(expression);
       this.memo.set(expression, value);
       return value;
     } finally {
-      this.depth--;
-      this.computing.delete(expression);
+      this.leave(expression);
     }
   }
 
   /**
-   * 타입 표기의 값을 돌려준다. 같은 노드는 한 번만 계산한다(문맥에 기댄 값은 같은 진입 깊이에서만 다시 쓴다).
+   * 타입 표기의 값을 돌려준다. 같은 노드는 한 번만 계산한다(문맥에 기댄 값은 같은 진입 깊이에서 문맥 조건이 맞을
+   * 때만 다시 쓴다).
    *
    * @param type 타입 노드
    * @returns 값
@@ -169,9 +224,131 @@ export class OrmEvaluator {
     const settled = this.settledType(type);
     if (settled !== undefined) return settled;
     if (this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
-    const cut = this.cutTypeMemo.get(type)?.get(this.depth);
-    if (cut !== undefined) return this.cutOff(cut);
+    const cuts = this.cutTypeMemo.get(type)?.get(this.depth);
+    if (cuts === undefined) return this.computeTypeValue(type);
+    const fitting = cuts.find((cut) => this.fits(cut));
+    return fitting === undefined ? this.recomputeTypeValue(type) : this.reuseCut(fitting);
+  }
+
+  /**
+   * 문맥 조건이 맞는 메모가 없는 타입 값을 다시 계산한다. 재계산 상한을 넘었으면 계산하지 않고 모름 값으로 끊는다.
+   *
+   * @param type 타입 노드
+   * @returns 값
+   */
+  private recomputeTypeValue(type: ts.TypeNode): OrmValue {
+    if (this.recomputations >= MAX_CONTEXTUAL_RECOMPUTATIONS) {
+      this.truncated = true;
+      return this.cutOff(UNKNOWN);
+    }
+    this.recomputations++;
     return this.computeTypeValue(type);
+  }
+
+  /**
+   * 문맥에 기댄 타입 값을 지금 다시 써도 되는지 본다: 끊은 바깥 노드가 모두 아직 계산 중이고, 끝까지 계산한 선언은
+   * 하나도 계산 중이 아니며, 깊이로 끊은 식이 아직 메모되지 않았다.
+   *
+   * @param cut 문맥에 기댄 타입 값
+   * @returns 다시 써도 되면 true
+   */
+  private fits(cut: CutType): boolean {
+    for (const node of cut.outer) if (!this.computing.has(node)) return false;
+    for (const node of this.computing.keys()) if (cut.inner.has(node)) return false;
+    return !this.anyMemoized(cut.depthCuts);
+  }
+
+  /**
+   * 식 가운데 하나라도 메모되었는지 본다.
+   *
+   * @param expressions 식
+   * @returns 메모된 식이 있으면 true
+   */
+  private anyMemoized(expressions: ReadonlySet<ts.Expression>): boolean {
+    for (const expression of expressions) if (this.memo.has(expression)) return true;
+    return false;
+  }
+
+  /**
+   * 문맥에 기댄 타입 값을 다시 쓴다. 그 값의 문맥 조건을 감싼 타입 값에 넘기고 끊김으로 센다.
+   *
+   * @param cut 문맥에 기댄 타입 값
+   * @returns 값
+   */
+  private reuseCut(cut: CutType): OrmValue {
+    const frame = this.typeFrames.at(-1);
+    if (frame !== undefined) this.mergeContext(frame, cut);
+    return this.cutOff(cut.value);
+  }
+
+  /**
+   * 안쪽 타입 값의 문맥 조건을 감싼 타입 값에 더한다. 바깥 노드는 감싼 타입 값보다 먼저 계산을 시작한 것만 남긴다
+   * (나중에 시작한 노드에서 끊긴 자리는 감싼 타입 값을 다시 계산해도 같은 길로 다시 끊긴다).
+   *
+   * @param frame 감싼 타입 값의 문맥 조건
+   * @param cut 안쪽 타입 값의 문맥 조건
+   */
+  private mergeContext(frame: TypeFrame, cut: CutType): void {
+    for (const node of cut.outer) if (this.startedBefore(node, frame)) (frame.outer ??= new Set()).add(node);
+    for (const node of cut.inner) (frame.inner ??= new Set()).add(node);
+    for (const expression of cut.depthCuts) (frame.depthCuts ??= new Set()).add(expression);
+  }
+
+  /**
+   * 계산 중인 노드가 타입 값보다 먼저 계산을 시작했는지(그 타입 값의 바깥인지) 본다. 노드는 계산 중이어야 한다.
+   *
+   * @param node 계산 중인 노드
+   * @param frame 타입 값의 문맥 조건
+   * @returns 바깥이면 true
+   */
+  private startedBefore(node: ts.Node, frame: TypeFrame): boolean {
+    return this.computing.get(node)! < frame.entry;
+  }
+
+  /**
+   * 노드 계산을 시작한다(순환 감지에 등록하고 깊이를 내린다).
+   *
+   * @param node 식 또는 선언
+   */
+  private enter(node: ts.Node): void {
+    this.computing.set(node, this.depth);
+    this.descend();
+  }
+
+  /**
+   * 노드 계산을 끝낸다.
+   *
+   * @param node 식 또는 선언
+   */
+  private leave(node: ts.Node): void {
+    this.depth--;
+    this.computing.delete(node);
+  }
+
+  /**
+   * 계산 중인 노드를 다시 만나 끊는다. 끊은 노드가 지금 타입 값보다 먼저 계산을 시작했으면 그 타입 값은 이 노드가
+   * 계산 중인 문맥에서만 같은 값이므로 바깥 노드로 적는다.
+   *
+   * @param node 다시 만난 노드
+   * @returns 모름 값
+   */
+  private cycleCut(node: ts.Node): OrmValue {
+    const frame = this.typeFrames.at(-1);
+    if (frame !== undefined && this.startedBefore(node, frame)) (frame.outer ??= new Set()).add(node);
+    return this.cutOff(UNKNOWN);
+  }
+
+  /**
+   * 깊이 상한에서 식 평가를 끊는다. 그 식이 나중에 메모되면 같은 자리를 다시 계산할 때 메모를 읽으므로, 감싼 타입
+   * 값은 그 식이 아직 메모되지 않은 동안만 다시 쓸 수 있다.
+   *
+   * @param expression 끊은 식
+   * @returns 모름 값
+   */
+  private depthCut(expression: ts.Expression): OrmValue {
+    const frame = this.typeFrames.at(-1);
+    if (frame !== undefined) (frame.depthCuts ??= new Set()).add(expression);
+    return this.cutOff(UNKNOWN);
   }
 
   /**
@@ -195,17 +372,20 @@ export class OrmEvaluator {
    * @returns 값
    */
   private computeTypeValue(type: ts.TypeNode): OrmValue {
-    const entry = this.depth;
+    const frame: TypeFrame = { entry: this.depth, outer: undefined, inner: undefined, depthCuts: undefined };
     const outerReach = this.reach;
     const cutoffsBefore = this.cutoffs;
-    this.reach = entry;
+    this.typeFrames.push(frame);
+    this.reach = frame.entry;
     this.descend();
     try {
       const value = this.computeType(type);
-      this.rememberType(type, entry, value, this.cutoffs !== cutoffsBefore);
+      if (this.cutoffs === cutoffsBefore) this.typeMemo.set(type, { value, span: this.reach - frame.entry });
+      else this.rememberCut(type, frame, value);
       return value;
     } finally {
       this.depth--;
+      this.typeFrames.pop();
       this.reach = Math.max(outerReach, this.reach);
     }
   }
@@ -219,21 +399,21 @@ export class OrmEvaluator {
   }
 
   /**
-   * 타입 값을 메모에 둔다. 문맥에 기댄 값은 진입 깊이별 메모에만 둔다.
+   * 문맥에 기댄 타입 값을 진입 깊이별 메모에 두고, 그 문맥 조건을 감싼 타입 값에 넘긴다(감싼 값도 같은 문맥에 기댄다).
+   * 깊이로 끊은 식이 이미 메모된 값은 다시 쓸 일이 없으므로 함께 버린다.
    *
    * @param type 타입 노드
-   * @param entry 진입 깊이
+   * @param frame 이 타입 값의 문맥 조건
    * @param value 값
-   * @param contextual 계산 중 깊이 상한·순환 감지에 걸렸는지 여부
    */
-  private rememberType(type: ts.TypeNode, entry: number, value: OrmValue, contextual: boolean): void {
-    if (!contextual) {
-      this.typeMemo.set(type, { value, span: this.reach - entry });
-      return;
-    }
-    const byDepth = this.cutTypeMemo.get(type) ?? new Map<number, OrmValue>();
-    byDepth.set(entry, value);
+  private rememberCut(type: ts.TypeNode, frame: TypeFrame, value: OrmValue): void {
+    const cut: CutType = { value, outer: frame.outer ?? NO_NODES, inner: frame.inner ?? NO_NODES, depthCuts: frame.depthCuts ?? NO_EXPRESSIONS };
+    const byDepth = this.cutTypeMemo.get(type) ?? new Map<number, CutType[]>();
+    const current = (byDepth.get(frame.entry) ?? []).filter((known) => !this.anyMemoized(known.depthCuts));
+    byDepth.set(frame.entry, [...current, cut]);
     this.cutTypeMemo.set(type, byDepth);
+    const parent = this.typeFrames.at(-2);
+    if (parent !== undefined) this.mergeContext(parent, cut);
   }
 
   /**
@@ -254,14 +434,16 @@ export class OrmEvaluator {
    * @returns 값
    */
   declarationValue(declaration: ts.Declaration): OrmValue {
-    if (this.computing.has(declaration) || this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
-    this.computing.add(declaration);
-    this.descend();
+    if (this.computing.has(declaration)) return this.cycleCut(declaration);
+    if (this.depth >= MAX_DEPTH) return this.cutOff(UNKNOWN);
+    // 선언은 메모하지 않으므로, 이 선언이 나중에 계산 중일 때 감싼 타입 값을 다시 계산하면 여기서 끊긴다.
+    const frame = this.typeFrames.at(-1);
+    if (frame !== undefined) (frame.inner ??= new Set()).add(declaration);
+    this.enter(declaration);
     try {
       return this.computeDeclaration(declaration);
     } finally {
-      this.depth--;
-      this.computing.delete(declaration);
+      this.leave(declaration);
     }
   }
 

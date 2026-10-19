@@ -195,6 +195,9 @@ tsograph는 기본 스키마(`public`)를 추측하지 않는다.
 - `orm-naming-unverified:` 이름 규칙을 확정하지 못한 이유(Drizzle casing 불일치, TypeORM 사용자 전략·접두사 불일치,
   Sequelize 전역 `define` 불일치). 해당 이름은 dynamic이거나 생략된다.
 - `unreadable-orm-declarations:` 정적으로 읽지 못한 선언 조각(비리터럴 이름·옵션, 계산된 키, 풀지 못한 스프레드) 수(표면별).
+- `orm-evaluation-truncated:` 값 평가가 순환하는 선언에 기댄 타입 값을 다시 계산하는 상한(10,000회)에 닿아 남은 값을
+  모르는 값으로 두었다. 그 값에 기댄 사용은 빠졌을 수 있다. 여러 선언이 서로의 `typeof`를 합 타입으로 참조하는 넓은
+  순환처럼 계산 중인 선언 조합이 계속 바뀌는 입력에서만 생긴다.
 
 dynamic 사실은 기존 `dynamic-relation-names:`에 합산한다. 이 표면이 읽는 패키지는 더 이상 `unsupported-db-packages:`로
 세지 않는다. 그 목록에는 `sequelize-typescript`·`kysely`·`objection`·`pg-promise`·`sqlite`·`mssql`·`tedious`·`oracledb`·

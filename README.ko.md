@@ -572,9 +572,9 @@ Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터�
 `ignored-prisma-elements:`, `unresolved-generator-outputs:`, `unresolved-typed-sql:`,
 `unsupported-db-packages:`, `dynamic-relation-names:`, `skipped-sql-literals:`,
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
-`unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
-`invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
-`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
+`unreadable-orm-declarations:`, `orm-evaluation-truncated:`, `provenance-truncated:`,
+`missing-relation-usrs:`, `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`,
+`parse-errors:`, `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
 심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
 
 ### 카탈로그와 조인

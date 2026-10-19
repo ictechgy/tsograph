@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { extractProject } from '../testing.test.ts';
 import { OrmBinder } from './orm-binder.ts';
-import { ormLines } from './testing.test.ts';
+import { ormLines, usrLines } from './testing.test.ts';
 
 /**
  * 콜백을 실행하는 동안 이름 해석(`OrmBinder.originOf`) 호출 수를 세고, 상한을 넘으면 즉시 실패시킨다.
@@ -91,6 +92,94 @@ function deepAndShallowUses(deepFirst: boolean): string {
 test('메모한 타입 값도 깊이 상한이 끊는 위치는 평가 순서와 무관하게 메모 전과 같다', () => {
   assert.deepEqual(ormLines({ 'src/q.ts': deepAndShallowUses(true) }), ['src/q.ts:33:55 shallow_rows @src/q.ts#shallow']);
   assert.deepEqual(ormLines({ 'src/q.ts': deepAndShallowUses(false) }), ['src/q.ts:32:55 shallow_rows @src/q.ts#shallow']);
+});
+
+/**
+ * `type T = typeof x`를 x의 초기값 단언(`pool as T`)과 다른 선언의 타입 표기(`v: T | undefined`)가 함께 쓰는 파일이다
+ * (`tsc --strict` 통과). x를 평가하는 동안에는 x가 계산 중이라 T가 순환 감지로 끊기고, v에서는 x가 계산 중이 아니라
+ * T가 x의 값까지 풀린다.
+ *
+ * @param assertionFirst x를 쓰는 함수를 먼저 둘지 여부(평가 순서)
+ * @returns 파일 내용
+ */
+function typeofCycle(assertionFirst: boolean): string {
+  const uses = [
+    "export async function first() { return x.query('select * from x_rows'); }",
+    "export async function second() { return v?.query('select * from v_rows'); }",
+  ];
+  const lines = ["import { Pool } from 'pg';", 'const pool = new Pool();', 'type T = typeof x;', 'const x: Pool = pool as T;'];
+  lines.push('declare const v: T | undefined;', ...(assertionFirst ? uses : uses.reverse()), '');
+  return lines.join('\n');
+}
+
+test('순환 감지로 끊긴 타입 값은 끊게 만든 선언이 계산 중인 문맥에서만 다시 쓴다(평가 순서와 무관하게 메모 전과 같다)', () => {
+  assert.deepEqual(ormLines({ 'src/q.ts': typeofCycle(true) }), ['src/q.ts:6:48 x_rows @src/q.ts#first', 'src/q.ts:7:50 v_rows @src/q.ts#second']);
+  assert.deepEqual(ormLines({ 'src/q.ts': typeofCycle(false) }), ['src/q.ts:6:50 v_rows @src/q.ts#second', 'src/q.ts:7:48 x_rows @src/q.ts#first']);
+});
+
+test('끊긴 타입 값은 그 계산이 끝까지 풀었던 선언이 지금 계산 중이면 다시 쓰지 않는다(없던 사실을 만들지 않는다)', () => {
+  // w의 타입에서 먼저 푼 T(= typeof n.Pool)는 n을 끝까지 풀어 pg의 Pool이다. n 자신의 타입에서 같은 깊이로 다시 닿은
+  // T는 n이 계산 중이라 그 자리에서 끊겨야 한다(메모 전 평가). 먼저 푼 값을 쓰면 n이 Pool이 되어 client_rows가 생긴다.
+  const lines = ormLines({
+    'src/q.ts': [
+      "import * as pg from 'pg';",
+      'type T = typeof n.Pool;',
+      'declare const n: T & typeof pg;',
+      'declare const w: ((((T))));',
+      'const client = new n();',
+      'const pool = new pg.Pool();',
+      "export async function first() { return w.query('select * from w_rows'); }",
+      "export async function second() { return client.query('select * from client_rows'); }",
+      "export async function third() { return pool.query('select * from ok_rows'); }",
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(lines, ['src/q.ts:9:51 ok_rows @src/q.ts#third']);
+});
+
+/**
+ * 21단계 괄호 별칭 사슬 끝의 `typeof x`를 두 선언(v1·v2)이 타입으로 쓰고, x를 직접 쓰는 함수도 있는 파일이다.
+ * v1·v2를 풀면 x의 초기값이 깊이 상한에서 끊긴다. 그 사이 x를 직접 풀면 초기값이 메모되어, 그 뒤의 평가는 같은
+ * 깊이에서 끊기는 대신 메모를 읽는다.
+ *
+ * @param order 함수를 둘 순서(a: v1, b: x, c: v2)
+ * @returns 파일 내용
+ */
+function depthCutThenMemo(order: string): string {
+  const uses: Record<string, string> = {
+    a: "export async function a() { return v1.query('select * from v1_rows'); }",
+    b: "export async function b() { return x.query('select * from x_rows'); }",
+    c: "export async function c() { return v2.query('select * from v2_rows'); }",
+  };
+  const lines = ["import { Pool } from 'pg';", 'const pool = new Pool();', 'type T0 = typeof x;'];
+  for (let level = 1; level <= 21; level++) lines.push(`type T${level} = (T${level - 1});`);
+  lines.push('const x = pool;', 'declare const v1: (T21);', 'declare const v2: (T21);', ...[...order].map((name) => uses[name]!), '');
+  return lines.join('\n');
+}
+
+test('깊이 상한으로 끊긴 식이 나중에 메모되면 그 끊김에 기댄 타입 값은 다시 쓰지 않는다(메모 전과 같다)', () => {
+  // 기대값은 타입 메모가 없는 평가(수정 전)의 사실이다. 그 평가도 식 메모 때문에 순서에 따라 결과가 다르다.
+  assert.deepEqual(ormLines({ 'src/q.ts': depthCutThenMemo('abc') }), ['src/q.ts:29:44 x_rows @src/q.ts#b', 'src/q.ts:30:45 v2_rows @src/q.ts#c']);
+  assert.deepEqual(ormLines({ 'src/q.ts': depthCutThenMemo('cba') }), ['src/q.ts:29:44 x_rows @src/q.ts#b', 'src/q.ts:30:45 v1_rows @src/q.ts#a']);
+});
+
+test('순환과 분기가 섞인 별칭 사슬도 같은 문맥에서는 끊긴 값을 다시 써 이름 해석 예산 안에 끝난다', () => {
+  const lines = ["import { Pool } from 'pg';", 'const pool = new Pool();', 'type T0 = typeof x;'];
+  for (let level = 1; level <= 18; level++) lines.push(`type T${level} = T${level - 1} | T${level - 1} | T${level - 1};`);
+  lines.push('const x: Pool = pool as T18;', "export async function run() { return x.query('select * from fan_rows'); }", '');
+  assert.deepEqual(withOriginBudget(20_000, () => ormLines({ 'src/q.ts': lines.join('\n') })), ['src/q.ts:23:46 fan_rows @src/q.ts#run']);
+});
+
+test('여러 선언이 서로의 typeof를 합 타입으로 참조하는 넓은 순환은 재계산 상한에서 멈추고 limitation으로 알린다', () => {
+  // 선언 16개가 `T = typeof a0 | … | typeof a15`, `aN: T & Pool`이다. 정확한 문맥 조건만 쓰면 계산 중인 선언
+  // 집합마다 T를 다시 계산해 선언 수에 지수적으로 늘어난다.
+  const width = 16;
+  const lines = ["import { Pool } from 'pg';", `type T = ${Array.from({ length: width }, (_, index) => `typeof a${index}`).join(' | ')};`];
+  for (let index = 0; index < width; index++) lines.push(`declare const a${index}: T & Pool;`);
+  lines.push('declare const v: T;', "export async function run() { return v.query('select * from wide_rows'); }", '');
+  const result = withOriginBudget(50_000, () => extractProject({ 'src/q.ts': lines.join('\n') }));
+  assert.deepEqual(usrLines(result), ['src/q.ts:20:46 wide_rows @src/q.ts#run']);
+  assert.ok(result.limitations.some((limitation) => limitation.startsWith('orm-evaluation-truncated: ')), JSON.stringify(result.limitations));
 });
 
 test('값 평가: 이름공간·재수출·CommonJS·import=·조건·대체 연산자·타입 별칭·ReturnType·교차 타입·객체 스키마', () => {
