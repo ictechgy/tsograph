@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { extractProject } from '../testing.test.ts';
 import { ormLines, usrLines } from './testing.test.ts';
-import { toCamelCase, toSnakeCase } from './drizzle-catalog.ts';
+import { DrizzleCatalog, toCamelCase, toSnakeCase } from './drizzle-catalog.ts';
 
 /** pg 스키마 파일 하나다. */
 const pgSchema = [
@@ -216,4 +216,102 @@ test('Drizzle casing 변환은 라이브러리 함수와 같다', () => {
   assert.equal(toCamelCase('created_at'), 'createdAt');
   assert.equal(toCamelCase('HTTPRequest'), 'httpRequest');
   assert.equal(toCamelCase(''), '');
+});
+
+/**
+ * 콜백을 실행하는 동안 `DrizzleCatalog.relationalTables`가 스키마 식·타입마다 불린 수와 돌려준 서로 다른 표의 수를 센다.
+ * 표를 다시 만들면 호출마다 새 표가 나오므로, 실행 시간 대신 이 수로 스키마 표를 다시 계산하는지 결정적으로 본다.
+ *
+ * @param run 실행할 콜백
+ * @returns 콜백 결과와, 처음 물은 순서대로 스키마마다 [호출 수, 서로 다른 표 수]
+ */
+function countRelationalTables<T>(run: () => T): { readonly result: T; readonly builds: [number, number][] } {
+  const original = DrizzleCatalog.prototype.relationalTables;
+  const built = new Map<unknown, { readonly tables: Set<unknown>; calls: number }>();
+  DrizzleCatalog.prototype.relationalTables = function countedRelationalTables(this: DrizzleCatalog, schema) {
+    const tables = original.call(this, schema);
+    const entry = built.get(schema) ?? { tables: new Set(), calls: 0 };
+    entry.tables.add(tables);
+    entry.calls++;
+    built.set(schema, entry);
+    return tables;
+  };
+  try {
+    const result = run();
+    return { result, builds: [...built.values()].map((entry) => [entry.calls, entry.tables.size]) };
+  } finally {
+    DrizzleCatalog.prototype.relationalTables = original;
+  }
+}
+
+test('관계형 쿼리의 스키마 키 표는 스키마 식·타입마다 한 번만 만든다(스키마 없는 db는 변수 이름 표)', () => {
+  const { result: lines, builds } = countRelationalTables(() => ormLines({
+    'src/schema.ts': "import { sqliteTable, integer } from 'drizzle-orm/sqlite-core';\nexport const users = sqliteTable('user_rows', { id: integer() });\nexport const posts = sqliteTable('post_rows', { id: integer() });\n",
+    'src/db.ts': [
+      "import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';",
+      "import * as schema from './schema';",
+      "export const db = drizzle('file:x', { schema });",
+      "export const bare = drizzle('file:y');",
+      'export type Db = LibSQLDatabase<typeof schema>;',
+      '',
+    ].join('\n'),
+    'src/q.ts': [
+      "import { db, bare, type Db } from './db';",
+      'export async function run(client: Db) {',
+      '  await db.query.users.findMany();',
+      '  await db.query.posts.findFirst();',
+      '  await client.query.users.findMany();',
+      '  await client.query.posts.findMany();',
+      '  await bare.query.users.findMany();',
+      '  return bare.query.posts.findFirst();',
+      '}',
+      '',
+    ].join('\n'),
+  }));
+  // 스키마 식(`{ schema }`), 타입(`typeof schema`), 스키마 없음(undefined) 세 가지가 각각 두 번 물린다.
+  assert.deepEqual(builds, [[2, 1], [2, 1], [2, 1]]);
+  assert.deepEqual(lines, [
+    'src/q.ts:3:18 user_rows @src/q.ts#run',
+    'src/q.ts:4:18 post_rows @src/q.ts#run',
+    'src/q.ts:5:22 user_rows @src/q.ts#run',
+    'src/q.ts:6:22 post_rows @src/q.ts#run',
+    'src/q.ts:7:20 user_rows @src/q.ts#run',
+    'src/q.ts:8:21 post_rows @src/q.ts#run',
+    'src/schema.ts:2:34 user_rows @src/schema.ts#model:users',
+    'src/schema.ts:2:49 user_rows.id @src/schema.ts#model:users.id',
+    'src/schema.ts:3:34 post_rows @src/schema.ts#model:posts',
+    'src/schema.ts:3:49 post_rows.id @src/schema.ts#model:posts.id',
+  ]);
+});
+
+test('스키마 export 평가가 순환 감지에 걸린 표는 메모하지 않고 다음 호출이 다시 만든다', () => {
+  const { result: lines, builds } = countRelationalTables(() => ormLines({
+    'src/schema.ts': [
+      "import { sqliteTable, integer } from 'drizzle-orm/sqlite-core';",
+      "export const users = sqliteTable('user_rows', { id: integer() });",
+      'export const left = right;',
+      'export const right = left;',
+      '',
+    ].join('\n'),
+    'src/db.ts': "import { drizzle } from 'drizzle-orm/libsql';\nimport * as schema from './schema';\nexport const db = drizzle('file:x', { schema });\n",
+    'src/q.ts': [
+      "import { db } from './db';",
+      'export async function run() {',
+      '  await db.query.users.findMany();',
+      '  await db.query.users.findFirst();',
+      '  return db.query.users.findMany();',
+      '}',
+      '',
+    ].join('\n'),
+  }));
+  // 첫 표는 서로를 가리키는 `left`·`right`의 순환을 끊어 만들었으므로 두지 않는다. 두 번째 계산은 끊긴 값의 식 메모만
+  // 읽어 평가를 끊지 않으므로 메모되고, 세 번째 호출이 그 표를 쓴다.
+  assert.deepEqual(builds, [[3, 2]]);
+  assert.deepEqual(lines, [
+    'src/q.ts:3:18 user_rows @src/q.ts#run',
+    'src/q.ts:4:18 user_rows @src/q.ts#run',
+    'src/q.ts:5:19 user_rows @src/q.ts#run',
+    'src/schema.ts:2:34 user_rows @src/schema.ts#model:users',
+    'src/schema.ts:2:49 user_rows.id @src/schema.ts#model:users.id',
+  ]);
 });

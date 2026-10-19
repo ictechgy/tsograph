@@ -114,6 +114,14 @@ export class OrmEvaluator {
   }
 
   /**
+   * 깊이 상한·순환 감지로 평가를 끊은 누적 횟수다. 호출자는 계산 전후 값을 비교해, 그 결과가 진행 중인 계산·깊이에
+   * 기댄 것인지(다른 순서로 다시 계산하면 달라질 수 있어 메모하면 안 되는지) 안다.
+   */
+  get cutoffCount(): number {
+    return this.cutoffs;
+  }
+
+  /**
    * 규칙을 더한다. 먼저 더한 규칙이 우선한다.
    *
    * @param rules 규칙

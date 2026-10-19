@@ -34,6 +34,9 @@ export type BindingOrigin =
 /** 해석하지 못한 결과의 공유 값이다. */
 export const UNKNOWN_ORIGIN: BindingOrigin = { kind: 'unknown' };
 
+/** 순환을 끊은 자리의 빈 export 표다(읽기 전용으로만 돌려준다). */
+const NO_EXPORTS: ReadonlyMap<string, BindingOrigin> = new Map();
+
 /** 파일 확장자 → 컴파일러 확장자 종류다. */
 const extensions: ReadonlyMap<string, ts.Extension> = new Map([
   ['.ts', ts.Extension.Ts], ['.tsx', ts.Extension.Tsx], ['.mts', ts.Extension.Mts], ['.cts', ts.Extension.Cts],
@@ -53,6 +56,16 @@ export class OrmBinder {
    * 가리키면 표 계산이 끝없이 서로를 부르므로, 계산 중인 파일을 다시 만나면 빈 표로 끊는다.
    */
   private readonly exporting = new Set<ts.SourceFile>();
+  /**
+   * 모듈 파일 → export 이름 → 대상 메모다. Program은 실행 중 바뀌지 않으므로 표는 파일마다 늘 같다. 메모가 없으면
+   * `schema.users` 같은 이름공간 접근·require 구조 분해마다 모든 export를 다시 따라가, 비용이 참조 수 × export 수가 된다.
+   */
+  private readonly exportsMemo = new Map<ts.SourceFile, ReadonlyMap<string, BindingOrigin>>();
+  /**
+   * 계산 중인 파일을 다시 만나 빈 표로 끊은 누적 횟수다. 계산 전후 값이 다르면 그 표는 순환을 끊은 자리에 기댄 부분
+   * 결과라 메모하지 않는다(다른 파일에서 시작하면 끊는 자리가 달라진다).
+   */
+  private cycleCuts = 0;
 
   /**
    * @param modules 스캔한 소스 모듈(이미 파싱한 트리를 그대로 Program에 넣는다)
@@ -85,22 +98,41 @@ export class OrmBinder {
   }
 
   /**
-   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함). 계산 중인 파일을 다시 만나면(순환 require
-   * 재수출) 빈 표라, 순환으로만 이어진 멤버는 모르는 대상이 된다.
+   * 프로젝트 모듈 파일의 export 이름 → 대상 표를 돌려준다(재수출 포함). 파일마다 한 번만 계산해 같은 표를 다시 준다.
+   * 계산 중인 파일을 다시 만나면(순환 require 재수출) 빈 표라, 순환으로만 이어진 멤버는 모르는 대상이 된다.
+   *
+   * @param sourceFile 모듈 파일
+   * @returns export 이름 → 대상(읽기 전용, 호출자끼리 공유한다)
+   */
+  exportsOf(sourceFile: ts.SourceFile): ReadonlyMap<string, BindingOrigin> {
+    const cached = this.exportsMemo.get(sourceFile);
+    if (cached !== undefined) return cached;
+    if (this.exporting.has(sourceFile)) {
+      this.cycleCuts++;
+      return NO_EXPORTS;
+    }
+    const cutsBefore = this.cycleCuts;
+    this.exporting.add(sourceFile);
+    try {
+      const result = this.computeExports(sourceFile);
+      if (this.cycleCuts === cutsBefore) this.exportsMemo.set(sourceFile, result);
+      return result;
+    } finally {
+      this.exporting.delete(sourceFile);
+    }
+  }
+
+  /**
+   * export 표를 메모 없이 계산한다(export마다 별칭 사슬을 따라간다).
    *
    * @param sourceFile 모듈 파일
    * @returns export 이름 → 대상
    */
-  exportsOf(sourceFile: ts.SourceFile): Map<string, BindingOrigin> {
+  private computeExports(sourceFile: ts.SourceFile): ReadonlyMap<string, BindingOrigin> {
     const result = new Map<string, BindingOrigin>();
     const moduleSymbol = this.checker.getSymbolAtLocation(sourceFile);
-    if (moduleSymbol === undefined || this.exporting.has(sourceFile)) return result;
-    this.exporting.add(sourceFile);
-    try {
-      for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) result.set(symbol.name, this.followSymbol(symbol));
-    } finally {
-      this.exporting.delete(sourceFile);
-    }
+    if (moduleSymbol === undefined) return result;
+    for (const symbol of this.checker.getExportsOfModule(moduleSymbol)) result.set(symbol.name, this.followSymbol(symbol));
     return result;
   }
 
