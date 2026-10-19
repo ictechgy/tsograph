@@ -12,9 +12,15 @@
  * root 중 더 작은 인덱스를 이미 65개 이상 가졌다면 더 큰 인덱스 root는 그 정점에서 전파를 멈춘다 — 그 65개가
  * 같은 경로로 같거나 더 얕게 닿으므로, 그 너머 정점이 자기 인덱스 하나를 빼도 더 작은 root가 64개 남아 그
  * root는 어디서도 출력(작은 인덱스 64개, depth, via)을 바꾸지 못한다(64개면 아래 정점이 자기 인덱스를 빼는
- * 순간 모자란다 — 무작위 비교 테스트가 찾은 경우다). 그래서 root 수가 많아도 정점당 쌍 수가 대략 65로 묶인다.
+ * 순간 모자란다 — 무작위 비교 테스트가 찾은 경우다). 그래서 작은 인덱스 root가 먼저 닿는 정점은 쌍이 65개 남짓으로
+ * 묶이지만, 큰 인덱스 root가 먼저 닿는 정점은 작은 인덱스가 65개 차기 전에 들어온 root를 모두 든다(root 500개를 준
+ * 허브형 합성 그래프에서 정점당 평균 175개).
  * 옛 root별 알고리즘과의 동등성은 무작위 그래프 테스트(`traversal-oracle.test.ts`)로 확인한다. 전파를 멈춘
  * 경우(`rootsTruncated: true`)에는 깊이 잘림(`depth`)을 도달 정점 집합이 불완전할 때만 알린다.
+ *
+ * 탐색을 시작할 때 정점 id를 한 번 정수로 바꾸고 이웃 목록을 CSR 배열로 만든다. 간선마다 문자열 키 Map을 찾지 않게
+ * 하려는 것이다. 지배 판정은 정점마다 자기 자신이 아닌 가장 작은 root 인덱스 65개를 들고 65번째 값과 비교한다.
+ * 같은 단계 안의 처리 순서(경계에 들어온 순서, 이웃 순서)가 지배 판정에 들어가는 root를 정하므로 순서는 그대로 둔다.
  *
  * 디스패치 모드(`direct`·`bound`·`candidates`)는 따라갈 간선 근거를 정한다(direct ⊂ bound ⊂ candidate).
  * depth·via·roots는 모드가 허용하는 전체 그래프 기준이다. 정점의 `evidence`는 root별 하한이다: 그 정점에
@@ -96,12 +102,29 @@ interface Adjacency {
   readonly kinds: ReadonlyMap<string, readonly EdgeKind[]>;
 }
 
-/** 정점별 (root 인덱스 → 처음 닿은 단계) 기록이다. */
-type Levels = Map<string, Map<number, number>>;
+/**
+ * 정점 id를 정수로 한 번 바꾼 전체 인접 목록이다(CSR: 정점 v의 이웃은 `targets[offsets[v]]`부터
+ * `targets[offsets[v + 1]]` 앞까지). 정점별 이웃 순서는 `Adjacency.neighbors`와 같다.
+ */
+interface IndexedGraph {
+  /** 정수 → 정점 id */
+  readonly ids: readonly string[];
+  /** 정점 id → 정수 */
+  readonly index: ReadonlyMap<string, number>;
+  readonly offsets: Int32Array;
+  readonly targets: Int32Array;
+}
+
+/** 정점별 (root 인덱스 → 처음 닿은 단계) 기록이다(정점 정수 위치, 닿지 않은 정점은 undefined). */
+type Levels = readonly (ReadonlyMap<number, number> | undefined)[];
 
 /** 단일 패스의 결과다. */
 interface PassResult {
   readonly levels: Levels;
+  /** 정점 정수 → 그 정점이 root면 root 인덱스, 아니면 -1 */
+  readonly owners: Int32Array;
+  /** 정점별 자기 아닌 가장 작은 root 인덱스 65개(65개 이상 든 정점만) */
+  readonly smallest: SmallestRoots;
   readonly depthCut: boolean;
   readonly pruned: boolean;
 }
@@ -116,14 +139,15 @@ interface PassResult {
 export function traverse(graph: CallGraph, request: TraversalRequest): TraversalResult {
   const tier = weakestEvidence(request.dispatch);
   const adjacency = buildAdjacency(graph, request.direction, tier);
-  const pass = propagate(adjacency, request.rootIds, request.maxDepth);
-  const rows = reachedRows(adjacency, pass.levels, request.rootIds);
+  const indexed = indexGraph(graph, adjacency, request.rootIds);
+  const pass = propagate(indexed, request.rootIds, request.maxDepth);
+  const rows = reachedRows(adjacency, indexed, pass);
   const kept = rows.slice(0, request.maxReached);
   const reasons: TruncationReason[] = [];
   if (pass.depthCut) reasons.push('depth');
   if (rows.length > kept.length) reasons.push('max-reached');
   const rootsTruncated = pass.pruned || kept.some((row) => row.roots.length > MAX_ROOTS_PER_NODE);
-  const evidence = evidenceTiers(graph, request, adjacency, tier, pass.levels);
+  const evidence = evidenceTiers(graph, request, adjacency, indexed, tier, pass.levels);
   const reached = kept.map((row) => ({ ...row, roots: row.roots.slice(0, MAX_ROOTS_PER_NODE), evidence: evidence.of(row.id) }));
   return { reached, truncationReasons: reasons, rootsTruncated, evidenceApproximated: evidence.approximated };
 }
@@ -134,19 +158,22 @@ interface EvidenceLookup {
   readonly approximated: boolean;
 }
 
-/** 정점별 root 비트 집합이다(비트 위치 = 등급 비교 대상 root의 순번). */
-type RootBits = Map<string, Uint32Array>;
-
 /**
  * 정점의 root별 하한 근거 등급을 구하는 함수를 만든다.
+ *
+ * 메모리 판정식(정점 수 × 단어 수 × 4 × (등급 수 + 1))은 근사로 바꾸는 조건과 출력을 지키려고 그대로 둔다.
+ * 정확 비교는 (정점 수 × 단어 수) 평면 배열 네 개(전체 등급 도달, 재사용하는 하위 등급 도달, 경계 두 벌)를 쓰므로
+ * bound 모드에서는 판정식보다 한 벌 많다(정점·단계마다 비트 배열과 Map 항목을 만들던 예전 구현보다는 훨씬 작다).
  *
  * @param graph 호출 그래프
  * @param request 탐색 요청
  * @param full 모드가 허용하는 전체 인접 목록
+ * @param indexed 정수 인접 목록(정점 번호를 함께 쓴다)
  * @param tier 모드가 허용하는 가장 약한 근거
+ * @param levels 전체 그래프 단계 기록
  * @returns 정점 id → 근거 등급
  */
-function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjacency, tier: EdgeEvidence, levels: Levels): EvidenceLookup {
+function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjacency, indexed: IndexedGraph, tier: EdgeEvidence, levels: Levels): EvidenceLookup {
   const tiers = EDGE_EVIDENCE_ORDER.slice(0, EDGE_EVIDENCE_ORDER.indexOf(tier) + 1);
   const weakEdges = graph.edges.filter((edge) => edge.evidence !== 'direct' && evidenceAllowed(edge.evidence, request.dispatch));
   const weakSources = new Set(weakEdges.map((edge) => (request.direction === 'dependencies' ? edge.from : edge.to)));
@@ -154,16 +181,12 @@ function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjace
   if (tiers.length === 1 || compared.length === 0) return { of: () => 'direct', approximated: false };
   const estimate = graph.nodes.length * Math.ceil(compared.length / 32) * 4 * (tiers.length + 1);
   if (estimate > (request.evidenceMemoryBytes ?? EVIDENCE_MEMORY_BYTES)) {
-    return { of: approximateEvidence(full, weakEdges, request.direction, levels), approximated: true };
+    return { of: approximateEvidence(full, indexed, weakEdges, request.direction, levels), approximated: true };
   }
-  const fullBits = reachBits(full, compared, request.maxDepth);
-  const lowerBits = tiers.slice(0, -1).map((lower) => reachBits(buildAdjacency(graph, request.direction, lower), compared, request.maxDepth));
-  const of = (id: string): EdgeEvidence => {
-    const reference = fullBits.get(id);
-    const index = lowerBits.findIndex((bits) => sameBits(bits.get(id), reference));
-    return tiers[index === -1 ? tiers.length - 1 : index]!;
-  };
-  return { of, approximated: false };
+  const tierGraph = buildTierGraph(graph, indexed, request.direction, tiers.length - 1);
+  const strongest = strongestTiers(tierGraph, compared.map((root) => indexed.index.get(root)!), tiers.length, request.maxDepth);
+  // 도달 행의 정점은 모두 번호가 있다(노드·간선 끝점·root를 모두 번호에 넣었다).
+  return { of: (id) => tiers[strongest[indexed.index.get(id)!]!]!, approximated: false };
 }
 
 /**
@@ -173,17 +196,24 @@ function evidenceTiers(graph: CallGraph, request: TraversalRequest, full: Adjace
  * bound 이하이므로, 이 값은 정확한 root별 하한보다 약하게 적을 수는 있어도 부풀리지 않는다.
  *
  * @param full 모드가 허용하는 전체 인접 목록
+ * @param indexed 정수 인접 목록(단계 기록의 정점 번호)
  * @param weakEdges 모드가 허용하는 약한(direct가 아닌) 간선
  * @param direction 방향
  * @param levels 전체 그래프 단계 기록(root에서 깊이 상한 안에 닿은 정점)
  * @returns 정점 id → 근거 등급
  */
-function approximateEvidence(full: Adjacency, weakEdges: CallGraph['edges'], direction: TraversalDirection, levels: Levels): (id: string) => EdgeEvidence {
+function approximateEvidence(
+  full: Adjacency,
+  indexed: IndexedGraph,
+  weakEdges: CallGraph['edges'],
+  direction: TraversalDirection,
+  levels: Levels,
+): (id: string) => EdgeEvidence {
   const marks = new Map<string, EdgeEvidence>();
   for (const evidence of ['bound', 'candidate'] as const) {
     const heads = weakEdges.filter((edge) => edge.evidence === evidence)
       .map((edge) => (direction === 'dependencies' ? [edge.from, edge.to] : [edge.to, edge.from]) as [string, string])
-      .filter(([tail]) => levels.has(tail)).map(([, head]) => head);
+      .filter(([tail]) => levels[indexed.index.get(tail)!] !== undefined).map(([, head]) => head);
     const queue = [...new Set(heads)];
     const seen = new Set(queue);
     while (queue.length > 0) {
@@ -229,135 +259,290 @@ function weakTouchingRoots(full: Adjacency, rootIds: readonly string[], weakSour
 }
 
 /**
- * root마다 비트 하나를 두고 단계 동기로 전파해, 깊이 상한 안에서 각 정점에 닿는 root 비트 집합을 구한다.
- *
- * @param adjacency 인접 목록
- * @param roots 비교 대상 root id(순번이 비트 위치)
- * @param maxDepth 최대 깊이
- * @returns 정점 → 비트 집합
+ * 등급 비교용 정수 인접 목록이다(CSR). 항목마다 그 간선의 근거 강도를 싣고, 등급별 전파는 그 등급 이하 항목만
+ * 따른다 — 등급마다 인접 목록을 다시 만들지 않으려는 것이다. 같은 쌍의 근거별 간선은 항목이 따로 남지만, 같은 비트를
+ * 두 번 넘겨도 전파 결과는 같다.
  */
-function reachBits(adjacency: Adjacency, roots: readonly string[], maxDepth: number): RootBits {
-  const words = Math.ceil(roots.length / 32);
-  const seen: RootBits = new Map();
-  let frontier: RootBits = new Map();
-  roots.forEach((root, position) => {
-    for (const bits of [bitsFor(seen, root, words), bitsFor(frontier, root, words)]) bits[position >>> 5]! |= 1 << (position & 31);
+interface TierGraph {
+  readonly offsets: Int32Array;
+  readonly targets: Int32Array;
+  /** 항목의 근거 강도(`EDGE_EVIDENCE_ORDER` 인덱스) */
+  readonly strengths: Uint8Array;
+}
+
+/**
+ * 모드가 허용하는 간선으로 등급 비교용 인접 목록을 만든다.
+ *
+ * @param graph 호출 그래프
+ * @param indexed 정점 번호
+ * @param direction 방향
+ * @param limit 따라갈 가장 약한 근거의 강도
+ * @returns 등급 비교용 인접 목록
+ */
+function buildTierGraph(graph: CallGraph, indexed: IndexedGraph, direction: TraversalDirection, limit: number): TierGraph {
+  const size = indexed.ids.length;
+  const edges = graph.edges.filter((edge) => EDGE_EVIDENCE_ORDER.indexOf(edge.evidence) <= limit);
+  const sources = edges.map((edge) => indexed.index.get(direction === 'dependencies' ? edge.from : edge.to)!);
+  const offsets = new Int32Array(size + 1);
+  for (const source of sources) offsets[source + 1] = offsets[source + 1]! + 1;
+  for (let node = 0; node < size; node++) offsets[node + 1] = offsets[node + 1]! + offsets[node]!;
+  const cursors = offsets.slice(0, size);
+  const targets = new Int32Array(edges.length);
+  const strengths = new Uint8Array(edges.length);
+  edges.forEach((edge, position) => {
+    const at = cursors[sources[position]!]!;
+    cursors[sources[position]!] = at + 1;
+    targets[at] = indexed.index.get(direction === 'dependencies' ? edge.to : edge.from)!;
+    strengths[at] = EDGE_EVIDENCE_ORDER.indexOf(edge.evidence);
   });
-  for (let level = 0; level < maxDepth && frontier.size > 0; level++) {
-    const next: RootBits = new Map();
-    for (const [node, bits] of frontier) {
-      for (const neighbor of adjacency.neighbors.get(node) ?? []) spreadBits(bits, bitsFor(seen, neighbor, words), next, neighbor, words);
+  return { offsets, targets, strengths };
+}
+
+/** 등급 전파가 단계마다 재사용하는 경계 버퍼다. 전파가 끝나면 비트는 다시 모두 0이다. */
+interface BitFrontier {
+  /** 비트 집합 길이(32비트 단어 수) */
+  readonly words: number;
+  /** 지금 단계와 다음 단계의 정점별 새 비트((정점 수 × words) 평면 배열 두 벌) */
+  readonly bits: readonly [Uint32Array, Uint32Array];
+  /** 지금 단계와 다음 단계에 새 비트를 받은 정점 */
+  readonly nodes: readonly [Int32Array, Int32Array];
+  /** 정점이 다음 단계 목록에 들어간 세대 번호 */
+  readonly stamps: Int32Array;
+  /** 마지막으로 쓴 세대 번호(단계마다 하나씩 늘린다) */
+  generation: number;
+}
+
+/**
+ * 비교 대상 root마다 비트 하나로 등급별 도달을 구해, 정점마다 전체 등급과 같은 root 집합을 주는 가장 강한 등급을
+ * 고른다(등급 그래프는 포함 관계라 도달 집합도 포함 관계다). 하위 등급 도달 배열과 경계 버퍼는 등급마다 재사용한다.
+ *
+ * @param graph 등급 비교용 인접 목록
+ * @param roots 비교 대상 root 정점 번호(순번이 비트 위치)
+ * @param tierCount 모드가 허용하는 등급 수
+ * @param maxDepth 최대 깊이
+ * @returns 정점 번호 → 등급 위치(`EDGE_EVIDENCE_ORDER` 인덱스)
+ */
+function strongestTiers(graph: TierGraph, roots: readonly number[], tierCount: number, maxDepth: number): Uint8Array {
+  const size = graph.offsets.length - 1;
+  const words = Math.ceil(roots.length / 32);
+  const work: BitFrontier = {
+    words,
+    bits: [new Uint32Array(size * words), new Uint32Array(size * words)],
+    nodes: [new Int32Array(size), new Int32Array(size)],
+    stamps: new Int32Array(size),
+    generation: 0,
+  };
+  const full = new Uint32Array(size * words);
+  reachBits(graph, roots, tierCount - 1, maxDepth, full, work);
+  const strongest = new Uint8Array(size).fill(tierCount - 1);
+  const lower = new Uint32Array(size * words);
+  for (let tier = 0; tier < tierCount - 1; tier++) {
+    if (tier > 0) lower.fill(0);
+    reachBits(graph, roots, tier, maxDepth, lower, work);
+    for (let node = 0; node < size; node++) {
+      if (strongest[node] === tierCount - 1 && sameRow(full, lower, node * words, words)) strongest[node] = tier;
     }
-    frontier = next;
   }
-  return seen;
+  return strongest;
+}
+
+/**
+ * root마다 비트 하나를 두고 단계 동기로 전파해, 깊이 상한 안에서 각 정점에 닿는 root 비트 집합을 `seen`에 채운다.
+ * 단계마다 새 Map·비트 배열을 만들지 않고 경계 버퍼 두 벌을 번갈아 쓰며, 지난 단계 정점의 행만 지운다.
+ *
+ * @param graph 등급 비교용 인접 목록
+ * @param roots 비교 대상 root 정점 번호(순번이 비트 위치, 서로 다르다)
+ * @param strength 따라갈 가장 약한 근거의 강도
+ * @param maxDepth 최대 깊이
+ * @param seen 정점 → 비트 집합 평면 배열(0으로 시작, 갱신)
+ * @param work 경계 버퍼(0으로 시작하고 0으로 끝난다)
+ */
+function reachBits(graph: TierGraph, roots: readonly number[], strength: number, maxDepth: number, seen: Uint32Array, work: BitFrontier): void {
+  const { words, stamps } = work;
+  let [bits, nextBits] = work.bits;
+  let [nodes, nextNodes] = work.nodes;
+  let count = roots.length;
+  roots.forEach((node, position) => {
+    const at = node * words + (position >>> 5);
+    seen[at]! |= 1 << (position & 31);
+    bits[at]! |= 1 << (position & 31);
+    nodes[position] = node;
+  });
+  for (let level = 0; level < maxDepth && count > 0; level++) {
+    const stamp = ++work.generation;
+    let nextCount = 0;
+    for (let item = 0; item < count; item++) {
+      const node = nodes[item]!;
+      for (let entry = graph.offsets[node]!, end = graph.offsets[node + 1]!; entry < end; entry++) {
+        const neighbor = graph.targets[entry]!;
+        if (graph.strengths[entry]! > strength || !spreadBits(bits, node * words, seen, nextBits, neighbor * words, words)) continue;
+        if (stamps[neighbor] !== stamp) {
+          stamps[neighbor] = stamp;
+          nextNodes[nextCount++] = neighbor;
+        }
+      }
+    }
+    clearRows(bits, nodes, count, words);
+    [bits, nextBits] = [nextBits, bits];
+    [nodes, nextNodes] = [nextNodes, nodes];
+    count = nextCount;
+  }
+  clearRows(bits, nodes, count, words);
 }
 
 /**
  * 한 간선으로 새 root 비트를 이웃에 넘긴다.
  *
- * @param bits 넘길 비트
- * @param held 이웃이 가진 비트(갱신)
- * @param next 다음 단계 경계(갱신)
- * @param neighbor 이웃 id
+ * @param bits 지금 단계 비트(평면 배열)
+ * @param from 출발 정점 행의 시작
+ * @param seen 정점이 가진 비트(갱신)
+ * @param next 다음 단계 비트(갱신)
+ * @param to 이웃 정점 행의 시작
+ * @param words 비트 집합 길이(32비트 단어 수)
+ * @returns 이웃이 새 비트를 받았으면 true
+ */
+function spreadBits(bits: Uint32Array, from: number, seen: Uint32Array, next: Uint32Array, to: number, words: number): boolean {
+  let spread = false;
+  for (let word = 0; word < words; word++) {
+    const fresh = bits[from + word]! & ~seen[to + word]!;
+    if (fresh === 0) continue;
+    seen[to + word]! |= fresh;
+    next[to + word]! |= fresh;
+    spread = true;
+  }
+  return spread;
+}
+
+/**
+ * 경계 정점들의 비트 행을 0으로 되돌린다.
+ *
+ * @param bits 비트 평면 배열(갱신)
+ * @param nodes 정점 목록
+ * @param count 목록 길이
  * @param words 비트 집합 길이(32비트 단어 수)
  */
-function spreadBits(bits: Uint32Array, held: Uint32Array, next: RootBits, neighbor: string, words: number): void {
-  for (let word = 0; word < words; word++) {
-    const fresh = bits[word]! & ~held[word]!;
-    if (fresh === 0) continue;
-    held[word]! |= fresh;
-    bitsFor(next, neighbor, words)[word]! |= fresh;
-  }
+function clearRows(bits: Uint32Array, nodes: Int32Array, count: number, words: number): void {
+  for (let item = 0; item < count; item++) bits.fill(0, nodes[item]! * words, (nodes[item]! + 1) * words);
 }
 
 /**
- * 정점의 비트 집합을 꺼내고, 없으면 만든다.
+ * 두 평면 배열의 한 행이 같은지 본다.
  *
- * @param map 정점 → 비트 집합
- * @param id 정점 id
- * @param words 길이
- * @returns 비트 집합
- */
-function bitsFor(map: RootBits, id: string, words: number): Uint32Array {
-  let bits = map.get(id);
-  if (bits === undefined) {
-    bits = new Uint32Array(words);
-    map.set(id, bits);
-  }
-  return bits;
-}
-
-/**
- * 두 비트 집합이 같은지 본다(없으면 빈 집합).
- *
- * @param left 비트 집합
- * @param right 비트 집합
+ * @param left 비트 평면 배열
+ * @param right 비트 평면 배열
+ * @param start 행의 시작
+ * @param words 행 길이
  * @returns 같으면 true
  */
-function sameBits(left: Uint32Array | undefined, right: Uint32Array | undefined): boolean {
-  const length = Math.max(left?.length ?? 0, right?.length ?? 0);
-  for (let word = 0; word < length; word++) if ((left?.[word] ?? 0) !== (right?.[word] ?? 0)) return false;
+function sameRow(left: Uint32Array, right: Uint32Array, start: number, words: number): boolean {
+  for (let word = start; word < start + words; word++) if (left[word] !== right[word]) return false;
   return true;
+}
+
+/** 한 단계의 경계다: 새 root를 받은 정점(받은 순서)과 정점별로 받은 root 인덱스(받은 순서)다. */
+interface Frontier {
+  readonly nodes: number[];
+  readonly roots: (number[] | undefined)[];
+}
+
+/** 전파 중인 상태다. */
+interface PassState {
+  readonly levels: (Map<number, number> | undefined)[];
+  readonly owners: Int32Array;
+  readonly smallest: SmallestRoots;
 }
 
 /**
  * 모든 root에서 단계 동기로 전파한다.
  *
- * @param adjacency 인접 목록
+ * @param graph 정수 인접 목록
  * @param rootIds root id
  * @param maxDepth 최대 깊이
  * @returns 정점별 단계 기록과 잘림·전파 중단 여부
  */
-function propagate(adjacency: Adjacency, rootIds: readonly string[], maxDepth: number): PassResult {
-  const levels: Levels = new Map();
-  const owners = new Map(rootIds.map((root, index) => [root, index]));
-  let frontier = new Map<string, number[]>();
+function propagate(graph: IndexedGraph, rootIds: readonly string[], maxDepth: number): PassResult {
+  const size = graph.ids.length;
+  const state: PassState = {
+    levels: new Array<Map<number, number> | undefined>(size).fill(undefined),
+    owners: new Int32Array(size).fill(-1),
+    smallest: new SmallestRoots(size),
+  };
+  let frontier = emptyFrontier(size);
+  let next = emptyFrontier(size);
   rootIds.forEach((root, index) => {
-    levels.set(root, new Map([[index, 0]]));
-    frontier.set(root, [index]);
+    const node = graph.index.get(root)!;
+    state.owners[node] = index;
+    state.levels[node] = new Map([[index, 0]]);
+    frontier.nodes.push(node);
+    frontier.roots[node] = [index];
   });
   let pruned = false;
-  for (let level = 0; level < maxDepth && frontier.size > 0; level++) {
-    const next = new Map<string, number[]>();
-    for (const [node, roots] of frontier) {
-      for (const neighbor of adjacency.neighbors.get(node) ?? []) {
-        pruned = spread(levels, owners.get(neighbor), neighbor, roots, level + 1, next) || pruned;
+  for (let level = 0; level < maxDepth && frontier.nodes.length > 0; level++) {
+    for (const node of frontier.nodes) {
+      const roots = frontier.roots[node]!;
+      for (let entry = graph.offsets[node]!, end = graph.offsets[node + 1]!; entry < end; entry++) {
+        pruned = spread(state, graph.targets[entry]!, roots, level + 1, next) || pruned;
       }
     }
-    frontier = next;
+    clearFrontier(frontier);
+    [frontier, next] = [next, frontier];
   }
-  return { levels, depthCut: hasDepthCut(adjacency, levels, frontier), pruned };
+  return { ...state, depthCut: hasDepthCut(graph, state.levels, frontier), pruned };
+}
+
+/**
+ * 빈 경계를 만든다.
+ *
+ * @param size 정점 수
+ * @returns 빈 경계
+ */
+function emptyFrontier(size: number): Frontier {
+  return { nodes: [], roots: new Array<number[] | undefined>(size).fill(undefined) };
+}
+
+/**
+ * 다 쓴 경계를 비워 다음 단계에 다시 쓴다.
+ *
+ * @param frontier 경계(갱신)
+ */
+function clearFrontier(frontier: Frontier): void {
+  for (const node of frontier.nodes) frontier.roots[node] = undefined;
+  frontier.nodes.length = 0;
 }
 
 /**
  * 한 간선으로 root 인덱스들을 이웃에 전파한다.
  *
- * @param levels 단계 기록(갱신)
- * @param owner 이웃이 root면 그 인덱스
+ * @param state 전파 상태(갱신)
  * @param neighbor 이웃 정점
  * @param roots 넘길 root 인덱스
  * @param level 이웃이 닿는 단계
  * @param next 다음 단계 경계(갱신)
  * @returns 전파를 멈춘 쌍이 있었으면 true
  */
-function spread(levels: Levels, owner: number | undefined, neighbor: string, roots: readonly number[], level: number, next: Map<string, number[]>): boolean {
-  let held = levels.get(neighbor);
+function spread(state: PassState, neighbor: number, roots: readonly number[], level: number, next: Frontier): boolean {
+  let held = state.levels[neighbor];
   if (held === undefined) {
     held = new Map();
-    levels.set(neighbor, held);
+    state.levels[neighbor] = held;
   }
+  const owner = state.owners[neighbor]!;
   let pruned = false;
   for (const root of roots) {
     if (held.has(root)) continue;
-    if (dominated(held, owner, root)) {
+    if (state.smallest.dominates(neighbor, root)) {
       pruned = true;
       continue;
     }
     held.set(root, level);
-    const list = next.get(neighbor);
-    if (list === undefined) next.set(neighbor, [root]);
-    else list.push(root);
+    state.smallest.add(neighbor, root, held, owner);
+    let list = next.roots[neighbor];
+    if (list === undefined) {
+      list = [];
+      next.roots[neighbor] = list;
+      next.nodes.push(neighbor);
+    }
+    list.push(root);
   }
   return pruned;
 }
@@ -366,34 +551,115 @@ function spread(levels: Levels, owner: number | undefined, neighbor: string, roo
 const DOMINATING_ROOTS = MAX_ROOTS_PER_NODE + 1;
 
 /**
- * 정점이 자기 자신이 아닌 root 중 이 root보다 작은 인덱스를 이미 65개 이상 가졌는지 본다.
- *
- * @param held 정점의 root 기록
- * @param owner 정점이 root면 그 인덱스(세지 않는다)
- * @param root 새 root 인덱스
- * @returns 65개 이상이면 true
+ * 정점마다 자기 자신이 아닌 root 인덱스 중 가장 작은 `DOMINATING_ROOTS`개를 오름차순으로 든다. 지배 판정(이 root보다
+ * 작은 인덱스를 65개 이상 가졌는가)은 65번째로 작은 값과의 비교 한 번이다. 판정마다 정점의 root 기록을 처음부터
+ * 훑으면 정점이 root를 수백 개 들 때 판정이 전파 비용의 대부분이 된다. 칸은 자기 아닌 root가 65개 찬 정점에만 둔다.
  */
-function dominated(held: ReadonlyMap<number, number>, owner: number | undefined, root: number): boolean {
-  if (held.size - (owner === undefined ? 0 : 1) < DOMINATING_ROOTS) return false;
-  let smaller = 0;
-  for (const index of held.keys()) {
-    if (index !== owner && index < root && ++smaller >= DOMINATING_ROOTS) return true;
+class SmallestRoots {
+  /** 정점 → 칸 번호(-1이면 자기 아닌 root가 아직 65개 미만) */
+  readonly #slots: Int32Array;
+  /** 칸마다 오름차순 root 인덱스 65개 */
+  #values = new Int32Array(DOMINATING_ROOTS * 16);
+  /** 쓴 칸 수 */
+  #used = 0;
+
+  /**
+   * @param size 정점 수
+   */
+  constructor(size: number) {
+    this.#slots = new Int32Array(size).fill(-1);
   }
-  return false;
+
+  /**
+   * 정점이 자기 자신이 아닌 root 중 이 root보다 작은 인덱스를 이미 65개 이상 가졌는지 본다.
+   *
+   * @param node 정점
+   * @param root 정점이 아직 갖지 않은 root 인덱스
+   * @returns 65개 이상이면 true
+   */
+  dominates(node: number, root: number): boolean {
+    const slot = this.#slots[node]!;
+    return slot !== -1 && this.#values[(slot + 1) * DOMINATING_ROOTS - 1]! < root;
+  }
+
+  /**
+   * 정점 기록에 막 넣은(지배되지 않은) root를 반영한다.
+   *
+   * @param node 정점
+   * @param root 넣은 root 인덱스
+   * @param held 넣은 뒤의 정점 기록
+   * @param owner 정점이 root면 그 인덱스(세지 않는다), 아니면 -1
+   */
+  add(node: number, root: number, held: ReadonlyMap<number, number>, owner: number): void {
+    const slot = this.#slots[node]!;
+    if (slot !== -1) this.#insert(slot * DOMINATING_ROOTS, root);
+    else if (held.size - (owner === -1 ? 0 : 1) === DOMINATING_ROOTS) this.#open(node, held, owner);
+  }
+
+  /**
+   * 정점의 자기 아닌 가장 작은 root 인덱스 65개다.
+   *
+   * @param node 정점
+   * @returns 오름차순 65개, 자기 아닌 root가 65개 미만이면 undefined
+   */
+  lowest(node: number): number[] | undefined {
+    const slot = this.#slots[node]!;
+    return slot === -1 ? undefined : Array.from(this.#values.subarray(slot * DOMINATING_ROOTS, (slot + 1) * DOMINATING_ROOTS));
+  }
+
+  /**
+   * 자기 아닌 root가 막 65개가 된 정점의 칸을 만들어 정렬해 채운다.
+   *
+   * @param node 정점
+   * @param held 정점 기록
+   * @param owner 정점이 root면 그 인덱스, 아니면 -1
+   */
+  #open(node: number, held: ReadonlyMap<number, number>, owner: number): void {
+    if ((this.#used + 1) * DOMINATING_ROOTS > this.#values.length) {
+      const grown = new Int32Array(this.#values.length * 2);
+      grown.set(this.#values);
+      this.#values = grown;
+    }
+    const start = this.#used * DOMINATING_ROOTS;
+    let cursor = start;
+    for (const index of held.keys()) if (index !== owner) this.#values[cursor++] = index;
+    this.#values.subarray(start, start + DOMINATING_ROOTS).sort();
+    this.#slots[node] = this.#used++;
+  }
+
+  /**
+   * 65번째보다 작은 새 인덱스를 제자리에 넣고 가장 큰 값을 버린다.
+   *
+   * @param start 칸의 시작
+   * @param root 넣을 root 인덱스(칸에 없고 마지막 값보다 작다)
+   */
+  #insert(start: number, root: number): void {
+    const last = start + DOMINATING_ROOTS - 1;
+    let low = start;
+    let high = last;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.#values[middle]! < root) low = middle + 1;
+      else high = middle;
+    }
+    this.#values.copyWithin(low + 1, low, last);
+    this.#values[low] = root;
+  }
 }
 
 /**
  * 마지막 단계 경계에서 아직 그 root를 갖지 않은 이웃이 있으면 깊이 상한에 잘린 것이다.
  *
- * @param adjacency 인접 목록
+ * @param graph 정수 인접 목록
  * @param levels 단계 기록
  * @param frontier 최대 깊이 단계의 경계(상한 전에 끝났으면 비어 있다)
  * @returns 잘렸으면 true
  */
-function hasDepthCut(adjacency: Adjacency, levels: Levels, frontier: ReadonlyMap<string, readonly number[]>): boolean {
-  for (const [node, roots] of frontier) {
-    for (const neighbor of adjacency.neighbors.get(node) ?? []) {
-      const held = levels.get(neighbor);
+function hasDepthCut(graph: IndexedGraph, levels: Levels, frontier: Frontier): boolean {
+  for (const node of frontier.nodes) {
+    const roots = frontier.roots[node]!;
+    for (let entry = graph.offsets[node]!, end = graph.offsets[node + 1]!; entry < end; entry++) {
+      const held = levels[graph.targets[entry]!];
       if (roots.some((root) => held?.has(root) !== true)) return true;
     }
   }
@@ -405,31 +671,76 @@ interface ReachedRow {
   readonly id: string;
   readonly via: string;
   readonly depth: number;
+  /** 닿는 root 인덱스(정렬). 65개 이상이면 가장 작은 65개만 둔다(출력은 64개, 넘침 판정은 65개면 된다). */
   readonly roots: readonly number[];
   readonly relationships: readonly EdgeKind[];
 }
 
 /**
- * 단계 기록에서 도달 행을 만든다. (depth, id) 순이다.
+ * 단계 기록에서 도달 행을 만든다. (depth, id) 순이다. depth·가장 가까운 root는 정점 기록을 한 번 훑어 구하고,
+ * root 목록은 지배 판정 표의 가장 작은 65개를 쓴다 — 정점마다 든 root 전부(수백 개)를 펼쳐 정렬하지 않게 한다.
  *
  * @param adjacency 인접 목록
- * @param levels 단계 기록
- * @param rootIds root id
+ * @param graph 정수 인접 목록(정점 번호)
+ * @param pass 단계 기록과 root 정점 표
  * @returns 도달 행
  */
-function reachedRows(adjacency: Adjacency, levels: Levels, rootIds: readonly string[]): ReachedRow[] {
-  const owners = new Map(rootIds.map((root, index) => [root, index]));
+function reachedRows(adjacency: Adjacency, graph: IndexedGraph, pass: PassResult): ReachedRow[] {
   const rows: ReachedRow[] = [];
-  for (const [id, held] of levels) {
-    const owner = owners.get(id);
-    const roots = [...held.keys()].filter((index) => index !== owner).sort((left, right) => left - right);
-    if (roots.length === 0) continue;
-    const depth = Math.min(...roots.map((index) => held.get(index)!));
-    const nearest = roots.find((index) => held.get(index) === depth)!;
-    const via = (adjacency.predecessors.get(id) ?? []).find((candidate) => levels.get(candidate)?.get(nearest) === depth - 1)!;
+  pass.levels.forEach((held, node) => {
+    if (held === undefined) return;
+    const owner = pass.owners[node]!;
+    let depth = Infinity;
+    let nearest = -1;
+    held.forEach((level, root) => {
+      if (root !== owner && (level < depth || (level === depth && root < nearest))) {
+        depth = level;
+        nearest = root;
+      }
+    });
+    if (nearest === -1) return;
+    const id = graph.ids[node]!;
+    const roots = pass.smallest.lowest(node) ?? [...held.keys()].filter((index) => index !== owner).sort((left, right) => left - right);
+    const via = (adjacency.predecessors.get(id) ?? []).find((candidate) => pass.levels[graph.index.get(candidate)!]?.get(nearest) === depth - 1)!;
     rows.push({ id, via, depth, roots, relationships: adjacency.kinds.get(`${via}\u0000${id}`) ?? [] });
-  }
+  });
   return rows.sort((left, right) => left.depth - right.depth || compareStrings(left.id, right.id));
+}
+
+/**
+ * 정점 id에 노드 순서대로 번호를 주고 전체 인접 목록을 CSR로 만든다. 노드 목록에 없는 root·간선 끝점이 있으면 뒤에
+ * 번호를 붙인다(스냅샷 검증은 그런 간선을 거부하지만 탐색이 그 가정에 기대지 않게 한다).
+ *
+ * @param graph 호출 그래프
+ * @param adjacency 모드가 허용하는 전체 인접 목록
+ * @param rootIds root id
+ * @returns 정수 인접 목록
+ */
+function indexGraph(graph: CallGraph, adjacency: Adjacency, rootIds: readonly string[]): IndexedGraph {
+  const ids: string[] = [];
+  const index = new Map<string, number>();
+  const intern = (id: string): void => {
+    if (index.has(id)) return;
+    index.set(id, ids.length);
+    ids.push(id);
+  };
+  for (const node of graph.nodes) intern(node.id);
+  rootIds.forEach(intern);
+  let total = 0;
+  for (const [from, list] of adjacency.neighbors) {
+    intern(from);
+    list.forEach(intern);
+    total += list.length;
+  }
+  const offsets = new Int32Array(ids.length + 1);
+  const targets = new Int32Array(total);
+  let cursor = 0;
+  ids.forEach((id, node) => {
+    offsets[node] = cursor;
+    for (const to of adjacency.neighbors.get(id) ?? []) targets[cursor++] = index.get(to)!;
+  });
+  offsets[ids.length] = cursor;
+  return { ids, index, offsets, targets };
 }
 
 /**
