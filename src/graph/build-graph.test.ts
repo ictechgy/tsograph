@@ -14,7 +14,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
-import { linkToDevZero, makeFifo, runMainGuarded } from '../cli/testing.test.ts';
+import { linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
@@ -466,22 +466,31 @@ const callableGapSource = 'export function run(callback: () => string) { return 
 test('FIFO·장치 링크인 루트 package.json·vercel.json은 기다리거나 끝없이 읽지 않고 기존 limitation으로 알린다', {
   skip: process.platform === 'win32',
 }, async () => {
-  for (const place of [makeFifo, linkToDevZero]) {
-    const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-special-roots-')));
-    try {
+  const places = [makeFifo, linkToDevZero];
+  const projects: string[] = [];
+  try {
+    for (const place of places) {
+      const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-special-roots-')));
+      projects.push(project);
       mkdirSync(join(project, 'src'));
       writeFileSync(join(project, 'src/main.ts'), callableGapSource);
       place(join(project, 'package.json'));
       place(join(project, 'vercel.json'));
-      const result = await runMainGuarded(['graph', '--project', project, '--generated-at', '2026-01-01T00:00:00.000Z']);
-      assert.equal(result.stopped, undefined, place.name);
-      assert.equal(result.status, 0, result.stderr);
-      const { limitations } = JSON.parse(result.stdout) as { limitations: string[] };
+    }
+    // 두 특수 파일 종류의 프로젝트를 감시하는 자식 하나에서 차례로 분석한다.
+    const { child, results } = await runCliGuarded(projects.map((project) => ['graph', '--project', project, '--generated-at', '2026-01-01T00:00:00.000Z']));
+    assert.equal(child.stopped, undefined, child.stderr);
+    assert.equal(child.status, 0, child.stderr);
+    for (const [index, place] of places.entries()) {
+      const result = results[index];
+      assert.ok(result !== undefined, place.name);
+      assert.equal(result.exitCode, 0, `${place.name}: ${result.standardError}`);
+      const { limitations } = JSON.parse(result.standardOutput) as { limitations: string[] };
       assert.ok(limitations.includes(unreadableCronConfig), place.name);
       assert.ok(limitations.includes(unreadableManifest), place.name);
-    } finally {
-      rmSync(project, { recursive: true, force: true });
     }
+  } finally {
+    for (const project of projects) rmSync(project, { recursive: true, force: true });
   }
 });
 

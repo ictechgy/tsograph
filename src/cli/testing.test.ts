@@ -12,10 +12,16 @@ import { symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+import type { CommandResult } from './command-result.ts';
+
 /** 타입 제거로 직접 실행하는 CLI 진입점이다. */
 const mainPath = fileURLToPath(new URL('./main.ts', import.meta.url));
 
-/** 자식 실행 시간 상한(ms)이다. 정상 실행은 1초 남짓이지만 부하가 큰 CI에서도 흔들리지 않게 넉넉히 잡는다. */
+/** 여러 명령을 자식 하나에서 차례로 돌리는 실행기가 불러올 분배기·파일 시스템 모듈이다. */
+const runCliModule = new URL('./run-cli.ts', import.meta.url).href;
+const fileSystemModule = new URL('./file-system.ts', import.meta.url).href;
+
+/** 명령 하나의 자식 실행 시간 상한(ms)이다. 정상 실행은 1초 남짓이지만 부하가 큰 CI에서도 흔들리지 않게 넉넉히 잡는다. */
 const CHILD_TIMEOUT_MS = 60_000;
 
 /** 자식 RSS 상한(바이트)이다. 정상 실행은 수백 MiB이고, 장치를 끝없이 읽는 회귀는 1초 안에 이 값을 넘는다. */
@@ -42,9 +48,10 @@ export interface GuardedRun {
  * 남짓을 더 쓴다. 감시하는 검사(특수 파일·펼치기 상한)와 무관한 비용이고 인자는 모두 절대 경로라 결과는 같다.
  *
  * @param arguments_ `node` 실행 파일 뒤의 인자
+ * @param timeoutMs 자식 실행 시간 상한(ms). 기본은 명령 하나의 상한이다
  * @returns 종료 코드·출력·감시 중단 이유
  */
-export function runNodeGuarded(arguments_: readonly string[]): Promise<GuardedRun> {
+export function runNodeGuarded(arguments_: readonly string[], timeoutMs = CHILD_TIMEOUT_MS): Promise<GuardedRun> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, arguments_, { cwd: tmpdir(), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -54,7 +61,7 @@ export function runNodeGuarded(arguments_: readonly string[]): Promise<GuardedRu
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
     const started = Date.now();
     const timer = setInterval(() => {
-      if (Date.now() - started > CHILD_TIMEOUT_MS) stopped = 'timeout';
+      if (Date.now() - started > timeoutMs) stopped = 'timeout';
       else if (residentBytes(child.pid) > CHILD_RSS_LIMIT_BYTES) stopped = 'memory';
       if (stopped !== undefined) child.kill('SIGKILL');
     }, POLL_INTERVAL_MS);
@@ -78,6 +85,46 @@ export function runNodeGuarded(arguments_: readonly string[]): Promise<GuardedRu
  */
 export function runMainGuarded(arguments_: readonly string[], nodeArguments: readonly string[] = []): Promise<GuardedRun> {
   return runNodeGuarded([...nodeArguments, mainPath, ...arguments_]);
+}
+
+/** 감시한 자식 하나에서 차례로 실행한 CLI 명령들의 결과다. */
+export interface GuardedCliRuns {
+  /** 자식 프로세스 자체의 종료 코드·출력·감시 중단 이유. stderr에는 시작한 명령 순번(`run <n>`)이 남는다 */
+  readonly child: GuardedRun;
+  /** 명령마다의 결과(인자 순서). 자식이 모든 명령을 끝내지 못했으면 빈 배열이다 */
+  readonly results: readonly CommandResult[];
+}
+
+/**
+ * 여러 CLI 명령을 시간·RSS 상한 아래의 자식 프로세스 하나에서 차례로 실행한다.
+ *
+ * 자식마다 내는 시작 비용(타입 제거·TypeScript 적재, 커버리지 실행에서 0.5초 남짓)을 명령마다 되풀이하지 않으려는
+ * 것이다. 명령은 `main.ts`처럼 `runCliSafely`로 실행하고 도구 버전·시계만 고정한다. 시간 상한은 명령 수만큼 늘려
+ * 명령 하나의 몫을 따로 실행할 때와 같게 둔다. 한 명령이 멈추거나 메모리를 다 쓰면 자식 전체가 끝나므로, 같은 회귀를
+ * 지키는 한 테스트의 명령끼리만 묶는다. 그때 stderr의 마지막 `run <n>`이 멈춘 명령이다.
+ *
+ * @param runs 명령마다 `tsograph` 뒤의 인자
+ * @param nodeArguments 실행기 앞에 둘 `node` 인자(예: V8 힙 상한). 기본은 없다
+ * @returns 자식 실행 결과와 명령별 결과
+ */
+export async function runCliGuarded(
+  runs: readonly (readonly string[])[],
+  nodeArguments: readonly string[] = [],
+): Promise<GuardedCliRuns> {
+  const script = [
+    `import { runCliSafely } from ${JSON.stringify(runCliModule)};`,
+    `import { createNodeFileSystem } from ${JSON.stringify(fileSystemModule)};`,
+    "const environment = { toolVersion: '0.0.0-test', fileSystem: createNodeFileSystem(), now: () => new Date(0) };",
+    'const results = [];',
+    'for (const [index, arguments_] of JSON.parse(process.argv[1]).entries()) {',
+    '  process.stderr.write(`run ${index}\\n`);',
+    '  results.push(await runCliSafely(arguments_, environment));',
+    '}',
+    'process.stdout.write(JSON.stringify(results));',
+  ].join('\n');
+  const child = await runNodeGuarded([...nodeArguments, '--input-type=module', '--eval', script, JSON.stringify(runs)], CHILD_TIMEOUT_MS * runs.length);
+  const finished = child.stopped === undefined && child.status === 0;
+  return { child, results: finished ? JSON.parse(child.stdout) as CommandResult[] : [] };
 }
 
 /**

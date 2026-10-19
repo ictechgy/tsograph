@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
-import { linkToDevZero, makeFifo, runMainGuarded } from '../cli/testing.test.ts';
+import { linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
 import { buildCallGraph } from './build-graph.ts';
 import type { CallGraph } from './graph-model.ts';
 
@@ -396,9 +396,12 @@ test('factory provenance and public mutation guards fail closed', async () => {
 test('FIFO or device-link next package.json is neither awaited nor read without bound and proves no SDK', {
   skip: process.platform === 'win32',
 }, async () => {
-  for (const place of [makeFifo, linkToDevZero]) {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-next-cache-special-')));
-    try {
+  const places = [makeFifo, linkToDevZero];
+  const roots: string[] = [];
+  try {
+    for (const place of places) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-next-cache-special-')));
+      roots.push(root);
       const files = {
         'tsconfig.json': '{ "compilerOptions": { "strict": true, "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
         'node_modules/next/cache.d.ts': cacheDeclaration,
@@ -413,16 +416,22 @@ test('FIFO or device-link next package.json is neither awaited nor read without 
         writeFileSync(join(root, path), content);
       }
       place(join(root, 'node_modules/next/package.json'));
-      // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 그래프를 만든다.
-      const result = await runMainGuarded(['graph', '--project', root, '--generated-at', '2026-01-01T00:00:00.000Z']);
-      assert.equal(result.stopped, undefined, place.name);
-      assert.equal(result.status, 0, result.stderr);
-      const graph = JSON.parse(result.stdout) as CallGraph;
+    }
+    // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 그래프를 만든다.
+    // 두 특수 파일 종류의 프로젝트는 그 자식 하나에서 차례로 분석한다.
+    const { child, results } = await runCliGuarded(roots.map((root) => ['graph', '--project', root, '--generated-at', '2026-01-01T00:00:00.000Z']));
+    assert.equal(child.stopped, undefined, child.stderr);
+    assert.equal(child.status, 0, child.stderr);
+    for (const [index, place] of places.entries()) {
+      const result = results[index];
+      assert.ok(result !== undefined, place.name);
+      assert.equal(result.exitCode, 0, `${place.name}: ${result.standardError}`);
+      const graph = JSON.parse(result.standardOutput) as CallGraph;
       assert.ok(graph.nodes.some((node) => node.id === 'src/main.ts#run'), place.name);
       assert.deepEqual(allBound(graph), [], place.name);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
     }
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
   }
 });
 

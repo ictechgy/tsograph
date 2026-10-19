@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
-import { linkToDevZero, makeFifo, runMainGuarded } from '../../cli/testing.test.ts';
+import { linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
 
 /** 문서 경계에서 관찰할 사실이다. */
@@ -236,22 +236,31 @@ const kyMajorUnknown = 'route-call-coverage: ky URL option dialect requires an u
 test('FIFO or device-link package.json is neither awaited nor read without bound and leaves the ky major unknown', {
   skip: process.platform === 'win32',
 }, async () => {
-  for (const place of [makeFifo, linkToDevZero]) {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-special-')));
-    try {
+  const places = [makeFifo, linkToDevZero];
+  const roots: string[] = [];
+  try {
+    for (const place of places) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-special-')));
+      roots.push(root);
       mkdirSync(join(root, 'src'));
       writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
       place(join(root, 'package.json'));
-      // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 추출한다.
-      const result = await runMainGuarded(['routes', '--role', 'client', '--project', root]);
-      assert.equal(result.stopped, undefined, place.name);
-      assert.equal(result.status, 0, result.stderr);
-      const document = JSON.parse(result.stdout) as { facts: Fact[]; limitations: string[] };
+    }
+    // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 추출한다.
+    // 두 특수 파일 종류의 프로젝트는 그 자식 하나에서 차례로 추출한다.
+    const { child, results } = await runCliGuarded(roots.map((root) => ['routes', '--role', 'client', '--project', root]));
+    assert.equal(child.stopped, undefined, child.stderr);
+    assert.equal(child.status, 0, child.stderr);
+    for (const [index, place] of places.entries()) {
+      const result = results[index];
+      assert.ok(result !== undefined, place.name);
+      assert.equal(result.exitCode, 0, `${place.name}: ${result.standardError}`);
+      const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
       assert.ok(document.limitations.includes(kyMajorUnknown), place.name);
       assert.equal(document.facts[0]?.dynamic, true, place.name);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
     }
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
   }
 });
 

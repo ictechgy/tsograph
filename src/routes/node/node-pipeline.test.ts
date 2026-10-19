@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runGraphCommand } from '../../cli/graph-command.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
-import { type GuardedRun, runMainGuarded } from '../../cli/testing.test.ts';
+import { type GuardedCliRuns, type GuardedRun, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { isSafeIdentifier } from '../../exchange/bridge-facts.ts';
 import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
@@ -268,6 +268,32 @@ async function runGuardedProject(files: Record<string, string>, command: readonl
   }
 }
 
+/**
+ * 합성 프로젝트 여러 개를 만들어 명령마다 하나씩, 시간·메모리를 감시하는 자식 프로세스 하나에서 차례로 실행한다.
+ * 자식 시작 비용을 한 번만 내려는 것이다. 자식 힙은 `DAG_CHILD_HEAP_MIB`로 막는다(명령 사이의 쓰레기는 V8이 상한
+ * 전에 회수한다).
+ *
+ * @param projects 프로젝트 기준 경로 → 내용과 그 프로젝트에서 실행할 `--project` 앞의 CLI 인자
+ * @returns 자식 실행 결과와 명령별 결과
+ */
+async function runGuardedProjects(projects: readonly (readonly [Record<string, string>, readonly string[]])[]): Promise<GuardedCliRuns> {
+  const roots: string[] = [];
+  try {
+    for (const [files] of projects) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-node-flatten-')));
+      roots.push(root);
+      for (const [path, content] of Object.entries(files)) {
+        mkdirSync(dirname(join(root, path)), { recursive: true });
+        writeFileSync(join(root, path), content);
+      }
+    }
+    const runs = projects.map(([, command], index) => [...command, '--project', roots[index]!]);
+    return await runCliGuarded(runs, [`--max-old-space-size=${DAG_CHILD_HEAP_MIB}`]);
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
+}
+
 /** 펼치면 사실이 2^22 = 4,194,304개인 라우터 DAG를 프레임워크별로 만든 프로젝트다. */
 const largeDags: readonly (readonly [string, Record<string, string>])[] = [
   ['express', { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22) }],
@@ -277,12 +303,16 @@ const largeDags: readonly (readonly [string, Record<string, string>])[] = [
 
 test('공유 하위 라우터 DAG가 사실 상한을 넘으면 다 펼치기 전에 멈추고 사실 상한으로 알린다', async () => {
   // 예전에는 펼친 라우트 400만 개와 그 사실을 모두 만든 뒤에야 상한을 봐서, 그 전에 V8 힙이 바닥났다(종료 134).
-  for (const [framework, files] of largeDags) {
-    const result = await runGuardedProject(files, ['routes', '--role', 'server']);
-    assert.equal(result.stopped, undefined, framework);
-    assert.equal(result.status, 2, `${framework}: ${result.stderr}`);
-    assert.equal(result.stdout, '', framework);
-    assert.match(result.stderr, /more than 100000 route-decl facts/u, framework);
+  // 세 프레임워크는 감시하는 자식 하나에서 차례로 실행한다. 자식이 끝나지 못하면 stderr의 마지막 `run <n>`이 그 프레임워크다.
+  const { child, results } = await runGuardedProjects(largeDags.map(([, files]) => [files, ['routes', '--role', 'server']]));
+  assert.equal(child.stopped, undefined, child.stderr);
+  assert.equal(child.status, 0, child.stderr);
+  for (const [index, [framework]] of largeDags.entries()) {
+    const result = results[index];
+    assert.ok(result !== undefined, framework);
+    assert.equal(result.exitCode, 2, `${framework}: ${result.standardError}`);
+    assert.equal(result.standardOutput, '', framework);
+    assert.match(result.standardError, /more than 100000 route-decl facts/u, framework);
   }
 });
 
