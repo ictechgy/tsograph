@@ -455,6 +455,12 @@ class ScopeAccumulator {
 }
 
 /**
+ * 펼친 라우트 수의 상한을 사실 상한의 몇 배로 둘지다. 같은 사실로 합쳐지는 라우트(정규화하면 같은 경로에 붙인 16단 DAG의 131,072개)는
+ * 지금처럼 성공하게 두면서, 그 수가 상한 없이 커지는 입력은 힙이 바닥나기 전에 멈추는 값이다.
+ */
+export const MAX_FLATTENED_ROUTES_PER_FACT = 2;
+
+/**
  * 펼치는 동안 문서가 낼 사실 수의 하한을 센다. 공유 하위 라우터를 여러 경로에 붙이면 펼친 라우트가 mount 단계마다 곱으로
  * 늘어(라우터 22개로 400만 개), 사실을 모두 만든 뒤의 상한 검사(route-document)에 닿기 전에 메모리를 다 쓴다. 그래서
  * 어댑터가 라우트를 펼칠 때마다 세고, 하한이 상한을 넘으면 펼치기를 멈춘다(문서는 사실 상한 실패로 끝난다).
@@ -463,10 +469,18 @@ class ScopeAccumulator {
  * 않으므로, 같은 라우터를 같은 경로(정규화하면 같은 경로 포함)에 거듭 붙여 펼친 라우트가 많아도 거짓으로 상한을 넘지 않는다.
  * 조건부 등록과 계약 method가 없는 등록은 사실을 내지 않으므로 세지 않는다. 사실을 낼 (라우트, method) 쌍이 상한 이하이면
  * 하한도 상한 이하라서, 그 수가 상한을 넘을 때 처음 센다 — 상한 아래 프로젝트는 예전과 같은 일만 한다.
+ *
+ * 같은 사실로 합쳐지는 라우트도 펼치는 데 시간과 메모리가 든다. 하한만 세면 정규화하면 같은 경로에 거듭 붙인 DAG가 상한에
+ * 걸리지 않고 라우트 수백만 개를 다 펼치다 힙이 바닥나므로, 펼친 라우트 수 자체도 [MAX_FLATTENED_ROUTES_PER_FACT]배 상한으로
+ * 센다. 넘으면 같은 사실 상한 실패로 끝난다(중복 제거 전 사실 수가 상한을 넘은 것이다).
  */
 export class NodeFactBudget {
   private readonly keys = new Set<string>();
   private readonly limit: number;
+  /** 펼친 라우트 수의 상한이다. 사실 상한의 [MAX_FLATTENED_ROUTES_PER_FACT]배다 */
+  private readonly routeLimit: number;
+  /** 지금까지 펼친 라우트 수다(조건부·method 없는 등록 포함) */
+  private flattened = 0;
   /** 세기 전에 모아 둔 라우트다. 처음 센 뒤에는 undefined다 */
   private pending: FlatRoute[] | undefined = [];
   /** 모아 둔 라우트의 (라우트, method) 쌍 수 */
@@ -477,11 +491,12 @@ export class NodeFactBudget {
    */
   constructor(limit: number) {
     this.limit = limit;
+    this.routeLimit = limit * MAX_FLATTENED_ROUTES_PER_FACT;
   }
 
-  /** 하한이 상한을 넘었는지다. 넘었으면 어댑터는 남은 사건을 펼치지 않는다. */
+  /** 하한이나 펼친 라우트 수가 상한을 넘었는지다. 넘었으면 어댑터는 남은 사건을 펼치지 않는다. */
   get isExceeded(): boolean {
-    return this.keys.size > this.limit;
+    return this.keys.size > this.limit || this.flattened > this.routeLimit;
   }
 
   /**
@@ -490,6 +505,7 @@ export class NodeFactBudget {
    * @param route 펼친 라우트
    */
   add(route: FlatRoute): void {
+    this.flattened += 1;
     if (route.conditional || route.methods.length === 0) return;
     if (this.pending === undefined) return this.count(route);
     this.pending.push(route);

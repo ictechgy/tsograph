@@ -302,6 +302,17 @@ test('정규화하면 같은 경로에 거듭 붙인 DAG는 펼친 라우트가 
   assert.deepEqual(factLines(document), [`GET root ${prefix}/x optional #0 ci`, `GET root ${prefix}{dynamic} - dynamic{"templatePrefixes":["${prefix}"]} #1 ci`]);
 });
 
+test('정규화하면 같은 경로로 합쳐지는 라우트도 펼친 수가 상한을 넘으면 다 펼치기 전에 멈춘다', async () => {
+  // 서로 다른 사실 하한만 세면 같은 사실로 합쳐지는 라우트는 상한에 걸리지 않아, 2^22 = 4,194,304개를 다 펼치다 V8 힙이 바닥난다.
+  // 펼친 라우트 수 자체에도 상한을 두면 사실 상한 실패(종료 2)로 끝난다.
+  const files = { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22, '%61') };
+  const result = await runGuardedProject(files, ['routes', '--role', 'server']);
+  assert.equal(result.stopped, undefined);
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /more than 100000 route-decl facts/u);
+});
+
 test('사실 상한 아래의 라우터 DAG는 예전처럼 모두 펼친다', async () => {
   const cases: readonly Record<string, string>[] = [
     { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(12) },
