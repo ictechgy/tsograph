@@ -12,6 +12,7 @@ import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { type GraphEnvironment, graphUsage, impactUsage, reachUsage, render, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { runCli } from './run-cli.ts';
+import { ambientTypesFreeConfig } from './testing.test.ts';
 
 const fixture = realpathSync(fileURLToPath(new URL('../../fixtures/graph/next-prisma/', import.meta.url)));
 const fixedNow = new Date('2026-09-27T00:00:00.000Z');
@@ -516,6 +517,8 @@ test('금지 문자 이름 파일이 있는 프로젝트의 graph 출력도 reac
     writeFileSync(join(root, 'package.json'), '{"private":true}');
     writeFileSync(join(root, 'src/index.ts'), 'export function start() { return finish(); }\nexport function finish() { return 1; }\n');
     writeFileSync(join(root, 'src/a\u001bb.ts'), 'export function hidden() { return 1; }\n');
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
     const snapshot = await runGraphCommand(['--project', root], environment());
     assert.equal(snapshot.exitCode, 0, snapshot.standardError);
     const graphFile = join(root, 'graph.json');

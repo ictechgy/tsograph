@@ -14,7 +14,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
-import { linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
@@ -505,6 +505,8 @@ test('루트 package.json·vercel.json symlink는 프로젝트 안 일반 파일
     writeFileSync(join(project, 'config/vercel.json'), '{"crons":[{"path":"/api/jobs","schedule":"0 0 * * *"}]}');
     symlinkSync(join(project, 'config/package.json'), join(project, 'package.json'));
     symlinkSync(join(project, 'config/vercel.json'), join(project, 'vercel.json'));
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용, 이 절의 다른 테스트도 같다).
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(project, 'src/main.ts'), callableGapSource);
     const target = await buildCallGraph(project, fileSystem);
     assert.ok(target.limitations.includes(unreadableCronConfig));
@@ -522,6 +524,7 @@ test('권한 때문에 읽지 못한 루트 vercel.json·package.json은 cron �
     mkdirSync(join(project, 'src'));
     writeFileSync(join(project, 'package.json'), '{"private":true}');
     writeFileSync(join(project, 'vercel.json'), '{"crons":[]}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(project, 'src/main.ts'), callableGapSource);
     chmodSync(join(project, 'package.json'), 0o000);
     chmodSync(join(project, 'vercel.json'), 0o000);
@@ -553,6 +556,7 @@ test('금지 문자 이름의 파일·디렉터리는 노드로 만들지 않고
   try {
     mkdirSync(join(project, 'src', 'dir\u{2028}x'), { recursive: true });
     writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(project, 'src/main.ts'), callableGapSource);
     writeFileSync(join(project, 'src/a\u007fb.ts'), 'export function hidden() { return 1; }\n');
     writeFileSync(join(project, 'src/dir\u{2028}x/c.ts'), 'export function nested() { return 2; }\n');
@@ -574,6 +578,7 @@ test('컴파일러가 읽지 못한 소스는 노드 없이 건너뛰지 않고 
   try {
     mkdirSync(join(project, 'src'));
     writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(project, 'src/a.ts'), 'export interface Runner { run(): void }\n'
       + 'export class A implements Runner { run() { safe(); } }\nfunction safe() {}\n'
       + 'export function call(r: Runner) { r.run(); }\nexport function main() { call(new A()); }\n');

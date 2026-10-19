@@ -133,6 +133,8 @@ test('금지 문자 이름의 파일·디렉터리는 라우트 사실 경로에
 }, async () => {
   const document = await scanNodeProject({
     'package.json': packageJson({ express: '4.21.2' }),
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용, 아래 공백 테스트도 같다).
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/app.ts': "import express from 'express';\nconst app = express();\napp.get('/ok', (req, res) => res.send('ok'));\nexport default app;\n",
     'src/r\u007fouter.ts': "import express from 'express';\nexport const hidden = express();\nhidden.get('/hidden', (req, res) => res.send('h'));\n",
     'src/dir\u{2028}x/extra.ts': "import express from 'express';\nexport const extra = express();\nextra.get('/extra', (req, res) => res.send('e'));\n",
@@ -151,6 +153,7 @@ test('컴파일러가 읽지 못한 소스는 그 안의 라우트가 빠졌을 
   try {
     mkdirSync(join(root, 'src'));
     writeFileSync(join(root, 'package.json'), packageJson({ express: '4.21.2' }));
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(root, 'src/app.ts'), "import express from 'express';\nimport { mount } from './users';\nconst app = express();\n"
       + "app.get('/ok', (req, res) => res.send('ok'));\nmount(app);\nexport default app;\n");
     writeFileSync(join(root, 'src/users.ts'), "export function mount(app: any) { app.get('/users/:id', (req: any, res: any) => res.send('u')); }\n");

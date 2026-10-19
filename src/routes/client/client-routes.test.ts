@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
-import { linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
 
 /** 문서 경계에서 관찰할 사실이다. */
@@ -267,7 +267,8 @@ test('FIFO or device-link package.json is neither awaited nor read without bound
 test('a symlinked package.json is not followed for the ky major while a regular one keeps the declared dialect', {
   skip: !constants.O_NOFOLLOW,
 }, async () => {
-  const regular = await scan(kyPrefixSource);
+  // 이 파일의 상한·공백 테스트 fixture는 저장소 @types/node를 읽지 않는 tsconfig를 둔다(검사와 무관한 Program 비용).
+  const regular = await scan(kyPrefixSource, [], { 'tsconfig.json': ambientTypesFreeConfig });
   assert.equal(regular.limitations.includes(kyMajorUnknown), false);
   assert.equal(regular.facts[0]?.channel, '/v1/items');
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-linked-')));
@@ -276,6 +277,7 @@ test('a symlinked package.json is not followed for the ky major while a regular 
     mkdirSync(join(root, 'src'));
     writeFileSync(join(root, 'config/package.json'), '{"dependencies":{"ky":"2.1.0"}}');
     symlinkSync(join(root, 'config/package.json'), join(root, 'package.json'));
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
     const result = await runRoutesCommand(['--role', 'client', '--project', root], {
       fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date('2026-10-01T00:00:00Z'),
@@ -1550,6 +1552,7 @@ test('sources whose names contain forbidden characters are skipped without expos
   skip: process.platform === 'win32',
 }, async () => {
   const doc = await scan('export const load = () => fetch("/ok");', [], {
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/h\u007fidden.ts': 'export const hidden = () => fetch("/hidden");',
     'src/dir\u{2028}x/nested.ts': 'export const nested = () => fetch("/nested");',
   });
@@ -1564,6 +1567,7 @@ test('sources the compiler cannot read are reported as skipped project sources',
   try {
     mkdirSync(join(root, 'src'));
     writeFileSync(join(root, 'package.json'), '{"dependencies":{"axios":"1.20.0"}}');
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(root, 'src/client.ts'), 'export const load = () => fetch("/ok");');
     writeFileSync(join(root, 'src/locked.ts'), 'export const hidden = () => fetch("/hidden");');
     chmodSync(join(root, 'src/locked.ts'), 0o000);
@@ -1608,7 +1612,7 @@ test('URL constant chains, query-suffix fanout and oversized literal joins stop 
     'export const query = () => fetch(`/search${q14}`);',
     'export const long = () => fetch(`${big}${big}`);',
     "export const ok = () => fetch('/ok');",
-  ].join('\n'));
+  ].join('\n'), [], { 'tsconfig.json': ambientTypesFreeConfig });
   assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.pathAnchor, fact.dynamic]), [[null, 'base', true], [null, 'base', true], [null, 'base', true], ['/ok', 'root', false]]);
   assert.ok(doc.limitations.some((text) => text.startsWith('unresolved-route-prefix:')));
 });

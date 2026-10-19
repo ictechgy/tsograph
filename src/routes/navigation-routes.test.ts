@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { ambientTypesFreeConfig } from '../cli/testing.test.ts';
 import { isCanonicalTemplate } from '../exchange/route-template-grammar.ts';
 import { buildCallGraph } from '../graph/build-graph.ts';
 import {
@@ -459,6 +460,8 @@ test('names with forbidden characters are skipped and counted as incomplete sour
 import { Catalog } from './screens';
 registerScreens([{ path: '${path}', screen: Catalog }]);`;
   await fixture({
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용, 다음 테스트도 같다).
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/router.ts': registration('/catalog'),
     'src/h\u007fidden.ts': registration('/hidden'),
   }, (root) => {
@@ -476,6 +479,7 @@ test('sources the compiler cannot read are counted as incomplete source discover
 import { Catalog } from './screens';
 registerScreens([{ path: '${path}', screen: Catalog }]);`;
   await fixture({
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/router.ts': registration('/catalog'),
     'src/locked.ts': registration('/hidden'),
   }, (root) => {

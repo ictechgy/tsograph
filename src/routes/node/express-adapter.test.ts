@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { runMainGuarded } from '../../cli/testing.test.ts';
+import { ambientTypesFreeConfig, runMainGuarded } from '../../cli/testing.test.ts';
 import { MAX_SOURCE_BYTES } from '../../schema/project-reader.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
 
@@ -47,6 +47,8 @@ function directoryRequireProject(manifestPadding: number): Record<string, string
   const router = (path: string): string => `const express = require('express');\nconst router = express.Router();\nrouter.get('${path}', (req, res) => res.send('x'));\nmodule.exports = router;\n`;
   return {
     'package.json': packageJson({ express: '4.21.2' }),
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용, 아래 상한 테스트 fixture도 같다).
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/app.js': "const express = require('express');\nconst app = express();\napp.use('/api', require('./routes'));\nmodule.exports = app;\n",
     'src/routes/package.json': `{"main":"other.js"}${' '.repeat(manifestPadding)}`,
     'src/routes/index.js': router('/index'),
@@ -261,7 +263,7 @@ function scopeSizes(document: NodeDocumentView, prefix: string): string[] {
 
 test('mount 접두사 대안 곱이 상한 안이면 모두 늘어놓아 dynamicScope와 한계 스코프를 싣는다', async () => {
   // 16 × 16 = 256개다. 펼친 템플릿이 16개를 넘어 상한 초과 dynamic이지만, 접두사 256개는 스코프 상한 안이다.
-  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'src/app.js': optionalMountChain(2, mixedLeaf) });
+  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'tsconfig.json': ambientTypesFreeConfig, 'src/app.js': optionalMountChain(2, mixedLeaf) });
   const head = optionalMountHead.repeat(2);
   assert.deepEqual(factShapes(document), [
     `ANY root ${head}/ dynamic scope:256 #6`,
@@ -282,7 +284,7 @@ test('mount 접두사 대안 곱이 상한 안이면 모두 늘어놓아 dynamic
 test('mount 접두사 대안 곱이 상한(2,000)을 넘으면 늘어놓지 않고 같은 사실·분류에 스코프만 생략한다', async () => {
   // 256 × 16 = 4,096개다. 예전에도 dynamicScope(1,000)·한계 스코프(2,000) 상한을 넘어 생략된 크기라 사실·한계 문장은 같다.
   // 정적 파일 한계만 접두사 4,096개를 늘어놓던 스코프 대신 문서 전체 효과가 된다(안전한 쪽).
-  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'src/app.js': optionalMountChain(3, mixedLeaf) });
+  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'tsconfig.json': ambientTypesFreeConfig, 'src/app.js': optionalMountChain(3, mixedLeaf) });
   const head = optionalMountHead.repeat(3);
   assert.deepEqual(factShapes(document), [
     `ANY root ${head}/ dynamic scope:- #6`,
@@ -325,6 +327,7 @@ test('선택 그룹이 수만 겹인 경로 한 줄이 있어도 그 라우트�
   const depth = 20_000;
   const document = await scanNodeProject({
     'package.json': packageJson({ express: '5.1.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/app.js': [
       "const express = require('express');",
       'const app = express();',
@@ -361,6 +364,7 @@ test('경로 상수 사슬과 큰 리터럴 합성은 작업·길이 상한에�
   const big = 'a'.repeat(40_000);
   const document = await scanNodeProject({
     'package.json': packageJson({ express: '4.21.2' }),
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/app.js': [
       "const express = require('express');",
       'const app = express();',

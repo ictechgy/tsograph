@@ -39,8 +39,11 @@ const POLL_INTERVAL_MS = 50;
  * 저장소 루트)와 그 조상의 `node_modules/@types`를 읽는다. 그래서 같은 프로세스에서 Program을 만들 때마다 저장소 자신의
  * @types/node(선언 67개)를 다시 파싱해 커버리지 실행에서 Program 하나에 0.4초 남짓을 쓴다. 그 선언과 무관한 검사는
  * fixture에 이 설정을 둬 그 비용을 뺀다(628bc19가 graph 합성 Program에 쓴 방식과 같다). 다른 compiler 옵션은 기본값과 같다.
+ *
+ * `include: []`라 설정이 루트 파일을 더하지 않는다(TypeScript의 '입력 없음' 18003은 분석기가 무시한다). 그래서 Program의
+ * 루트는 tsconfig가 없을 때처럼 걷기가 고른 소스뿐이고, 걷기가 뺀 금지 문자 이름·읽지 못한 파일을 설정이 다시 넣지 않는다.
  */
-export const ambientTypesFreeConfig = JSON.stringify({ compilerOptions: {
+export const ambientTypesFreeConfig = JSON.stringify({ include: [], compilerOptions: {
   target: 'es2022', module: 'esnext', moduleResolution: 'bundler', jsx: 'preserve', esModuleInterop: true, resolveJsonModule: true, types: [],
 } });
 

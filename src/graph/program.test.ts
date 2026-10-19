@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
-import { linkToDevZero, makeFifo } from '../cli/testing.test.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo } from '../cli/testing.test.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText, readBoundedFileBytes } from './bounded-config-reader.ts';
@@ -194,6 +194,8 @@ test('noFollow는 마지막 symlink를 열지 않고 기본값은 일반 파일 
 
 test('graph 모듈 해석기도 compiler host와 같은 상한으로 package.json을 읽는다', async (t) => {
   await withProject({
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/main.ts': 'import { value } from "./lib";\nexport function read() { return value; }\n',
     'src/lib/package.json': `{"main":"other.ts"}${' '.repeat(MAX_SOURCE_BYTES)}`,
     'src/lib/index.ts': 'export const value = 1;\n',

@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { ambientTypesFreeConfig } from '../../cli/testing.test.ts';
 import { buildRoutePrefix } from './fastify-adapter.ts';
 import { factLines, limitationsWith, packageJson, scanNodeProject } from './testing.test.ts';
 
@@ -89,6 +90,8 @@ test('빈 값 변형으로 펼친 템플릿이 16개를 넘으면 대안 하나�
   // find-my-way 파라미터는 빈 값도 받는다. `/:a/:b/:c/:d/:e`는 대안 하나가 32개로, `/x/:a/:b/:c/:d?`는 대안 둘이 16 + 8개로 넘는다.
   const document = await scanNodeProject({
     'package.json': packageJson({ fastify: '5.0.0' }),
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    'tsconfig.json': ambientTypesFreeConfig,
     'src/app.ts': "import Fastify from 'fastify';\nconst app = Fastify();\napp.get('/:a/:b/:c/:d/:e', async () => 'one');\napp.get('/x/:a/:b/:c/:d?', async () => 'two');\napp.get('/y/:a/:b/:c?', async () => 'ok');\nexport default app;\n",
   });
   const capped = document.facts.filter((fact) => fact.dynamic).map((fact) => `${fact.channel} ${JSON.stringify(fact.dynamicScope ?? null)}`);

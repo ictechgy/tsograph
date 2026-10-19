@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { RouteFactLimitError } from '../routes/route-document.ts';
 import { type CommandFileSystem, createNodeFileSystem } from './file-system.ts';
 import { renderDocument, routesUsage, runRoutesCommand } from './routes-command.ts';
+import { ambientTypesFreeConfig } from './testing.test.ts';
 
 /** 합성 Next fixture 디렉터리다. */
 const fixtures = realpathSync(fileURLToPath(new URL('../../fixtures/next/', import.meta.url)));
@@ -205,6 +206,8 @@ test('client 조립 중 스택 초과가 아닌 RangeError는 출력 초과로 �
   try {
     mkdirSync(join(directory, 'src'), { recursive: true });
     writeFileSync(join(directory, 'package.json'), '{}');
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    writeFileSync(join(directory, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(directory, 'src/client.ts'), 'export function load() { return fetch("/api/items"); }\n');
     // 잘못된 시계는 문서 조립의 toISOString에서 RangeError('Invalid time value')를 낸다(수정 전에는 출력 초과 문구였다).
     const invalidClock = { fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date(Number.NaN) };
