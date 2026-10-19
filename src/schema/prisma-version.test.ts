@@ -6,9 +6,14 @@ import {
   decideNamingRules,
   parseVersion,
   ruleForVersion,
+  type TrackedPackage,
   versionFromSpecifier,
   versionsFromLockfile,
 } from './prisma-version.ts';
+import { extractProject } from './testing.test.ts';
+
+/** 자격 증명이 든 합성 git 명세다(실제 토큰 형식이 아니다). */
+const credentialGitSpecifier = 'git+https://ci-bot:example-credential@git.example.test/acme/prisma-fork.git';
 
 test('패키지 버전별 이름 규칙 벡터', () => {
   const vectors: [Parameters<typeof ruleForVersion>[0], string, string][] = [
@@ -43,6 +48,42 @@ test('관찰 버전으로 규칙 후보를 정한다', () => {
   assert.match(unknown.unverifiedReason!, /@prisma\/client@workspace:\*/u);
   assert.match(decideNamingRules([]).unverifiedReason!, /no Prisma package version/u);
   assert.match(decideNamingRules([at('prisma', '8.0.0-rc.17')]).unverifiedReason!, /no Prisma ORM package/u);
+});
+
+test('확인하지 않은 버전은 semver와 짧은 안전 명세만 원문으로 싣고 URL·경로·별칭은 범주로 바꾼다', () => {
+  const at = (packageName: TrackedPackage, version: string) => ({ packageName, version, source: 'package.json' });
+  const reason = decideNamingRules([
+    at('@prisma/client', credentialGitSpecifier),
+    at('prisma', 'file:/srv/private/prisma-cli'),
+    at('prisma', '../vendor/prisma'),
+    at('prisma', 'https://registry.example.test/prisma-7.8.0.tgz'),
+    at('@prisma/client', 'npm:@acme/prisma-client@7.8.0'),
+    at('prisma', 'user/prisma-fork#main'),
+    at('prisma', `1.0.0-${'a'.repeat(80)}`),
+    at('prisma', '7.8.0\u0000'),
+    at('@prisma/client', ' 8.0.0\n'),
+    at('prisma', '>=7 <8'),
+    at('prisma', 'catalog:'),
+  ]).unverifiedReason!;
+  assert.equal(reason, 'unverified Prisma version(s): @prisma/client@8.0.0, @prisma/client@<git specifier>, '
+    + '@prisma/client@<npm alias>, prisma@<file specifier>, prisma@<other specifier>, prisma@<url specifier>, '
+    + 'prisma@>=7 <8, prisma@catalog:');
+  const versions = Array.from({ length: 12 }, (_, index) => `8.0.${index}`);
+  const shown = [...versions].sort().slice(0, 10).map((version) => `@prisma/client@${version}`).join(', ');
+  assert.equal(decideNamingRules(versions.map((version) => at('@prisma/client', version))).unverifiedReason,
+    `unverified Prisma version(s): ${shown} and 2 more`);
+});
+
+test('package.json 명세의 자격 증명·절대 경로는 prisma-naming-unverified에 나오지 않는다', () => {
+  const result = extractProject({
+    'package.json': JSON.stringify({ dependencies: { '@prisma/client': credentialGitSpecifier, prisma: 'file:/srv/private/prisma-cli' } }),
+    'prisma/schema.prisma': 'model User {\n  id Int @id\n}\n',
+  });
+  assert.deepEqual(result.limitations.filter((line) => line.startsWith('prisma-naming-unverified:')), [
+    'prisma-naming-unverified: unverified Prisma version(s): @prisma/client@<git specifier>, prisma@<file specifier>; '
+    + '1 table name(s) that differ across the candidate naming rules (prisma-7, prisma-8-lower-first, prisma-8-verbatim) '
+    + 'are emitted as dynamic facts and their columns are omitted',
+  ]);
 });
 
 test('잠금 파일 형식별로 추적 패키지 버전을 읽는다', () => {

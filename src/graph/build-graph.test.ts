@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,8 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
+import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
@@ -408,15 +410,17 @@ test('parse-error limitation은 안전한 상대 파일 10개와 생략 수만 �
     for (let index = 0; index < 12; index++) {
       writeFileSync(join(project, `src/bad${String(index).padStart(2, '0')}.ts`), 'export const = ;\n');
     }
+    // 금지 문자 이름은 걷기에서 빠지므로 parse-error 계수에도 목록에도 들어가지 않고 unsafe-names:로 센다.
     writeFileSync(join(project, 'src/bad\nunsafe.ts'), 'export const = ;\n');
     const target = await buildCallGraph(project, fileSystem);
     const limitation = target.limitations.find((line) => line.startsWith('parse-errors:'));
     assert.equal(limitation,
-      'parse-errors: 13 source file(s) have syntax errors; their calls may be incomplete; '
+      'parse-errors: 12 source file(s) have syntax errors; their calls may be incomplete; '
       + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
-      + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 3');
+      + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
     assert.ok(!limitation?.includes('\nunsafe'));
     assert.ok(!limitation?.includes(project));
+    assert.ok(target.limitations.includes(unsafeWalkNames(1)));
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -445,6 +449,151 @@ test('indirect unresolved 통계는 관찰한 callee AST shape만 세분화한�
       property: 1,
       element: 1,
     });
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+/** 읽지 못한 루트 vercel.json limitation이다. */
+const unreadableCronConfig = 'entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown';
+
+/** 읽지 못한 루트 package.json 때문에 callable 흐름을 여는 limitation이다. */
+const unreadableManifest = 'bound-dispatch: package.json could not be read as a JSON object within 1 MiB, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound';
+
+/** callable 매개변수 공백이 있어 열린 프로그램 limitation이 실리는 소스다. */
+const callableGapSource = 'export function run(callback: () => string) { return callback(); }\n';
+
+test('FIFO·장치 링크인 루트 package.json·vercel.json은 기다리거나 끝없이 읽지 않고 기존 limitation으로 알린다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const places = [makeFifo, linkToDevZero];
+  const projects: string[] = [];
+  try {
+    for (const place of places) {
+      const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-special-roots-')));
+      projects.push(project);
+      mkdirSync(join(project, 'src'));
+      writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+      place(join(project, 'package.json'));
+      place(join(project, 'vercel.json'));
+    }
+    // 두 특수 파일 종류의 프로젝트를 감시하는 자식 하나에서 차례로 분석한다.
+    const { child, results } = await runCliGuarded(projects.map((project) => ['graph', '--project', project, '--generated-at', '2026-01-01T00:00:00.000Z']));
+    assert.equal(child.stopped, undefined, child.stderr);
+    assert.equal(child.status, 0, child.stderr);
+    for (const [index, place] of places.entries()) {
+      const result = results[index];
+      assert.ok(result !== undefined, place.name);
+      assert.equal(result.exitCode, 0, `${place.name}: ${result.standardError}`);
+      const { limitations } = JSON.parse(result.standardOutput) as { limitations: string[] };
+      assert.ok(limitations.includes(unreadableCronConfig), place.name);
+      assert.ok(limitations.includes(unreadableManifest), place.name);
+    }
+  } finally {
+    for (const project of projects) rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('루트 package.json·vercel.json symlink는 프로젝트 안 일반 파일을 가리켜도 따라가지 않는다', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-linked-roots-')));
+  try {
+    mkdirSync(join(project, 'config'));
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'config/package.json'), '{"name":"lib","main":"src/main.ts"}');
+    writeFileSync(join(project, 'config/vercel.json'), '{"crons":[{"path":"/api/jobs","schedule":"0 0 * * *"}]}');
+    symlinkSync(join(project, 'config/package.json'), join(project, 'package.json'));
+    symlinkSync(join(project, 'config/vercel.json'), join(project, 'vercel.json'));
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용, 이 절의 다른 테스트도 같다).
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    const target = await buildCallGraph(project, fileSystem);
+    assert.ok(target.limitations.includes(unreadableCronConfig));
+    assert.ok(target.limitations.includes(unreadableManifest));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('권한 때문에 읽지 못한 루트 vercel.json·package.json은 cron 없음·비공개로 숨기지 않는다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-locked-roots-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'vercel.json'), '{"crons":[]}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    chmodSync(join(project, 'package.json'), 0o000);
+    chmodSync(join(project, 'vercel.json'), 0o000);
+    const target = await buildCallGraph(project, fileSystem);
+    assert.ok(target.limitations.includes(unreadableCronConfig));
+    assert.ok(target.limitations.includes(unreadableManifest));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 걷기가 건너뛴 금지 문자 이름의 limitation이다.
+ *
+ * @param count 건너뛴 이름 수
+ * @returns limitation 문장
+ */
+function unsafeWalkNames(count: number): string {
+  return `unsafe-names: ${count} file or directory name(s) contain characters the exchange format forbids and were skipped`;
+}
+
+/** 스캔이 불완전해 callable 흐름을 여는 limitation이다. */
+const incompleteScanCallables = 'bound-dispatch: the scan is incomplete, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound';
+
+test('금지 문자 이름의 파일·디렉터리는 노드로 만들지 않고 unsafe-names:와 불완전 스캔으로 알린다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-unsafe-names-')));
+  try {
+    mkdirSync(join(project, 'src', 'dir\u{2028}x'), { recursive: true });
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    writeFileSync(join(project, 'src/a\u007fb.ts'), 'export function hidden() { return 1; }\n');
+    writeFileSync(join(project, 'src/dir\u{2028}x/c.ts'), 'export function nested() { return 2; }\n');
+    const target = await buildCallGraph(project, fileSystem);
+    assert.deepEqual(target.nodes.filter((node) => !isSafeIdentifier(node.id) || !isSafeIdentifier(node.location.path)), []);
+    assert.ok(target.nodes.some((node) => node.id === 'src/main.ts#run'));
+    assert.ok(target.limitations.includes(unsafeWalkNames(2)));
+    assert.ok(target.limitations.includes(incompleteScanCallables));
+    assert.ok(target.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('컴파일러가 읽지 못한 소스는 노드 없이 건너뛰지 않고 unreadable-sources:와 불완전 스캔으로 알린다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-compiler-unreadable-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(project, 'src/a.ts'), 'export interface Runner { run(): void }\n'
+      + 'export class A implements Runner { run() { safe(); } }\nfunction safe() {}\n'
+      + 'export function call(r: Runner) { r.run(); }\nexport function main() { call(new A()); }\n');
+    // 읽지 못한 구현 B를 보지 못한 채 A.run만 관찰한 값으로 bound를 확정하면 안 된다.
+    writeFileSync(join(project, 'src/b.ts'), "import { call, type Runner } from './a';\n"
+      + 'export class B implements Runner { run() { danger(); } }\nfunction danger() {}\nexport function other() { call(new B()); }\n');
+    chmodSync(join(project, 'src/b.ts'), 0o000);
+    // TypeScript는 경로의 백슬래시를 구분자로 바꿔 읽으므로 이 이름(POSIX에서 쓸 수 있다)의 파일은 읽지 못한다.
+    writeFileSync(join(project, 'src/back\\slash.ts'), 'export function back() { return 2; }\n');
+    const target = await buildCallGraph(project, fileSystem);
+    assert.deepEqual([...new Set(target.nodes.map((node) => node.location.path))], ['src/a.ts']);
+    assert.deepEqual(target.edges.filter((edge) => edge.evidence === 'bound'), []);
+    assert.ok(target.limitations.includes('unreadable-sources: 2 source file(s) could not be read by the compiler and were skipped'));
+    assert.ok(target.limitations.includes('bound-dispatch: the scan is incomplete, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound'));
+    assert.ok(target.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

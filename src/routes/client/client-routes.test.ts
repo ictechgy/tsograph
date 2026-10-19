@@ -1,11 +1,12 @@
 /** 웹·RN 호출부 추출의 외부 계약을 합성 프로젝트로 검증한다. */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
 
 /** 문서 경계에서 관찰할 사실이다. */
@@ -224,6 +225,70 @@ test('ky 2 prefix/baseUrl and legacy ky 1 prefixUrl are distinct joins', async (
   });
   assert.equal(legacy.facts[0]?.channel, '/v1/items');
   assert.equal(legacy.facts[1]?.dynamic, true);
+});
+
+/** ky 2 `prefix` 결합을 쓰는 호출이다(major를 모르면 결합 방식을 정하지 않는다). */
+const kyPrefixSource = "import ky from 'ky';\nexport function load() { return ky('items', { prefix: 'https://api.example.com/v1' }); }\n";
+
+/** 선언 major를 모를 때 ky 호출에 싣는 limitation이다. */
+const kyMajorUnknown = 'route-call-coverage: ky URL option dialect requires an unambiguous declared major version (1 or 2)';
+
+test('FIFO or device-link package.json is neither awaited nor read without bound and leaves the ky major unknown', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const places = [makeFifo, linkToDevZero];
+  const roots: string[] = [];
+  try {
+    for (const place of places) {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-special-')));
+      roots.push(root);
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
+      place(join(root, 'package.json'));
+    }
+    // 수정 전 코드는 이 manifest에서 멈추거나 메모리를 끝없이 쓰므로 감시하는 자식 프로세스에서 추출한다.
+    // 두 특수 파일 종류의 프로젝트는 그 자식 하나에서 차례로 추출한다.
+    const { child, results } = await runCliGuarded(roots.map((root) => ['routes', '--role', 'client', '--project', root]));
+    assert.equal(child.stopped, undefined, child.stderr);
+    assert.equal(child.status, 0, child.stderr);
+    for (const [index, place] of places.entries()) {
+      const result = results[index];
+      assert.ok(result !== undefined, place.name);
+      assert.equal(result.exitCode, 0, `${place.name}: ${result.standardError}`);
+      const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
+      assert.ok(document.limitations.includes(kyMajorUnknown), place.name);
+      assert.equal(document.facts[0]?.dynamic, true, place.name);
+    }
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a symlinked package.json is not followed for the ky major while a regular one keeps the declared dialect', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  // 이 파일의 상한·공백 테스트 fixture는 저장소 @types/node를 읽지 않는 tsconfig를 둔다(검사와 무관한 Program 비용).
+  const regular = await scan(kyPrefixSource, [], { 'tsconfig.json': ambientTypesFreeConfig });
+  assert.equal(regular.limitations.includes(kyMajorUnknown), false);
+  assert.equal(regular.facts[0]?.channel, '/v1/items');
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-linked-')));
+  try {
+    mkdirSync(join(root, 'config'));
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'config/package.json'), '{"dependencies":{"ky":"2.1.0"}}');
+    symlinkSync(join(root, 'config/package.json'), join(root, 'package.json'));
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(root, 'src/client.ts'), kyPrefixSource);
+    const result = await runRoutesCommand(['--role', 'client', '--project', root], {
+      fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date('2026-10-01T00:00:00Z'),
+    });
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
+    assert.ok(document.limitations.includes(kyMajorUnknown));
+    assert.equal(document.facts[0]?.dynamic, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('dynamic path/method/config and unknown base retain honest limitations without source leakage', async () => {
@@ -1478,4 +1543,93 @@ test('large wrapper summary set emits one outer fact per represented call', asyn
   assert.deepEqual([doc.facts[0]?.method, doc.facts[0]?.channel], ['GET', '/route-0']);
   assert.deepEqual([doc.facts.at(-1)?.method, doc.facts.at(-1)?.channel], ['GET', '/route-799']);
   assert.equal(doc.facts.some((fact) => fact.channel === null), false);
+});
+
+/** 건너뛴 프로젝트 소스가 있을 때 호출 문서가 싣는 limitation이다. */
+const skippedProjectSources = 'route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped';
+
+test('sources whose names contain forbidden characters are skipped without exposing their paths', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const doc = await scan('export const load = () => fetch("/ok");', [], {
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/h\u007fidden.ts': 'export const hidden = () => fetch("/hidden");',
+    'src/dir\u{2028}x/nested.ts': 'export const nested = () => fetch("/nested");',
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.location.path, fact.symbol?.usr]), [['/ok', 'src/client.ts', 'src/client.ts#load']]);
+  assert.ok(doc.limitations.includes(skippedProjectSources));
+});
+
+test('sources the compiler cannot read are reported as skipped project sources', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-unreadable-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"dependencies":{"axios":"1.20.0"}}');
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(root, 'src/client.ts'), 'export const load = () => fetch("/ok");');
+    writeFileSync(join(root, 'src/locked.ts'), 'export const hidden = () => fetch("/hidden");');
+    chmodSync(join(root, 'src/locked.ts'), 0o000);
+    const result = await runRoutesCommand(['--role', 'client', '--project', root], {
+      fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date('2026-10-01T00:00:00Z'),
+    });
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
+    assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+    assert.ok(document.limitations.includes(skippedProjectSources));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unparsed tsconfig is reported with the graph cause wording', async () => {
+  const doc = await scan('export const load = () => fetch("/ok");', [], {
+    'tsconfig.json': JSON.stringify({ extends: '@tsconfig/node20/tsconfig.json', compilerOptions: { baseUrl: '.', paths: { '@app/*': ['src/*'] } } }),
+  });
+  assert.deepEqual(doc.facts.map((fact) => fact.channel), ['/ok']);
+  assert.ok(doc.limitations.includes('route-call-coverage: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve'));
+});
+
+/** 상수 사슬 선언 줄이다. `<name>0`은 `base`이고, 단계마다 바로 앞 상수를 `spans`번 보간한다. */
+function constantChain(name: string, levels: number, spans: number, base: string): string[] {
+  const lines = [`const ${name}0 = '${base}';`];
+  for (let level = 1; level <= levels; level++) lines.push(`const ${name}${level} = \`${`\${${name}${level - 1}}`.repeat(spans)}\`;`);
+  return lines;
+}
+
+test('URL constant chains, query-suffix fanout and oversized literal joins stop at fixed bounds as unknown request paths', async () => {
+  // 예전에는 c8을 3^8 조각까지 펼치고, q14의 query 꼬리 판정을 2^14번 되풀이하고, 40 KB 리터럴 둘을 이어 붙였다.
+  // 펼치다 만 조각을 한 세그먼트 보간으로 남기면 좁은 정적 경로를 주장하므로 URL 전체를 모르는 값으로 낸다.
+  const big = 'a'.repeat(40_000);
+  const doc = await scan([
+    'declare const flag: boolean;',
+    ...constantChain('c', 8, 3, '/a'),
+    "const q0 = '?a';",
+    ...Array.from({ length: 14 }, (_, index) => `const q${index + 1} = flag ? q${index} : q${index};`),
+    `const big = '/${big}';`,
+    'export const chain = () => fetch(c8);',
+    'export const query = () => fetch(`/search${q14}`);',
+    'export const long = () => fetch(`${big}${big}`);',
+    "export const ok = () => fetch('/ok');",
+  ].join('\n'), [], { 'tsconfig.json': ambientTypesFreeConfig });
+  assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.pathAnchor, fact.dynamic]), [[null, 'base', true], [null, 'base', true], [null, 'base', true], ['/ok', 'root', false]]);
+  assert.ok(doc.limitations.some((text) => text.startsWith('unresolved-route-prefix:')));
+});
+
+test('a 14-level URL constant chain ends within the per-URL work budget instead of expanding 3^14 parts', async () => {
+  // 예전에는 조각 478만 개를 만들어 16초·RSS 2 GB를 썼다. 회귀가 이 검사만 실패하도록 감시하는 자식 프로세스로 돌린다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-chain-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"dependencies":{}}');
+    writeFileSync(join(root, 'src/client.ts'), [...constantChain('c', 14, 3, '/a'), 'export const chain = () => fetch(c14);', "export const ok = () => fetch('/ok');"].join('\n'));
+    const result = await runMainGuarded(['routes', '--role', 'client', '--project', root]);
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const document = JSON.parse(result.stdout) as { facts: Fact[] };
+    assert.deepEqual(document.facts.map((fact) => [fact.channel, fact.pathAnchor, fact.dynamic]), [[null, 'base', true], ['/ok', 'root', false]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

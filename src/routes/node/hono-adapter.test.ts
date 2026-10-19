@@ -3,9 +3,13 @@
  */
 
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { factLines, limitationsWith, packageJson, scanNodeProject } from './testing.test.ts';
+import { runMainGuarded } from '../../cli/testing.test.ts';
+import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
 
 /** 기본 package.json이다. */
 const hono = packageJson({ hono: '^4.6.0' });
@@ -140,4 +144,24 @@ test('인라인 핸들러 usr는 콜백 노드이고, 자기 노드를 얻지 �
     '/own src/index.ts#<module>.app.get("/own")',
   ]);
   assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 route handler(s) are inline functions without their own graph node').length, 1);
+});
+
+test('선택 세그먼트 16,000개 경로 한 줄도 펼칠 경로를 만들지 않고 상한 초과 dynamic 하나로 끝난다', async () => {
+  // 예전에는 펼칠 경로(세그먼트 n개에 O(n²) 문자)를 모두 만들어 컴파일한 뒤에야 상한을 적용해, 133 KB 경로 하나로 V8 힙이
+  // 바닥났다(종료 134). 회귀가 생겨도 테스트 프로세스가 아니라 이 검사만 실패하도록 시간·메모리를 감시하는 자식 프로세스로 돌린다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-hono-optional-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), hono);
+    const path = Array.from({ length: 16_000 }, (_, index) => `/:p${index}?`).join('');
+    writeFileSync(join(root, 'src/index.ts'), `import { Hono } from 'hono';\nconst app = new Hono();\napp.get('${path}', (c) => c.text('x'));\napp.get('/ok', (c) => c.text('ok'));\nexport default app;\n`);
+    const result = await runMainGuarded(['routes', '--role', 'server', '--project', root]);
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const document = JSON.parse(result.stdout) as NodeDocumentView;
+    assert.deepEqual(factLines(document).map((line) => line.replace(/^GET root \/:p0%3F\S*/u, 'GET root <optional>')).sort(), ['GET root /ok strict #1', 'GET root <optional> - dynamic #0']);
+    assert.equal(limitationsWith(document, 'route-template-expansion-capped: 1 route path(s)').length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

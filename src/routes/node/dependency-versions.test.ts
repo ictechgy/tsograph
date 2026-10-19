@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { Parser } from 'yaml';
+
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { declaredRanges, lockedVersions, majorOfRange, readProjectDependencies } from './dependency-versions.ts';
 import { detectFrameworks, hasNodeFramework } from './node-frameworks.ts';
@@ -72,6 +74,40 @@ test('package.json 선언과 잠금 파일을 합쳐 주 버전을 정한다', a
   assert.deepEqual([...broken.declared], []);
   assert.equal(broken.manifest, 'unusable');
   assert.equal((await readWith({ 'a.ts': '' })).manifest, 'absent');
+});
+
+test('yarn 머리 줄의 여러 키·따옴표·scope 이름과 버전 없는 항목을 이름마다 그대로 가린다', () => {
+  const text = [
+    '"@koa/router@^12.0.0", "@koa/router@^12.0.1":', '  version "12.0.2"', '',
+    'express@npm:@scope/fork@1.0.0:', '  dependencies:', '    version "0.0.1"', '  version: 4.0.0', '  version: 9.9.9', '',
+    'koa-router@^12:', '', 'express@^5:', '  version "5.1.0"', '',
+  ].join('\n');
+  assert.deepEqual(lockedVersions('yarn.lock', text, '@koa/router'), ['12.0.2']);
+  assert.deepEqual(lockedVersions('yarn.lock', text, 'express'), ['4.0.0', '5.1.0']);
+  assert.deepEqual(lockedVersions('yarn.lock', text, 'koa-router'), []);
+  assert.deepEqual(lockedVersions('yarn.lock', text, 'hono'), []);
+});
+
+test('잠금 파일은 선언한 프레임워크 수와 상관없이 처음 조회할 때 파일마다 한 번만 파싱한다', async (t) => {
+  const pnpm = ["lockfileVersion: '9.0'", 'importers:', '  .:', '    dependencies:',
+    ...[['express', '4.21.2'], ['hono', '4.6.14'], ['fastify', '5.2.0']].flatMap(([name, version]) => [`      ${name}:`, `        specifier: ^${version}`, `        version: ${version}`]),
+    '    devDependencies:', '      typescript:', '        specifier: 5.9.3', '        version: 5.9.3',
+    'packages:', '  express@4.21.2:', '    resolution: {integrity: sha512-x}', ''].join('\n');
+  const npm = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/express': { version: '4.21.2' }, 'node_modules/hono': { version: '4.6.14' }, 'node_modules/fastify': { version: '5.2.0' } } });
+  // npm은 JSON.parse, pnpm은 yaml의 parse가 문서마다 한 번 부르는 Parser.prototype.parse로 센다(잠금 파일 텍스트만).
+  const jsonParse = t.mock.method(JSON, 'parse');
+  const yamlParse = t.mock.method(Parser.prototype, 'parse');
+  const parses = (): readonly number[] => [
+    jsonParse.mock.calls.filter((call) => call.arguments[0] === npm).length,
+    yamlParse.mock.calls.filter((call) => call.arguments[0] === pnpm).length,
+  ];
+  const nextOnly = detectFrameworks(await readWith({ 'package.json': JSON.stringify({ dependencies: { next: '16.0.0' } }), 'package-lock.json': npm, 'pnpm-lock.yaml': pnpm }));
+  assert.equal(nextOnly.next, true);
+  assert.deepEqual(parses(), [0, 0]);
+  const declared = { dependencies: { express: '*', hono: '*', fastify: '*' } };
+  const detected = detectFrameworks(await readWith({ 'package.json': JSON.stringify(declared), 'package-lock.json': npm, 'pnpm-lock.yaml': pnpm }));
+  assert.deepEqual([detected.express?.major, detected.hono?.major, detected.fastify?.major, detected.unverified], [4, 4, 5, []]);
+  assert.deepEqual(parses(), [1, 1]);
 });
 
 test('symlink package.json은 읽지 않는다', async () => {

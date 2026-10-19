@@ -6,10 +6,9 @@
  * `ValueFlow`에 전달하지 않는다.
  */
 
-import { readFileSync, statSync } from 'node:fs';
-
 import ts from 'typescript';
 
+import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import type { FlowIndex } from './flow-index.ts';
 import { skipWrappers } from './node-collector.ts';
 
@@ -526,24 +525,28 @@ function nextPackageRoot(fileName: string): string | undefined {
   return undefined;
 }
 
-/** package.json의 name/version만 bounded하게 읽는다. 실패는 unknown으로 캐시한다. */
+/**
+ * package.json의 name/version만 bounded하게 읽는다. 실패는 unknown으로 캐시한다.
+ *
+ * 같은 package의 선언을 읽는 compiler host처럼 symlink는 따라가지만, FIFO·장치 같은 일반 파일이 아닌 대상은
+ * 기다리거나 끝없이 읽지 않는다.
+ */
 function packageManifest(root: string, cache: ModelCache): PackageManifest | undefined {
   if (cache.manifests.has(root)) return cache.manifests.get(root);
   let manifest: PackageManifest | undefined;
-  try {
-    const path = `${root}/package.json`;
-    if (statSync(path).size > MAX_PACKAGE_JSON_BYTES) {
-      cache.manifests.set(root, undefined);
-      return undefined;
+  const read = readBoundedFileBytes(`${root}/package.json`, MAX_PACKAGE_JSON_BYTES);
+  if (read.ok) {
+    try {
+      const parsed: unknown = JSON.parse(read.bytes.toString('utf8'));
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        && typeof (parsed as { name?: unknown }).name === 'string'
+        && typeof (parsed as { version?: unknown }).version === 'string') {
+        manifest = { name: (parsed as { name: string }).name, version: (parsed as { version: string }).version };
+      }
+    } catch {
+      // JSON이 아닌 manifest로는 SDK 버전을 증명하지 못한다.
+      manifest = undefined;
     }
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      && typeof (parsed as { name?: unknown }).name === 'string'
-      && typeof (parsed as { version?: unknown }).version === 'string') {
-      manifest = { name: (parsed as { name: string }).name, version: (parsed as { version: string }).version };
-    }
-  } catch {
-    manifest = undefined;
   }
   cache.manifests.set(root, manifest);
   return manifest;

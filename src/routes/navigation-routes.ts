@@ -21,10 +21,12 @@ import { scopeIdOf } from '../graph/symbol-ids.ts';
 import { MAX_TEMPLATE_LENGTH } from '../openapi/path-template.ts';
 import { canonicalizeLiteral } from '../openapi/percent-encoding.ts';
 import {
+  compilerConfigGaps,
   hasParseErrors,
   isNodeTestPath,
   loadNodeProject,
   type NodeProject,
+  type NodeProjectGaps,
 } from './node/node-project.ts';
 import { resolveAlias, symbolAt } from './node/symbols.ts';
 
@@ -781,15 +783,32 @@ function buildLimitations(
       `navigation-source-coverage: ${parseErrors} production source file(s) had parse errors and were not scanned`,
     );
   }
-  const gaps = project.gaps;
-  if (gaps.symlinks + gaps.unreadableDirectories + gaps.oversizedFiles > 0 || gaps.truncated) {
-    limitations.push(
-      'navigation-project-coverage: source discovery was incomplete '
-        + `(symlinks: ${gaps.symlinks}, unreadable directories: ${gaps.unreadableDirectories}, `
-        + `oversized files: ${gaps.oversizedFiles}, truncated: ${gaps.truncated})`,
-    );
-  }
+  limitations.push(...sourceDiscoveryLimitations(project.gaps));
+  limitations.push(...compilerConfigGaps(project.configStatus, 'screen registrations')
+    .map((gap) => `navigation-project-coverage: ${gap}`));
   return limitations;
+}
+
+/**
+ * 소스 수집 공백을 `navigation-project-coverage:` 한 줄로 만든다.
+ *
+ * 처음부터 있던 네 계수는 늘 싣고, 나중에 더한 계수는 0이 아닐 때만 괄호 끝에 덧붙인다 — 그 계수가 없는
+ * 프로젝트의 문구가 바뀌지 않게 하기 위해서다.
+ *
+ * @param gaps 소스 수집 공백
+ * @returns 공백이 없으면 빈 목록
+ */
+function sourceDiscoveryLimitations(gaps: NodeProjectGaps): string[] {
+  const added = ([['unsafe names', gaps.unsafeNames], ['unreadable files', gaps.unreadableFiles]] as const)
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => `, ${label}: ${count}`)
+    .join('');
+  if (gaps.symlinks + gaps.unreadableDirectories + gaps.oversizedFiles === 0 && !gaps.truncated && added === '') return [];
+  return [
+    'navigation-project-coverage: source discovery was incomplete '
+      + `(symlinks: ${gaps.symlinks}, unreadable directories: ${gaps.unreadableDirectories}, `
+      + `oversized files: ${gaps.oversizedFiles}, truncated: ${gaps.truncated}${added})`,
+  ];
 }
 
 function rootIdentifier(expression: ts.Expression): ts.Identifier | undefined {

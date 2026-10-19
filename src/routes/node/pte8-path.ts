@@ -38,20 +38,27 @@ const ID_CONTINUE = /^[$‌‍\p{ID_Continue}]$/u;
 interface ParseState {
   readonly chars: readonly string[];
   index: number;
+  /** 아직 토큰으로 내보내지 않은 텍스트 */
+  text: string;
+  /** 열린 그룹마다 모으는 토큰(맨 앞은 최상위) */
+  readonly groups: Token[][];
 }
 
 /**
  * path-to-regexp 8 경로 하나를 컴파일한다.
+ *
+ * 작업은 경로 길이에 선형이다. 선택 그룹이 상한 이상으로 겹치면 펼치지 않고 상한 초과로 낸다 — 그룹이 d겹이면 펼친
+ * 대안이 d+1개 이상이라 펼쳐도 같은 결과이고, 겹친 수만큼 깊어지는 재귀가 긴 경로 한 줄로 호출 스택을 넘지 않게 한다.
  *
  * @param path 경로 문자열
  * @param loosen 끝 슬래시를 떼는지(Express router의 non-strict `loosen`). @koa/router는 떼지 않는다.
  * @returns 컴파일 결과
  */
 export function compilePte8Path(path: string, loosen: boolean): CompiledPath {
-  const loosened = !loosen || path === '/' ? path : path.replace(/\/+$/u, '');
+  const loosened = !loosen || path === '/' ? path : trimTrailingSlashes(path);
   const tokens = parseTokens(loosened);
   if (tokens === undefined) return dynamicWithPrefix(loosened, 'unsupported-syntax');
-  const sequences = flattenGroups(tokens);
+  const sequences = groupDepth(tokens) >= MAX_TEMPLATE_VARIANTS ? undefined : flattenGroups(tokens);
   if (sequences === undefined) return dynamicWithPrefix(loosened, 'expansion-capped');
   const variants: PathVariant[] = [];
   for (const sequence of sequences) {
@@ -63,61 +70,90 @@ export function compilePte8Path(path: string, loosen: boolean): CompiledPath {
 }
 
 /**
+ * 끝 슬래시를 모두 뗀다(router `loosen`의 `/\/+$/` 치환과 같다). 정규식 치환은 끝이 아닌 긴 `/` 연속에서 시작
+ * 위치마다 연속의 끝까지 다시 맞춰 보아 길이의 제곱으로 느려지므로 뒤에서부터 센다.
+ *
+ * @param path 경로
+ * @returns 끝 슬래시를 뗀 경로
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path[end - 1] === '/') end -= 1;
+  return path.slice(0, end);
+}
+
+/**
  * 경로를 토큰으로 파싱한다(`parse`와 같은 규칙). 오류면 undefined다.
+ *
+ * 원본은 `{`마다 재귀하지만 여기서는 열린 그룹을 명시 스택으로 들고 간다. 그룹이 수천 겹인 경로 한 줄도 호출 스택을
+ * 넘지 않고 같은 토큰을 만든다.
  *
  * @param path 경로
  * @returns 토큰 목록 또는 undefined
  */
 export function parseTokens(path: string): Token[] | undefined {
-  const state: ParseState = { chars: [...path], index: 0 };
-  return consumeUntil(state, '');
+  const state: ParseState = { chars: [...path], index: 0, text: '', groups: [[]] };
+  while (state.index < state.chars.length) {
+    if (!consumeCharacter(state, state.chars[state.index++]!)) return undefined;
+  }
+  if (state.groups.length > 1) return undefined;
+  writeText(state);
+  return state.groups[0];
 }
 
 /**
- * 끝 문자까지 토큰을 읽는다.
+ * 문자 하나를 읽어 토큰 상태를 갱신한다(원본 `consume` 반복의 한 단계).
  *
  * @param state 상태
- * @param end 끝 문자(`''`는 문자열 끝)
- * @returns 토큰 목록 또는 undefined
+ * @param value 읽은 문자
+ * @returns 문법 오류면 false
  */
-function consumeUntil(state: ParseState, end: string): Token[] | undefined {
-  const output: Token[] = [];
-  let text = '';
-  const writeText = (): void => {
-    if (text !== '') output.push({ type: 'text', value: text });
-    text = '';
-  };
-  while (state.index < state.chars.length) {
-    const value = state.chars[state.index++]!;
-    if (value === end) {
-      writeText();
-      return output;
-    }
-    if (value === '\\') {
-      if (state.index === state.chars.length) return undefined;
-      text += state.chars[state.index++]!;
-      continue;
-    }
-    if (value === ':' || value === '*') {
-      const name = readName(state);
-      if (name === undefined) return undefined;
-      writeText();
-      output.push({ type: value === ':' ? 'param' : 'wildcard', name });
-      continue;
-    }
-    if (value === '{') {
-      writeText();
-      const tokens = consumeUntil(state, '}');
-      if (tokens === undefined) return undefined;
-      output.push({ type: 'group', tokens });
-      continue;
-    }
-    if ('}()[]+?!'.includes(value)) return undefined;
-    text += value;
+function consumeCharacter(state: ParseState, value: string): boolean {
+  if (value === '}' && state.groups.length > 1) {
+    writeText(state);
+    const tokens = state.groups.pop()!;
+    state.groups.at(-1)!.push({ type: 'group', tokens });
+    return true;
   }
-  if (end !== '') return undefined;
-  writeText();
-  return output;
+  if (value === '\\') {
+    if (state.index === state.chars.length) return false;
+    state.text += state.chars[state.index++]!;
+    return true;
+  }
+  if (value === ':' || value === '*') return consumeName(state, value);
+  if (value === '{') {
+    writeText(state);
+    state.groups.push([]);
+    return true;
+  }
+  if ('}()[]+?!'.includes(value)) return false;
+  state.text += value;
+  return true;
+}
+
+/**
+ * `:name`·`*name` 토큰을 읽는다.
+ *
+ * @param state 상태
+ * @param marker `:` 또는 `*`
+ * @returns 이름이 없거나 따옴표가 닫히지 않으면 false
+ */
+function consumeName(state: ParseState, marker: ':' | '*'): boolean {
+  const name = readName(state);
+  if (name === undefined) return false;
+  writeText(state);
+  state.groups.at(-1)!.push({ type: marker === ':' ? 'param' : 'wildcard', name });
+  return true;
+}
+
+/**
+ * 모은 텍스트를 지금 그룹의 텍스트 토큰으로 내보낸다.
+ *
+ * @param state 상태
+ */
+function writeText(state: ParseState): void {
+  if (state.text !== '') state.groups.at(-1)!.push({ type: 'text', value: state.text });
+  state.text = '';
 }
 
 /**
@@ -145,7 +181,28 @@ function readName(state: ParseState): string | undefined {
 }
 
 /**
+ * 가장 깊은 선택 그룹 중첩 수다(`{a}`는 1). 경로 길이만큼 깊을 수 있어 재귀하지 않는다.
+ *
+ * @param tokens 토큰 목록
+ * @returns 중첩 수
+ */
+function groupDepth(tokens: readonly Token[]): number {
+  let deepest = 0;
+  const pending: { readonly tokens: readonly Token[]; readonly depth: number }[] = [{ tokens, depth: 0 }];
+  for (let item = pending.pop(); item !== undefined; item = pending.pop()) {
+    deepest = Math.max(deepest, item.depth);
+    for (const token of item.tokens) {
+      if (token.type === 'group') pending.push({ tokens: token.tokens, depth: item.depth + 1 });
+    }
+  }
+  return deepest;
+}
+
+/**
  * 선택 그룹을 넣은 것과 뺀 것으로 펼친다(`flatten`과 같은 순서). 조합이 상한을 넘으면 undefined다.
+ *
+ * 그룹이 아닌 토큰은 모든 대안 끝에 그대로 붙인다. 대안 배열은 서로 공유하지 않으므로(그룹을 펼칠 때 새로 만든다)
+ * 복사하지 않고 붙여 토큰 수에 선형이다.
  *
  * @param tokens 토큰 목록
  * @returns 평평한 토큰 목록의 목록 또는 undefined
@@ -154,7 +211,7 @@ function flattenGroups(tokens: readonly Token[]): Token[][] | undefined {
   let results: Token[][] = [[]];
   for (const token of tokens) {
     if (token.type !== 'group') {
-      results = results.map((result) => [...result, token]);
+      for (const result of results) result.push(token);
       continue;
     }
     const inner = flattenGroups(token.tokens);

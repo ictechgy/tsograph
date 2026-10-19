@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { ambientTypesFreeConfig, linkToDevZero, makeFifo } from '../cli/testing.test.ts';
+import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { buildCallGraph } from './build-graph.ts';
-import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText } from './bounded-config-reader.ts';
+import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText, readBoundedFileBytes } from './bounded-config-reader.ts';
 import { GraphProjectInputError, createGraphProgram } from './program.ts';
 import { SdkSourceFileCache, sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
@@ -146,6 +149,72 @@ test('bounded config reader preserves TypeScript BOM encodings', async () => {
     for (const name of ['utf8.json', 'utf16le.json', 'utf16be.json']) {
       const result = createGraphProgram(root, [], ts.createProgram, join(root, name));
       assert.equal(result.program.getCompilerOptions().strict, true, name);
+    }
+  });
+});
+
+test('bounded reader는 없는 파일만 missing으로 두고 FIFO·장치·디렉터리는 기다리지 않고 unreadable로 본다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  await withProject({ 'directory/x.json': '{}' }, (root) => {
+    makeFifo(join(root, 'pipe.json'));
+    linkToDevZero(join(root, 'zero.json'));
+    assert.deepEqual(readBoundedConfigText(join(root, 'missing.json')), { ok: false, reason: 'missing' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'missing.json'), 8), { ok: false, reason: 'missing' });
+    for (const name of ['pipe.json', 'zero.json', 'directory']) {
+      assert.deepEqual(readBoundedFileBytes(join(root, name), 8), { ok: false, reason: 'unreadable' }, name);
+      assert.deepEqual(readBoundedConfigText(join(root, name), 8), { ok: false, reason: 'unreadable' }, name);
+    }
+  });
+});
+
+test('bounded bytes reader는 상한을 지키고 BOM을 지우지 않으며 상한 인자를 검증한다', async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{}')]);
+  await withProject({ 'bom.json': bom, 'over.json': Buffer.from('123456789') }, (root) => {
+    const read = readBoundedFileBytes(join(root, 'bom.json'), 8);
+    assert.equal(read.ok && read.bytes.equals(bom), true);
+    assert.deepEqual(readBoundedFileBytes(join(root, 'over.json'), 8), { ok: false, reason: 'too-large' });
+    assert.throws(() => readBoundedFileBytes(join(root, 'bom.json'), -1), RangeError);
+  });
+});
+
+test('noFollow는 마지막 symlink를 열지 않고 기본값은 일반 파일 대상을 따라간다', {
+  skip: !constants.O_NOFOLLOW,
+}, async () => {
+  await withProject({ 'target.json': '{}' }, (root) => {
+    symlinkSync(join(root, 'target.json'), join(root, 'link.json'));
+    symlinkSync(join(root, 'absent.json'), join(root, 'dangling.json'));
+    assert.deepEqual(readBoundedConfigText(join(root, 'link.json')), { ok: true, text: '{}' });
+    assert.deepEqual(readBoundedConfigText(join(root, 'link.json'), 8, { noFollow: true }), { ok: false, reason: 'unreadable' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'dangling.json'), 8), { ok: false, reason: 'missing' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'dangling.json'), 8, { noFollow: true }), { ok: false, reason: 'unreadable' });
+    assert.deepEqual(readBoundedFileBytes(join(root, 'target.json'), 8, { noFollow: true }), { ok: true, bytes: Buffer.from('{}') });
+  });
+});
+
+test('graph 모듈 해석기도 compiler host와 같은 상한으로 package.json을 읽는다', async (t) => {
+  await withProject({
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/main.ts': 'import { value } from "./lib";\nexport function read() { return value; }\n',
+    'src/lib/package.json': `{"main":"other.ts"}${' '.repeat(MAX_SOURCE_BYTES)}`,
+    'src/lib/index.ts': 'export const value = 1;\n',
+    'src/lib/other.ts': 'export const value = 2;\n',
+  }, async (root) => {
+    const originalReadFileSync = fs.readFileSync;
+    const unboundedManifestReads: string[] = [];
+    t.mock.method(fs, 'readFileSync', function readFileSync(this: unknown, ...arguments_: Parameters<typeof fs.readFileSync>) {
+      if (String(arguments_[0]).endsWith('/src/lib/package.json')) unboundedManifestReads.push(String(arguments_[0]));
+      return originalReadFileSync.apply(this, arguments_);
+    });
+    syncBuiltinESMExports();
+    try {
+      const graph = await buildCallGraph(root, createNodeFileSystem());
+      assert.deepEqual(unboundedManifestReads, []);
+      assert.ok(graph.limitations.some((line) => line.startsWith('oversized-compiler-inputs:')));
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
     }
   });
 });

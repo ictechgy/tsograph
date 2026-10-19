@@ -25,3 +25,29 @@ test('텍스트 읽기: BOM 보존, 디렉터리·크기 초과·자라난 파�
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('텍스트 읽기는 읽기 단계에도 상한을 넘겨 메타데이터 확인 뒤 자란 파일을 상한+1 바이트까지만 읽는다', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'tsograph-text-'));
+  try {
+    const file = join(directory, 'grown.ts');
+    writeFileSync(file, 'x'.repeat(64));
+    const base = createNodeFileSystem();
+    const caps: (number | undefined)[] = [];
+    let returnedBytes = 0;
+    const stale: CommandFileSystem = {
+      ...base,
+      status: async () => ({ kind: 'file', size: 1, modifiedAt: new Date(0) }),
+      readBytes: async (path, maximumBytes) => {
+        caps.push(maximumBytes);
+        const bytes = await base.readBytes(path, maximumBytes);
+        returnedBytes = bytes.byteLength;
+        return bytes;
+      },
+    };
+    assert.deepEqual(await readTextFile(stale, file, 8), { kind: 'failure', reason: 'too-large' });
+    assert.deepEqual(caps, [8]);
+    assert.equal(returnedBytes, 9);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

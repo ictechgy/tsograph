@@ -9,7 +9,7 @@
  * 가는 호출은 외부로 센다.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
@@ -20,11 +20,12 @@ import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
 import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
 import { extractProjectRoutes } from '../routes/project-routes.ts';
-import { createRouteDocument } from '../routes/route-document.ts';
+import { createRouteDocument, type RouteFactLimitCause, RouteFactLimitError } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
 import { isSourceFileName } from '../schema/source-module.ts';
+import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
@@ -76,6 +77,11 @@ interface RouteInputs {
   readonly extraction: NextRoutesResult;
   readonly facts: readonly RouteDeclFact[];
   readonly pageExtensions: readonly string[];
+  /**
+   * 라우트 문서가 사실 상한 실패로 끝나 facts가 비었으면 그 원인이다(Next 라우트가 없는 Node 백엔드도 포함). 사실 수 초과와
+   * Node 라우터 펼치기 상한 초과를 나눠 진입점 한계 문장이 실제 원인을 가리키게 한다. 상한 안이면 undefined다.
+   */
+  readonly factLimitCause: RouteFactLimitCause | undefined;
 }
 
 /** limitation을 만드는 데 필요한 계수다. */
@@ -86,10 +92,13 @@ interface GraphCounts {
   readonly config: ProgramConfigStatus;
   readonly inputs: GraphInputs;
   readonly parseErrorFiles: readonly string[];
+  /** 걷기가 골랐지만 compiler host가 읽지 못해 노드 파일이 되지 못한 소스 수 */
+  readonly unreadableSources: number;
   readonly unresolvedExports: number;
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
-  readonly routeFactsTruncated: boolean;
+  /** 라우트 사실을 진입점 표식에 쓰지 못한 사실 상한 실패의 원인(없으면 undefined) */
+  readonly routeFactLimit: RouteFactLimitCause | undefined;
   /** bound의 열린 프로그램 판정 이유(없으면 닫힌 프로그램) */
   readonly openProgram: OpenProgramReason | undefined;
 }
@@ -125,10 +134,13 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   const { program, checker, status } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
   const files = nodeFiles(program, inputs.sources);
+  // 걷기가 고른 소스 중 Program에 없는 것은 compiler host가 읽지 못했다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
+  // 읽는 백슬래시 이름). host의 'unreadable' 전체를 세면 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조한다.
+  const unreadableSources = inputs.sources.size - files.size;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
-    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
@@ -140,13 +152,14 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length);
+  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
-    ...analysis, config: status, inputs, parseErrorFiles, unmatchedCrons, openProgram,
-    cronConfigUnreadable: crons.unreadable, routeFactsTruncated: routes.facts.length === 0 && routes.extraction.routes.length > 0,
+    ...analysis, config: status, inputs, parseErrorFiles, unreadableSources, unmatchedCrons, openProgram,
+    cronConfigUnreadable: crons.unreadable,
+    routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
   const environmentLimits: string[] = [];
   if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
@@ -158,41 +171,39 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
 
 /**
  * bound 디스패치가 프로그램을 열린 것으로 봐야 하는 이유다: 공개 패키지(스캔 밖 코드가 내보낸 선언을
- * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink, 구문 오류) 보지 못한 호출자가 있을 수 있다.
+ * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink·금지 문자 이름, 컴파일러가 읽지 못한 소스,
+ * 구문 오류) 보지 못한 호출자가 있을 수 있다.
  *
  * @param project 프로젝트 realpath
  * @param inputs 입력 파일
  * @param parseErrors 구문 오류 파일 수
+ * @param unreadableSources 걷기가 골랐지만 compiler host가 읽지 못한 소스 수
  * @returns 이유, 닫힌 프로그램이면 undefined
  */
-function openProgramReason(project: string, inputs: GraphInputs, parseErrors: number): OpenProgramReason | undefined {
+function openProgramReason(project: string, inputs: GraphInputs, parseErrors: number, unreadableSources: number): OpenProgramReason | undefined {
   const manifest = readManifestEntry(project);
   if (manifest !== 'private') return manifest;
   const walk = inputs.walk;
-  const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0 || parseErrors > 0;
+  const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0
+    || walk.unsafeNames > 0 || unreadableSources > 0 || parseErrors > 0;
   return incomplete ? 'incomplete-scan' : undefined;
 }
 
 /**
  * 프로젝트 루트 `package.json`이 공개 진입점 필드(main·module·exports·bin·types·typings·browser)를 선언했는지
  * 본다. 파일이 없으면 공개 표식도 없다. 있는데 1 MiB를 넘거나 JSON 객체로 읽지 못하면 판단할 수 없으므로
- * 열린 쪽으로 본다(추측하지 않는다).
+ * 열린 쪽으로 본다(추측하지 않는다). symlink·FIFO·장치 같은 일반 파일이 아닌 것도 읽지 못한 것으로 본다.
  *
  * @param project 프로젝트 realpath
  * @returns 공개 패키지·판단 불가·비공개
  */
 function readManifestEntry(project: string): 'public-package' | 'unreadable-manifest' | 'private' {
-  const path = join(project, 'package.json');
-  let text: string;
+  const read = readBoundedFileBytes(join(project, 'package.json'), MAX_PACKAGE_JSON_BYTES, { noFollow: true });
+  // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한·링크·비일반 파일·상한)는 판단할 수 없다.
+  if (!read.ok) return read.reason === 'missing' ? 'private' : 'unreadable-manifest';
   try {
-    if (statSync(path).size > MAX_PACKAGE_JSON_BYTES) return 'unreadable-manifest';
-    text = readFileSync(path, 'utf8');
-  } catch (error) {
-    // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한 등)는 판단할 수 없다.
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'private' : 'unreadable-manifest';
-  }
-  try {
-    const manifest: unknown = JSON.parse(text);
+    // BOM을 지우지 않고 UTF-8로 읽는다. routes의 manifest 읽기처럼 BOM이 붙은 파일은 JSON으로 보지 않는다.
+    const manifest: unknown = JSON.parse(read.bytes.toString('utf8'));
     if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return 'unreadable-manifest';
     return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
   } catch {
@@ -301,15 +312,18 @@ async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): 
   const config = routes.next?.config;
   const pageExtensions = config?.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
   let facts: readonly RouteDeclFact[] = [];
+  let factLimitCause: RouteFactLimitCause | undefined;
   try {
     facts = createRouteDocument({
       next: routes.next, node: routes.node, project, service: undefined, includeTests: false, toolVersion: '', generatedAt: new Date(0),
     }).facts;
-  } catch {
-    // 사실 상한 초과면 진입점 표식 없이 계속하고 limitation으로 알린다(buildLimitations의 routeFactsTruncated).
+  } catch (error) {
+    // 사실 상한 초과면 진입점 표식 없이 계속하고 limitation으로 알린다(buildLimitations의 routeFactLimit).
+    // Next 라우트가 없는 Node 백엔드도 알리도록 상한 초과와 그 원인을 따로 기록한다.
+    factLimitCause = error instanceof RouteFactLimitError ? error.limitCause : undefined;
     facts = [];
   }
-  return { extraction, facts, pageExtensions };
+  return { extraction, facts, pageExtensions, factLimitCause };
 }
 
 /**
@@ -358,7 +372,8 @@ function isOversized(absolute: string): boolean {
 }
 
 /**
- * Program의 소스 파일 중 노드 파일을 고른다.
+ * Program의 소스 파일 중 노드 파일을 고른다. compiler host가 읽지 못해 SourceFile이 없는 소스는 빠지며,
+ * 호출자가 기대 소스 수와의 차이로 그 수를 센다.
  *
  * @param program Program
  * @param sources 노드 파일(프로젝트 기준 경로 → 절대 경로)
@@ -420,7 +435,7 @@ function collectParseErrorFiles(files: ReadonlyMap<string, ts.SourceFile>): stri
 /** `vercel.json`에서 읽은 cron 경로다. */
 interface CronPaths {
   readonly paths: readonly string[];
-  /** 파일이 있지만 JSON으로 읽지 못했는지 여부 */
+  /** 파일이 있지만 1 MiB 안의 일반 파일 JSON으로 읽지 못했는지 여부 */
   readonly unreadable: boolean;
 }
 
@@ -431,17 +446,11 @@ interface CronPaths {
  * @returns cron 경로와 읽기 실패 여부
  */
 function readCronPaths(project: string): CronPaths {
-  let text: string;
+  const read = readBoundedFileBytes(join(project, 'vercel.json'), MAX_VERCEL_CONFIG_BYTES, { noFollow: true });
+  // vercel.json이 없으면 cron도 없다. 있는데 읽지 못하면(권한·링크·비일반 파일·상한) cron을 알 수 없다고 알린다.
+  if (!read.ok) return { paths: [], unreadable: read.reason !== 'missing' };
   try {
-    const path = join(project, 'vercel.json');
-    if (statSync(path).size > MAX_VERCEL_CONFIG_BYTES) return { paths: [], unreadable: true };
-    text = readFileSync(path, 'utf8');
-  } catch {
-    // vercel.json이 없으면 cron도 없다.
-    return { paths: [], unreadable: false };
-  }
-  try {
-    const crons: unknown = (JSON.parse(text) as { crons?: unknown }).crons;
+    const crons: unknown = (JSON.parse(read.bytes.toString('utf8')) as { crons?: unknown }).crons;
     const entries = Array.isArray(crons) ? crons : [];
     return { paths: entries.flatMap((entry) => (typeof entry?.path === 'string' ? [entry.path as string] : [])), unreadable: false };
   } catch {
@@ -568,7 +577,7 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
  * @param counts 계수
  * @returns limitation 목록
  */
-function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
+function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactLimit }: GraphCounts): string[] {
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
@@ -582,10 +591,18 @@ function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadabl
   }
   if (inputs.oversized > 0) result.push(`oversized-sources: ${inputs.oversized} file(s) larger than 4 MiB were skipped`);
   if (inputs.walk.unreadableDirectories > 0) result.push(`unreadable-sources: ${inputs.walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
+  if (unreadableSources > 0) result.push(`unreadable-sources: ${unreadableSources} source file(s) could not be read by the compiler and were skipped`);
   if (inputs.walk.skippedSymlinks > 0) result.push(`skipped-symlinks: ${inputs.walk.skippedSymlinks} symbolic link(s) were not followed`);
+  if (inputs.walk.unsafeNames > 0) {
+    result.push(`unsafe-names: ${inputs.walk.unsafeNames} file or directory name(s) contain characters the exchange format forbids and were skipped`);
+  }
   if (inputs.walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   if (cronConfigUnreadable) result.push('entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown');
-  if (routeFactsTruncated) result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');
+  if (routeFactLimit === 'facts') result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');
+  if (routeFactLimit === 'flattened-routes') {
+    result.push("entry-points: the project's routers expand to more route registrations than the flattening limit when routers mounted at "
+      + 'several paths are flattened; route handlers are not marked');
+  }
   return result;
 }
 

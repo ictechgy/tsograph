@@ -4,7 +4,7 @@
 
 import type { FrameworkRoutes } from './flat-route.ts';
 import type { LimitationEntry } from './node-facts.ts';
-import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
+import { compilerConfigGaps, MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import type { NodeRoutesResult } from './node-routes.ts';
 import { MAX_CALL_DEPTH } from './router-interpreter.ts';
 
@@ -42,11 +42,15 @@ export function nodeProjectLimitations(result: NodeRoutesResult): LimitationEntr
   const candidates: [number, string][] = [
     [gaps.symlinks, `route-coverage: ${gaps.symlinks} symbolic link(s) in the project were not followed; routers behind them were not scanned`],
     [gaps.unreadableDirectories, `route-coverage: ${gaps.unreadableDirectories} director(ies) could not be listed`],
+    [gaps.unsafeNames, `route-coverage: ${gaps.unsafeNames} file or directory name(s) in the project contain characters the exchange format forbids; routers in them were not scanned`],
     [Number(gaps.truncated), 'route-coverage: the source scan stopped at its entry limit; later files were not analyzed'],
     [gaps.oversizedFiles, `route-coverage: ${gaps.oversizedFiles} source file(s) exceed ${MAX_NODE_SOURCE_BYTES} bytes and were not analyzed`],
+    [gaps.unreadableFiles, `route-coverage: ${gaps.unreadableFiles} source file(s) could not be read by the compiler and were not analyzed`],
     [analysis.syntaxErrorFiles, `route-coverage: ${analysis.syntaxErrorFiles} source file(s) have syntax errors; route registrations in them may be incomplete`],
     [analysis.truncatedCalls, `route-coverage: ${analysis.truncatedCalls} function call(s) were not followed (recursion, depth ${MAX_CALL_DEPTH}, or the frame limit); routes registered inside them may be missing`],
   ];
   entries.push(...candidates.filter(([count]) => count > 0).map(([, text]) => ({ text })));
+  // 설정 해석 실패면 paths 별칭으로 붙인 라우터를 놓치거나 패키지로 볼 수 있어 문서 전체(스코프 없음)에 건다.
+  entries.push(...compilerConfigGaps(analysis.project.configStatus, 'route registrations').map((gap) => ({ text: `route-coverage: ${gap}` })));
   return entries;
 }

@@ -22,7 +22,9 @@ tsograph가 Hono·Express·Fastify·Koa(@koa/router)·NestJS 프로젝트에서 
 
 분석 대상 코드는 실행하지 않는다. `tsograph graph`와 같은 방식으로 TypeScript `Program`·`TypeChecker`(루트 `tsconfig.json`, 없으면
 `jsconfig.json`, 없으면 번들러 해석 기본값, `allowJs` 켬)를 만들어 import·재수출·기본 내보내기·CommonJS `require`를 따라간다.
-emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서는 Program을 만들지 않는다.
+emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서는 Program을 만들지 않는다. 설정(`extends` 대상 포함)을 해석하지
+못하면 기본 옵션으로 계속하되 경로 별칭이 풀리지 않을 수 있으므로, 4 MiB를 넘어 읽지 않은 compiler 입력과 함께 graph와 같은
+원인 문구의 스코프 없는 `route-coverage:`로 알린다.
 
 ## 해석기
 
@@ -43,7 +45,9 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
   Express `Router`·`Express`·`Application`, @koa/router `Router`, `FastifyInstance`)는 붙는 위치를 모르는 라우터로 보고
   `pathAnchor: "base"`와 `unresolved-route-prefix:`로 낸다.
 - 경로 값은 문자열 리터럴, `const`, import한 상수, 열거형 멤버, `as const` 객체 속성, 템플릿 문자열·`+` 연결을 따라간다. 앞부분만
-  확정되면(`` `/users/${id}` ``) dynamic 사실의 `dynamicScope` 접두사로 쓴다. 등록 호출의 첫 인자는 리터럴·확정 문자열이면 경로,
+  확정되면(`` `/users/${id}` ``) dynamic 사실의 `dynamicScope` 접두사로 쓴다. 경로 값 하나는 4,096단계(식 하나를 구하는 호출)와
+  이은 템플릿·`+` 문자열 64 KiB 안에서만 구한다 — 같은 상수를 거듭 보간하는 상수 사슬은 깊이 상한(16) 안에서도 해석이 보간 수의
+  거듭제곱으로 늘기 때문이다. 넘으면 그때까지 증명한 앞부분만 접두사로 쓴다. 등록 호출의 첫 인자는 리터럴·확정 문자열이면 경로,
   함수·라우터·패키지 미들웨어로 풀리면 아니며, 둘 다 아니면 타입이 문자열 계열이거나 뒤에 인자가 더 있을 때 경로로 본다
   (`app.use(process.env.PREFIX, router)`를 루트 mount로 잘못 읽지 않기 위해서다).
 
@@ -141,6 +145,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 - **0세그먼트 catch-all**(Hono `/x/*`, Express `:x*?`, @koa/router `:x*`): `/x/{**}`와 `/x` 접두사 decl(`catchAllPrefix: true`, usr가
   있을 때만)을 함께 낸다. **빈 값 변형**(Express 4 `*`, find-my-way 파라미터·`*`)은 그 자리를 빈 값으로 채운 decl을 같은
   method·symbol·location으로 더한다. 펼친 템플릿이 16개를 넘으면 dynamic과 `route-template-expansion-capped:`다.
+  Express는 mount 접두사의 대안을 단계마다 곱하므로(선택 그룹 넷이면 16배), 이은 대안이 2,000개를 넘으면 늘어놓지 않고
+  같은 dynamic·`route-template-expansion-capped:`로 내며 그 접두사의 스코프는 싣지 않는다(문서 전체 효과).
 - **paramConstraints**: 파라미터 정규식이 숫자만 받으면 `int`, slug 문자(`[-A-Za-z0-9_]`)만 받으면 `slug`, 그 밖은 `regex`와 원문,
   catch-all은 정보용 `path`. `/`를 받을 수 있거나 빈 값을 받는 정규식은 dynamic이다(`.+`는 끝 catch-all).
 - **trailingSlash**: 끝 슬래시를 정확히 비교하면 `strict`, 선택이면 `optional`, 빈 값 변형으로 생긴 끝 슬래시는 `strict`, `{**}`로
@@ -171,7 +177,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 | 핸들러가 프로젝트 밖·해석 불가, 마지막 핸들러가 펼침(`get('/x', ...handlers)`) | usr 없음·순서 없음, `missing-route-usrs:`(체인 전용) |
 | 자기 노드를 얻지 못한 인라인 핸들러(계산된 이름 멤버 안), 요청을 넘긴다고 본 미들웨어 | `framework-dispatch-unmodeled:`(체인 전용) |
 | 순서를 증명하지 못한 decl | `route-dispatch-order-unknown:` + 템플릿 스코프 |
-| 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
+| 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 교환 형식이 금지하는 문자가 든 파일·디렉터리 이름, 컴파일러가 읽지 못한 파일(권한, 걷기 뒤 삭제, 백슬래시가 든 이름), 해석하지 못한 `tsconfig.json`·`jsconfig.json`, 4 MiB를 넘는 compiler 입력, 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
+| 사실이 100,000개를 넘음(공유 하위 라우터를 여러 경로에 붙이면 펼친 라우트가 mount 단계마다 곱으로 는다) | 부분 문서 없이 종료 코드 `2`. Hono·Express·Koa는 펼치면서 서로 다른 (method, 앵커, channel) 수를 세어 상한을 넘는 즉시 멈춘다. 같은 사실로 합쳐지거나 사실을 내지 않는(조건부) 등록도 펼친 수가 200,000개(사실 상한의 2배)를 넘으면 멈추며, 이때 문구는 사실 수가 아니라 펼친 등록 수(`more than 200000 route registrations`)를 원인으로 든다. `tsograph graph`는 라우트 핸들러를 진입점으로 표시하지 못하고 그 원인의 `entry-points:`로 알린다 |
 
 ## 결정(초안·형제 도구와 다른 부분)
 

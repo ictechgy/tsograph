@@ -8,9 +8,11 @@ import { join } from 'node:path';
 import type { CallGraph } from '../graph/graph-model.ts';
 import { graphOutputChunks } from '../graph/graph-output.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
+import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { type GraphEnvironment, graphUsage, impactUsage, reachUsage, render, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { runCli } from './run-cli.ts';
+import { ambientTypesFreeConfig } from './testing.test.ts';
 
 const fixture = realpathSync(fileURLToPath(new URL('../../fixtures/graph/next-prisma/', import.meta.url)));
 const fixedNow = new Date('2026-09-27T00:00:00.000Z');
@@ -93,6 +95,15 @@ test('explicit input failures keep actionable reasons and internal builder failu
   assert.equal(unsafe.exitCode, 2);
   assert.match(unsafe.standardError, /workspace path contains/);
   assert.equal(builds, 0);
+});
+
+test('그래프 생성 중 스택 초과는 graph·reach·impact 모두 공용 원인 문구의 2이고 다른 RangeError는 전파한다', async () => {
+  const exhausted = environment({ buildGraph: async () => { throw new RangeError('Maximum call stack size exceeded'); } });
+  assert.deepEqual(await runGraphCommand(['--project', '.'], exhausted), stackExhaustionFailure());
+  assert.deepEqual(await runReachCommand(['--project', '.', 'a.ts#a'], exhausted), stackExhaustionFailure());
+  assert.deepEqual(await runImpactCommand(['--project', '.', 'a.ts#a'], exhausted), stackExhaustionFailure());
+  await assert.rejects(runGraphCommand(['--project', '.'], environment({ buildGraph: async () => { throw new RangeError('Map maximum size exceeded'); } })),
+    { name: 'RangeError', message: 'Map maximum size exceeded' });
 });
 
 test('--generated-at은 시각을 고정하고 잘못된 값은 64다', async () => {
@@ -492,6 +503,31 @@ test('저장 그래프의 endpoint·revision·duplicate·UTF-8·크기·읽기 �
     assert.equal(oversized.standardOutput, '');
     assert.match(oversized.standardError, /134217728 bytes/u);
     assert.equal(read, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('금지 문자 이름 파일이 있는 프로젝트의 graph 출력도 reach --graph-file로 다시 읽힌다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-unsafe-graph-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"private":true}');
+    writeFileSync(join(root, 'src/index.ts'), 'export function start() { return finish(); }\nexport function finish() { return 1; }\n');
+    writeFileSync(join(root, 'src/a\u001bb.ts'), 'export function hidden() { return 1; }\n');
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
+    const snapshot = await runGraphCommand(['--project', root], environment());
+    assert.equal(snapshot.exitCode, 0, snapshot.standardError);
+    const graphFile = join(root, 'graph.json');
+    writeFileSync(graphFile, snapshot.standardOutput);
+    const reach = await runReachCommand(['--graph-file', graphFile, 'src/index.ts#start'], environment());
+    assert.equal(reach.exitCode, 0, reach.standardError);
+    const document = JSON.parse(reach.standardOutput);
+    assert.deepEqual(document.reached.map((row: { symbol: { usr: string } }) => row.symbol.usr), ['src/index.ts#finish']);
+    assert.ok(document.limitations.some((line: string) => line.startsWith('unsafe-names: 1 file or directory name(s)')));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

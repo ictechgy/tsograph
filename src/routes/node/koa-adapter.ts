@@ -21,6 +21,7 @@ import type { HttpMethod, RouteDeclMethod } from '../../exchange/bridge-facts.ts
 import { type CopyCutoff, eventsByInstance, type FlatProvided, type FlatRoute, type FrameworkRoutes, type OrderCounter, partitionEvents, takeOrder } from './flat-route.ts';
 import { instanceGroupName } from './group-name.ts';
 import { classifyPackageMiddleware } from './middleware-packages.ts';
+import type { NodeFactBudget } from './node-facts.ts';
 import type { NodeProject } from './node-project.ts';
 import { type CompiledPath, prefixTemplates, ROOT_VARIANT } from './path-model.ts';
 import { compilePte6Path } from './pte6-path.ts';
@@ -298,6 +299,8 @@ interface FlattenContext {
   middlewareCount: number;
   exclusiveRoutes: number;
   readonly active: Set<RouterInstance>;
+  /** 프레임워크가 함께 쓰는 사실 하한 계수기. 상한을 넘으면 남은 사건을 펼치지 않는다 */
+  readonly budget: NodeFactBudget;
 }
 
 /** 라우터 경로 옵션이다. */
@@ -323,13 +326,14 @@ interface OuterPrefix {
  * @param instances 인스턴스
  * @param events 사건
  * @param routerMajor 라우터 주 버전(모르면 undefined)
+ * @param budget 사실 하한 계수기(상한을 넘으면 펼치기를 멈춘다)
  * @returns Koa 추출 결과
  */
-export function flattenKoa(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], routerMajor: number | undefined): FrameworkRoutes {
+export function flattenKoa(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], routerMajor: number | undefined, budget: NodeFactBudget): FrameworkRoutes {
   const koa = instances.filter((instance) => instance.framework === 'koa');
   const koaEvents = events.filter((event) => event.target.instance.framework === 'koa');
   const grammar: KoaGrammar = routerMajor === undefined ? undefined : routerMajor >= 14 ? 8 : 6;
-  const context: FlattenContext = { byInstance: eventsByInstance(koaEvents), grammar, routes: [], provided: [], middlewareCount: 0, exclusiveRoutes: 0, active: new Set() };
+  const context: FlattenContext = { byInstance: eventsByInstance(koaEvents), grammar, routes: [], provided: [], middlewareCount: 0, exclusiveRoutes: 0, active: new Set(), budget };
   const mounted = new Set(koaEvents.flatMap((event) => (event.kind === 'mount' ? event.children.map((child) => child.instance) : [])));
   for (const root of koa.filter((instance) => !mounted.has(instance))) {
     const counter: OrderCounter = { group: root.kind === 'opaque' ? undefined : instanceGroupName('koa', project, root), next: 0, assigned: new Map() };
@@ -383,7 +387,7 @@ function walkInstance(context: FlattenContext, instance: RouterInstance, outer: 
 }
 
 /**
- * 사건 하나를 펼친다.
+ * 사건 하나를 펼친다. 사실 하한이 상한을 넘었으면 펼치지 않는다(문서는 사실 상한 실패로 끝나므로 남은 사건은 쓰이지 않는다).
  *
  * @param context 펼치기 문맥
  * @param event 사건
@@ -393,6 +397,7 @@ function walkInstance(context: FlattenContext, instance: RouterInstance, outer: 
  * @param isOrdered 순서를 증명했는지
  */
 function handleEvent(context: FlattenContext, event: RouterEvent, outer: OuterPrefix, policy: RouterPolicy, counter: OrderCounter, isOrdered: boolean): void {
+  if (context.budget.isExceeded) return;
   if (event.kind === 'route') return routeEvent(context, event, outer, policy, counter, isOrdered);
   if (event.kind === 'mount') return mountEvent(context, event, outer, policy, counter, isOrdered);
   if (event.kind === 'provided') return context.provided.push(providedOf(context, event, outer, policy)), undefined;
@@ -415,7 +420,7 @@ function routeEvent(context: FlattenContext, event: RouteEvent, outer: OuterPref
     const joined = joinKoa([path.value, policy.prefix, ...outer.pieces], policy.strict === true);
     const compiled = compileJoined(context, joined, event.openEnded === true);
     const provable = isOrdered && policy.exclusive === false && !event.handler.mayCallNext && !event.site.conditional;
-    context.routes.push({
+    const route: FlatRoute = {
       handler: event.handler,
       unsupportedMethods: event.unsupportedMethods,
       methods: event.methods,
@@ -428,7 +433,9 @@ function routeEvent(context: FlattenContext, event: RouteEvent, outer: OuterPref
       caseInsensitive: policy.sensitive === false,
       narrowed: event.narrowed || policy.host,
       conditional: event.site.conditional,
-    });
+    };
+    context.routes.push(route);
+    context.budget.add(route);
   }
 }
 

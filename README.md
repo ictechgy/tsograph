@@ -52,14 +52,20 @@ invocations retain the inner dynamic request so known calls do not hide other po
 
 URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`baseUrl`), with shared
 isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
-major version. Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
-fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
+major version in a regular, non-symlink root `package.json` within 1 MiB (a symlink, FIFO, or device there
+is not followed or waited on). Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
+fragment and userinfo are removed, and high-entropy/webhook path segments are masked. A request URL is
+expanded within 4,096 steps, and one template or `+` join may yield at most 1,024 parts and 64 KiB of
+literal text; past these bounds the whole URL is unknown (`channel: null`, `pathAnchor: "base"`).
 
 Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
 retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Wrappers with additional
 statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
+Skipped project sources, an unparsed `tsconfig.json`/`jsconfig.json` (default compiler options, so path
+aliases may not resolve), and compiler inputs over 4 MiB are also reported under `route-call-coverage:`,
+with the same cause wording as `tsograph graph`.
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
 
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
@@ -70,7 +76,9 @@ recovered paths dynamic. See [typed client models](docs/CLIENT-MODELS.md).
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
 data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
-document. Large traversals can use `--max-depth` and `--max-reached` to return explicit truncation.
+document. An analysis that exceeds the call stack (typically on a deeply nested generated or minified
+source) is reported with that cause, not as oversized output. Large traversals can use `--max-depth`
+and `--max-reached` to return explicit truncation.
 
 ## Requirements
 
@@ -282,6 +290,13 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
 - Exit codes: `0` success (zero facts is still success, not proof of completeness), `2`
   unreadable project or oversized output (more than 100,000 facts, or more than 16 Mi
   characters), `64` usage error. A single unreadable route file is a limitation, not a failure.
+  Node routers mounted at several paths are flattened at most to 200,000 route registrations, counting
+  registrations that merge into one fact or emit none (conditional ones); past that the command exits
+  `2` with a message that names the flattened registrations, not the fact count, as the cause.
+  An analysis that exceeds the call stack (typically on a deeply nested generated or minified
+  source) also exits `2`, with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`,
+  and `navigation` that names the cause and asks to exclude or split such files; no partial
+  document is written.
 
 ### Verified Next.js semantics (next 16.2.7)
 
@@ -422,7 +437,9 @@ synthetic fixtures under `fixtures/node/`.
   with their prefixes, Hono `basePath()`, @koa/router `prefix`, Fastify `prefix` and `fastify-plugin`,
   and NestJS `@Controller`/`@Get`… with `setGlobalPrefix`, URI versioning, and `RouterModule`. Values
   are followed through `const`s, imports, enums, `as const` objects, template literals, and CommonJS
-  `require`/`module.exports`.
+  `require`/`module.exports`. Each path value is resolved within 4,096 steps and 64 KiB of joined
+  template/`+` text, so constant chains that interpolate the same constant many times stay bounded; past
+  either bound only the proven prefix is used and the fact is `dynamic`.
 - **Path syntax** is translated per router: Hono patterns, path-to-regexp 0.1 (Express 4), 8 (Express 5,
   @koa/router 14+), 6 (@koa/router 12–13), and find-my-way (Fastify, NestJS on Fastify). Optional
   segments expand into several templates, zero-segment catch-alls add the `catchAllPrefix` decl,
@@ -510,12 +527,17 @@ joins it with a `platform: "sql"` document (schemagraph `facts --document <catal
 persistence rules of `docs/GRAPH-EXCHANGE.md`.
 
 - `--project` (required): the join root. `project` is its POSIX realpath and every
-  `location.path` is relative to it. Symbolic links are never followed.
+  `location.path` is relative to it. Symbolic links are never followed to collect sources; module
+  resolution reads configs and `package.json` through a link only when the real path stays inside
+  the project.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness),
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
-  `64` usage error. `1` is reserved.
+  `64` usage error. `1` is reserved. An analysis that exceeds the call stack (typically on a
+  deeply nested generated or minified source) also exits `2`, with one message shared by `schema`,
+  `routes`, `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or
+  split such files; no partial document is written.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
-  Prisma generator output directories, and files over 4 MiB (counted). Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. `*.d.ts` files are not
+  Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
 
 ### Facts
@@ -611,7 +633,10 @@ Verified against Prisma's source for the pinned versions (prisma-engines at the 
 CLI and is ignored). When the version is unknown, unverified (for example rc.13+ or 8.0.0), or
 several rules are installed, every candidate rule is evaluated: names that agree are emitted,
 names that differ become dynamic facts without columns, and the document carries
-`prisma-naming-unverified:`. Prisma 8 contract files and its client API are not scanned
+`prisma-naming-unverified:`. That limitation quotes unverified versions only as semver strings or
+short range and tag specifiers (`^7`, `latest`, `workspace:*`); Git, URL, file, and `npm:` alias
+specifiers are reduced to a category such as `<git specifier>` so credentials and local paths are
+not copied, and at most 10 entries are listed. Prisma 8 contract files and its client API are not scanned
 (`prisma-8-surface-unscanned:`).
 
 ### Prisma Client usage
@@ -632,7 +657,15 @@ and nothing is executed:
 - bindings imported across files: named, default, namespace, re-exports, `export *`,
   CommonJS `require`/`module.exports`, and `await import(...)`, resolved with the TypeScript
   module resolver and the nearest `tsconfig.json`/`jsconfig.json` (restricted to the project),
-  iterated to a fixed point.
+  iterated to a fixed point. A config, its `extends` chain, and `package.json` are read only as
+  regular files of at most 1 MiB whose real path stays inside the project: links inside the project
+  (a symlinked tsconfig, pnpm `node_modules` links into a store under the project) are followed, and
+  a file whose real path leaves the project is not read. An `extends` target or `package.json`
+  outside the project, by path or through a link (for example a pnpm workspace package whose store
+  sits above `--project`), is treated as missing: TypeScript skips that `extends`, and the config's
+  own options (`paths`, `baseUrl`) still apply. A config that is itself outside the project, or a
+  config or `extends` file that is oversized or unreadable, counts under
+  `unreadable-module-configs:`, and imports under it use default resolution.
 
 Local variables and parameters shadow outer clients. A call shaped like
 `x.<delegate>.<operation>(...)` on an untraced receiver is not emitted and is counted under
@@ -717,7 +750,8 @@ Oracle, and slonik queries are not interpreted. Files using them are counted und
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
 `unreadable-orm-declarations:`, `orm-evaluation-truncated:`, `provenance-truncated:`,
 `missing-relation-usrs:`, `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`,
-`parse-errors:`, `unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
+`parse-errors:`, `unreadable-module-configs:`, `skipped-symlinks:`, `unsafe-names:`,
+`scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
 itself (`unjoined-dynamic-relations`).
 
@@ -761,7 +795,9 @@ computed.
 an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
 source boundary and workspace-relative ids for calls across packages. The selected project's compiler
 options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. A PnP-only project is reported
+records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. The root `package.json`
+and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
+failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
 explicitly; the CLI never executes `.pnp.cjs`.
 
 The CLI streams graph JSON without a whole-document string; `--format ndjson` emits a
@@ -799,7 +835,10 @@ The reader still holds the bounded input and reconstructed graph in memory. Reca
   [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
   traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
 - Exit codes: `0` success, `2` input/output failure or a bounded exchange/API output exceeding 16 Mi characters, `64`
-  usage error (empty stdout) or root-not-found (document written).
+  usage error (empty stdout) or root-not-found (document written). An analysis that exceeds the
+  call stack (typically on a deeply nested generated or minified source) also exits `2`, with one
+  message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that names the
+  cause and asks to exclude or split such files; no partial document is written.
 
 ### Nodes and edges
 
@@ -1076,8 +1115,8 @@ What `bound` guarantees, and what it does not:
   loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
   `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
-  1 MiB), or an incomplete scan (skipped, oversized, unreadable, or
-  symlinked files, or parse errors), additionally opens every exported function and class and every
+  1 MiB), or an incomplete scan (skipped, oversized, unreadable, symlinked, or
+  unsafely named files, or parse errors), additionally opens every exported function and class and every
   non-private property; the document then says so under `bound-dispatch:`. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
@@ -1234,7 +1273,8 @@ compatibility; released isthmus-cli 0.11.0 rejects `symbol.entries`, so upgrade 
 - `graphRevision` is `sha256:` over node ids, kinds, entries, per-mode unresolved-call counts, and edges
   with their evidence (locations excluded), so `graph`, `reach`, and `impact` over the same graph agree
   whatever the `--dispatch` mode. `revision` is the project root's git
-  `HEAD` commit read from `.git` (working-tree changes are not reflected).
+  `HEAD` commit read from `.git` (working-tree changes are not reflected). Git metadata may be a symlink (a legacy
+  symlinked `HEAD`) but is read only as regular files within 1 MiB; a FIFO or device omits `revision`.
 - `limitations` carries the graph's limitations for the mode plus the document-scoped
   `non-http-entries:`. The `unresolved-calls:` and `partial-dispatch:` counts exclude the interface
   calls the mode links, and `bound-dispatch:`/`candidate-dispatch:` report how many calls the mode's
@@ -1319,9 +1359,10 @@ candidate edge).
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
+A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
-`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
+`unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
 `reach`/`impact` documents only, `evidence-approximated:` and `unresolved-calls-capped:`.
 Counts only; no source text or absolute paths.
 

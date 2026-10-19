@@ -4,6 +4,10 @@
  * 식별자는 매개변수 바인딩(호출 인자), `const`·초기값 있는 변수, import한 상수, 열거형 멤버, `as const` 객체 속성까지
  * 따라간다. 템플릿 문자열과 `+` 연결은 앞부분이 확정되면 `partial`로 돌려준다 — 경로 앞부분만 증명해도
  * `dynamicScope` 접두사로 쓸 수 있기 때문이다. 확정하지 못하면 `unknown`이고 호출자가 dynamic·limitation으로 낸다.
+ *
+ * 경로 문자열 하나를 구하는 작업에는 단계 예산과 합성 길이 상한을 둔다. 깊이 상한만으로는 같은 상수를 여러 번
+ * 보간하는 상수 사슬(`c1`이 템플릿에서 `c0`을, `c2`가 `c1`을 여러 번 보간하는 식)이 span 수의 거듭제곱만큼 해석을
+ * 늘리고, 큰 리터럴을 거듭 이어 붙인 값은 V8 문자열 한도를 넘는다. 넘으면 그때까지 증명한 앞부분만 `partial`로 낸다.
  */
 
 import ts from 'typescript';
@@ -13,6 +17,24 @@ import { enclosingFunction, resolveAlias, symbolAt, unwrap } from './symbols.ts'
 
 /** 값 추적 최대 깊이다. 순환 참조를 끊는다. */
 export const MAX_VALUE_DEPTH = 16;
+
+/**
+ * 경로 문자열 하나를 구할 때 거치는 최대 해석 단계(식 하나를 구하는 호출) 수다. 실제 경로 식은 수십 단계 안에서
+ * 끝나므로 넉넉히 잡고, 넘으면 남은 식을 모르는 값으로 본다.
+ */
+export const MAX_VALUE_STEPS = 4096;
+
+/**
+ * 템플릿·`+` 연결로 합성한 경로 문자열의 최대 길이(UTF-16 단위)다. 정규 템플릿 상한(2,048자)보다 훨씬 크게 둔다 —
+ * 파라미터 이름이 긴 경로(`/users/:aaaa…`)는 원문이 길어도 짧은 템플릿이 되기 때문이다.
+ */
+export const MAX_PATH_VALUE_LENGTH = 65_536;
+
+/** 경로 문자열 하나를 구하는 동안 함께 쓰는 작업 예산이다. 최상위 호출마다 새로 만든다. */
+export interface ValueBudget {
+  /** 지금까지 쓴 해석 단계 수 */
+  steps: number;
+}
 
 /** 객체 속성 조회 결과다. */
 export type PropertyLookup =
@@ -63,58 +85,76 @@ export function frameForDeclaration(environment: ValueEnvironment, declaration: 
 /**
  * 식을 경로 문자열 값으로 구한다.
  *
+ * 단계 예산을 다 쓰면 그 식은 `unknown`이다. 템플릿·연결은 모르는 조각에서 멈추므로 나머지 식은 더 해석하지 않고,
+ * 결과는 그때까지 증명한 앞부분의 `partial`이 된다(호출자의 기존 dynamic·limitation 경로).
+ *
  * @param environment 환경
  * @param expression 식
  * @param frame 프레임
  * @param depth 추적 깊이
+ * @param budget 작업 예산. 생략하면 이 호출을 최상위로 보고 새 예산을 쓴다.
  * @returns 문자열 값
  */
-export function resolveStringValue(environment: ValueEnvironment, expression: ts.Expression, frame: Frame, depth = 0): PathValue {
-  if (depth > MAX_VALUE_DEPTH) return { kind: 'unknown' };
+export function resolveStringValue(environment: ValueEnvironment, expression: ts.Expression, frame: Frame, depth = 0, budget: ValueBudget = { steps: 0 }): PathValue {
+  budget.steps += 1;
+  if (depth > MAX_VALUE_DEPTH || budget.steps > MAX_VALUE_STEPS) return { kind: 'unknown' };
   const node = unwrap(expression);
   if (ts.isStringLiteralLike(node)) return { kind: 'literal', text: node.text };
-  if (ts.isTemplateExpression(node)) return templateValue(environment, node, frame, depth);
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return concatValue(environment, node, frame, depth);
+  if (ts.isTemplateExpression(node)) return templateValue(environment, node, frame, depth, budget);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return concatValue(environment, node, frame, depth, budget);
   const reference = referencedExpression(environment, node, frame);
-  if (reference !== undefined) return resolveStringValue(environment, reference.expression, reference.frame, depth + 1);
+  if (reference !== undefined) return resolveStringValue(environment, reference.expression, reference.frame, depth + 1, budget);
   const constant = constantString(environment.checker, node);
   return constant === undefined ? { kind: 'unknown' } : { kind: 'literal', text: constant };
 }
 
 /**
- * 템플릿 문자열을 구한다. 보간을 확정하지 못하면 그 앞까지가 `partial`이다.
+ * 템플릿 문자열을 구한다. 보간을 확정하지 못하거나 합성 길이 상한을 넘으면 그 앞까지가 `partial`이다.
  *
  * @param environment 환경
  * @param node 템플릿 식
  * @param frame 프레임
  * @param depth 추적 깊이
+ * @param budget 작업 예산
  * @returns 문자열 값
  */
-function templateValue(environment: ValueEnvironment, node: ts.TemplateExpression, frame: Frame, depth: number): PathValue {
+function templateValue(environment: ValueEnvironment, node: ts.TemplateExpression, frame: Frame, depth: number, budget: ValueBudget): PathValue {
   let text = node.head.text;
   for (const span of node.templateSpans) {
-    const value = resolveStringValue(environment, span.expression, frame, depth + 1);
+    const value = resolveStringValue(environment, span.expression, frame, depth + 1, budget);
     if (value.kind !== 'literal') return { kind: 'partial', head: value.kind === 'partial' ? text + value.head : text };
+    if (exceedsPathValueLength(text, value.text, span.literal.text)) return { kind: 'partial', head: text };
     text += value.text + span.literal.text;
   }
   return { kind: 'literal', text };
 }
 
 /**
- * `a + b` 문자열 연결을 구한다.
+ * `a + b` 문자열 연결을 구한다. 합성 길이 상한을 넘으면 왼쪽까지가 `partial`이다.
  *
  * @param environment 환경
  * @param node 이항 식
  * @param frame 프레임
  * @param depth 추적 깊이
+ * @param budget 작업 예산
  * @returns 문자열 값
  */
-function concatValue(environment: ValueEnvironment, node: ts.BinaryExpression, frame: Frame, depth: number): PathValue {
-  const left = resolveStringValue(environment, node.left, frame, depth + 1);
+function concatValue(environment: ValueEnvironment, node: ts.BinaryExpression, frame: Frame, depth: number, budget: ValueBudget): PathValue {
+  const left = resolveStringValue(environment, node.left, frame, depth + 1, budget);
   if (left.kind !== 'literal') return left.kind === 'partial' ? left : { kind: 'unknown' };
-  const right = resolveStringValue(environment, node.right, frame, depth + 1);
-  if (right.kind === 'literal') return { kind: 'literal', text: left.text + right.text };
+  const right = resolveStringValue(environment, node.right, frame, depth + 1, budget);
+  if (right.kind === 'literal') return exceedsPathValueLength(left.text, right.text) ? { kind: 'partial', head: left.text } : { kind: 'literal', text: left.text + right.text };
   return { kind: 'partial', head: right.kind === 'partial' ? left.text + right.head : left.text };
+}
+
+/**
+ * 조각들을 이으면 합성 길이 상한을 넘는지 본다. 문자열을 실제로 만들기 전에 길이만 더한다.
+ *
+ * @param pieces 이을 조각
+ * @returns 상한을 넘으면 true
+ */
+function exceedsPathValueLength(...pieces: readonly string[]): boolean {
+  return pieces.reduce((total, piece) => total + piece.length, 0) > MAX_PATH_VALUE_LENGTH;
 }
 
 /**

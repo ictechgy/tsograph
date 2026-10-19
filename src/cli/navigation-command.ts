@@ -24,6 +24,8 @@ import {
 import {
   type CommandResult,
   inputFailure,
+  isStackExhaustion,
+  stackExhaustionFailure,
   success,
   usageFailure,
 } from './command-result.ts';
@@ -287,6 +289,8 @@ function extractAndRender(
           + `keeping each file within ${MAX_GRAPH_CONFIG_BYTES} bytes.`,
       );
     }
+    // 깊이 중첩된 소스로 분석이 호출 스택을 넘긴 경우는 다른 명령과 같은 원인 문구로 알린다.
+    if (isStackExhaustion(error)) return stackExhaustionFailure();
     return inputFailure(
       'navigation analysis failed; check project sources and compiler configuration, then retry.',
     );

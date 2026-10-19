@@ -10,6 +10,37 @@
 
 - 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
 
+### Changed
+
+- `schema`의 SQL 관계 스캔이 앞선 단어와 괄호 짝을 한 번만 계산해, 세미콜론 없이 `INTO`·`ON`이 반복되거나 괄호가 닫히지
+  않은 대형 SQL 리터럴·파일도 어휘 수에 비례한 시간에 끝난다(출력 같음).
+
+- `schema`가 Drizzle·TypeORM 지정자가 없는 프로젝트에서는 두 ORM의 선언 탐색을 건너뛴다. `drizzle.config.*`의 casing은
+  그대로 읽는다(출력 같음).
+
+- `schema`가 모듈 export 표와 Drizzle 관계형 쿼리 스키마 표를 파일·스키마마다 한 번만 만들어, `import * as schema`·
+  `drizzle(client, { schema })` 앱의 사용 스캔이 테이블 수에 비례해 느려지지 않는다(출력 같음).
+
+- `reach`·`impact`가 정점 id를 정수로 바꿔 순회하고 근거 등급 비교 버퍼를 재사용하며 지배 판정을 정점당 상수 시간에 해,
+  root 수백~수천 개 순회가 3~4배 빨라진다(출력 같음).
+
+- `graph`가 노드·간선 레코드를 고정 키 순서로 바로 직렬화하고 JSON 형식도 레코드 하나를 한 조각으로 내, 대형 그래프의
+  NDJSON 출력은 약 2배, JSON 출력은 약 4.5배 빨라진다(출력 바이트 같음).
+
+- graph·reach·impact: 반사적 쓰기 대상(`Object.assign(this, …)` 등)의 정체성을 resolver마다 한 번만 계산하고
+  해석 결과가 노드일 때만 겹침을 따진다. 그런 대상이 많은 프로젝트에서 직접 간선 수집이 호출 수 × 대상 수로
+  느려지지 않는다. 출력은 같다.
+
+- schema: import 해석이 package.json 정보를 실행 내내 한 번만 읽고 없는 경로를 예외 없이 판정한다. Prisma가
+  없어도 import가 많은 프로젝트의 schema 명령이 빨라진다(합성 1만 파일에서 약 9초 → 2.6초). 출력은 같다.
+
+- routes server·graph(reach·impact 포함): 루트 잠금 파일(`package-lock.json`·`npm-shrinkwrap.json`·
+  `pnpm-lock.yaml`·`yarn.lock`)을 확인하는 프레임워크마다 다시 파싱하지 않고 파일마다 한 번만 색인한다. 수 MiB
+  잠금 파일에 프레임워크를 여럿 선언한 프로젝트가 빨라진다. 주 버전 판정은 같다.
+
+- routes server·graph: path-to-regexp 8 경로 컴파일이 파라미터나 끝이 아닌 `/`가 많은 긴 경로에서 길이의
+  제곱으로 느려지지 않는다. 출력은 같다.
+
 ### Fixed
 
 - persistence 소스 reader가 파일을 연 뒤 같은 핸들에서 최대 4 MiB+1 바이트만 읽는다. 크기 확인 뒤 커진 파일도
@@ -30,22 +61,84 @@
   실패하던 문제를 고친다. 순환으로만 이어진 멤버는 모르는 값으로 두고 사실로 내지 않는다. require 사슬은 export마다 한
   번만 따라가므로, 모듈 고리가 커져도 시간이 지수적으로 늘지 않는다.
 
-### Changed
+- schema: Prisma 설정·스키마·스키마 폴더·TypedSQL 위치를 루트부터 경로 요소마다 `lstat`으로 확인해 `prisma/`·
+  `.config/`·`prisma/sql/` 같은 디렉터리 링크를 따라가지 않는다. 링크 하나로 프로젝트 밖 스키마·SQL이 저장소
+  경로의 사실로 나가던 문제를 고치고, 막은 링크는 걷기와 중복 없이 `skipped-symlinks:`로 센다.
 
-- `schema`의 SQL 관계 스캔이 앞선 단어와 괄호 짝을 한 번만 계산해, 세미콜론 없이 `INTO`·`ON`이 반복되거나 괄호가 닫히지
-  않은 대형 SQL 리터럴·파일도 어휘 수에 비례한 시간에 끝난다(출력 같음).
+- schema: 프로젝트 루트나 그 조상으로 풀리는 Prisma generator `output`을 소스 제외·클라이언트 출처 판정에 쓰지
+  않고 `unresolved-generator-outputs:`로 알린다. 모든 소스가 생성 클라이언트로 빠져 사실이 한계 없이 사라지던
+  문제다.
 
-- `schema`가 Drizzle·TypeORM 지정자가 없는 프로젝트에서는 두 ORM의 선언 탐색을 건너뛴다. `drizzle.config.*`의 casing은
-  그대로 읽는다(출력 같음).
+- schema: `prisma-naming-unverified:`에는 확인하지 않은 버전 가운데 semver와 짧은 범위·태그 명세만 원문으로
+  싣고, git·URL·파일 경로·npm 별칭 명세는 범주(`<git specifier>` 등)로 바꿔 10개까지만 적는다. 의존성 명세의
+  자격 증명·절대 경로가 출력에 실리던 문제다.
 
-- `schema`가 모듈 export 표와 Drizzle 관계형 쿼리 스키마 표를 파일·스키마마다 한 번만 만들어, `import * as schema`·
-  `drizzle(client, { schema })` 앱의 사용 스캔이 테이블 수에 비례해 느려지지 않는다(출력 같음).
+- schema: import 해석기가 tsconfig/jsconfig·`extends`·package.json을 실제 경로가 프로젝트 안인 일반 파일만
+  1 MiB까지 읽는다. 커밋된 큰 설정 파일이나 밖의 큰 파일로 가는 링크 하나로 V8 메모리가 바닥나(종료 134) 끝나던
+  문제를 고친다. 상한을 넘거나 읽을 수 없는 설정·`extends` 파일과 프로젝트 밖으로 가는 설정 파일은
+  `unreadable-module-configs:`로 알린다. 링크로 프로젝트 밖에 있는 `extends` 대상(저장소가 `--project` 위에 있는
+  pnpm 워크스페이스 하위 패키지 등)은 프로젝트 위 경로의 `extends`처럼 그것만 건너뛰고 설정 자체의 `paths`·
+  `baseUrl`은 그대로 쓴다. 프로젝트 안 링크(링크로 둔 tsconfig, 프로젝트 안 pnpm 저장소)는 따라간다.
 
-- `reach`·`impact`가 정점 id를 정수로 바꿔 순회하고 근거 등급 비교 버퍼를 재사용하며 지배 판정을 정점당 상수 시간에 해,
-  root 수백~수천 개 순회가 3~4배 빨라진다(출력 같음).
+- graph·routes client: 루트 `package.json`·`vercel.json`·`node_modules/next/package.json`·`.git` 메타데이터와
+  client가 ky 주 버전을 읽는 `package.json`을 non-blocking으로 열어 일반 파일만 상한 안에서 읽는다. FIFO에서
+  멈추거나 `/dev/zero`로 가는 링크를 끝없이 읽던 문제다. 루트 `package.json`·`vercel.json`은 symlink를 따라가지
+  않으며, 읽지 못하면 기존 `bound-dispatch:`(열린 프로그램)·`entry-points:`·`route-call-coverage:` 한계로 알린다.
 
-- `graph`가 노드·간선 레코드를 고정 키 순서로 바로 직렬화하고 JSON 형식도 레코드 하나를 한 조각으로 내, 대형 그래프의
-  NDJSON 출력은 약 2배, JSON 출력은 약 4.5배 빨라진다(출력 바이트 같음).
+- routes server·graph: `require`·import 모듈 해석이 compiler host와 같은 4 MiB 상한으로 package.json을 읽는다.
+  Node routes는 상한을 넘은 manifest를 거친 `require`를 추측하지 않고 미해석(`route-coverage:`)으로 둔다.
+  routes·openapi는 크기 확인 뒤 커진 텍스트 파일·스펙을 상한+1 byte까지만 읽는다.
+
+- graph·schema·routes·navigation: 모을 파일이나 내려갈 디렉터리 이름에 교환 형식이 금지하는 문자(C0·C1 제어
+  문자, DEL, U+2028/U+2029, 짝 없는 서러게이트)가 있으면 건너뛰고 `unsafe-names:`(graph·schema)·
+  `route-coverage:`(Node)·`route-call-coverage:`(client)·`navigation-project-coverage:`로 알린다. 그런 이름 하나로
+  종료 0 문서가 isthmus에 통째로 거부되고 graph 스냅샷을 `reach --graph-file`이 다시 읽지 못하던 문제다. graph는
+  이때 스캔을 불완전하다고 보고 bound를 확정하지 않는다.
+
+- graph·routes·client·navigation: 걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, 백슬래시
+  이름)를 세어 graph는 `unreadable-sources:`와 열린 프로그램으로, Node routes·client·navigation은 각 coverage
+  한계로 알린다. 읽지 못한 구현을 두고 bound를 확정하거나 라우트가 빠진 문서를 한계 없이 내던 문제다.
+
+- routes server·client·navigation: tsconfig/jsconfig 해석 실패(기본 옵션 사용)와 4 MiB를 넘은 compiler 입력을
+  graph와 같은 원인 문구로 각 coverage 한계에 싣는다.
+
+- routes·schema·graph(reach·impact 포함)·navigation: 깊이 중첩된 소스(생성·압축 코드의 긴 메서드 사슬·쉼표
+  연결 등)로 분석이 호출 스택을 넘기면 원인과 해결 방향(그런 파일을 빼거나 나눠 다시 실행)을 담은 같은 문구로
+  코드 2를 낸다. 예전에는 명령마다 internal error·출력 크기 초과·일반 분석 실패로 달리 보고했고,
+  `routes --role client`는 분석 중 RangeError를 출력이 16,777,216자를 넘는다고 잘못 보고했다.
+
+- routes server·graph: 사실 상한(100,000개)을 넘는 Node 프로젝트를 코드 2와 상한 문구
+  (`more than 100000 route-decl facts`)로 알린다. 사실이 약 12만 개를 넘으면 출력 크기 초과로 잘못 보고하던
+  문제와, 공유 하위 라우터를 여러 경로에 붙인 DAG(Express·Hono·Koa)를 다 펼치느라 V8 힙이 바닥나던 문제를
+  고친다. 펼치면서 사실 수의 하한을 세어 상한을 넘는 즉시 멈추고, graph는 Next 라우트가 없는 Node 백엔드에서도
+  사실 상한 초과를 `entry-points:` 한계로 알린다. 같은 사실로 합쳐지거나 사실을 내지 않는(조건부) 등록도 펼친 수가
+  200,000개(사실 상한의 2배)를 넘으면 메모리를 지키려고 펼치기를 멈춘다. 이때는 사실 수가 아니라 펼친 등록 수를
+  원인으로 든 문구(`more than 200000 route registrations`, 종료 2)와 그 원인의 `entry-points:` 문장으로 알린다.
+
+- routes server·graph: Express mount 경로의 선택 그룹 대안이 단계마다 곱해져 작은 파일 하나로 V8 힙이 바닥나던
+  (종료 134) 문제를 고친다. 이은 대안이 2,000개를 넘으면 늘어놓지 않고 상한 초과 dynamic
+  (`route-template-expansion-capped:`)으로 내며, 정적 파일 같은 제공 경로 한계의 스코프는 싣지 않는다.
+
+- routes server·graph: Hono 선택 파라미터가 많은 경로 한 줄이나 path-to-regexp 8(Express 5 등)의 수천 겹 중첩
+  선택 그룹이 메모리나 호출 스택을 다 써 문서 전체가 실패하던 문제를 고친다. 그런 경로는 상한 초과 dynamic으로
+  내고 다른 라우트는 그대로 낸다.
+
+- routes server·graph: 같은 상수를 거듭 보간하는 상수 사슬이 경로 해석을 거듭제곱으로 늘려 1 KB 미만 파일로도
+  분석이 끝나지 않던 문제를 고친다. 경로 값 하나는 4,096단계·이은 문자열 64 KiB 안에서 구하고, 넘으면 증명한
+  앞부분만 dynamic 접두사로 쓴다. 큰 리터럴을 거듭 이어 internal error(RangeError)로 끝나던 문제도 함께 고친다.
+
+- routes client: 같은 상수 사슬·query 꼬리 조건 사슬·큰 리터럴 보간이 URL 조각을 거듭제곱으로 펼쳐 멈추거나
+  RangeError로 끝나던 문제를 고친다. URL 하나는 4,096단계, 템플릿·연결 하나는 1,024조각·리터럴 64 KiB까지만
+  펼치고, 넘으면 URL 전체를 모르는 값(`channel: null`, `pathAnchor: "base"`)으로 낸다.
+
+- graph·reach·impact: bound가 실패한 인터페이스 호출이 많은 대형 프로젝트(공개 패키지·데코레이터 DI)에서
+  candidate 탐색이 모든 클래스를 대입 검사하다 TypeScript 관계 캐시 한도(RangeError)로 출력 없이 실패하던
+  문제와, 기반 클래스가 순환하는(타입 오류) 프로젝트에서 탐색이 끝나지 않던 문제를 고친다. 메서드와 필수 멤버를
+  가질 수 있는 클래스만 검사하고 결과를 수신자 타입별로 재사용한다. candidate 간선은 같다.
+
+- 전체 제품 검사 한도를 CI job 15분 안의 12분으로 늘린다(이전 10분 안의 8분). GitHub ubuntu 러너가 같은
+  테스트를 1.7~1.8배 느리게 돌면 정상 러너에서 5분 남짓인 전체 테스트가 8분을 넘겨 미완료(종료 2)로 끝나던
+  문제다. 제품 테스트는 모두 실행하며 라인·함수·분기 커버리지 기준 90%를 유지한다.
 
 ## [0.10.0] - 2026-10-09
 

@@ -53,8 +53,29 @@ interface SemanticVersion {
   readonly prerelease: readonly string[];
 }
 
+/** limitation 한 줄에 싣는 확인하지 않은 버전 항목 수 상한이다. 넘친 항목은 개수만 적는다. */
+const MAX_UNVERIFIED_ENTRIES = 10;
+
+/** 원문으로 싣는 semver 길이 상한이다. 더 긴 값은 범주로 바꿔 limitation 길이를 묶는다. */
+const MAX_DISPLAYED_VERSION_LENGTH = 64;
+
 /**
- * 관찰한 버전으로 이름 규칙 후보를 정한다.
+ * 원문을 그대로 실어도 되는 짧은 명세다: dist-tag·범위(`latest`, `^7`, `>=7 <8`)와 `workspace:`·`catalog:`
+ * 프로토콜. 경로·URL·자격 증명에 쓰이는 `/`·`@`·`#`·(접두사 밖의) `:`와 제어 문자는 들어갈 수 없다.
+ */
+const SHORT_SAFE_SPECIFIER = /^(?:(?:workspace|catalog):)?[0-9A-Za-z.*^~<>=|_ -]{0,32}$/u;
+
+/** 원문 대신 싣는 명세 범주다. 앞에서부터 처음 맞는 범주를 쓰고, 맞는 것이 없으면 `<other specifier>`다. */
+const SPECIFIER_CATEGORIES: readonly (readonly [RegExp, string])[] = [
+  [/^(?:git\+|git:|git@|github:|gitlab:|bitbucket:|gist:)/iu, '<git specifier>'],
+  [/^https?:/iu, '<url specifier>'],
+  [/^(?:file:|link:|portal:|\.{0,2}\/|~\/|[A-Za-z]:[\\/])/u, '<file specifier>'],
+  [/^npm:/iu, '<npm alias>'],
+];
+
+/**
+ * 관찰한 버전으로 이름 규칙 후보를 정한다. 확인하지 않은 버전은 limitation에 실을 표기(`displayVersion`)로
+ * 바꿔 최대 10개만 이유에 싣는다.
  *
  * @param observed 관찰한 버전(잠금 파일 우선, 없으면 package.json 명세에서 얻은 값)
  * @returns 판정 결과
@@ -68,11 +89,11 @@ export function decideNamingRules(observed: readonly ObservedVersion[]): NamingD
   const unknown: string[] = [];
   for (const entry of sorted) {
     const rule = ruleForVersion(entry.packageName, entry.version);
-    if (rule === 'unknown') unknown.push(`${entry.packageName}@${entry.version}`);
+    if (rule === 'unknown') unknown.push(`${entry.packageName}@${displayVersion(entry.version)}`);
     else if (rule !== 'ignored') rules.add(rule);
   }
   if (unknown.length > 0) {
-    return { rules: ALL_NAMING_RULES, unverifiedReason: `unverified Prisma version(s): ${unique(unknown).join(', ')}`, observed: sorted };
+    return { rules: ALL_NAMING_RULES, unverifiedReason: `unverified Prisma version(s): ${joinWithLimit(unique(unknown))}`, observed: sorted };
   }
   if (rules.size === 0) {
     return { rules: ALL_NAMING_RULES, unverifiedReason: 'no Prisma ORM package version was found', observed: sorted };
@@ -80,6 +101,33 @@ export function decideNamingRules(observed: readonly ObservedVersion[]): NamingD
   const list = ALL_NAMING_RULES.filter((rule) => rules.has(rule));
   const reason = list.length > 1 ? `Prisma packages with different naming rules are installed: ${list.join(', ')}` : undefined;
   return { rules: list, unverifiedReason: reason, observed: sorted };
+}
+
+/**
+ * 확인하지 않은 버전을 limitation에 실을 표기로 바꾼다. semver와 짧은 안전 명세만 원문(앞뒤 공백 제외)을
+ * 두고, git·URL·파일 경로·npm 별칭 같은 명세는 범주 이름으로 바꾼다 — package.json 명세에 든 자격 증명·
+ * 절대 경로·제어 문자가 출력 문서로 새지 않게 하고 항목 길이를 묶는다.
+ *
+ * @param version 잠금 파일 버전 또는 package.json 명세 원문
+ * @returns limitation 표기
+ */
+function displayVersion(version: string): string {
+  const text = version.trim();
+  if (parseVersion(text) !== undefined && text.length <= MAX_DISPLAYED_VERSION_LENGTH) return text;
+  if (SHORT_SAFE_SPECIFIER.test(text)) return text;
+  return SPECIFIER_CATEGORIES.find(([pattern]) => pattern.test(text))?.[1] ?? '<other specifier>';
+}
+
+/**
+ * 항목을 상한까지 쉼표로 잇고, 넘친 항목은 개수만 적는다.
+ *
+ * @param values 정렬된 고유 항목
+ * @returns 이은 문자열
+ */
+function joinWithLimit(values: readonly string[]): string {
+  const shown = values.slice(0, MAX_UNVERIFIED_ENTRIES).join(', ');
+  const omitted = values.length - MAX_UNVERIFIED_ENTRIES;
+  return omitted > 0 ? `${shown} and ${omitted} more` : shown;
 }
 
 /**

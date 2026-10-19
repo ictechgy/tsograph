@@ -252,6 +252,9 @@ function prismaLimitations({ project, relational }: LimitationInput): string[] {
   if (counts.unresolvedGeneratorOutputs > 0) {
     result.push(`unresolved-generator-outputs: ${counts.unresolvedGeneratorOutputs} Prisma generator output(s) are not string literals; imports of those clients are not traced`);
   }
+  if (counts.generatorOutputsContainingProject > 0) {
+    result.push(`unresolved-generator-outputs: ${counts.generatorOutputsContainingProject} Prisma generator output(s) resolve to the project root or one of its ancestors; they were not excluded from the source scan and imports of those clients are not traced`);
+  }
   if (counts.unresolvedTypedSql > 0) {
     result.push(`unresolved-typed-sql: ${counts.unresolvedTypedSql} prisma.config typedSql path(s) are not string literals; TypedSQL files there were not read`);
   }
@@ -321,8 +324,8 @@ function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated,
  * @param input 조립 입력
  * @returns limitation 목록
  */
-function inputLimitations({ project, counts, reader, unreadableConfigs }: LimitationInput): string[] {
-  const { walk, location } = project;
+function inputLimitations({ project, counts, reader, unreadableConfigs, sink }: LimitationInput): string[] {
+  const { walk } = project;
   const result: string[] = [];
   if (reader.unreadable + walk.unreadableDirectories > 0) {
     result.push(`unreadable-sources: ${reader.unreadable} file(s) and ${walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
@@ -337,8 +340,17 @@ function inputLimitations({ project, counts, reader, unreadableConfigs }: Limita
   if (unreadableConfigs > 0) {
     result.push(`unreadable-module-configs: ${unreadableConfigs} tsconfig/jsconfig file(s) could not be parsed; imports under them use default resolution`);
   }
-  const symlinks = walk.skippedSymlinks + location.skippedSymlinks;
+  // Prisma 탐색 계수는 걷기가 이미 센 링크를 빼고 셌으므로 더해도 같은 링크를 두 번 세지 않는다.
+  const symlinks = walk.skippedSymlinks + project.counts.skippedSymlinks;
   if (symlinks > 0) result.push(`skipped-symlinks: ${symlinks} symbolic link(s) were not followed`);
+  if (walk.unsafeNames > 0) {
+    result.push(`unsafe-names: ${walk.unsafeNames} file or directory name(s) contain characters the exchange format forbids and were skipped`);
+  }
+  // 걷기 밖에서 조립한 Prisma 스키마·TypedSQL 경로는 수집기가 마지막에 거른다. 걷기는 이름을, 수집기는 사실을
+  // 세어 단위가 다르므로 더하지 않고 따로 싣는다.
+  if (sink.unsafePaths > 0) {
+    result.push(`unsafe-names: ${sink.unsafePaths} relation-use fact(s) were skipped because their file paths contain characters the exchange format forbids`);
+  }
   if (walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   return result;
 }

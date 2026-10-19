@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { RouteFactLimitError } from '../routes/route-document.ts';
 import { type CommandFileSystem, createNodeFileSystem } from './file-system.ts';
 import { renderDocument, routesUsage, runRoutesCommand } from './routes-command.ts';
+import { ambientTypesFreeConfig } from './testing.test.ts';
 
 /** 합성 Next fixture 디렉터리다. */
 const fixtures = realpathSync(fileURLToPath(new URL('../../fixtures/next/', import.meta.url)));
@@ -194,6 +195,23 @@ test('client model option is wired through routes and service conflicts fail cle
     assert.equal(conflict.exitCode, 2);
     assert.match(conflict.standardError, /conflicts with --service/u);
     assert.doesNotMatch(conflict.standardError, /other/u);
+    const missing = await run(['--role', 'client', '--project', directory, '--client-model', 'missing.json']);
+    assert.equal(missing.exitCode, 2);
+    assert.match(missing.standardError, /unable to read the client model file/u);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('client 조립 중 스택 초과가 아닌 RangeError는 출력 초과로 바꾸지 않고 내부 오류로 전파한다', async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-clock-')));
+  try {
+    mkdirSync(join(directory, 'src'), { recursive: true });
+    writeFileSync(join(directory, 'package.json'), '{}');
+    // 저장소 @types/node를 읽지 않는 설정이다(검사와 무관한 Program 비용).
+    writeFileSync(join(directory, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(directory, 'src/client.ts'), 'export function load() { return fetch("/api/items"); }\n');
+    // 잘못된 시계는 문서 조립의 toISOString에서 RangeError('Invalid time value')를 낸다(수정 전에는 출력 초과 문구였다).
+    const invalidClock = { fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date(Number.NaN) };
+    await assert.rejects(runRoutesCommand(['--role', 'client', '--project', directory], invalidClock), { name: 'RangeError', message: 'Invalid time value' });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -221,13 +239,30 @@ test('사실·출력 상한을 넘으면 부분 문서 대신 2다', () => {
   const tooMany = renderDocument(() => { throw new RouteFactLimitError(); });
   assert.equal(tooMany.exitCode, 2);
   assert.match(tooMany.standardError, /more than 100000 route-decl facts/);
+  // 펼친 등록 수 상한으로 멈춘 실패는 사실 수가 아니라 펼친 등록 수를 원인으로 든다(사실이 거의 없을 수 있다).
+  const tooManyFlattened = renderDocument(() => { throw new RouteFactLimitError('flattened-routes'); });
+  assert.equal(tooManyFlattened.exitCode, 2);
+  assert.equal(tooManyFlattened.standardOutput, '');
+  assert.match(tooManyFlattened.standardError, /more than 200000 route registrations when routers mounted at several paths are flattened, which exceeds the flattening limit; scan a smaller project root\.\n$/u);
+  assert.doesNotMatch(tooManyFlattened.standardError, /route-decl facts/u);
   const tooLong = renderDocument(() => ({ text: 'x'.repeat(100) }), 50);
   assert.equal(tooLong.exitCode, 2);
   assert.match(tooLong.standardError, /would exceed/);
   assert.match(tooLong.standardError, /exceed 50 characters/);
-  const rangeError = renderDocument(() => { throw new RangeError('Invalid string length'); });
-  assert.equal(rangeError.exitCode, 2);
+  // 직렬화 단계에서 엔진 문자열 길이 한계(RangeError)에 걸린 것도 출력 초과다.
+  const encodeLimit = renderDocument(() => ({ get text(): string { throw new RangeError('Invalid string length'); } }));
+  assert.equal(encodeLimit.exitCode, 2);
+  assert.match(encodeLimit.standardError, /would exceed 16777216 characters/);
   assert.equal(renderDocument(() => ({ a: 1 })).exitCode, 0);
+});
+
+test('문서 조립(build) 단계의 RangeError는 출력 초과로 바꾸지 않고 호출자에게 전파한다', () => {
+  // client 역할은 분석 전체가 build 안에 있다. 스택 초과는 호출자가 분석 실패로 분류하고, 그 밖의 RangeError는
+  // 내부 오류(runCliSafely)로 간다. 어느 쪽도 "출력이 너무 크다"는 거짓 원인이 되면 안 된다.
+  for (const message of ['Maximum call stack size exceeded', 'Invalid string length', 'Map maximum size exceeded']) {
+    assert.throws(() => renderDocument(() => { throw new RangeError(message); }), { name: 'RangeError', message });
+  }
+  assert.throws(() => renderDocument(() => ({ get text(): string { throw new TypeError('encode bug'); } })), TypeError);
 });
 
 test('공백 때문에 커진 문서는 한 번만 조립하고 사실 손실 없이 압축한다', () => {

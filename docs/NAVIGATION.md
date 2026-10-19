@@ -31,10 +31,16 @@ route 배열 binding에 직접 대입이나 표준 mutator 호출을 관찰하�
 증명할 수 없는 값은 `unproven route container`로 구분한다. 두 경우 모두 배열 내용을 추측하지
 않고 dynamic 사실을 낸다. binding AST 분석이 1,000,000 node 상한을 넘으면 alias·mutation
 완전성을 주장할 수 없으므로 부분 navigation 문서를 내지 않고 명령이 코드 2로 실패한다.
+깊이 중첩된 소스(생성·압축 코드 등)로 분석이 호출 스택을 넘겨도 부분 문서 없이 코드 2이며, `schema`·`routes`·
+`graph`와 같은 원인 문구를 낸다.
 
 screen은 프로젝트 function/class/불변 arrow 선언 또는 JSX 태그로 증명해야 한다.
 USR은 graph와 같은 규칙이며 source 위치는 1 기반 UTF-8 열이다. 테스트와 구문 오류
 소스는 제외한다. 라이브러리 전용 redirect·guard·lazy loader 등의 런타임 의미는 추론하지 않는다.
+소스는 `tsograph schema`와 같은 걷기 규칙으로 모으고, 따라가지 않은 symlink·목록을 읽지 못한
+디렉터리·크기 초과 파일·잘린 스캔·교환 형식이 금지하는 문자가 든 이름·컴파일러가 읽지 못한 소스는
+`navigation-project-coverage:` 한 줄의 계수로 알린다. 설정을 해석하지 못해 기본 옵션을 쓴 경우(경로 별칭이 풀리지
+않을 수 있음)와 4 MiB를 넘어 읽지 않은 compiler 입력도 graph와 같은 원인 문구로 `navigation-project-coverage:`에 싣는다.
 
 설정은 project 안의 1 MiB JSON이며 중복 key·닫힌 schema·깊이·모델 상한을 검사한다.
 등록 깊이는 64, 사실은 100,000개로 제한하며 상한 뒤를 조용히 버리지 않는다. 출력은

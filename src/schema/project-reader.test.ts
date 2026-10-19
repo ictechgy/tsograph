@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { MAX_SOURCE_BYTES, ProjectReader } from './project-reader.ts';
+import { LinkFreePaths, MAX_SOURCE_BYTES, ProjectReader } from './project-reader.ts';
 import { withProject } from './testing.test.ts';
 
 test('파일 크기 정보가 오래되어도 실제 읽기 상한을 넘긴 소스를 받아들이지 않는다', (t) => {
@@ -109,6 +109,24 @@ test('지원하는 플랫폼에서는 마지막 파일 심볼릭 링크를 따�
     const reader = new ProjectReader();
     assert.equal(reader.read(join(root, 'link.ts')), undefined);
     assert.equal(reader.unreadable, 1);
+  });
+});
+
+test('링크 없는 경로 판정은 루트부터 요소마다 lstat하고 막은 링크를 한 번씩 모은다', {
+  skip: process.platform === 'win32',
+}, () => {
+  withProject({ 'dir/file.txt': 'x', 'dir/sub/deep.txt': 'y' }, (root) => {
+    symlinkSync(join(root, 'dir'), join(root, 'linked'));
+    symlinkSync(join(root, 'dir', 'file.txt'), join(root, 'dir', 'file-link.txt'));
+    symlinkSync(join(root, 'dir', 'sub'), join(root, 'dir', 'sub-link'));
+    const paths = new LinkFreePaths(root);
+    const kinds = [
+      root, join(root, 'dir'), join(root, 'dir', 'file.txt'), join(root, 'missing', 'x'),
+      join(root, 'dir', 'file.txt', 'x'), join(root, '..', 'elsewhere'), join(root, 'dir', 'file-link.txt'),
+      join(root, 'linked', 'file.txt'), join(root, 'linked', 'sub', 'deep.txt'), join(root, 'dir', 'sub-link'),
+    ].map((path) => paths.kind(path));
+    assert.deepEqual(kinds, ['directory', 'directory', 'file', undefined, undefined, 'outside', 'file', 'symlink', 'symlink', 'symlink']);
+    assert.deepEqual([...paths.skippedLinks].sort(), [join(root, 'dir', 'sub-link'), join(root, 'linked')]);
   });
 });
 

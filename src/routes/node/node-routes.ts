@@ -7,6 +7,7 @@
  */
 
 import type { CommandFileSystem } from '../../cli/file-system.ts';
+import { MAX_ROUTE_FACTS, type RouteFactLimitCause } from '../route-document.ts';
 import { readProjectDependencies } from './dependency-versions.ts';
 import { expressAdapter, flattenExpress } from './express-adapter.ts';
 import { fastifyAdapter, flattenFastify } from './fastify-adapter.ts';
@@ -14,6 +15,7 @@ import type { FrameworkRoutes } from './flat-route.ts';
 import { flattenHono, honoAdapter } from './hono-adapter.ts';
 import { flattenKoa, koaAdapter } from './koa-adapter.ts';
 import { extractNestRoutes } from './nest-routes.ts';
+import { NodeFactBudget } from './node-facts.ts';
 import { type DetectedFrameworks, detectFrameworks, hasNodeFramework } from './node-frameworks.ts';
 import { hasParseErrors, isNodeTestPath, loadNodeProject, type NodeProject } from './node-project.ts';
 import { type FrameworkAdapter, interpretProject } from './router-interpreter.ts';
@@ -35,6 +37,12 @@ export interface NodeRoutesResult {
     readonly truncatedCalls: number;
     /** 분석한(테스트 제외 등) 파일 중 구문 오류가 있는 파일 수 */
     readonly syntaxErrorFiles: number;
+    /**
+     * 펼치기를 상한에서 멈췄으면 그 원인이다: 펼친 라우트가 낼 사실의 하한이 사실 상한을 넘었거나(`facts`), 펼친 라우트 수가
+     * 펼치기 상한을 넘었다(`flattened-routes`). 원인이 있으면 frameworks는 일부뿐이고, 문서 조립은 그 원인을 실은 사실 상한
+     * 실패(RouteFactLimitError)로 끝난다. 상한 안이면 undefined다.
+     */
+    readonly factLimitCause: RouteFactLimitCause | undefined;
   };
 }
 
@@ -64,13 +72,17 @@ export async function extractNodeRoutes(input: NodeRoutesInput, detected?: Detec
   const includeFile = (path: string): boolean => input.includeTests || !isNodeTestPath(path);
   const interpretation = interpretProject(project, adapters, includeFile);
   const results: FrameworkRoutes[] = [];
-  if (frameworks.hono !== undefined) results.push(flattenHono(project, interpretation.instances, interpretation.events));
-  if (frameworks.express !== undefined) results.push(flattenExpress(project, interpretation.instances, interpretation.events, frameworks.express.major));
-  if (frameworks.koa !== undefined) results.push(flattenKoa(project, interpretation.instances, interpretation.events, frameworks.koa.routerMajor));
+  // 공유 라우터를 여러 경로에 붙이는 프레임워크는 펼친 라우트가 mount 단계마다 곱으로 늘 수 있어, 펼치면서 사실 수의
+  // 하한을 세고 상한을 넘으면 멈춘다. Fastify는 register마다 해석기가 플러그인 인스턴스를 새로 만들어(프레임 상한) 같은
+  // 인스턴스를 다시 걷지 않고, NestJS는 mount를 펼치지 않는다.
+  const budget = new NodeFactBudget(MAX_ROUTE_FACTS);
+  if (frameworks.hono !== undefined) results.push(flattenHono(project, interpretation.instances, interpretation.events, budget));
+  if (frameworks.express !== undefined) results.push(flattenExpress(project, interpretation.instances, interpretation.events, frameworks.express.major, budget));
+  if (frameworks.koa !== undefined) results.push(flattenKoa(project, interpretation.instances, interpretation.events, frameworks.koa.routerMajor, budget));
   if (frameworks.fastify !== undefined) results.push(flattenFastify(project, interpretation.instances, interpretation.events));
   if (frameworks.nest !== undefined) results.push(...extractNestRoutes(project, frameworks.nest, includeFile));
   const syntaxErrorFiles = [...project.files].filter(([path, sourceFile]) => includeFile(path) && hasParseErrors(sourceFile)).length;
-  return { detected: frameworks, analysis: { project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles } };
+  return { detected: frameworks, analysis: { project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles, factLimitCause: budget.exceededCause } };
 }
 
 /**
