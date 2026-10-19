@@ -1,6 +1,6 @@
 /** 웹·RN 호출부 추출의 외부 계약을 합성 프로젝트로 검증한다. */
 import assert from 'node:assert/strict';
-import { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -1546,4 +1546,26 @@ test('sources whose names contain forbidden characters are skipped without expos
   });
   assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.location.path, fact.symbol?.usr]), [['/ok', 'src/client.ts', 'src/client.ts#load']]);
   assert.ok(doc.limitations.includes(skippedProjectSources));
+});
+
+test('sources the compiler cannot read are reported as skipped project sources', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-unreadable-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"dependencies":{"axios":"1.20.0"}}');
+    writeFileSync(join(root, 'src/client.ts'), 'export const load = () => fetch("/ok");');
+    writeFileSync(join(root, 'src/locked.ts'), 'export const hidden = () => fetch("/hidden");');
+    chmodSync(join(root, 'src/locked.ts'), 0o000);
+    const result = await runRoutesCommand(['--role', 'client', '--project', root], {
+      fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date('2026-10-01T00:00:00Z'),
+    });
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as { facts: Fact[]; limitations: string[] };
+    assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+    assert.ok(document.limitations.includes(skippedProjectSources));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

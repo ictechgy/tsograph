@@ -45,6 +45,7 @@ export function nodeProjectLimitations(result: NodeRoutesResult): LimitationEntr
     [gaps.unsafeNames, `route-coverage: ${gaps.unsafeNames} file or directory name(s) in the project contain characters the exchange format forbids; routers in them were not scanned`],
     [Number(gaps.truncated), 'route-coverage: the source scan stopped at its entry limit; later files were not analyzed'],
     [gaps.oversizedFiles, `route-coverage: ${gaps.oversizedFiles} source file(s) exceed ${MAX_NODE_SOURCE_BYTES} bytes and were not analyzed`],
+    [gaps.unreadableFiles, `route-coverage: ${gaps.unreadableFiles} source file(s) could not be read by the compiler and were not analyzed`],
     [analysis.syntaxErrorFiles, `route-coverage: ${analysis.syntaxErrorFiles} source file(s) have syntax errors; route registrations in them may be incomplete`],
     [analysis.truncatedCalls, `route-coverage: ${analysis.truncatedCalls} function call(s) were not followed (recursion, depth ${MAX_CALL_DEPTH}, or the frame limit); routes registered inside them may be missing`],
   ];

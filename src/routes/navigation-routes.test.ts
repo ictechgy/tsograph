@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -466,5 +466,23 @@ registerScreens([{ path: '${path}', screen: Catalog }]);`;
     assert.deepEqual(doc.facts.map((fact) => [fact.urlTemplate, fact.location.path]), [['/catalog', 'src/router.ts']]);
     assert.ok(doc.limitations.includes('navigation-project-coverage: source discovery was incomplete '
       + '(symlinks: 0, unreadable directories: 0, oversized files: 0, truncated: false, unsafe names: 1)'));
+  });
+});
+
+test('sources the compiler cannot read are counted as incomplete source discovery', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const registration = (path: string) => `import { registerScreens } from './router-api';
+import { Catalog } from './screens';
+registerScreens([{ path: '${path}', screen: Catalog }]);`;
+  await fixture({
+    'src/router.ts': registration('/catalog'),
+    'src/locked.ts': registration('/hidden'),
+  }, (root) => {
+    chmodSync(join(root, 'src/locked.ts'), 0o000);
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.deepEqual(doc.facts.map((fact) => [fact.urlTemplate, fact.location.path]), [['/catalog', 'src/router.ts']]);
+    assert.ok(doc.limitations.includes('navigation-project-coverage: source discovery was incomplete '
+      + '(symlinks: 0, unreadable directories: 0, oversized files: 0, truncated: false, unreadable files: 1)'));
   });
 });

@@ -36,8 +36,8 @@ screen은 프로젝트 function/class/불변 arrow 선언 또는 JSX 태그로 �
 USR은 graph와 같은 규칙이며 source 위치는 1 기반 UTF-8 열이다. 테스트와 구문 오류
 소스는 제외한다. 라이브러리 전용 redirect·guard·lazy loader 등의 런타임 의미는 추론하지 않는다.
 소스는 `tsograph schema`와 같은 걷기 규칙으로 모으고, 따라가지 않은 symlink·목록을 읽지 못한
-디렉터리·크기 초과 파일·잘린 스캔·교환 형식이 금지하는 문자가 든 이름은 `navigation-project-coverage:`
-한 줄의 계수로 알린다.
+디렉터리·크기 초과 파일·잘린 스캔·교환 형식이 금지하는 문자가 든 이름·컴파일러가 읽지 못한 소스는
+`navigation-project-coverage:` 한 줄의 계수로 알린다.
 
 설정은 project 안의 1 MiB JSON이며 중복 key·닫힌 schema·깊이·모델 상한을 검사한다.
 등록 깊이는 64, 사실은 100,000개로 제한하며 상한 뒤를 조용히 버리지 않는다. 출력은

@@ -796,7 +796,7 @@ function buildLimitations(
  * @returns 공백이 없으면 빈 목록
  */
 function sourceDiscoveryLimitations(gaps: NodeProjectGaps): string[] {
-  const added = ([['unsafe names', gaps.unsafeNames]] as const)
+  const added = ([['unsafe names', gaps.unsafeNames], ['unreadable files', gaps.unreadableFiles]] as const)
     .filter(([, count]) => count > 0)
     .map(([label, count]) => `, ${label}: ${count}`)
     .join('');

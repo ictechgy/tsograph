@@ -557,3 +557,30 @@ test('금지 문자 이름의 파일·디렉터리는 노드로 만들지 않고
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('컴파일러가 읽지 못한 소스는 노드 없이 건너뛰지 않고 unreadable-sources:와 불완전 스캔으로 알린다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-compiler-unreadable-')));
+  try {
+    mkdirSync(join(project, 'src'));
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'src/a.ts'), 'export interface Runner { run(): void }\n'
+      + 'export class A implements Runner { run() { safe(); } }\nfunction safe() {}\n'
+      + 'export function call(r: Runner) { r.run(); }\nexport function main() { call(new A()); }\n');
+    // 읽지 못한 구현 B를 보지 못한 채 A.run만 관찰한 값으로 bound를 확정하면 안 된다.
+    writeFileSync(join(project, 'src/b.ts'), "import { call, type Runner } from './a';\n"
+      + 'export class B implements Runner { run() { danger(); } }\nfunction danger() {}\nexport function other() { call(new B()); }\n');
+    chmodSync(join(project, 'src/b.ts'), 0o000);
+    // TypeScript는 경로의 백슬래시를 구분자로 바꿔 읽으므로 이 이름(POSIX에서 쓸 수 있다)의 파일은 읽지 못한다.
+    writeFileSync(join(project, 'src/back\\slash.ts'), 'export function back() { return 2; }\n');
+    const target = await buildCallGraph(project, fileSystem);
+    assert.deepEqual([...new Set(target.nodes.map((node) => node.location.path))], ['src/a.ts']);
+    assert.deepEqual(target.edges.filter((edge) => edge.evidence === 'bound'), []);
+    assert.ok(target.limitations.includes('unreadable-sources: 2 source file(s) could not be read by the compiler and were skipped'));
+    assert.ok(target.limitations.includes('bound-dispatch: the scan is incomplete, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound'));
+    assert.ok(target.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

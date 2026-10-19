@@ -1331,6 +1331,7 @@ candidate edge).
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
+A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in

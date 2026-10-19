@@ -3,7 +3,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -141,4 +141,26 @@ test('금지 문자 이름의 파일·디렉터리는 라우트 사실 경로에
   assert.deepEqual(unsafe, []);
   assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
   assert.equal(limitationsWith(document, 'route-coverage: 2 file or directory name(s) in the project contain characters the exchange format forbids; routers in them were not scanned').length, 1);
+});
+
+test('컴파일러가 읽지 못한 소스는 그 안의 라우트가 빠졌을 수 있다고 route-coverage로 알린다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-node-unreadable-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), packageJson({ express: '4.21.2' }));
+    writeFileSync(join(root, 'src/app.ts'), "import express from 'express';\nimport { mount } from './users';\nconst app = express();\n"
+      + "app.get('/ok', (req, res) => res.send('ok'));\nmount(app);\nexport default app;\n");
+    writeFileSync(join(root, 'src/users.ts'), "export function mount(app: any) { app.get('/users/:id', (req: any, res: any) => res.send('u')); }\n");
+    chmodSync(join(root, 'src/users.ts'), 0o000);
+    writeFileSync(join(root, 'src/back\\slash.ts'), 'export const unused = 1;\n');
+    const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0', now: () => new Date(0) });
+    assert.equal(result.exitCode, 0, result.standardError);
+    const document = JSON.parse(result.standardOutput) as NodeDocumentView;
+    assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+    assert.equal(limitationsWith(document, 'route-coverage: 2 source file(s) could not be read by the compiler and were not analyzed').length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

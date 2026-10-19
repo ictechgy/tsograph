@@ -30,6 +30,11 @@ export interface NodeProjectGaps {
   readonly oversizedFiles: number;
   /** 교환 형식이 금지하는 문자가 든 이름이라 걷기가 건너뛴 파일·디렉터리 수다. */
   readonly unsafeNames: number;
+  /**
+   * 걷기가 골랐지만 compiler host가 읽지 못해 Program에 없는 소스 수다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
+   * 읽는 백슬래시 이름). host의 읽기 실패 전체는 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조해 센다.
+   */
+  readonly unreadableFiles: number;
 }
 
 /** 준비한 프로젝트다. */
@@ -76,6 +81,7 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       truncated: walk.truncated,
       oversizedFiles: walk.files.size - candidates.length,
       unsafeNames: walk.unsafeNames,
+      unreadableFiles: candidates.length - files.size,
     },
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),

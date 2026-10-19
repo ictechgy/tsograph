@@ -1088,6 +1088,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
+걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, TypeScript가 경로 구분자로 읽는 백슬래시가 든 이름)는 노드가 되지 않으며 `unreadable-sources:`로 세고 역시 분석 완전성을 인정하지 않는다.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고

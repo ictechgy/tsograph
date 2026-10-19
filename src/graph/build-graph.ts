@@ -87,6 +87,8 @@ interface GraphCounts {
   readonly config: ProgramConfigStatus;
   readonly inputs: GraphInputs;
   readonly parseErrorFiles: readonly string[];
+  /** 걷기가 골랐지만 compiler host가 읽지 못해 노드 파일이 되지 못한 소스 수 */
+  readonly unreadableSources: number;
   readonly unresolvedExports: number;
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
@@ -126,10 +128,13 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   const { program, checker, status } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
   const files = nodeFiles(program, inputs.sources);
+  // 걷기가 고른 소스 중 Program에 없는 것은 compiler host가 읽지 못했다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
+  // 읽는 백슬래시 이름). host의 'unreadable' 전체를 세면 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조한다.
+  const unreadableSources = inputs.sources.size - files.size;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
-    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0;
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
@@ -141,12 +146,12 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length);
+  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
-    ...analysis, config: status, inputs, parseErrorFiles, unmatchedCrons, openProgram,
+    ...analysis, config: status, inputs, parseErrorFiles, unreadableSources, unmatchedCrons, openProgram,
     cronConfigUnreadable: crons.unreadable, routeFactsTruncated: routes.facts.length === 0 && routes.extraction.routes.length > 0,
   };
   const environmentLimits: string[] = [];
@@ -159,19 +164,21 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
 
 /**
  * bound 디스패치가 프로그램을 열린 것으로 봐야 하는 이유다: 공개 패키지(스캔 밖 코드가 내보낸 선언을
- * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink·금지 문자 이름, 구문 오류) 보지 못한 호출자가 있을 수 있다.
+ * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink·금지 문자 이름, 컴파일러가 읽지 못한 소스,
+ * 구문 오류) 보지 못한 호출자가 있을 수 있다.
  *
  * @param project 프로젝트 realpath
  * @param inputs 입력 파일
  * @param parseErrors 구문 오류 파일 수
+ * @param unreadableSources 걷기가 골랐지만 compiler host가 읽지 못한 소스 수
  * @returns 이유, 닫힌 프로그램이면 undefined
  */
-function openProgramReason(project: string, inputs: GraphInputs, parseErrors: number): OpenProgramReason | undefined {
+function openProgramReason(project: string, inputs: GraphInputs, parseErrors: number, unreadableSources: number): OpenProgramReason | undefined {
   const manifest = readManifestEntry(project);
   if (manifest !== 'private') return manifest;
   const walk = inputs.walk;
   const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0
-    || walk.unsafeNames > 0 || parseErrors > 0;
+    || walk.unsafeNames > 0 || unreadableSources > 0 || parseErrors > 0;
   return incomplete ? 'incomplete-scan' : undefined;
 }
 
@@ -355,7 +362,8 @@ function isOversized(absolute: string): boolean {
 }
 
 /**
- * Program의 소스 파일 중 노드 파일을 고른다.
+ * Program의 소스 파일 중 노드 파일을 고른다. compiler host가 읽지 못해 SourceFile이 없는 소스는 빠지며,
+ * 호출자가 기대 소스 수와의 차이로 그 수를 센다.
  *
  * @param program Program
  * @param sources 노드 파일(프로젝트 기준 경로 → 절대 경로)
@@ -559,7 +567,7 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
  * @param counts 계수
  * @returns limitation 목록
  */
-function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
+function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactsTruncated }: GraphCounts): string[] {
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
@@ -573,6 +581,7 @@ function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadabl
   }
   if (inputs.oversized > 0) result.push(`oversized-sources: ${inputs.oversized} file(s) larger than 4 MiB were skipped`);
   if (inputs.walk.unreadableDirectories > 0) result.push(`unreadable-sources: ${inputs.walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
+  if (unreadableSources > 0) result.push(`unreadable-sources: ${unreadableSources} source file(s) could not be read by the compiler and were skipped`);
   if (inputs.walk.skippedSymlinks > 0) result.push(`skipped-symlinks: ${inputs.walk.skippedSymlinks} symbolic link(s) were not followed`);
   if (inputs.walk.unsafeNames > 0) {
     result.push(`unsafe-names: ${inputs.walk.unsafeNames} file or directory name(s) contain characters the exchange format forbids and were skipped`);
