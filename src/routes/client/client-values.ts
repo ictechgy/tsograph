@@ -22,6 +22,15 @@ const MAX_MUTATION_QUERY_WORK = 20_000;
  * 0.48, 가장 무거운 단일 파일 2.54(`value-flow.ts`), fixture 0.03~0.18이었다.
  */
 const MUTATION_WORK_PER_SOURCE_UNIT = 8;
+/**
+ * wrapper 호출 하나를 다시 검사하는 최대 횟수(재검사 회차 수)다. 회차마다 아직 증명된 wrapper 호출을 모두 한 번씩 다시 본다.
+ *
+ * 예전에는 재검사 총횟수 20,000을 프로젝트 전체가 함께 써서, wrapper 호출이 2만 개를 넘으면 첫 회차만으로 미완이 됐다.
+ * 회차는 탈출이 다음 wrapper를 무너뜨리는 사슬 길이만큼만 필요하다. 예전 총횟수 상한 안에서 끝나던 분석은 회차마다 남은
+ * 호출이 하나 이상 줄어 199회차를 넘지 않으므로, 200회차는 그런 분석을 모두 그대로 끝낸다. 회차마다 전체 AST를 다시
+ * 색인하므로 최악 시간도 예전 상한과 같은 차수다.
+ */
+const MAX_ESCAPE_RECHECK_ROUNDS = 200;
 const MAX_PROJECTION_DEPTH = 16;
 /** URL 식 하나를 조각으로 펼칠 때 거치는 최대 단계(`parts`·query 꼬리 판정 호출) 수다. 실제 URL 식은 수십 단계면 끝난다. */
 const MAX_URL_PART_STEPS = 4096;
@@ -76,11 +85,14 @@ export interface ClientMutationBudget {
   readonly queryWork: number;
   /** 단계마다 분석 소스 UTF-16 코드 단위 하나가 단계 전체 상한에 보태는 작업 단위 수다. */
   readonly workPerSourceUnit: number;
+  /** wrapper 호출 하나를 다시 검사하는 최대 회차 수다. */
+  readonly escapeRecheckRounds: number;
 }
 
 /** 기본 변경 분석 예산이다. 값의 근거는 각 상수 주석에 있다. */
 export const DEFAULT_CLIENT_MUTATION_BUDGET: ClientMutationBudget = {
   queryWork: MAX_MUTATION_QUERY_WORK, workPerSourceUnit: MUTATION_WORK_PER_SOURCE_UNIT,
+  escapeRecheckRounds: MAX_ESCAPE_RECHECK_ROUNDS,
 };
 
 /** 한 단계(색인 또는 변경 질의)의 누적 작업과, 상한에 한 번이라도 닿았는지다. */

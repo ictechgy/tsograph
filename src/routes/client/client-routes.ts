@@ -7,7 +7,7 @@ import { scopeIdOf } from '../../graph/symbol-ids.ts';
 import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
-import { ClientValues, configValue, type ClientConfig, type ClientMutationBudget } from './client-values.ts';
+import { ClientValues, configValue, DEFAULT_CLIENT_MUTATION_BUDGET, type ClientConfig, type ClientMutationBudget } from './client-values.ts';
 import { ClientWrappers } from './client-wrappers.ts';
 import { typedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
@@ -41,7 +41,6 @@ interface Sink {
 }
 /** 계약 동사 집합이다. */
 const methods = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']);
-const MAX_ESCAPE_RECHECKS = 20_000;
 /** ky major를 읽는 루트 `package.json` 최대 크기(바이트)다. */
 const MAX_KY_MANIFEST_BYTES = 1024 * 1024;
 
@@ -239,15 +238,16 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     inspect(source);
   }
   let pendingWrappers = deferredWrapperCalls;
-  let escapeRechecks = 0;
-  while (pendingWrappers.length > 0 && !values.mutationAnalysisIncomplete) {
+  const recheckRounds = (mutationBudget ?? DEFAULT_CLIENT_MUTATION_BUDGET).escapeRecheckRounds;
+  // 회차마다 남은 wrapper 호출을 모두 한 번씩 다시 본다. 호출 지점마다 재검사 횟수(회차)에 상한을 두어 호출 수와 무관하다.
+  for (let round = 0; pendingWrappers.length > 0 && !values.mutationAnalysisIncomplete; round++) {
+    if (round >= recheckRounds) {
+      values.mutationAnalysisIncomplete = true; break;
+    }
     const rechecked = new ClientWrappers(values, includeTests);
     const stillProven: ts.CallExpression[] = [];
     const before = values.mutated.size;
     for (const call of pendingWrappers) {
-      if (++escapeRechecks > MAX_ESCAPE_RECHECKS) {
-        values.mutationAnalysisIncomplete = true; break;
-      }
       if (sinkOf(call, values, rechecked, typedModels) === undefined) escapeCall(call);
       else stillProven.push(call);
     }

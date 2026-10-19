@@ -670,6 +670,22 @@ test('the per-phase mutation work cap scales with the analyzed source size', () 
   assert.equal(mutationIncomplete(scaled.limitations), false);
 });
 
+test('wrapper rechecks are bounded per call site by rounds, not by the project-wide recheck count', () => {
+  // 비HTTP 전달 `api.log`의 탈출이 `api`를 변경 대상으로 만들어, 1회차에서 `api.get` 호출이 무너지고 `opts`가 새로 변경
+  // 대상이 된다. `plain` 호출이 남아 있으므로 2회차가 돈다. 예전에는 재검사 총횟수 20,000을 프로젝트 전체가 함께 썼다.
+  const chain = { 'src/chain.ts': `export {}; declare function register(value: unknown): unknown;
+    const api = { get(url: string, init: object) { return fetch(url, init); }, log(message: string) { return register(message); } };
+    const opts = { method: 'GET' }; api.log('ready'); api.get('/chained', opts);
+    function plain(url: string) { return fetch(url); } plain('/plain');` };
+  const oneRound = extractWithBudget(chain, { ...DEFAULT_CLIENT_MUTATION_BUDGET, escapeRecheckRounds: 1 });
+  assert.ok(mutationIncomplete(oneRound.limitations));
+  const twoRounds = extractWithBudget(chain, { ...DEFAULT_CLIENT_MUTATION_BUDGET, escapeRecheckRounds: 2 });
+  assert.equal(mutationIncomplete(twoRounds.limitations), false);
+  assert.deepEqual(twoRounds.facts.filter((fact) => !fact.dynamic).map((fact) => [fact.method, fact.channel]), [
+    ['GET', '/plain'], ...budgetStaticFacts.map(([method, channel]) => [method, channel]),
+  ]);
+});
+
 test('array spread positions cannot certify a numeric configuration projection', async () => {
   const doc = await scan(`declare function register(value: unknown): void;
     const opts = { method: 'GET' }; const list = [...[0, 0], opts]; register(list[2]);

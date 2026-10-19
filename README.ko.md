@@ -64,8 +64,9 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 
 설정 변경 분석 예산은 프로젝트 전체가 아니라 지점마다 둔다. 탈출 지점(알 수 없는 호출의 인자·수신자, `new`,
 tagged template)과 색인 지점은 하나마다 20,000단계를 쓰고, 이미 본 상태는 지점 사이에 함께 쓴다. 단계 전체는 분석
-소스 문자당 8단계까지라 무관한 파일 수가 결과를 바꾸지 않는다. 예산을 넘은 지점은 무엇을 바꿀 수 있었는지 좁히지
-못하므로 `route-call-coverage:`로 변경 분석 미완을 알리고 axios·ky 클라이언트와 요청 설정을 모두 dynamic으로 둔다.
+소스 문자당 8단계, wrapper 호출 재검사는 200회차까지라 무관한 파일 수가 결과를 바꾸지 않는다. 예산을 넘은 지점은
+무엇을 바꿀 수 있었는지 좁히지 못하므로 `route-call-coverage:`로 변경 분석 미완을 알리고 axios·ky 클라이언트와
+요청 설정을 모두 dynamic으로 둔다.
 
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
 HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로

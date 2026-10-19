@@ -70,10 +70,10 @@ The libraries are development-only dependencies for the oracle; the CLI does not
 
 Configuration mutation analysis is budgeted per site, not per project: each escape site (an unknown
 call's arguments and receiver, a `new` expression, or a tagged template) and each indexing site gets
-20,000 steps, visited states are shared across sites, and each phase is capped at 8 steps per analyzed
-source character, so unrelated files do not change the result. A site over its budget cannot be
-narrowed to what it might change, so `route-call-coverage:` reports the mutation analysis as incomplete
-and every axios/ky client and request configuration stays dynamic.
+20,000 steps, visited states are shared across sites, each phase is capped at 8 steps per analyzed source
+character, and a wrapper call is rechecked for at most 200 rounds, so unrelated files do not change the
+result. A site over its budget cannot be narrowed to what it might change, so `route-call-coverage:`
+reports the mutation analysis as incomplete and every axios/ky client and request configuration stays dynamic.
 
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
