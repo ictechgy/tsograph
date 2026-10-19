@@ -550,6 +550,24 @@ SQL은 가족 공유 어휘 추출기(dartograph `sql_relations.dart`·cartograp
 - 그 밖의 문자열 리터럴은 SQL 동사와 관계 키워드가 대문자일 때만 읽는다(strict). 소문자 SQL처럼 보이는
   리터럴은 `skipped-sql-literals:`로 센다.
 
+추출기는 다음 세 경우의 이름을 relation-use로 내지 않는다. persistence 생산자 계열이 공통 사례(같은 SQL 문자열과
+기대 관계)로 고정한 규칙이다.
+
+- 함수 인자 안의 `FROM`: 그 `FROM`을 감싼 가장 안쪽 `(`가 함수 이름(SQL 절 키워드가 아닌 비인용 이름) 바로 뒤에
+  있고 그 괄호가 `SELECT`·`WITH`·`VALUES`로 시작하지 않으면 관계가 아니다. 예: `EXTRACT(YEAR FROM created_at)`,
+  `TRIM(BOTH ' ' FROM name)`, `SUBSTRING(name FROM 2 FOR 3)`. 하위 질의(`FROM (SELECT …)`·`IN (SELECT …)`)와 CTE
+  본문(`AS MATERIALIZED (DELETE FROM t …)`)의 `FROM`은 그대로 관계다. 다른 키워드 뒤 괄호 속 문장
+  (`COPY (DELETE FROM t …)` 등)은 함수 인자로 읽으므로 그 `FROM`은 관계를 내지 않는다.
+- 같은 문장(`;`로 나뉜 구간)이 정의한 CTE 이름을 가리키는 한정자 없는 피연산자
+  (`WITH recent AS (…) SELECT * FROM recent`). 비인용 이름끼리는 대소문자를 무시하고 인용 이름은 그대로 비교한다.
+  `public.recent`는 CTE가 아니다. CTE 본문이 읽는 관계는 그대로 내지만, 테이블과 같은 이름의 CTE는 그 문장의
+  테이블 사용도 가린다.
+- `IS [NOT] DISTINCT FROM`의 `FROM`.
+
+이 셋은 미해석 피연산자로도 세지 않으므로 그 자리의 바인드 플레이스홀더(`$queryRaw`의
+`IS DISTINCT FROM ${value}`)는 dynamic 사실을 더하지 않는다. 이 규칙이 알아보는 단어는 strict 모드에서도
+대소문자를 가리지 않는다.
+
 ### Node ORM과 SQL 드라이버
 
 이름 규칙·출처·오라클은 [docs/PERSISTENCE.md](docs/PERSISTENCE.md)에 있다. 요약:

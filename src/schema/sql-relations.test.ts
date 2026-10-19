@@ -99,6 +99,48 @@ test('이름 escape는 한정자와 한 세그먼트를 구분한다', () => {
   assert.equal(escapeName('a.b'), 'a%2Eb');
 });
 
+/**
+ * 계열 공통 사례다. persistence 생산자 7곳의 SQL 관계 추출 테스트와 isthmus `conformance/sql-relations.json` 벡터가 같은
+ * SQL 문자열과 기대값을 쓴다. 공통 사례 파일에서 기계적으로 옮겼으므로 고치지 않는다(벡터를 벤더링하면 그 파일로 옮긴다).
+ * `relations`는 관계 이름의 집합이다 — 순서와 중복(키워드마다 따로 낸다)은 이 저장소의 규칙을 따른다.
+ * 규칙: R1 함수 인자 안의 FROM, R2 문장 단위 CTE 이름, R3 `IS [NOT] DISTINCT FROM`.
+ */
+const sharedRelationCases: readonly {
+  readonly id: string;
+  readonly rule: 'R1' | 'R2' | 'R3';
+  readonly sql: string;
+  readonly relations: readonly string[];
+}[] = [
+  { id: 'cte/simple', rule: 'R2', sql: 'WITH recent AS (SELECT * FROM orders) SELECT * FROM recent', relations: ['orders'] },
+  { id: 'cte/recursive-with-columns', rule: 'R2', sql: 'WITH RECURSIVE tree(id, parent_id) AS (SELECT id, parent_id FROM nodes UNION ALL SELECT n.id, n.parent_id FROM nodes n JOIN tree t ON n.parent_id = t.id) SELECT * FROM tree', relations: ['nodes'] },
+  { id: 'cte/multiple-materialized', rule: 'R2', sql: 'WITH a AS (SELECT 1), b AS MATERIALIZED (SELECT * FROM orders) SELECT * FROM a JOIN b ON true', relations: ['orders'] },
+  { id: 'cte/not-materialized', rule: 'R2', sql: 'WITH c AS NOT MATERIALIZED (SELECT * FROM orders) SELECT * FROM c', relations: ['orders'] },
+  { id: 'cte/insert-select', rule: 'R2', sql: 'WITH staged AS (SELECT * FROM imports) INSERT INTO orders SELECT * FROM staged', relations: ['imports', 'orders'] },
+  { id: 'cte/scope-is-one-statement', rule: 'R2', sql: 'WITH recent AS (SELECT 1) SELECT * FROM recent; SELECT * FROM recent', relations: ['recent'] },
+  { id: 'function-from/extract', rule: 'R1', sql: 'SELECT EXTRACT(YEAR FROM created_at) FROM orders', relations: ['orders'] },
+  { id: 'function-from/trim', rule: 'R1', sql: "SELECT TRIM(BOTH ' ' FROM name) FROM users", relations: ['users'] },
+  { id: 'function-from/substring', rule: 'R1', sql: 'SELECT SUBSTRING(name FROM 2 FOR 3) FROM users', relations: ['users'] },
+  { id: 'subquery/derived-table-still-fires', rule: 'R1', sql: 'SELECT * FROM (SELECT * FROM orders) AS sub', relations: ['orders'] },
+  { id: 'subquery/scalar-still-fires', rule: 'R1', sql: 'SELECT (SELECT max(id) FROM users) FROM orders', relations: ['users', 'orders'] },
+  { id: 'subquery/in-select-still-fires', rule: 'R1', sql: 'SELECT * FROM orders WHERE id IN (SELECT order_id FROM payments)', relations: ['orders', 'payments'] },
+  { id: 'distinct-from/is', rule: 'R3', sql: 'SELECT * FROM events WHERE a IS DISTINCT FROM b', relations: ['events'] },
+  { id: 'distinct-from/is-not', rule: 'R3', sql: 'SELECT * FROM events WHERE a IS NOT DISTINCT FROM b', relations: ['events'] },
+];
+
+test('계열 공통 사례: CTE 이름·함수 인자 안의 FROM·IS [NOT] DISTINCT FROM 피연산자는 관계가 아니다', () => {
+  // 공통 사례는 키워드가 모두 대문자라 strict 모드에서도 같다. 내지 않는 피연산자는 미해석으로도 세지 않는다.
+  for (const { id, sql, relations: expected } of sharedRelationCases) {
+    for (const strict of [false, true]) {
+      const result = sqlRelations(sql, strict);
+      const names = [...new Set(result.relations.map((relation) => relation.name))].sort();
+      assert.deepEqual([names, result.unresolved], [[...expected].sort(), 0], `${id} (strict ${strict})`);
+    }
+  }
+  // CTE 이름은 그 문장 안에서만 가린다 — 두 번째 문장의 `recent` 하나만 남는다(개수까지 본다).
+  const scope = sharedRelationCases.find((testCase) => testCase.id === 'cte/scope-is-one-statement')!;
+  assert.deepEqual(relations(scope.sql), ['recent']);
+});
+
 // 아래는 공유 벡터 밖의 포트 분기 회귀 테스트다(원본 알고리즘의 같은 분기를 고정한다).
 
 test('주석·문자열·인용 식별자를 어휘로 올바르게 나눈다', () => {
@@ -141,6 +183,48 @@ test('닫히지 않은 괄호와 중복 피연산자를 처리한다', () => {
   assert.deepEqual(relations('SELECT * FROM a.where'), ['a']);
   assert.deepEqual(relations('SELECT * FROM ""'), []);
   assert.deepEqual(relations('SELECT * FROM "a" AS'), ['a']);
+});
+
+test('CTE·함수 인자·DISTINCT FROM 규칙은 가장 안쪽 괄호와 문장으로 판정하고 CTE 본문 괄호는 함수 인자가 아니다', () => {
+  const cases: readonly (readonly [string, readonly string[], number])[] = [
+    // R3의 피연산자는 자리표시자여도 관계도 미해석도 아니다.
+    ['SELECT * FROM events WHERE kind IS DISTINCT FROM $1', ['events'], 0],
+    ['SELECT * FROM events WHERE kind IS NOT DISTINCT FROM ?', ['events'], 0],
+    // R1의 함수 이름은 절 단어(AS)가 아니고 CTE 본문 괄호(`AS [NOT] MATERIALIZED (`)도 아니다 — DML CTE 본문의 FROM은 관계다.
+    ['WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', ['t'], 0],
+    ['WITH d AS MATERIALIZED (DELETE FROM t RETURNING *) SELECT * FROM d', ['t'], 0],
+    ['WITH d AS NOT MATERIALIZED (DELETE FROM t RETURNING *) SELECT * FROM d', ['t'], 0],
+    // 이름 뒤 괄호라도 첫 토큰이 SELECT면 하위 질의이고, 판정은 FROM을 감싼 가장 안쪽 괄호로 한다.
+    ['INSERT INTO t (SELECT * FROM s)', ['t', 's'], 0],
+    ['(SELECT * FROM t) UNION (SELECT * FROM u)', ['t', 'u'], 0],
+    ['SELECT EXTRACT(YEAR FROM (SELECT max(d) FROM t)) FROM orders', ['t', 'orders'], 0],
+    ['SELECT OVERLAY(name PLACING $1 FROM 2) FROM users', ['users'], 0],
+    // 테이블 값 함수 피연산자는 지금처럼 미해석이다.
+    ['SELECT * FROM generate_series(1, 10)', [], 1],
+    // 괄호 문맥은 문장마다 새로 시작한다 — 닫히지 않은 함수 괄호가 다음 문장의 FROM을 가리지 않는다.
+    ['SELECT EXTRACT(YEAR FROM ts; SELECT * FROM orders', ['orders'], 0],
+    // CTE 이름 비교: 비인용끼리는 대소문자를 무시하고, 인용 이름은 그대로 비교하고, 한정 이름은 CTE가 아니다.
+    ['WITH Recent AS (SELECT * FROM orders) SELECT * FROM recent', ['orders'], 0],
+    ['WITH "Recent" AS (SELECT 1) SELECT * FROM recent', ['recent'], 0],
+    ['WITH "Recent" AS (SELECT 1) SELECT * FROM "Recent"', [], 0],
+    ['WITH recent AS (SELECT 1) SELECT * FROM public.recent', ['public.recent'], 0],
+    // 규칙대로 문장 전체를 가리므로, 테이블과 같은 이름의 CTE는 그 문장의 테이블 사용도 가린다(README에 적은 한계).
+    ['WITH orders AS (SELECT * FROM orders WHERE paid) SELECT * FROM orders', [], 0],
+    // 내지 않는 CTE 피연산자도 별칭·쉼표 목록 진행은 그대로다. 문장 경계는 비인용 `;`뿐이다.
+    ['WITH a AS (SELECT 1) SELECT * FROM a x, orders o', ['orders'], 0],
+    ['WITH recent AS (SELECT 1) SELECT ";" FROM recent', [], 0],
+  ];
+  for (const [sql, names, unresolved] of cases) {
+    for (const strict of [false, true]) {
+      const result = sqlRelations(sql, strict);
+      const actual = [result.relations.map((relation) => relation.name), result.unresolved];
+      assert.deepEqual(actual, [names, unresolved], `${sql} (strict ${strict})`);
+    }
+  }
+  // 세 규칙은 관계를 빼기만 하므로 인식 단어는 strict 모드에서도 대소문자를 가리지 않는다(strict 게이트는 발화만 막는다).
+  assert.deepEqual(relations('with recent as (SELECT * FROM orders) SELECT * FROM recent', true), ['orders']);
+  assert.deepEqual(relations('SELECT * FROM events WHERE a is not distinct FROM b', true), ['events']);
+  assert.deepEqual(relations('SELECT extract(year FROM created_at) FROM orders', true), ['orders']);
 });
 
 test('table-valued functions are unresolved operands, not table names', () => {
@@ -203,6 +287,24 @@ test('반복 INTO·ON과 닫히지 않거나 중첩된 괄호도 어휘를 위�
     `GRANT SELECT${' ON t'.repeat(2000)}`,
     `CREATE INDEX i${' ON t'.repeat(2000)}`,
     `${'SELECT * FROM ('.repeat(1000)}SELECT 1${')'.repeat(1000)}`,
+  ];
+  for (const sql of inputs) {
+    const counted = countedTokens(sql);
+    assert.deepEqual(tokenRelations(counted.tokens, true), sqlRelations(sql, true));
+    const tokens = counted.tokens.length;
+    assert.ok(counted.reads() <= 64 * tokens, `${sql.slice(0, 16)}…: ${counted.reads()} reads for ${tokens} tokens`);
+  }
+});
+
+test('CTE 이름·함수 인자 괄호·DISTINCT FROM 판정도 어휘를 위치마다 다시 훑지 않는다', () => {
+  // 피연산자마다 문장을 다시 훑는 CTE 조회, 쉼표마다 닫히지 않은 열 목록 끝을 찾는 CTE 인식, FROM마다 감싼 괄호를
+  // 거꾸로 찾는 함수 인자 판정은 모두 어휘 수의 제곱이 된다.
+  const inputs = [
+    `WITH a AS (SELECT 1) SELECT 1${' FROM a'.repeat(2000)}`,
+    `SELECT 1${', a ('.repeat(2000)}`,
+    `SELECT f(x${' (1) FROM y'.repeat(2000)})`,
+    `SELECT * FROM t WHERE${' a IS NOT DISTINCT FROM b AND'.repeat(2000)} true`,
+    `SELECT EXTRACT(YEAR FROM ts${'; SELECT * FROM t'.repeat(2000)}`,
   ];
   for (const sql of inputs) {
     const counted = countedTokens(sql);

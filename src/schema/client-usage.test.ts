@@ -125,6 +125,28 @@ test('$queryRaw 태그 템플릿은 보간을 바인드 파라미터로 보고 �
   assert.ok(result.limitations.some((line) => line.startsWith('dynamic-relation-names: 2 ')));
 });
 
+test('SQL 텍스트의 CTE 이름·함수 인자 안의 FROM·IS DISTINCT FROM 피연산자는 relation-use도 dynamic 사실도 아니다', () => {
+  // 예전에는 `recent`·`createdAt`가 relation-use로, `IS DISTINCT FROM ${kind}`의 바인드 자리가 미해석 dynamic 사실로
+  // 나가 isthmus가 거짓 relation-use-without-decl error를 냈다.
+  const result = extractProject({
+    ...prismaBase,
+    'src/cte.ts': [
+      "import { PrismaClient } from '@prisma/client';",
+      'const prisma = new PrismaClient();',
+      'export async function q(since: Date, kind: string) {',
+      '  await prisma.$queryRaw`WITH recent AS (SELECT * FROM users WHERE id > ${since}) SELECT * FROM recent`;',
+      '  await prisma.$queryRaw`SELECT EXTRACT(YEAR FROM "createdAt") FROM "Post" WHERE kind IS DISTINCT FROM ${kind}`;',
+      '}',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(result).filter((line) => line.startsWith('src/')), [
+    'src/cte.ts:4:25 users @src/cte.ts#q',
+    'src/cte.ts:5:25 Post @src/cte.ts#q',
+  ]);
+  assert.ok(!result.limitations.some((line) => line.startsWith('dynamic-relation-names:')));
+});
+
 test('$queryRawUnsafe는 리터럴·같은 파일 const를 읽고 보간 템플릿은 dynamic이다', () => {
   const lines = sourceFacts({
     'src/unsafe.ts': [

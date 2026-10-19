@@ -6,6 +6,10 @@
  * isthmus persistence 조인 결과가 생산자 언어에 따라 달라지므로 알고리즘·게이트·
  * 미해석 계수 규칙을 가족과 같게 유지한다. 오프셋은 JS 문자열의 UTF-16 코드 단위 위치다
  * (Dart와 같은 단위라 공유 벡터의 키워드 위치가 그대로 맞는다).
+ *
+ * 관계 이름이 아닌 세 경우 — 함수 인자 안의 FROM(R1), 같은 문장의 CTE 이름(R2), `IS [NOT] DISTINCT FROM`의
+ * 피연산자(R3) — 는 persistence 생산자 계열이 같은 공통 사례로 고정한 규칙이다. 이 이름을 relation-use로 내면
+ * isthmus가 선언과 잇지 못해 거짓 `relation-use-without-decl` error를 낸다.
  */
 
 /** SQL 어휘 하나다. 인용된 식별자는 키워드가 아니다. */
@@ -181,6 +185,8 @@ export function tokenRelations(tokens: readonly SqlToken[], strict = false): Sql
 /**
  * `sqlRelations` 한 번의 스캔 상태다. 포트 원본의 필드·메서드와 한 줄씩 대응한다. 다만 원본이 키워드마다 다시
  * 훑는 앞선 단어 탐색(`segmentBefore`)과 괄호 짝 찾기(`skipParens`)는 생성자에서 한 번 계산해 조회한다(결과는 같다).
+ * R1·R2의 문맥(괄호 그룹이 함수 인자인지, 문장마다의 CTE 이름)도 생성자에서 한 번에 구한다 — 키워드·피연산자마다
+ * 감싼 괄호나 문장을 다시 훑으면 어휘 수의 제곱이 된다.
  */
 class RelationScan {
   /** 어휘 목록이다. */
@@ -203,6 +209,12 @@ class RelationScan {
    * 키워드마다 구간을 거꾸로 다시 훑으면 세미콜론 없는 반복 INTO·ON 입력에서 어휘 수의 제곱이 된다.
    */
   private readonly precedingWords: Uint8Array;
+  /** 각 토큰이 속한 문장 번호다. 경계는 `markStatements`와 같은 비인용 `;`이고, CTE 이름(R2)이 유효한 범위다. */
+  private readonly statementIndex: Uint32Array;
+  /** 문장 번호 → 그 문장이 정의한 CTE 이름의 비교 키(`nameKey`)다(R2). CTE가 없는 문장은 항목이 없다. */
+  private readonly commonTableExpressionNames: ReadonlyMap<number, ReadonlySet<string>>;
+  /** 각 위치를 감싼 가장 안쪽 비인용 괄호가 함수 인자 그룹이면 1이다(R1). */
+  private readonly functionArguments: Uint8Array;
   /** 같은 키워드의 피연산자 목록 안에서만 중복을 막는 키다(`FROM a, a`). */
   private readonly seen = new Set<string>();
   /** 읽은 관계다. */
@@ -223,6 +235,10 @@ class RelationScan {
     this.closeAfter = matchParens(tokens);
     this.precedingWords = this.markPrecedingWords();
     this.markStatements();
+    this.statementIndex = this.markStatementIndexes();
+    const commonTableExpressions = this.findCommonTableExpressions();
+    this.commonTableExpressionNames = commonTableExpressions.names;
+    this.functionArguments = this.markFunctionArguments(commonTableExpressions.bodies);
   }
 
   /**
@@ -245,6 +261,19 @@ class RelationScan {
   private isSymbol(index: number, symbol: string): boolean {
     const token = this.tokens[index];
     return token !== undefined && !token.quoted && token.text === symbol;
+  }
+
+  /**
+   * 위치의 토큰이 비인용 단어 `word`인지 대소문자 없이 본다. R1~R3의 인식 단어용이라 strict 게이트를 걸지 않는다 —
+   * 세 규칙은 관계를 빼기만 하고, strict 게이트는 관계 자리를 여는 키워드·동사에만 건다.
+   *
+   * @param index 토큰 위치
+   * @param word 소문자 단어
+   * @returns 같으면 true
+   */
+  private isWord(index: number, word: string): boolean {
+    const token = this.tokens[index];
+    return token !== undefined && !token.quoted && token.text.toLowerCase() === word;
   }
 
   /**
@@ -298,6 +327,105 @@ class RelationScan {
   }
 
   /**
+   * 토큰마다 속한 문장 번호를 매긴다. 경계는 `markStatements`와 같은 비인용 `;`이고 `;` 자신은 앞 문장에 속한다.
+   *
+   * @returns 위치 → 문장 번호
+   */
+  private markStatementIndexes(): Uint32Array {
+    const statements = new Uint32Array(this.tokens.length);
+    let statement = 0;
+    for (let index = 0; index < this.tokens.length; index++) {
+      statements[index] = statement;
+      if (this.isSymbol(index, ';')) statement++;
+    }
+    return statements;
+  }
+
+  /**
+   * R2: 문장마다 CTE 이름을 모은다. 꼴은 `WITH [RECURSIVE] name [(cols)] AS [NOT] [MATERIALIZED] (`와
+   * `, name [(cols)] AS [NOT] [MATERIALIZED] (`다. 열 목록은 미리 구한 괄호 짝으로 건너뛰므로 `WITH`·쉼표마다 상수
+   * 개 토큰만 본다.
+   *
+   * @returns 문장 번호 → 이름 비교 키 집합과, CTE 본문을 여는 `(` 위치(R1의 함수 인자 그룹이 아니다)
+   */
+  private findCommonTableExpressions(): { names: Map<number, Set<string>>; bodies: Set<number> } {
+    const names = new Map<number, Set<string>>();
+    const bodies = new Set<number>();
+    for (let index = 0; index < this.tokens.length; index++) {
+      const token = this.tokens[index]!;
+      if (token.quoted) continue;
+      const withClause = token.text.toLowerCase() === 'with';
+      if (!withClause && token.text !== ',') continue;
+      const nameIndex = withClause && this.isWord(index + 1, 'recursive') ? index + 2 : index + 1;
+      const body = this.commonTableExpressionBody(nameIndex);
+      if (body === undefined) continue;
+      bodies.add(body);
+      const statement = this.statementIndex[nameIndex]!;
+      names.set(statement, (names.get(statement) ?? new Set<string>()).add(nameKey(this.tokens[nameIndex]!)));
+    }
+    return { names, bodies };
+  }
+
+  /**
+   * `nameIndex`에서 `name [(cols)] AS [NOT] [MATERIALIZED] (`가 시작하면 본문을 여는 `(` 위치를 돌려준다. 꼴이 문장
+   * 경계를 넘거나 열 목록 괄호가 닫히지 않으면 CTE 정의가 아니다.
+   *
+   * @param nameIndex 이름 후보 위치
+   * @returns 본문 `(` 위치. CTE 정의가 아니면 undefined
+   */
+  private commonTableExpressionBody(nameIndex: number): number | undefined {
+    const name = this.tokens[nameIndex];
+    if (name === undefined || !(name.quoted ? name.text.length > 0 : isNameToken(name))) return undefined;
+    let cursor = this.isSymbol(nameIndex + 1, '(') ? this.closeAfter[nameIndex + 1] : nameIndex + 1;
+    if (cursor === undefined || !this.isWord(cursor, 'as')) return undefined;
+    cursor++;
+    if (this.isWord(cursor, 'not')) cursor++;
+    if (this.isWord(cursor, 'materialized')) cursor++;
+    const sameStatement = this.statementIndex[cursor] === this.statementIndex[nameIndex];
+    return sameStatement && this.isSymbol(cursor, '(') ? cursor : undefined;
+  }
+
+  /**
+   * R1: 위치마다 감싼 가장 안쪽 비인용 괄호가 함수 인자 그룹인지 표시한다. 한 번의 훑기로 구하므로 FROM마다 감싼 괄호를
+   * 거꾸로 찾지 않는다. 괄호 문맥은 비인용 `;`에서 비운다 — 닫히지 않은 함수 괄호가 다음 문장의 FROM을 가리지 않게
+   * 하려는 것이다(R2와 같은 문장 단위).
+   *
+   * @param commonTableExpressionBodies CTE 본문을 여는 `(` 위치
+   * @returns 위치 → 1(가장 안쪽 괄호가 함수 인자 그룹) 또는 0
+   */
+  private markFunctionArguments(commonTableExpressionBodies: ReadonlySet<number>): Uint8Array {
+    const inside = new Uint8Array(this.tokens.length);
+    const groups: boolean[] = [];
+    for (let index = 0; index < this.tokens.length; index++) {
+      const token = this.tokens[index]!;
+      const symbol = token.quoted ? '' : token.text;
+      if (symbol === ';') groups.length = 0;
+      else if (symbol === '(') groups.push(this.opensFunctionArguments(index, commonTableExpressionBodies));
+      else if (symbol === ')') groups.pop();
+      inside[index] = groups.at(-1) === true ? 1 : 0;
+    }
+    return inside;
+  }
+
+  /**
+   * `(`가 함수 인자 그룹을 여는지 본다(R1). 바로 앞 토큰이 함수 이름 — 절 단어·관계 키워드가 아닌 비인용 이름 — 이고
+   * 그룹 첫 토큰이 하위 질의 머리(SELECT·WITH·VALUES)가 아니어야 한다. CTE 본문 괄호는 앞 토큰과 무관하게 함수 인자가
+   * 아니다 — `AS MATERIALIZED (DELETE FROM t …)`의 `materialized`는 절 단어가 아니어서 이 제외가 없으면 `t`가 사라진다.
+   *
+   * @param open `(` 위치
+   * @param commonTableExpressionBodies CTE 본문을 여는 `(` 위치
+   * @returns 함수 인자 그룹이면 true
+   */
+  private opensFunctionArguments(open: number, commonTableExpressionBodies: ReadonlySet<number>): boolean {
+    const callee = this.tokens[open - 1];
+    if (callee === undefined || !isNameToken(callee) || commonTableExpressionBodies.has(open)) return false;
+    const lower = callee.text.toLowerCase();
+    if (clauseWords.has(lower) || relationKeywords.has(lower)) return false;
+    const first = this.tokens[open + 1];
+    return first === undefined || first.quoted || !subqueryHeads.has(first.text.toLowerCase());
+  }
+
+  /**
    * `start`부터 같은 문장 안에 대문자 게이트를 통과한 단어 `word`가 있는지 본다.
    *
    * @param start 시작 위치
@@ -341,8 +469,9 @@ class RelationScan {
       case 'into': return this.precededBy(index, PRECEDING_INTO_VERB);
       case 'table': return this.tableKeywordContext(index);
       case 'on': return this.onFires(index, grantStatement);
-      // grant·revoke의 FROM은 권한 주체 자리다.
-      case 'from':
+      // grant·revoke의 FROM은 권한 주체 자리다. 함수 인자 안의 FROM(`EXTRACT(YEAR FROM ts)`, R1)과
+      // `IS [NOT] DISTINCT FROM`(R3)도 관계 자리가 아니고 미해석으로도 세지 않는다. JOIN에는 R1을 걸지 않는다.
+      case 'from': return !grantStatement && this.functionArguments[index] === 0 && !this.distinctFromOperator(index);
       case 'join': return !grantStatement;
       /* node:coverage ignore next */
       default: return true;
@@ -361,6 +490,18 @@ class RelationScan {
     const grantOn = grantStatement && this.precededBy(index, PRECEDING_GRANT_PRIVILEGE);
     const createOn = this.statementVerb[index] === 'create' && this.precededBy(index, PRECEDING_CREATE_ON_KIND);
     return grantOn || createOn;
+  }
+
+  /**
+   * R3: FROM이 비교 연산자 `IS [NOT] DISTINCT FROM`의 일부인지 본다. 앞 토큰들은 비인용이어야 하고 대소문자는 가리지
+   * 않는다.
+   *
+   * @param from FROM 위치
+   * @returns 연산자의 일부면 true
+   */
+  private distinctFromOperator(from: number): boolean {
+    if (!this.isWord(from - 1, 'distinct')) return false;
+    return this.isWord(from - 2, 'is') || (this.isWord(from - 2, 'not') && this.isWord(from - 3, 'is'));
   }
 
   /**
@@ -532,10 +673,27 @@ class RelationScan {
       for (let consumed = index; consumed < read.next; consumed++) this.consumed[consumed] = true;
       return this.closeAfter[read.next];
     }
-    if (buffer === undefined) this.emit(read.name, keyword);
-    else buffer.push(read.name);
+    // R2: 같은 문장의 CTE 이름은 관계가 아니다(내지도 미해석으로 세지도 않는다). 소비·별칭·쉼표 목록 진행은 그대로 해
+    // 뒤의 스캔을 바꾸지 않는다.
+    if (!this.namesCommonTableExpression(index, read.next)) {
+      if (buffer === undefined) this.emit(read.name, keyword);
+      else buffer.push(read.name);
+    }
     for (let consumed = index; consumed < read.next; consumed++) this.consumed[consumed] = true;
     return read.next;
+  }
+
+  /**
+   * R2: 한정자 없는 피연산자가 같은 문장이 정의한 CTE 이름인지 본다. 한정 이름(`public.recent`)은 CTE가 아니다.
+   *
+   * @param index 피연산자 위치
+   * @param next 피연산자 이름 다음 위치
+   * @returns CTE 이름이면 true
+   */
+  private namesCommonTableExpression(index: number, next: number): boolean {
+    if (next !== index + 1) return false;
+    const names = this.commonTableExpressionNames.get(this.statementIndex[index]!);
+    return names !== undefined && names.has(nameKey(this.tokens[index]!));
   }
 
   /**
@@ -632,6 +790,20 @@ const grantNonTableKinds = new Set([
 
 /** 뒤따르는 식별자가 관계 이름인 키워드다. */
 const relationKeywords = new Set(['from', 'join', 'into', 'update', 'table', 'truncate', 'on']);
+
+/** 괄호 그룹을 하위 질의로 만드는 첫 단어다(R1). 이 단어로 시작하는 그룹 안의 FROM은 함수 이름 뒤에서도 관계를 낸다. */
+const subqueryHeads = new Set(['select', 'with', 'values']);
+
+/**
+ * CTE 이름과 한정자 없는 피연산자의 비교 키다(R2). 비인용 이름은 소문자로 접고 인용 이름은 그대로 둔다 — SQL 표준·
+ * Postgres의 식별자 규칙이고 계열 생산자와 같은 선택이다(`"recent"`는 `recent`와 같고 `"Recent"`와는 다르다).
+ *
+ * @param token 이름 토큰
+ * @returns 비교 키
+ */
+function nameKey(token: SqlToken): string {
+  return token.quoted ? token.text : token.text.toLowerCase();
+}
 
 /** SQL 문을 여는 강한 동사다. */
 const sqlVerbs = new Set([

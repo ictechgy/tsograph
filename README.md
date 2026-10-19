@@ -693,6 +693,26 @@ same SQL yields the same relations in every producer.
 - Other string literals are read only when their SQL verb and relation keywords are uppercase
   (strict mode); lowercase SQL-looking literals are counted under `skipped-sql-literals:`.
 
+The extractor does not report three kinds of names as relation uses. The persistence producers pin
+these rules with shared cases (the same SQL strings and expected relations):
+
+- A `FROM` inside function arguments: the innermost `(` around it follows a function name (an
+  unquoted name that is not an SQL clause keyword), and the group does not start with `SELECT`,
+  `WITH`, or `VALUES`, as in `EXTRACT(YEAR FROM created_at)`, `TRIM(BOTH ' ' FROM name)`, or
+  `SUBSTRING(name FROM 2 FOR 3)`. Subqueries (`FROM (SELECT …)`, `IN (SELECT …)`) and CTE bodies
+  (`AS MATERIALIZED (DELETE FROM t …)`) still yield relations. A parenthesized statement after
+  another keyword, such as `COPY (DELETE FROM t …)`, is read as function arguments, so its `FROM`
+  yields nothing.
+- An unqualified operand naming a CTE that the same `;`-separated statement defines
+  (`WITH recent AS (…) SELECT * FROM recent`). Unquoted names compare case-insensitively and quoted
+  names exactly; `public.recent` is not a CTE. Relations read by the CTE body are kept, but a CTE
+  named like a table also hides that table's uses in the statement.
+- The `FROM` of `IS [NOT] DISTINCT FROM`.
+
+None of these counts as an unresolved operand, so a bind placeholder there
+(`IS DISTINCT FROM ${value}` in `$queryRaw`) adds no dynamic fact. Keyword case does not matter for
+these rules, even in strict mode.
+
 ### Node ORMs and SQL drivers
 
 Naming rules, sources, and the naming oracle are documented in Korean in
