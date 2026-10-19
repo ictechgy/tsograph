@@ -33,6 +33,30 @@ function countExportTables<T>(run: () => T): { readonly result: T; readonly tabl
   }
 }
 
+/**
+ * 콜백을 실행하는 동안 모듈 지정자 해석(`OrmBinder.moduleOrigin`) 호출 수를 세고, 상한을 넘으면 즉시 실패시킨다.
+ * require 재수출 사슬 한 단계마다 한 번 불리므로, 사슬을 다시 따라가는 구현이 고리에서 지수적으로 늘어 테스트를
+ * 붙잡아 두지 않고 바로 빨간불이 되게 하려는 장치다.
+ *
+ * @param limit 허용하는 호출 수
+ * @param run 실행할 콜백
+ * @returns 콜백 결과
+ */
+function withModuleOriginBudget<T>(limit: number, run: () => T): T {
+  const original = OrmBinder.prototype.moduleOrigin;
+  let calls = 0;
+  OrmBinder.prototype.moduleOrigin = function moduleOriginWithBudget(this: OrmBinder, specifier, importer) {
+    calls++;
+    if (calls > limit) throw new Error(`module resolution exceeded ${limit} calls; require re-export chains are followed again`);
+    return original.call(this, specifier, importer);
+  };
+  try {
+    return run();
+  } finally {
+    OrmBinder.prototype.moduleOrigin = original;
+  }
+}
+
 test('서로를 require로 재수출하는 모듈의 export 표는 끝없이 펼치지 않고 순환 멤버를 모르는 값으로 둔다', () => {
   const lines = ormLines({
     'src/db.ts': [
@@ -71,6 +95,47 @@ test('순환 require 재수출 안에서 끊어 만든 export 표는 다른 파�
     ].join('\n'),
   });
   assert.deepEqual(lines, ['src/db.ts:6:20 via_b @src/db.ts#q']);
+});
+
+test('require 재수출 고리는 export마다 한 번만 따라가고, 고리로만 이어진 멤버는 모르는 값이다', () => {
+  // 파일 12개가 export 6개씩을 다음 파일에서 require로 재수출한다. 표를 export마다 다시 만들면 6^12번 따라간다.
+  const files: Record<string, string> = {};
+  for (let file = 0; file < 12; file++) {
+    const next = (file + 1) % 12;
+    files[`src/f${file}.ts`] = Array.from({ length: 6 }, (_, index) => `export const e${index} = require('./f${next}').e${index};`).join('\n') + '\n';
+  }
+  files['src/db.ts'] = [
+    "import { Pool } from 'pg';",
+    "import * as f0 from './f0';",
+    "const { e3 } = require('./f7');",
+    'const pool = new Pool();',
+    'export async function q() {',
+    "  await f0.e0.query('select * from ring_rows');",
+    "  await e3.query('select * from ring_e3');",
+    "  return pool.query('select * from ok_rows');",
+    '}',
+    '',
+  ].join('\n');
+  const lines = withModuleOriginBudget(1_000, () => ormLines(files));
+  assert.deepEqual(lines, ['src/db.ts:8:21 ok_rows @src/db.ts#q']);
+});
+
+test('require 사슬이 이미 들어간 파일로 돌아오는지는 사슬을 시작한 파일마다 따로 판정한다', () => {
+  // a에서 시작한 `a.x`는 b.x(Pool)로 풀린다. b에서 시작한 `b.y`는 a.x를 거쳐 b로 돌아오므로 모르는 값이다.
+  const lines = ormLines({
+    'src/a.ts': "export const x = require('./b').x;\n",
+    'src/b.ts': "import { Pool } from 'pg';\nexport const x = new Pool();\nexport const y = require('./a').x;\n",
+    'src/db.ts': [
+      "import * as a from './a';",
+      "import * as b from './b';",
+      'export async function q() {',
+      "  await a.x.query('select * from from_a');",
+      "  return b.y.query('select * from from_b');",
+      '}',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(lines, ['src/db.ts:4:19 from_a @src/db.ts#q']);
 });
 
 test('모듈 export 표는 파일마다 한 번만 만들어 이름공간 접근·require 구조 분해·관계형 쿼리 스키마가 함께 쓴다', () => {
