@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import type { ExtractionResult } from './extract.ts';
 import { extractProject, factLines, prismaBase } from './testing.test.ts';
 
@@ -57,12 +58,52 @@ test('schema parse-error limitation은 안전한 상대 파일 10개와 생략 �
   for (let index = 0; index < 12; index++) {
     files[`src/bad${String(index).padStart(2, '0')}.ts`] = 'export const = ;\n';
   }
+  // 금지 문자 이름은 걷기에서 빠지므로 parse-error 계수에도 목록에도 들어가지 않고 unsafe-names:로 센다.
   files['src/bad\nunsafe.ts'] = 'export const = ;\n';
   const result = extractProject(files);
   const limitation = result.limitations.find((line) => line.startsWith('parse-errors:'));
   assert.equal(limitation,
-    'parse-errors: 13 source file(s) could not be parsed completely; '
+    'parse-errors: 12 source file(s) could not be parsed completely; '
     + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
-    + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 3');
+    + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
   assert.ok(!limitation?.includes('\nunsafe'));
+  assert.ok(result.limitations.includes(unsafeWalkNames(1)));
+});
+
+/**
+ * 걷기가 건너뛴 금지 문자 이름의 limitation이다.
+ *
+ * @param count 건너뛴 이름 수
+ * @returns limitation 문장
+ */
+function unsafeWalkNames(count: number): string {
+  return `unsafe-names: ${count} file or directory name(s) contain characters the exchange format forbids and were skipped`;
+}
+
+test('금지 문자 이름의 소스·스키마 폴더·TypedSQL 파일은 사실 경로에 싣지 않고 unsafe-names:로 알린다', {
+  skip: process.platform === 'win32',
+}, () => {
+  const result = extractProject({
+    'package.json': JSON.stringify({ dependencies: { '@prisma/client': '6.0.0', pg: '8.0.0' } }),
+    'prisma.config.ts': "export default { schema: 'prisma/schema' };\n",
+    'prisma/schema/base.prisma': [
+      'datasource db {', '  provider = "postgresql"', '}',
+      'generator client {', '  provider = "prisma-client-js"', '  previewFeatures = ["typedSql"]', '}',
+      'model User {', '  id Int @id', '  @@map("users")', '}', '',
+    ].join('\n'),
+    'prisma/schema/h\u007fidden.prisma': 'model Hidden {\n  id Int @id\n}\n',
+    'prisma/schema/sql/q\u{2028}uery.sql': 'SELECT * FROM hidden_table\n',
+    'prisma/schema/sql/visible.sql': 'SELECT * FROM visible_table\n',
+    'src/ok.ts': "import { Pool } from 'pg';\nconst pool = new Pool();\nexport const list = () => pool.query('SELECT * FROM orders');\n",
+    'src/a\u007fb.ts': "import { Pool } from 'pg';\nconst pool = new Pool();\nexport const hidden = () => pool.query('SELECT * FROM secrets');\n",
+  });
+  assert.deepEqual(result.facts.filter((fact) => !isSafeIdentifier(fact.location.path)), []);
+  const lines = factLines(result);
+  assert.ok(lines.some((line) => line.startsWith('src/ok.ts:') && line.includes(' orders')));
+  assert.ok(lines.some((line) => line.startsWith('prisma/schema/sql/visible.sql:') && line.includes(' visible_table')));
+  assert.ok(!lines.some((line) => line.includes('secrets') || line.includes('Hidden') || line.includes('hidden_table')));
+  // 걷기는 자기가 모으는 소스만 세고, 걷기 밖에서 조립한 스키마·TypedSQL 경로의 사실은 수집기가 따로 센다.
+  assert.ok(result.limitations.includes(unsafeWalkNames(1)));
+  assert.ok(result.limitations.includes(
+    'unsafe-names: 3 relation-use fact(s) were skipped because their file paths contain characters the exchange format forbids'));
 });

@@ -33,6 +33,18 @@ test('사실 수집기는 제어 문자 이름을 세고 같은 사실을 한 �
   ]);
 });
 
+test('사실 수집기는 위치 경로에 금지 문자가 든 사실을 내지 않고 따로 센다', () => {
+  const text = new SourceText('x');
+  const sink = new RelationFactSink();
+  const base = { channel: 'users', dynamic: false, text, offset: 0, symbol: undefined };
+  sink.add({ ...base, path: 'prisma/schema/a\u007fb.prisma' });
+  sink.add({ ...base, path: 'prisma/sql/q\u{2028}.sql' });
+  sink.add({ ...base, path: 'prisma/ok.prisma' });
+  assert.equal(sink.unsafePaths, 2);
+  assert.equal(sink.invalidNames, 0);
+  assert.deepEqual(sink.sorted().map((fact) => fact.location.path), ['prisma/ok.prisma']);
+});
+
 test('dynamic 요약은 공백을 접고 제어 문자를 지우며 서러게이트 쌍을 가르지 않는다', () => {
   assert.equal(dynamicChannel('  SELECT\n\t*  FROM\u0007 x '), 'SELECT * FROM x');
   assert.equal(dynamicChannel('\u0001'), '<dynamic>');
@@ -81,5 +93,20 @@ test('트리 탐색은 링크를 따라가지 않고 생성물·점 디렉터리
     } finally {
       chmodSync(join(root, 'src', 'locked'), 0o755);
     }
+  });
+});
+
+test('트리 탐색은 쓰려던 파일·디렉터리의 이름에 교환 형식이 금지하는 문자가 있으면 건너뛰고 센다', {
+  skip: process.platform === 'win32',
+}, () => {
+  withProject({
+    'src/ok.ts': '', 'src/a\u007fb.ts': '', 'src/dir\u{2028}x/c.ts': '',
+    // 어차피 쓰지 않는 항목(다른 확장자, 건너뛰는 디렉터리와 그 아래)은 세지 않는다.
+    'docs/n\u0085.md': '', '.cache\u007f/x.ts': '', 'node_modules/p/x\u007f.ts': '',
+  }, (root) => {
+    const walk = collectProjectFiles(root, { includeFile: (name) => name.endsWith('.ts'), excludedDirectories: new Set() });
+    assert.deepEqual([...walk.files.keys()], ['src/ok.ts']);
+    assert.equal(walk.unsafeNames, 2);
+    assert.equal(walk.unreadableDirectories, 0);
   });
 });

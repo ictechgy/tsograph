@@ -3,7 +3,7 @@
  *
  * 계약(isthmus `docs/GRAPH-EXCHANGE.md` persistence 절): channel은 관계 이름(코드에 쓰인 그대로,
  * 한정·비한정), method는 선택적 컬럼 이름, dynamic은 조인할 수 없는 사용, location은 필수다.
- * 제어 문자가 섞인 이름은 소비자가 문서 전체를 거부하므로 사실로 내지 않고 센다.
+ * 제어 문자가 섞인 이름·위치 경로는 소비자가 문서 전체를 거부하므로 사실로 내지 않고 센다.
  */
 
 import { isSafeIdentifier, type BridgeLocation } from '../exchange/bridge-facts.ts';
@@ -48,6 +48,11 @@ export class RelationFactSink {
   private readonly facts = new Map<string, RelationUseFact>();
   /** 제어 문자·빈 값이라 버린 이름 수다. */
   invalidNames = 0;
+  /**
+   * 위치 경로에 교환 형식이 금지하는 문자가 있어 버린 사실 수다. 소스는 걷기에서 이미 걸러지므로 걷기 밖에서
+   * 조립한 경로(Prisma 스키마 폴더·설정 경로·TypedSQL 디렉터리 목록)만 여기에 닿는다.
+   */
+  unsafePaths = 0;
 
   /**
    * 사실 하나를 넣는다. 같은 위치·채널·컬럼·dynamic의 사실은 한 번만 남긴다.
@@ -55,6 +60,10 @@ export class RelationFactSink {
    * @param input 사실 입력
    */
   add(input: FactInput): void {
+    if (!isSafeIdentifier(input.path)) {
+      this.unsafePaths++;
+      return;
+    }
     if (!isSafeIdentifier(input.channel) || input.channel.trim().length === 0
       || (input.method !== undefined && (!isSafeIdentifier(input.method) || input.method.trim().length === 0))) {
       this.invalidNames++;

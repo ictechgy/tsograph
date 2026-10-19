@@ -451,3 +451,20 @@ registerScreens([${entry}]);`,
     assert.ok(doc.facts.length <= 65);
   });
 });
+
+test('names with forbidden characters are skipped and counted as incomplete source discovery', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const registration = (path: string) => `import { registerScreens } from './router-api';
+import { Catalog } from './screens';
+registerScreens([{ path: '${path}', screen: Catalog }]);`;
+  await fixture({
+    'src/router.ts': registration('/catalog'),
+    'src/h\u007fidden.ts': registration('/hidden'),
+  }, (root) => {
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.deepEqual(doc.facts.map((fact) => [fact.urlTemplate, fact.location.path]), [['/catalog', 'src/router.ts']]);
+    assert.ok(doc.limitations.includes('navigation-project-coverage: source discovery was incomplete '
+      + '(symlinks: 0, unreadable directories: 0, oversized files: 0, truncated: false, unsafe names: 1)'));
+  });
+});

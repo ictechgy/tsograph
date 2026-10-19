@@ -20,12 +20,16 @@ import { isSourceFileName } from '../../schema/source-module.ts';
 /** 분석하는 소스 파일 하나의 최대 크기(바이트)다. `graph`·`schema`와 같다. */
 export const MAX_NODE_SOURCE_BYTES = 4 * 1024 * 1024;
 
-/** 소스를 모으며 센 공백이다. */
+/**
+ * 소스를 모으며 센 공백이다. 값이 하나라도 0·false가 아니면 스캔이 불완전하다(client 문서는 그 판정에 모든 값을 쓴다).
+ */
 export interface NodeProjectGaps {
   readonly symlinks: number;
   readonly unreadableDirectories: number;
   readonly truncated: boolean;
   readonly oversizedFiles: number;
+  /** 교환 형식이 금지하는 문자가 든 이름이라 걷기가 건너뛴 파일·디렉터리 수다. */
+  readonly unsafeNames: number;
 }
 
 /** 준비한 프로젝트다. */
@@ -71,6 +75,7 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       unreadableDirectories: walk.unreadableDirectories,
       truncated: walk.truncated,
       oversizedFiles: walk.files.size - candidates.length,
+      unsafeNames: walk.unsafeNames,
     },
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),

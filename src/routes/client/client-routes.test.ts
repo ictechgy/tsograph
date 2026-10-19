@@ -1533,3 +1533,17 @@ test('large wrapper summary set emits one outer fact per represented call', asyn
   assert.deepEqual([doc.facts.at(-1)?.method, doc.facts.at(-1)?.channel], ['GET', '/route-799']);
   assert.equal(doc.facts.some((fact) => fact.channel === null), false);
 });
+
+/** 건너뛴 프로젝트 소스가 있을 때 호출 문서가 싣는 limitation이다. */
+const skippedProjectSources = 'route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped';
+
+test('sources whose names contain forbidden characters are skipped without exposing their paths', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const doc = await scan('export const load = () => fetch("/ok");', [], {
+    'src/h\u007fidden.ts': 'export const hidden = () => fetch("/hidden");',
+    'src/dir\u{2028}x/nested.ts': 'export const nested = () => fetch("/nested");',
+  });
+  assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.location.path, fact.symbol?.usr]), [['/ok', 'src/client.ts', 'src/client.ts#load']]);
+  assert.ok(doc.limitations.includes(skippedProjectSources));
+});

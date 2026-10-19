@@ -496,3 +496,26 @@ test('저장 그래프의 endpoint·revision·duplicate·UTF-8·크기·읽기 �
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('금지 문자 이름 파일이 있는 프로젝트의 graph 출력도 reach --graph-file로 다시 읽힌다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-unsafe-graph-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"private":true}');
+    writeFileSync(join(root, 'src/index.ts'), 'export function start() { return finish(); }\nexport function finish() { return 1; }\n');
+    writeFileSync(join(root, 'src/a\u001bb.ts'), 'export function hidden() { return 1; }\n');
+    const snapshot = await runGraphCommand(['--project', root], environment());
+    assert.equal(snapshot.exitCode, 0, snapshot.standardError);
+    const graphFile = join(root, 'graph.json');
+    writeFileSync(graphFile, snapshot.standardOutput);
+    const reach = await runReachCommand(['--graph-file', graphFile, 'src/index.ts#start'], environment());
+    assert.equal(reach.exitCode, 0, reach.standardError);
+    const document = JSON.parse(reach.standardOutput);
+    assert.deepEqual(document.reached.map((row: { symbol: { usr: string } }) => row.symbol.usr), ['src/index.ts#finish']);
+    assert.ok(document.limitations.some((line: string) => line.startsWith('unsafe-names: 1 file or directory name(s)')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

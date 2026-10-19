@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runGraphCommand } from '../../cli/graph-command.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
+import { isSafeIdentifier } from '../../exchange/bridge-facts.ts';
 import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
 
@@ -124,4 +125,20 @@ test('graph는 Node 백엔드 핸들러를 route-handler 진입점으로 표시�
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('금지 문자 이름의 파일·디렉터리는 라우트 사실 경로에 싣지 않고 route-coverage로 알린다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    'src/app.ts': "import express from 'express';\nconst app = express();\napp.get('/ok', (req, res) => res.send('ok'));\nexport default app;\n",
+    'src/r\u007fouter.ts': "import express from 'express';\nexport const hidden = express();\nhidden.get('/hidden', (req, res) => res.send('h'));\n",
+    'src/dir\u{2028}x/extra.ts': "import express from 'express';\nexport const extra = express();\nextra.get('/extra', (req, res) => res.send('e'));\n",
+  });
+  const unsafe = document.facts.filter((fact) => !isSafeIdentifier(fact.location.path)
+    || !isSafeIdentifier(fact.symbol.qualifiedName) || (fact.symbol.usr !== undefined && !isSafeIdentifier(fact.symbol.usr)));
+  assert.deepEqual(unsafe, []);
+  assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+  assert.equal(limitationsWith(document, 'route-coverage: 2 file or directory name(s) in the project contain characters the exchange format forbids; routers in them were not scanned').length, 1);
 });

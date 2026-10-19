@@ -518,7 +518,7 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
   `64` usage error. `1` is reserved.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
-  Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
+  Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
 
 ### Facts
@@ -728,7 +728,7 @@ Oracle, and slonik queries are not interpreted. Files using them are counted und
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
 `unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
-`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. These are caller-side
+`unreadable-module-configs:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`. These are caller-side
 limitations: isthmus does not change severities for them, and it counts unjoined dynamic facts
 itself (`unjoined-dynamic-relations`).
 
@@ -1089,8 +1089,8 @@ What `bound` guarantees, and what it does not:
   loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
   `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
-  1 MiB), or an incomplete scan (skipped, oversized, unreadable, or
-  symlinked files, or parse errors), additionally opens every exported function and class and every
+  1 MiB), or an incomplete scan (skipped, oversized, unreadable, symlinked, or
+  unsafely named files, or parse errors), additionally opens every exported function and class and every
   non-private property; the document then says so under `bound-dispatch:`. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
@@ -1333,7 +1333,7 @@ candidate edge).
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
-`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
+`unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
 `reach`/`impact` documents only, `evidence-approximated:` and `unresolved-calls-capped:`.
 Counts only; no source text or absolute paths.
 

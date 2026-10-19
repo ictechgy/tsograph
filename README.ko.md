@@ -404,7 +404,7 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
   사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다.
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
-  generator 출력 디렉터리(프로젝트 루트나 그 조상으로 풀리는 output은 이 제외에도 클라이언트 출처 판정에도 쓰지 않고 `unresolved-generator-outputs:`로 알린다), 4 MiB 넘는 파일(개수로 센다). 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
+  generator 출력 디렉터리(프로젝트 루트나 그 조상으로 풀리는 output은 이 제외에도 클라이언트 출처 판정에도 쓰지 않고 `unresolved-generator-outputs:`로 알린다), 4 MiB 넘는 파일(개수로 센다). 모을 파일이나 내려갈 디렉터리의 이름에 교환 형식이 금지하는 문자(C0·C1 제어 문자, DEL, U+2028/U+2029, 짝 없는 서러게이트)가 있으면 건너뛰고 `unsafe-names:`로 센다(`graph`도 같은 접두사를 쓰고, 이 걷기를 함께 쓰는 Node 백엔드·client·navigation 스캔은 `route-coverage:`·`route-call-coverage:`·`navigation-project-coverage:`로 알린다). 경로에 그런 문자가 든 Prisma 스키마·TypedSQL 사실도 내지 않고 `unsafe-names:`로 센다. 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
   선언을 찾을 때만 읽는다.
 
 ### 사실
@@ -582,7 +582,7 @@ Redis는 `non-relational-stores:`로 센다. 그 파일의 대문자 SQL 리터�
 `unresolved-client-receivers:`, `unresolved-orm-receivers:`, `orm-naming-unverified:`,
 `unreadable-orm-declarations:`, `provenance-truncated:`, `missing-relation-usrs:`,
 `invalid-relation-names:`, `unreadable-sources:`, `oversized-sources:`, `parse-errors:`,
-`unreadable-module-configs:`, `skipped-symlinks:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
+`unreadable-module-configs:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`. 모두 호출 측 한계라 isthmus가
 심각도를 바꾸지 않으며, 조인하지 못한 dynamic 사실은 isthmus가 직접 센다(`unjoined-dynamic-relations`).
 
 ### 카탈로그와 조인
@@ -885,7 +885,7 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
   재내보내기 배럴(`export *`·`export { x } from`·`export * as ns`)로 닿는 내보내기, `declare`한 값.
   `package.json`이 `main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`를 선언한 패키지(또는 1 MiB 안에서
   JSON 객체로 읽지 못하는 `package.json`)이거나 스캔이
-  불완전하면(건너뛴·너무 큰·읽지 못한·symlink 파일, 구문 오류) 모든 내보낸 함수·클래스와 비공개가 아닌 속성도
+  불완전하면(건너뛴·너무 큰·읽지 못한·symlink·금지 문자 이름 파일, 구문 오류) 모든 내보낸 함수·클래스와 비공개가 아닌 속성도
   열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
   프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다. 닫힌 쪽으로 실패한다: 색인된 호출
   위치가 없는 함수·생성자는 모름이다(기본 매개변수 값만으로 흐름 전체라고 보지 않는다). 단 엄격한 문법 재검사로 참조가
@@ -1090,7 +1090,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
-`unreadable-sources:`, `skipped-symlinks:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고
+`unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고
 `reach`·`impact` 문서에만 `evidence-approximated:`·`unresolved-calls-capped:`.
 개수만 싣고 소스 원문·절대 경로는 싣지 않는다.
 

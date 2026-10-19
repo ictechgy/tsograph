@@ -129,7 +129,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
-    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0;
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
@@ -159,7 +159,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
 
 /**
  * bound 디스패치가 프로그램을 열린 것으로 봐야 하는 이유다: 공개 패키지(스캔 밖 코드가 내보낸 선언을
- * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink, 구문 오류) 보지 못한 호출자가 있을 수 있다.
+ * 가져다 쓴다)이거나, 스캔이 불완전해(건너뛴 파일·디렉터리·symlink·금지 문자 이름, 구문 오류) 보지 못한 호출자가 있을 수 있다.
  *
  * @param project 프로젝트 realpath
  * @param inputs 입력 파일
@@ -170,7 +170,8 @@ function openProgramReason(project: string, inputs: GraphInputs, parseErrors: nu
   const manifest = readManifestEntry(project);
   if (manifest !== 'private') return manifest;
   const walk = inputs.walk;
-  const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0 || parseErrors > 0;
+  const incomplete = walk.truncated || inputs.oversized > 0 || walk.unreadableDirectories > 0 || walk.skippedSymlinks > 0
+    || walk.unsafeNames > 0 || parseErrors > 0;
   return incomplete ? 'incomplete-scan' : undefined;
 }
 
@@ -573,6 +574,9 @@ function inputLimitations({ config, inputs, parseErrorFiles, cronConfigUnreadabl
   if (inputs.oversized > 0) result.push(`oversized-sources: ${inputs.oversized} file(s) larger than 4 MiB were skipped`);
   if (inputs.walk.unreadableDirectories > 0) result.push(`unreadable-sources: ${inputs.walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
   if (inputs.walk.skippedSymlinks > 0) result.push(`skipped-symlinks: ${inputs.walk.skippedSymlinks} symbolic link(s) were not followed`);
+  if (inputs.walk.unsafeNames > 0) {
+    result.push(`unsafe-names: ${inputs.walk.unsafeNames} file or directory name(s) contain characters the exchange format forbids and were skipped`);
+  }
   if (inputs.walk.truncated) result.push('scan-truncated: the project tree exceeded the directory entry limit; later files were not scanned');
   if (cronConfigUnreadable) result.push('entry-points: vercel.json could not be read as JSON within 1 MiB; scheduled entries are unknown');
   if (routeFactsTruncated) result.push('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked');

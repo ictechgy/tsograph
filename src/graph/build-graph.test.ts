@@ -15,6 +15,7 @@ import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
 import { linkToDevZero, makeFifo, runMainGuarded } from '../cli/testing.test.ts';
+import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
@@ -409,15 +410,17 @@ test('parse-error limitation은 안전한 상대 파일 10개와 생략 수만 �
     for (let index = 0; index < 12; index++) {
       writeFileSync(join(project, `src/bad${String(index).padStart(2, '0')}.ts`), 'export const = ;\n');
     }
+    // 금지 문자 이름은 걷기에서 빠지므로 parse-error 계수에도 목록에도 들어가지 않고 unsafe-names:로 센다.
     writeFileSync(join(project, 'src/bad\nunsafe.ts'), 'export const = ;\n');
     const target = await buildCallGraph(project, fileSystem);
     const limitation = target.limitations.find((line) => line.startsWith('parse-errors:'));
     assert.equal(limitation,
-      'parse-errors: 13 source file(s) have syntax errors; their calls may be incomplete; '
+      'parse-errors: 12 source file(s) have syntax errors; their calls may be incomplete; '
       + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
-      + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 3');
+      + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
     assert.ok(!limitation?.includes('\nunsafe'));
     assert.ok(!limitation?.includes(project));
+    assert.ok(target.limitations.includes(unsafeWalkNames(1)));
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -516,6 +519,40 @@ test('권한 때문에 읽지 못한 루트 vercel.json·package.json은 cron �
     const target = await buildCallGraph(project, fileSystem);
     assert.ok(target.limitations.includes(unreadableCronConfig));
     assert.ok(target.limitations.includes(unreadableManifest));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 걷기가 건너뛴 금지 문자 이름의 limitation이다.
+ *
+ * @param count 건너뛴 이름 수
+ * @returns limitation 문장
+ */
+function unsafeWalkNames(count: number): string {
+  return `unsafe-names: ${count} file or directory name(s) contain characters the exchange format forbids and were skipped`;
+}
+
+/** 스캔이 불완전해 callable 흐름을 여는 limitation이다. */
+const incompleteScanCallables = 'bound-dispatch: the scan is incomplete, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound';
+
+test('금지 문자 이름의 파일·디렉터리는 노드로 만들지 않고 unsafe-names:와 불완전 스캔으로 알린다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-unsafe-names-')));
+  try {
+    mkdirSync(join(project, 'src', 'dir\u{2028}x'), { recursive: true });
+    writeFileSync(join(project, 'package.json'), '{"private":true}');
+    writeFileSync(join(project, 'src/main.ts'), callableGapSource);
+    writeFileSync(join(project, 'src/a\u007fb.ts'), 'export function hidden() { return 1; }\n');
+    writeFileSync(join(project, 'src/dir\u{2028}x/c.ts'), 'export function nested() { return 2; }\n');
+    const target = await buildCallGraph(project, fileSystem);
+    assert.deepEqual(target.nodes.filter((node) => !isSafeIdentifier(node.id) || !isSafeIdentifier(node.location.path)), []);
+    assert.ok(target.nodes.some((node) => node.id === 'src/main.ts#run'));
+    assert.ok(target.limitations.includes(unsafeWalkNames(2)));
+    assert.ok(target.limitations.includes(incompleteScanCallables));
+    assert.ok(target.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
