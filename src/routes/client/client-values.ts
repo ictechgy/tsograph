@@ -6,6 +6,12 @@ import type { UrlPart } from './url-compose.ts';
 
 const MAX_MUTATION_WORK = 20_000;
 const MAX_PROJECTION_DEPTH = 16;
+/** URL 식 하나를 조각으로 펼칠 때 거치는 최대 단계(`parts`·query 꼬리 판정 호출) 수다. 실제 URL 식은 수십 단계면 끝난다. */
+const MAX_URL_PART_STEPS = 4096;
+/** 템플릿·`+` 연결 하나가 낼 수 있는 최대 URL 조각 수다. */
+const MAX_URL_PARTS = 1024;
+/** 템플릿·`+` 연결 하나가 낸 조각의 리터럴 길이(UTF-16 단위) 합 상한이다. 정규 템플릿 상한(2,048자)보다 훨씬 크게 둔다. */
+const MAX_URL_LITERAL_LENGTH = 65_536;
 type ProjectionKey = string | number;
 type ClosedNonClassProof = number | false | undefined;
 type NamespaceRuntimeValue = ts.Expression | ts.ClassLikeDeclaration | ts.FunctionDeclaration;
@@ -38,6 +44,13 @@ interface PendingClassStore {
   readonly expression: ts.Expression;
   readonly sourceProjection: readonly ProjectionKey[] | null;
   staticDestinationFound: boolean;
+}
+
+/** URL 식 하나를 펼치는 동안 함께 쓰는 작업 예산이다. */
+interface UrlPartBudget {
+  steps: number;
+  /** 단계 예산이나 조각 상한을 넘었는지. 넘으면 URL 전체를 모르는 값으로 본다. */
+  exceeded: boolean;
 }
 
 /** null은 전개·변경으로 전체 설정을 알 수 없다는 뜻이다. */
@@ -1651,31 +1664,59 @@ export class ClientValues {
     return properties;
   }
 
-  /** URL 보간을 값·쿼리 꼬리로 구분한다. 깊이와 순환에는 상한을 둔다. */
-  parts(expression: ts.Expression | undefined, depth = 0): UrlPart[] {
-    if (expression === undefined || depth > 16) return [{ value: true }];
+  /**
+   * URL 보간을 값·쿼리 꼬리로 구분한다. 깊이와 순환에는 상한을 둔다.
+   *
+   * 같은 상수를 여러 번 보간하는 상수 사슬은 깊이 상한 안에서도 조각이 span 수의 거듭제곱으로 늘고, 큰 리터럴을 거듭
+   * 보간하면 이은 URL이 V8 문자열 한도를 넘는다. 그래서 URL 식 하나마다 단계 예산과 조각 수·리터럴 길이 상한을 두고,
+   * 넘으면 URL 전체를 모르는 값 하나로 본다. 펼치다 만 조각을 한 세그먼트 보간(`{}`)으로 남기면 실제보다 좁은 정적
+   * 경로를 주장하게 된다.
+   */
+  parts(expression: ts.Expression | undefined): UrlPart[] {
+    const budget: UrlPartBudget = { steps: 0, exceeded: false };
+    const parts = this.urlParts(expression, 0, budget);
+    return budget.exceeded ? [{ value: true }] : parts;
+  }
+
+  /** {@link parts}의 재귀 본체다. 예산을 넘으면 그 식을 값 하나로 두고 예산에 넘었다고 적는다. */
+  private urlParts(expression: ts.Expression | undefined, depth: number, budget: UrlPartBudget): UrlPart[] {
+    if (expression === undefined || depth > 16 || !chargeUrlStep(budget)) return [{ value: true }];
     const node = this.resolve(expression);
     if (node === undefined) return [{ value: true }];
     if (ts.isStringLiteralLike(node)) return [{ literal: node.text }];
-    if (ts.isTemplateExpression(node)) return [{ literal: node.head.text }, ...node.templateSpans.flatMap((span) => [
-      ...this.parts(span.expression, depth + 1), { literal: span.literal.text },
-    ])];
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return [
-      ...this.parts(node.left, depth + 1), ...this.parts(node.right, depth + 1),
-    ];
-    if (ts.isConditionalExpression(node) && this.isQuerySuffix(node.whenTrue, depth + 1) && this.isQuerySuffix(node.whenFalse, depth + 1)) return [{ queryTail: true }];
+    if (ts.isTemplateExpression(node)) return boundedParts(budget, [{ literal: node.head.text }, ...node.templateSpans.flatMap((span) => [
+      ...this.urlParts(span.expression, depth + 1, budget), { literal: span.literal.text },
+    ])]);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return boundedParts(budget, [
+      ...this.urlParts(node.left, depth + 1, budget), ...this.urlParts(node.right, depth + 1, budget),
+    ]);
+    if (ts.isConditionalExpression(node) && this.isQuerySuffix(node.whenTrue, depth + 1, budget) && this.isQuerySuffix(node.whenFalse, depth + 1, budget)) return [{ queryTail: true }];
     return [{ value: true }];
   }
 
-  /** 조건식 가지가 빈 문자열 또는 고정된 '?' 접두사인지 증명한다. */
-  private isQuerySuffix(expression: ts.Expression, depth: number): boolean {
-    if (depth > 16) return false;
+  /** 조건식 가지가 빈 문자열 또는 고정된 '?' 접두사인지 증명한다. URL 식의 예산을 함께 쓴다. */
+  private isQuerySuffix(expression: ts.Expression, depth: number, budget: UrlPartBudget): boolean {
+    if (depth > 16 || !chargeUrlStep(budget)) return false;
     const node = this.resolve(expression);
     if (node === undefined) return false;
-    if (ts.isConditionalExpression(node)) return this.isQuerySuffix(node.whenTrue, depth + 1) && this.isQuerySuffix(node.whenFalse, depth + 1);
-    const head = this.parts(node, depth + 1)[0];
+    if (ts.isConditionalExpression(node)) return this.isQuerySuffix(node.whenTrue, depth + 1, budget) && this.isQuerySuffix(node.whenFalse, depth + 1, budget);
+    const head = this.urlParts(node, depth + 1, budget)[0];
     return head !== undefined && 'literal' in head && (head.literal.startsWith('?') || (head.literal === '' && ts.isStringLiteralLike(node)));
   }
+}
+
+/** URL 식 예산에서 한 단계를 쓴다. 이미 넘었거나 이번에 넘으면 false이고 넘었다고 적는다. */
+function chargeUrlStep(budget: UrlPartBudget): boolean {
+  budget.steps += 1;
+  if (budget.steps > MAX_URL_PART_STEPS) budget.exceeded = true;
+  return !budget.exceeded;
+}
+
+/** 템플릿·연결이 낸 조각이 조각 수·리터럴 길이 상한 안이면 그대로 두고, 넘으면 예산에 넘었다고 적는다. */
+function boundedParts(budget: UrlPartBudget, parts: UrlPart[]): UrlPart[] {
+  const literalLength = parts.reduce((total, part) => total + ('literal' in part ? part.literal.length : 0), 0);
+  if (parts.length > MAX_URL_PARTS || literalLength > MAX_URL_LITERAL_LENGTH) budget.exceeded = true;
+  return budget.exceeded ? [{ value: true }] : parts;
 }
 
 /** static member access만 object/array initializer projection으로 보낸다. */

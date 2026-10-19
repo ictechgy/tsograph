@@ -51,6 +51,8 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 로컬 HTTP 요청 27개로 검증했다. ky 설정은 1 MiB 안의 symlink가 아닌 일반 파일인 루트 `package.json`에 선언된 major가
 명확해야 한다(symlink·FIFO·장치는 따라가거나 기다리지 않는다). 전체 세그먼트 보간만 `{}`가
 되고 부분 보간은 dynamic이다. query·fragment·userinfo를 제거하고 고엔트로피·웹훅 경로를 마스킹한다.
+요청 URL 하나는 4,096단계 안에서 펼치고, 템플릿·`+` 연결 하나는 조각 1,024개·리터럴 64 KiB까지만 받는다.
+넘으면 URL 전체를 모르는 값으로 본다(`channel: null`, `pathAnchor: "base"`).
 
 미상 전개, 변경되거나 외부로 넘겨진 설정, interceptor·hook·adapter 및 미확정 동사는 `dynamic`·
 `methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 추가 문장·인자 변환·default/rest가 있는
@@ -332,7 +334,8 @@ find-my-way 8.2.2·9.9.0, @koa/router 15.7.0·13.1.1, NestJS 12.1.2)에서 읽�
   Fastify 플러그인)를 따라가는 정적 해석기가 모은다. `app.METHOD`·`all`·`on`·`route()` 빌더, 접두사가 붙은
   `use()`·`route()`·`register()` mount, Hono `basePath()`, @koa/router `prefix`, Fastify `prefix`·`fastify-plugin`, NestJS
   `@Controller`·`@Get`…과 `setGlobalPrefix`·URI 버전·`RouterModule`을 다룬다. 값은 `const`·import·열거형·`as const` 객체·
-  템플릿 문자열·CommonJS `require`/`module.exports`로 따라간다.
+  템플릿 문자열·CommonJS `require`/`module.exports`로 따라간다. 경로 값 하나는 4,096단계와 이은 템플릿·`+` 문자열 64 KiB
+  안에서만 구해, 같은 상수를 거듭 보간하는 상수 사슬도 작업이 불어나지 않는다. 넘으면 증명한 앞부분만 쓰고 사실은 `dynamic`이다.
 - **경로 문법**: 라우터마다 옮긴다 — Hono 패턴, path-to-regexp 0.1(Express 4)·8(Express 5, @koa/router 14 이상)·
   6(@koa/router 12–13), find-my-way(Fastify, NestJS Fastify 어댑터). 선택 세그먼트는 템플릿 여러 개, 0세그먼트 catch-all은
   `catchAllPrefix` decl, 빈 값을 받는 find-my-way 파라미터는 빈 값 변형, 파라미터 정규식은 `paramConstraints`(`int`·`slug`·

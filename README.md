@@ -54,7 +54,9 @@ URL joins follow axios 1.20.0, ky 1.10.0 (`prefixUrl`) and ky 2.1.0 (`prefix`/`b
 isthmus vectors and 27 real local HTTP requests. ky option dialects require an unambiguous declared
 major version in a regular, non-symlink root `package.json` within 1 MiB (a symlink, FIFO, or device there
 is not followed or waited on). Full-segment interpolation produces `{}`; partial segments remain dynamic. Query,
-fragment and userinfo are removed, and high-entropy/webhook path segments are masked.
+fragment and userinfo are removed, and high-entropy/webhook path segments are masked. A request URL is
+expanded within 4,096 steps, and one template or `+` join may yield at most 1,024 parts and 64 KiB of
+literal text; past these bounds the whole URL is unknown (`channel: null`, `pathAnchor: "base"`).
 
 Unknown spreads, mutable/escaped configuration, interceptors, hooks, adapters and unproven methods
 retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Wrappers with additional
@@ -432,7 +434,9 @@ synthetic fixtures under `fixtures/node/`.
   with their prefixes, Hono `basePath()`, @koa/router `prefix`, Fastify `prefix` and `fastify-plugin`,
   and NestJS `@Controller`/`@Get`… with `setGlobalPrefix`, URI versioning, and `RouterModule`. Values
   are followed through `const`s, imports, enums, `as const` objects, template literals, and CommonJS
-  `require`/`module.exports`.
+  `require`/`module.exports`. Each path value is resolved within 4,096 steps and 64 KiB of joined
+  template/`+` text, so constant chains that interpolate the same constant many times stay bounded; past
+  either bound only the proven prefix is used and the fact is `dynamic`.
 - **Path syntax** is translated per router: Hono patterns, path-to-regexp 0.1 (Express 4), 8 (Express 5,
   @koa/router 14+), 6 (@koa/router 12–13), and find-my-way (Fastify, NestJS on Fastify). Optional
   segments expand into several templates, zero-segment catch-alls add the `catchAllPrefix` decl,

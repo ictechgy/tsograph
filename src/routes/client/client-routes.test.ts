@@ -1577,3 +1577,46 @@ test('an unparsed tsconfig is reported with the graph cause wording', async () =
   assert.deepEqual(doc.facts.map((fact) => fact.channel), ['/ok']);
   assert.ok(doc.limitations.includes('route-call-coverage: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve'));
 });
+
+/** 상수 사슬 선언 줄이다. `<name>0`은 `base`이고, 단계마다 바로 앞 상수를 `spans`번 보간한다. */
+function constantChain(name: string, levels: number, spans: number, base: string): string[] {
+  const lines = [`const ${name}0 = '${base}';`];
+  for (let level = 1; level <= levels; level++) lines.push(`const ${name}${level} = \`${`\${${name}${level - 1}}`.repeat(spans)}\`;`);
+  return lines;
+}
+
+test('URL constant chains, query-suffix fanout and oversized literal joins stop at fixed bounds as unknown request paths', async () => {
+  // 예전에는 c8을 3^8 조각까지 펼치고, q14의 query 꼬리 판정을 2^14번 되풀이하고, 40 KB 리터럴 둘을 이어 붙였다.
+  // 펼치다 만 조각을 한 세그먼트 보간으로 남기면 좁은 정적 경로를 주장하므로 URL 전체를 모르는 값으로 낸다.
+  const big = 'a'.repeat(40_000);
+  const doc = await scan([
+    'declare const flag: boolean;',
+    ...constantChain('c', 8, 3, '/a'),
+    "const q0 = '?a';",
+    ...Array.from({ length: 14 }, (_, index) => `const q${index + 1} = flag ? q${index} : q${index};`),
+    `const big = '/${big}';`,
+    'export const chain = () => fetch(c8);',
+    'export const query = () => fetch(`/search${q14}`);',
+    'export const long = () => fetch(`${big}${big}`);',
+    "export const ok = () => fetch('/ok');",
+  ].join('\n'));
+  assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.pathAnchor, fact.dynamic]), [[null, 'base', true], [null, 'base', true], [null, 'base', true], ['/ok', 'root', false]]);
+  assert.ok(doc.limitations.some((text) => text.startsWith('unresolved-route-prefix:')));
+});
+
+test('a 14-level URL constant chain ends within the per-URL work budget instead of expanding 3^14 parts', async () => {
+  // 예전에는 조각 478만 개를 만들어 16초·RSS 2 GB를 썼다. 회귀가 이 검사만 실패하도록 감시하는 자식 프로세스로 돌린다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-chain-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), '{"dependencies":{}}');
+    writeFileSync(join(root, 'src/client.ts'), [...constantChain('c', 14, 3, '/a'), 'export const chain = () => fetch(c14);', "export const ok = () => fetch('/ok');"].join('\n'));
+    const result = await runMainGuarded(['routes', '--role', 'client', '--project', root]);
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const document = JSON.parse(result.stdout) as { facts: Fact[] };
+    assert.deepEqual(document.facts.map((fact) => [fact.channel, fact.pathAnchor, fact.dynamic]), [[null, 'base', true], ['/ok', 'root', false]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -339,3 +339,71 @@ test('선택 그룹이 수만 겹인 경로 한 줄이 있어도 그 라우트�
   ]);
   assert.equal(limitationsWith(document, 'route-template-expansion-capped: 1 route path(s)').length, 1);
 });
+
+/**
+ * 상수 사슬 선언 줄이다. `<name>0`은 `base`이고, 단계마다 바로 앞 상수를 `spans`번 보간한다.
+ *
+ * @param name 상수 이름 접두사
+ * @param levels 단계 수
+ * @param spans 단계마다 보간 수
+ * @param base 첫 상수 값
+ * @returns 선언 줄 목록
+ */
+function constantChain(name: string, levels: number, spans: number, base: string): string[] {
+  const lines = [`const ${name}0 = '${base}';`];
+  for (let level = 1; level <= levels; level++) lines.push(`const ${name}${level} = \`${`\${${name}${level - 1}}`.repeat(spans)}\`;`);
+  return lines;
+}
+
+test('경로 상수 사슬과 큰 리터럴 합성은 작업·길이 상한에서 멈추고 증명한 앞부분을 dynamic 접두사로 낸다', async () => {
+  // c6은 'a'를 6번씩 6단계 보간한 46,656자이고 c5까지 펼치는 데만 1만 단계가 넘는다. 예전에는 단계 예산 없이 끝까지
+  // 펼쳐 상한을 넘는 정적 경로로 컴파일했고, 40 KB 리터럴 둘을 이은 80 KB 경로도 그대로 만들었다(접두사 스코프 없음).
+  const big = 'a'.repeat(40_000);
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    'src/app.js': [
+      "const express = require('express');",
+      'const app = express();',
+      ...constantChain('c', 6, 6, 'a'),
+      `const big = '${big}';`,
+      "app.get(`/api/${c6}`, (req, res) => res.send('chain'));",
+      "app.get(`/files/${big}${big}`, (req, res) => res.send('template'));",
+      "app.get('/static/' + big + big, (req, res) => res.send('concat'));",
+      "app.get('/ok', (req, res) => res.send('ok'));",
+      'module.exports = app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(document).map((line) => line.replace(/a{64,}/u, '<a…>')), [
+    'GET root /api/<a…> - dynamic{"templatePrefixes":["/api"]} #0 ci',
+    'GET root /files/<a…> - dynamic{"templatePrefixes":["/files"]} #1 ci',
+    'GET root /ok optional #3 ci',
+    'GET root /static/<a…> - dynamic{"templatePrefixes":["/static"]} #2 ci',
+  ]);
+  assert.equal(limitationsWith(document, 'route-coverage: 3 route declaration(s) have paths').length, 1);
+  assert.equal(limitationsWith(document, 'route-template-expansion-capped:').length, 0);
+});
+
+test('공유 상수를 거듭 보간하는 상수 사슬도 경로 하나의 작업 예산 안에서 끝난다', async () => {
+  // c0 = ''에 c_k = `${c_{k-1}}`×20을 7단계 쌓으면 예전 해석은 같은 상수를 약 20^7번 다시 풀어 끝나지 않았다(CPU 100%).
+  // 회귀가 생겨도 테스트 프로세스가 아니라 이 검사만 실패하도록 시간·메모리를 감시하는 자식 프로세스로 돌린다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-express-chain-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), packageJson({ express: '4.21.2' }));
+    writeFileSync(join(root, 'src/app.js'), [
+      "const express = require('express');",
+      'const app = express();',
+      ...constantChain('c', 7, 20, ''),
+      "app.get(`/api/${c7}`, (req, res) => res.send('chain'));",
+      "app.get('/ok', (req, res) => res.send('ok'));",
+      'module.exports = app;',
+    ].join('\n'));
+    const result = await runMainGuarded(['routes', '--role', 'server', '--project', root]);
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const document = JSON.parse(result.stdout) as NodeDocumentView;
+    assert.deepEqual(factLines(document), ['GET root /api/{dynamic} - dynamic{"templatePrefixes":["/api"]} #0 ci', 'GET root /ok optional #1 ci']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

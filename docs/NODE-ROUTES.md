@@ -45,7 +45,9 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
   Express `Router`·`Express`·`Application`, @koa/router `Router`, `FastifyInstance`)는 붙는 위치를 모르는 라우터로 보고
   `pathAnchor: "base"`와 `unresolved-route-prefix:`로 낸다.
 - 경로 값은 문자열 리터럴, `const`, import한 상수, 열거형 멤버, `as const` 객체 속성, 템플릿 문자열·`+` 연결을 따라간다. 앞부분만
-  확정되면(`` `/users/${id}` ``) dynamic 사실의 `dynamicScope` 접두사로 쓴다. 등록 호출의 첫 인자는 리터럴·확정 문자열이면 경로,
+  확정되면(`` `/users/${id}` ``) dynamic 사실의 `dynamicScope` 접두사로 쓴다. 경로 값 하나는 4,096단계(식 하나를 구하는 호출)와
+  이은 템플릿·`+` 문자열 64 KiB 안에서만 구한다 — 같은 상수를 거듭 보간하는 상수 사슬은 깊이 상한(16) 안에서도 해석이 보간 수의
+  거듭제곱으로 늘기 때문이다. 넘으면 그때까지 증명한 앞부분만 접두사로 쓴다. 등록 호출의 첫 인자는 리터럴·확정 문자열이면 경로,
   함수·라우터·패키지 미들웨어로 풀리면 아니며, 둘 다 아니면 타입이 문자열 계열이거나 뒤에 인자가 더 있을 때 경로로 본다
   (`app.use(process.env.PREFIX, router)`를 루트 mount로 잘못 읽지 않기 위해서다).
 
