@@ -347,7 +347,8 @@ const flatteningEntryPoints = "entry-points: the project's routers expand to mor
 test('정규화하면 같은 경로로 합쳐지는 라우트도 펼친 수가 상한을 넘으면 다 펼치기 전에 멈추고 펼친 등록 수를 원인으로 알린다', async () => {
   // 서로 다른 사실 하한만 세면 같은 사실로 합쳐지는 라우트는 상한에 걸리지 않아, 2^22 = 4,194,304개를 다 펼치다 V8 힙이 바닥난다.
   // 펼친 라우트 수 자체에도 상한(200,000)을 두면 종료 2로 끝난다. 이때 사실은 하나뿐이고, 조건부 등록만 둔 2^18 DAG는 사실이
-  // 0개(예전에는 종료 0)라 사실 수 초과 문구는 거짓 원인이다. 세 명령은 감시하는 자식 하나에서 차례로 실행한다.
+  // 0개(예전에는 종료 0)라 사실 수 초과 문구는 거짓 원인이다. 세 명령은 감시하는 자식 하나에서 차례로 실행한다. graph는 펼치는
+  // 비용이 작은 조건부 DAG로 같은 원인의 진입점 한계를 본다.
   const sameFact = { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22, '%61') };
   const conditionalOnly = {
     'package.json': packageJson({ express: '4.21.2' }),
@@ -356,7 +357,7 @@ test('정규화하면 같은 경로로 합쳐지는 라우트도 펼친 수가 �
   const { child, results } = await runGuardedProjects([
     [sameFact, ['routes', '--role', 'server']],
     [conditionalOnly, ['routes', '--role', 'server']],
-    [sameFact, ['graph', '--generated-at', '2026-01-01T00:00:00.000Z']],
+    [conditionalOnly, ['graph', '--generated-at', '2026-01-01T00:00:00.000Z']],
   ]);
   assert.equal(child.stopped, undefined, child.stderr);
   assert.equal(child.status, 0, child.stderr);
