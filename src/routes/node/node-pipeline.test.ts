@@ -182,3 +182,36 @@ test('tsconfig 해석 실패와 compiler 입력 상한 초과를 graph와 같은
   assert.equal(limitationsWith(document, unparsedConfig)[0]!.scope, undefined);
   assert.equal(limitationsWith(document, 'route-coverage: 1 source, declaration, or package input(s) exceeded 4 MiB; type resolution and route registrations may be incomplete').length, 1);
 });
+
+/**
+ * 라우터 DAG 소스를 만든다. 단계마다 다음 라우터를 두 경로에 붙이므로 마지막 라우터의 GET 하나가 사실 2^depth개로 펼쳐진다.
+ *
+ * @param depth DAG 단계 수
+ * @returns `src/app.js` 내용
+ */
+function routerDagSource(depth: number): string {
+  const lines = ["const express = require('express');", 'const app = express();'];
+  for (let level = 1; level <= depth; level++) lines.push(`const r${level} = express.Router();`);
+  lines.push(`r${depth}.get('/x', (req, res) => res.send('x'));`);
+  for (let level = depth; level >= 1; level--) {
+    const parent = level === 1 ? 'app' : `r${level - 1}`;
+    lines.push(`${parent}.use('/a${level}', r${level});`, `${parent}.use('/b${level}', r${level});`);
+  }
+  return `${lines.join('\n')}\nmodule.exports = app;\n`;
+}
+
+test('사실이 인자 펼침 한계(약 12만)를 넘어도 스택 초과·출력 초과가 아니라 사실 상한으로 알린다', async () => {
+  // 2^17 = 131,072개. 64비트 V8 기본 스택(984 KiB)은 8바이트 인자 131,072개(1 MiB)를 한 번에 펼쳐 받지 못한다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-node-dag-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), packageJson({ express: '4.21.2' }));
+    writeFileSync(join(root, 'src/app.js'), routerDagSource(17));
+    const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0', now: () => new Date(0) });
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.standardOutput, '');
+    assert.match(result.standardError, /more than 100000 route-decl facts/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -82,7 +82,9 @@ export function buildNodeFacts(input: NodeFactsInput): NodeFacts {
   const facts: RouteDeclFact[] = [];
   for (const framework of input.frameworks) {
     const built = framework.routes.flatMap((route) => routeFacts(input, route, tally));
-    facts.push(...(framework.dispatch === 'specificity' ? dropShadowedEmptyVariants(built) : built).map((entry) => entry.fact));
+    // 인자 펼침(`push(...)`)은 사실 수만큼 스택 슬롯을 써서 약 12만 개부터 RangeError가 난다. 하나씩 넣어야
+    // 사실 상한(RouteFactLimitError) 판정까지 간다.
+    for (const entry of framework.dispatch === 'specificity' ? dropShadowedEmptyVariants(built) : built) facts.push(entry.fact);
   }
   const limitations = [
     ...tallyLimitations(tally, input.registrationOrder),
