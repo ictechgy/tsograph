@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 /** 타입 제거로 직접 실행하는 CLI 진입점이다. */
@@ -35,12 +36,17 @@ export interface GuardedRun {
 /**
  * Node 자식 프로세스를 시간·RSS 상한 아래에서 실행한다.
  *
+ * 자식의 현재 디렉터리는 임시 디렉터리다. tsconfig가 없는 프로젝트의 Program은 TypeScript 자동 타입 포함(typeRoots
+ * 기본값)이 현재 디렉터리와 그 조상의 `node_modules/@types`를 읽는다. 저장소 루트에서 실행한 테스트의 자식이 그대로
+ * 물려받으면 저장소 자신의 `@types/node`(선언 파일 67개)를 자식마다 다시 파싱해, 커버리지 실행에서 자식 하나에 0.5초
+ * 남짓을 더 쓴다. 감시하는 검사(특수 파일·펼치기 상한)와 무관한 비용이고 인자는 모두 절대 경로라 결과는 같다.
+ *
  * @param arguments_ `node` 실행 파일 뒤의 인자
  * @returns 종료 코드·출력·감시 중단 이유
  */
 export function runNodeGuarded(arguments_: readonly string[]): Promise<GuardedRun> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, arguments_, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, arguments_, { cwd: tmpdir(), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let stopped: GuardedRun['stopped'];
