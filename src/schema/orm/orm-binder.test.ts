@@ -53,6 +53,26 @@ test('서로를 require로 재수출하는 모듈의 export 표는 끝없이 펼
   assert.deepEqual(lines, ['src/db.ts:8:21 ok_rows @src/db.ts#q']);
 });
 
+test('순환 require 재수출 안에서 끊어 만든 export 표는 다른 파일에서 시작한 해석에 다시 쓰지 않는다', () => {
+  // `a.x`를 먼저 풀면 b의 표는 a를 계산하는 중에 만들어져 `b.x`(= a.z)가 끊긴다. 그 표를 b 자신의 표로 다시 쓰면
+  // 뒤의 `b.x`가 모르는 값이 되어 via_b 사실이 사라진다. b에서 시작하면 a.z는 순환 없이 풀린다.
+  const lines = ormLines({
+    'src/a.ts': "import { Pool } from 'pg';\nexport const x = require('./b').x;\nexport const z = new Pool();\n",
+    'src/b.ts': "export const x = require('./a').z;\nexport const w = require('./a').x;\n",
+    'src/db.ts': [
+      "import * as a from './a';",
+      "import * as b from './b';",
+      'export async function q() {',
+      "  await a.x.query('select * from via_a');",
+      "  await b.w.query('select * from via_w');",
+      "  return b.x.query('select * from via_b');",
+      '}',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(lines, ['src/db.ts:6:20 via_b @src/db.ts#q']);
+});
+
 test('모듈 export 표는 파일마다 한 번만 만들어 이름공간 접근·require 구조 분해·관계형 쿼리 스키마가 함께 쓴다', () => {
   const tables = Array.from({ length: 4 }, (_, index) => `export const t${index} = sqliteTable('t${index}_rows', { id: integer() });`);
   const uses = Array.from({ length: 4 }, (_, index) => `  await db.select().from(schema.t${index});\n  await db.query.t${index}.findMany();`);
