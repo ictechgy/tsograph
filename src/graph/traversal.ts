@@ -162,8 +162,8 @@ interface EvidenceLookup {
  * 정점의 root별 하한 근거 등급을 구하는 함수를 만든다.
  *
  * 메모리 판정식(정점 수 × 단어 수 × 4 × (등급 수 + 1))은 근사로 바꾸는 조건과 출력을 지키려고 그대로 둔다.
- * 정확 비교는 (정점 수 × 단어 수) 평면 배열 네 개(전체 등급 도달, 재사용하는 하위 등급 도달, 경계 두 벌)를 쓰므로
- * bound 모드에서는 판정식보다 한 벌 많다(정점·단계마다 비트 배열과 Map 항목을 만들던 예전 구현보다는 훨씬 작다).
+ * 정확 비교는 (정점 수 × 단어 수) 평면 배열 세 개(등급마다 다시 쓰는 도달, 경계 두 벌)와 정점별 비트 수만 쓰므로,
+ * 비트 배열이 어느 모드에서든 판정식 안에 든다(전체 등급 도달은 정점별 비트 수만 남긴다 — `strongestTiers`).
  *
  * @param graph 호출 그래프
  * @param request 탐색 요청
@@ -314,7 +314,9 @@ interface BitFrontier {
 
 /**
  * 비교 대상 root마다 비트 하나로 등급별 도달을 구해, 정점마다 전체 등급과 같은 root 집합을 주는 가장 강한 등급을
- * 고른다(등급 그래프는 포함 관계라 도달 집합도 포함 관계다). 하위 등급 도달 배열과 경계 버퍼는 등급마다 재사용한다.
+ * 고른다. 등급 그래프는 포함 관계라 하위 등급 도달은 전체 등급 도달의 부분집합이고, 그래서 두 집합이 같은지는 비트
+ * 수만 비교하면 된다. 전체 등급 도달은 정점별 비트 수만 남기고, 그 배열과 경계 버퍼를 하위 등급마다 다시 쓴다
+ * (전체 등급 배열을 따로 들면 bound 모드에서 평면 배열이 메모리 판정식보다 한 벌 많아진다).
  *
  * @param graph 등급 비교용 인접 목록
  * @param roots 비교 대상 root 정점 번호(순번이 비트 위치)
@@ -332,15 +334,15 @@ function strongestTiers(graph: TierGraph, roots: readonly number[], tierCount: n
     stamps: new Int32Array(size),
     generation: 0,
   };
-  const full = new Uint32Array(size * words);
-  reachBits(graph, roots, tierCount - 1, maxDepth, full, work);
+  const reach = new Uint32Array(size * words);
+  reachBits(graph, roots, tierCount - 1, maxDepth, reach, work);
+  const fullCounts = rowCounts(reach, size, words);
   const strongest = new Uint8Array(size).fill(tierCount - 1);
-  const lower = new Uint32Array(size * words);
   for (let tier = 0; tier < tierCount - 1; tier++) {
-    if (tier > 0) lower.fill(0);
-    reachBits(graph, roots, tier, maxDepth, lower, work);
+    reach.fill(0);
+    reachBits(graph, roots, tier, maxDepth, reach, work);
     for (let node = 0; node < size; node++) {
-      if (strongest[node] === tierCount - 1 && sameRow(full, lower, node * words, words)) strongest[node] = tier;
+      if (strongest[node] === tierCount - 1 && rowCount(reach, node * words, words) === fullCounts[node]) strongest[node] = tier;
     }
   }
   return strongest;
@@ -426,17 +428,43 @@ function clearRows(bits: Uint32Array, nodes: Int32Array, count: number, words: n
 }
 
 /**
- * 두 평면 배열의 한 행이 같은지 본다.
+ * 평면 배열의 정점별 비트 수를 센다.
  *
- * @param left 비트 평면 배열
- * @param right 비트 평면 배열
+ * @param bits 비트 평면 배열
+ * @param size 정점 수
+ * @param words 행 길이
+ * @returns 정점 번호 → 비트 수
+ */
+function rowCounts(bits: Uint32Array, size: number, words: number): Int32Array {
+  const counts = new Int32Array(size);
+  for (let node = 0; node < size; node++) counts[node] = rowCount(bits, node * words, words);
+  return counts;
+}
+
+/**
+ * 평면 배열 한 행의 비트 수를 센다.
+ *
+ * @param bits 비트 평면 배열
  * @param start 행의 시작
  * @param words 행 길이
- * @returns 같으면 true
+ * @returns 비트 수
  */
-function sameRow(left: Uint32Array, right: Uint32Array, start: number, words: number): boolean {
-  for (let word = start; word < start + words; word++) if (left[word] !== right[word]) return false;
-  return true;
+function rowCount(bits: Uint32Array, start: number, words: number): number {
+  let count = 0;
+  for (let word = start; word < start + words; word++) count += bitCount(bits[word]!);
+  return count;
+}
+
+/**
+ * 32비트 단어의 켜진 비트 수다(분기 없는 SWAR 계산, 곱은 `Math.imul`로 32비트 안에서 한다).
+ *
+ * @param word 부호 없는 32비트 값
+ * @returns 0~32
+ */
+function bitCount(word: number): number {
+  let value = word - ((word >>> 1) & 0x55555555);
+  value = (value & 0x33333333) + ((value >>> 2) & 0x33333333);
+  return Math.imul((value + (value >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
 }
 
 /** 한 단계의 경계다: 새 root를 받은 정점(받은 순서)과 정점별로 받은 root 인덱스(받은 순서)다. */

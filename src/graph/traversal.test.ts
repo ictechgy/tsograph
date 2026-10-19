@@ -246,3 +246,46 @@ test('지배 판정은 정점이 이미 든 root 목록을 판정마다 다시 �
   const nodes = roots.length + layer.length + 1;
   assert.ok(scans <= 2 * nodes, `${scans} scans for ${nodes} nodes`);
 });
+
+/**
+ * 동기 함수를 실행하는 동안 전역 `Uint32Array`를 길이로 만든 배열의 바이트 합을 센다(끝나면 원래 생성자로 되돌린다).
+ *
+ * @param run 실행할 함수
+ * @returns 할당한 바이트 수
+ */
+function bitSetBytes(run: () => void): number {
+  const original = globalThis.Uint32Array;
+  let bytes = 0;
+  globalThis.Uint32Array = new Proxy(original, {
+    construct(target, args) {
+      if (typeof args[0] === 'number') bytes += args[0] * original.BYTES_PER_ELEMENT;
+      return Reflect.construct(target, args);
+    },
+  });
+  try {
+    run();
+  } finally {
+    globalThis.Uint32Array = original;
+  }
+  return bytes;
+}
+
+test('등급 비교의 비트 배열은 정확 비교를 허용한 메모리 판정식 안에 든다(bound·candidates)', () => {
+  // root 40개(32비트 단어 2개)가 허브로 모이고, 허브 너머 bound·candidate 간선 뒤로 정점 사슬이 이어진다(모든 root가 비교 대상).
+  const roots = Array.from({ length: 40 }, (_, index) => `r${String(index).padStart(2, '0')}`);
+  const chain = (prefix: string): string[] => Array.from({ length: 50 }, (_, index) => `${prefix}${index}>${prefix}${index + 1}`);
+  const graph = graphOf([...roots.map((root) => `${root}>hub`), 'hub>b0:call:bound', 'hub>k0:call:candidate', ...chain('b'), ...chain('k')]);
+  for (const [dispatch, tiers] of [['bound', 2], ['candidates', 3]] as const) {
+    // 판정식(정점 수 × 단어 수 × 4바이트 × (등급 수 + 1))과 같은 상한이면 정확 비교가 허용된다. 예전에는 bound 모드가
+    // 평면 배열을 판정식보다 한 벌 더(4벌) 만들었다.
+    const budget = graph.nodes.length * Math.ceil(roots.length / 32) * 4 * (tiers + 1);
+    let result: ReturnType<typeof traverse> | undefined;
+    const bytes = bitSetBytes(() => {
+      result = traverse(graph, { rootIds: roots, direction: 'dependencies', maxDepth: 128, maxReached: 1000, dispatch, evidenceMemoryBytes: budget });
+    });
+    assert.equal(result?.evidenceApproximated, false, dispatch);
+    const evidence = ['hub', 'b50', 'k50'].map((id) => result?.reached.find((row) => row.id === id)?.evidence);
+    assert.deepEqual(evidence, dispatch === 'bound' ? ['direct', 'bound', undefined] : ['direct', 'bound', 'candidate'], dispatch);
+    assert.ok(bytes <= budget, `${dispatch}: ${bytes} bytes of bit sets for a ${budget}-byte budget`);
+  }
+});
