@@ -1224,8 +1224,10 @@ compatibility; released isthmus-cli 0.11.0 rejects `symbol.entries`, so upgrade 
   More than 64 root indices on one symbol keep the smallest 64 and set `rootsTruncated: true`.
 - The traversal is one multi-source, level-synchronous pass (all roots at once, not one search per
   root). A root stops spreading through a symbol that already holds 65 smaller root indices, because
-  it can no longer change any listed `roots`, `depth`, or `via`; this bounds the work per symbol even
-  with 10,000 roots. A randomized test checks the pass against the per-root algorithm. When root
+  it can no longer change any listed `roots`, `depth`, or `via`. This keeps a symbol's root records
+  near 65 only when smaller-index roots reach it first: a symbol that larger-index roots reach first
+  keeps every root that arrives before 65 smaller ones do, so the work per symbol can still grow with
+  the number of roots. A randomized test checks the pass against the per-root algorithm. When root
   indices overflow (`rootsTruncated: true`), the `depth` reason is reported when a symbol is missing
   because of the depth limit, not when only one root's provenance was cut; in a document also cut by
   `max-reached`, overflow on dropped symbols still sets `rootsTruncated`.
