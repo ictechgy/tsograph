@@ -519,9 +519,12 @@ Prisma 8 contract 파일과 클라이언트 API는 읽지 않는다(`prisma-8-su
   `require`·`module.exports`, `await import(...)`. TypeScript 모듈 해석기와 가장 가까운
   `tsconfig.json`/`jsconfig.json`(프로젝트 안으로 제한)으로 풀고 고정점까지 반복한다. 설정과 그
   `extends` 사슬, `package.json`은 실제 경로가 프로젝트 안인 1 MiB 이하 일반 파일만 읽는다. 프로젝트 안
-  링크(링크로 둔 tsconfig, pnpm `node_modules` 링크)는 따라가고 프로젝트 밖으로 나가는 링크는 읽지
-  않는다. 상한을 넘거나 읽을 수 없거나 프로젝트 밖인 설정(그 `extends` 사슬의 파일 포함)은
-  `unreadable-module-configs:`로 세고, 그 아래 import는 기본 해석을 쓴다.
+  링크(링크로 둔 tsconfig, 프로젝트 안 저장소로 가는 pnpm `node_modules` 링크)는 따라가고 실제 경로가
+  프로젝트 밖인 파일은 읽지 않는다. 경로로나 링크로(예: 저장소가 `--project` 위에 있는 pnpm 워크스페이스
+  하위 패키지) 프로젝트 밖에 있는 `extends` 대상과 `package.json`은 없는 파일로 본다. TypeScript가 그
+  `extends`만 건너뛰고 설정 자체의 옵션(`paths`·`baseUrl`)은 그대로 쓴다. 설정 파일 자체가 프로젝트
+  밖이거나, 설정·`extends` 파일이 상한을 넘거나 읽을 수 없으면 `unreadable-module-configs:`로 세고 그 아래
+  import는 기본 해석을 쓴다.
 
 지역 변수·매개변수는 바깥 클라이언트를 가린다. 출처를 추적하지 못한 수신자의
 `x.<delegate>.<operation>(...)` 모양 호출은 내지 않고 `unresolved-client-receivers:`로 센다. 증명된

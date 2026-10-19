@@ -49,8 +49,10 @@
 
 - schema: import 해석기가 tsconfig/jsconfig·`extends`·package.json을 실제 경로가 프로젝트 안인 일반 파일만
   1 MiB까지 읽는다. 커밋된 큰 설정 파일이나 밖의 큰 파일로 가는 링크 하나로 V8 메모리가 바닥나(종료 134) 끝나던
-  문제를 고치고, 읽지 않은 설정은 `unreadable-module-configs:`로 알린다. 프로젝트 안 링크(pnpm `node_modules`)는
-  따라간다.
+  문제를 고친다. 상한을 넘거나 읽을 수 없는 설정·`extends` 파일과 프로젝트 밖으로 가는 설정 파일은
+  `unreadable-module-configs:`로 알린다. 링크로 프로젝트 밖에 있는 `extends` 대상(저장소가 `--project` 위에 있는
+  pnpm 워크스페이스 하위 패키지 등)은 프로젝트 위 경로의 `extends`처럼 그것만 건너뛰고 설정 자체의 `paths`·
+  `baseUrl`은 그대로 쓴다. 프로젝트 안 링크(링크로 둔 tsconfig, 프로젝트 안 pnpm 저장소)는 따라간다.
 
 - graph·routes client: 루트 `package.json`·`vercel.json`·`node_modules/next/package.json`·`.git` 메타데이터와
   client가 ky 주 버전을 읽는 `package.json`을 non-blocking으로 열어 일반 파일만 상한 안에서 읽는다. FIFO에서

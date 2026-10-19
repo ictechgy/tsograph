@@ -656,10 +656,13 @@ and nothing is executed:
   module resolver and the nearest `tsconfig.json`/`jsconfig.json` (restricted to the project),
   iterated to a fixed point. A config, its `extends` chain, and `package.json` are read only as
   regular files of at most 1 MiB whose real path stays inside the project: links inside the project
-  (a symlinked tsconfig, pnpm `node_modules` links) are followed, and a link that leaves the project
-  is not read. A config that is oversized, unreadable, or outside the project, including any file of
-  its `extends` chain, counts under `unreadable-module-configs:`, and imports under it use default
-  resolution.
+  (a symlinked tsconfig, pnpm `node_modules` links into a store under the project) are followed, and
+  a file whose real path leaves the project is not read. An `extends` target or `package.json`
+  outside the project, by path or through a link (for example a pnpm workspace package whose store
+  sits above `--project`), is treated as missing: TypeScript skips that `extends`, and the config's
+  own options (`paths`, `baseUrl`) still apply. A config that is itself outside the project, or a
+  config or `extends` file that is oversized or unreadable, counts under
+  `unreadable-module-configs:`, and imports under it use default resolution.
 
 Local variables and parameters shadow outer clients. A call shaped like
 `x.<delegate>.<operation>(...)` on an untraced receiver is not emitted and is counted under

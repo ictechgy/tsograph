@@ -185,6 +185,37 @@ test('설정 파일과 package.json은 링크를 따라간 실제 경로가 프�
   }
 });
 
+test('pnpm 저장소가 --project 위에 있으면 밖의 extends만 건너뛰고 설정 자체의 paths 별칭으로 Prisma 사용을 낸다', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  // pnpm 워크스페이스 하위 패키지(`--project apps/api`)의 node_modules 링크는 워크스페이스 루트의 `.pnpm` 저장소,
+  // 곧 프로젝트 밖으로 간다. 그 extends는 프로젝트 위 경로의 extends처럼 없는 파일로 보고, 설정을 통째로 버리지 않는다.
+  const store = 'node_modules/.pnpm/@tsconfig+node18@18.2.4/node_modules/@tsconfig/node18';
+  const app = 'apps/api';
+  const appFiles = Object.entries({ ...prismaBase, ...aliasSources }).map(([path, content]) => [`${app}/${path}`, content]);
+  await withProjectAsync({
+    [`${store}/package.json`]: JSON.stringify({ name: '@tsconfig/node18', version: '18.2.4' }),
+    [`${store}/tsconfig.json`]: JSON.stringify({ compilerOptions: { module: 'node16', moduleResolution: 'node16' } }),
+    ...Object.fromEntries(appFiles),
+    [`${app}/tsconfig.json`]: JSON.stringify({ extends: '@tsconfig/node18/tsconfig.json', compilerOptions: { paths: { '@/*': ['./src/*'] } } }),
+  }, async (workspace) => {
+    const project = join(workspace, app);
+    mkdirSync(join(project, 'node_modules', '@tsconfig'), { recursive: true });
+    symlinkSync(join('..', '..', '..', '..', store), join(project, 'node_modules', '@tsconfig', 'node18'));
+    const environment = { fileSystem: createNodeFileSystem(), toolVersion: '0.0.0', now: () => new Date(0) };
+    const { value: result, log } = await countReads(t, () => runSchemaCommand(['--project', project], environment));
+    assert.equal(result.exitCode, 0);
+    const document = JSON.parse(result.standardOutput) as {
+      readonly facts: readonly { readonly location: { readonly path: string } }[];
+      readonly limitations: readonly string[];
+    };
+    assert.ok(document.facts.some((fact) => fact.location.path === 'src/use.ts'));
+    assert.deepEqual(document.limitations.filter((line) => /^(?:unreadable-module-configs|unresolved-client-receivers):/u.test(line)), []);
+    // 실제 경로가 프로젝트 밖인 저장소 파일은 여전히 열지 않는다.
+    assert.deepEqual([...log.counts.keys()].filter((path) => path.includes('@tsconfig')), []);
+  });
+});
+
 test('실제 경로를 확인하지 못한 설정은 읽지 않고 읽지 못한 설정으로 센다', (t) => {
   withProject({ ...aliasSources, 'tsconfig.json': aliasConfig }, (root) => {
     const config = join(root, 'tsconfig.json');

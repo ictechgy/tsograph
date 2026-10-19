@@ -5,7 +5,8 @@
  * `paths`·`baseUrl`·`moduleResolution`을 넘긴다. 파일 시스템 접근은 프로젝트 루트 안으로
  * 제한하고, 결과가 스캔한 파일 집합 밖(의존성 패키지 등)이면 해석하지 않은 것으로 본다 —
  * 모르는 모듈을 추측해 클라이언트 출처로 잇지 않기 위해서다. 설정·package.json은 링크를 따라간
- * 실제 경로가 루트 안인 일반 파일만 1 MiB까지 읽는다.
+ * 실제 경로가 루트 안인 일반 파일만 1 MiB까지 읽는다. 실제 경로가 루트 밖인 파일은 어휘적으로 밖인
+ * 경로와 같이 없는 파일로 본다.
  */
 
 import { existsSync, realpathSync, statSync } from 'node:fs';
@@ -34,6 +35,9 @@ const configNames = ['tsconfig.json', 'jsconfig.json'] as const;
 
 /** 해석 호스트가 묻는 경로의 종류다. `none`은 없음·특수 파일·stat 실패, `outside`는 루트 밖(stat하지 않음)이다. */
 type PathKind = 'file' | 'directory' | 'none' | 'outside';
+
+/** 링크를 따라간 실제 경로가 루트 기준 어디인지다. `unknown`은 루트나 파일의 실제 경로를 구하지 못한 경우다. */
+type RealLocation = 'inside' | 'outside' | 'unknown';
 
 /**
  * TypeScript 캐시의 경로 정규화다. 대소문자를 바꾸지 않는다 — 해석 결과를 스캔한 경로와 그대로 비교하기 때문이다.
@@ -72,7 +76,10 @@ export class ModuleResolver {
     directoryExists: (directory) => this.kindOf(directory) === 'directory',
     realpath: (file) => file,
   };
-  /** 있는 파일을 상한·루트 밖·권한 때문에 읽지 않은 누적 횟수다. 설정 하나를 파싱하는 동안 늘면 그 설정을 센다. */
+  /**
+   * 루트 안의 파일을 상한·권한·실제 경로 확인 실패 때문에 읽지 않은 누적 횟수다. 설정 하나를 파싱하는 동안 늘면
+   * 그 설정을 센다. 실제 경로가 루트 밖인 파일은 없는 파일로 보므로 세지 않는다.
+   */
   private refusedReads = 0;
   /** 읽지 못한 tsconfig 수다. */
   unreadableConfigs = 0;
@@ -178,9 +185,11 @@ export class ModuleResolver {
   /**
    * 설정 파일을 컴파일러 규칙(주석·끝 쉼표·`extends`)대로 읽는다. 파일 목록은 만들지 않는다.
    *
-   * 본 파일이나 `extends` 사슬의 파일이 있는데 읽지 않았으면(상한 초과·루트 밖·권한) 일부만 읽은 옵션을 쓰지
-   * 않고 읽지 못한 설정으로 센다 — limitation 문구대로 그 아래 import는 기본 해석을 쓴다. 없는 `extends` 대상은
-   * TypeScript 규칙대로 건너뛰고 나머지 옵션을 쓴다.
+   * 본 파일이나 `extends` 사슬의 파일이 루트 안에 있는데 읽지 않았으면(상한 초과·권한·실제 경로 확인 실패)
+   * 일부만 읽은 옵션을 쓰지 않고 읽지 못한 설정으로 센다 — limitation 문구대로 그 아래 import는 기본 해석을 쓴다.
+   * 없는 `extends` 대상은 TypeScript 규칙대로 건너뛰고 나머지 옵션을 쓴다. 실제 경로가 루트 밖인 대상(pnpm
+   * 워크스페이스 하위 패키지의 저장소 링크 등)도 어휘적으로 루트 위인 `extends`처럼 없는 대상이라 그것만
+   * 건너뛴다. 본 파일이 루트 밖이면 내용을 읽을 수 없어 읽지 못한 설정으로 센다.
    *
    * @param path 설정 파일 절대 경로
    * @returns 해석 설정. 읽지 못하면 undefined(계수에 남긴다)
@@ -241,17 +250,21 @@ export class ModuleResolver {
   /**
    * 루트 안의 파일을 읽는다.
    *
-   * 링크를 따라간 실제 경로가 루트 밖이면 읽지 않는다. 경로 요소마다 링크를 거부하지 않는 것은 pnpm
-   * `node_modules/<pkg>`처럼 루트 안을 가리키는 디렉터리 링크를 거친 `extends`·package.json 해석을 지키기
-   * 위해서다. 읽기는 일반 파일 핸들에서 1 MiB+1 byte까지만 한다(설정 하나로 메모리를 다 쓰지 않게). 실제 경로
-   * 확인과 열기 사이에 링크가 바뀌는 경쟁은 막지 않는다.
+   * 링크를 따라간 실제 경로가 루트 밖이면 읽지 않고 없는 파일로 본다(읽기 거부로 세지 않는다). 어휘적으로 루트
+   * 밖인 경로를 없는 것으로 보는 규칙과 같게 해, pnpm 워크스페이스 하위 패키지의 저장소 링크처럼 밖으로 가는
+   * `extends`도 npm·yarn 호이스팅 때와 같이 그것만 건너뛰고 설정 자체의 `paths`·`baseUrl`은 남긴다. 경로 요소마다
+   * 링크를 거부하지 않는 것은 pnpm `node_modules/<pkg>`처럼 루트 안을 가리키는 디렉터리 링크를 거친 `extends`·
+   * package.json 해석을 지키기 위해서다. 읽기는 일반 파일 핸들에서 1 MiB+1 byte까지만 한다(설정 하나로 메모리를
+   * 다 쓰지 않게). 실제 경로 확인과 열기 사이에 링크가 바뀌는 경쟁은 막지 않는다.
    *
    * @param file 경로
    * @returns 내용. 없거나 읽지 않았으면 undefined(TypeScript는 없는 파일로 보고, 호출자가 미해석으로 센다)
    */
   private readFile(file: string): string | undefined {
     if (!this.fileExists(file)) return undefined;
-    const read = this.hasRealPathInside(file) ? readBoundedConfigText(file, MAX_GRAPH_CONFIG_BYTES) : undefined;
+    const location = this.realLocationOf(file);
+    if (location === 'outside') return undefined;
+    const read = location === 'inside' ? readBoundedConfigText(file, MAX_GRAPH_CONFIG_BYTES) : undefined;
     if (read?.ok === true) return read.text;
     this.refusedReads++;
     return undefined;
@@ -261,11 +274,12 @@ export class ModuleResolver {
    * 링크를 따라간 실제 경로가 루트 안인지 본다.
    *
    * @param file 경로
-   * @returns 실제 경로를 확인했고 루트 안이면 true
+   * @returns 루트 안·밖, 또는 루트나 파일의 실제 경로를 구하지 못했으면 `unknown`
    */
-  private hasRealPathInside(file: string): boolean {
+  private realLocationOf(file: string): RealLocation {
     const real = realPathOf(file);
-    return real !== undefined && this.realRoot !== undefined && isInsideDirectory(this.realRoot, real);
+    if (real === undefined || this.realRoot === undefined) return 'unknown';
+    return isInsideDirectory(this.realRoot, real) ? 'inside' : 'outside';
   }
 
   /**
