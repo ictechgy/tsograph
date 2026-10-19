@@ -27,6 +27,7 @@ import { joinPieces } from './path-join.ts';
 import type { FrameworkAdapter, InstanceSpec, InterpreterContext } from './router-interpreter.ts';
 import type { EventSite, MountEvent, PathArgument, PathValue, ProvidedEvent, RouteEvent, RouterEvent, RouterInstance, RouterTarget } from './router-model.ts';
 import { calleeFromPackage, packageBindingOf, unwrap } from './symbols.ts';
+import type { NodeFactBudget } from './node-facts.ts';
 import type { NodeProject } from './node-project.ts';
 
 /** Hono 클래스를 내보내는 모듈이다. */
@@ -325,6 +326,8 @@ interface FlattenContext {
   readonly provided: FlatProvided[];
   middlewareCount: number;
   readonly active: Set<RouterInstance>;
+  /** 프레임워크가 함께 쓰는 사실 하한 계수기. 상한을 넘으면 남은 사건을 펼치지 않는다 */
+  readonly budget: NodeFactBudget;
 }
 
 /** 요청을 받는 앱 기준의 경로 규칙이다. */
@@ -338,12 +341,13 @@ interface AppPolicy {
  * @param project 프로젝트
  * @param instances 인스턴스
  * @param events 사건
+ * @param budget 사실 하한 계수기(상한을 넘으면 펼치기를 멈춘다)
  * @returns Hono 추출 결과
  */
-export function flattenHono(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[]): FrameworkRoutes {
+export function flattenHono(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], budget: NodeFactBudget): FrameworkRoutes {
   const hono = instances.filter((instance) => instance.framework === 'hono');
   const honoEvents = events.filter((event) => event.target.instance.framework === 'hono');
-  const context: FlattenContext = { project, byInstance: eventsByInstance(honoEvents), routes: [], provided: [], middlewareCount: 0, active: new Set() };
+  const context: FlattenContext = { project, byInstance: eventsByInstance(honoEvents), routes: [], provided: [], middlewareCount: 0, active: new Set(), budget };
   const mounted = new Set(honoEvents.flatMap((event) => (event.kind === 'mount' ? event.children.map((child) => child.instance) : [])));
   for (const root of hono.filter((instance) => !mounted.has(instance))) {
     const policy: AppPolicy = { trailingSlash: trailingSlashOf(root) };
@@ -395,7 +399,7 @@ function walkInstance(
 }
 
 /**
- * 사건 하나를 펼친다.
+ * 사건 하나를 펼친다. 사실 하한이 상한을 넘었으면 펼치지 않는다(문서는 사실 상한 실패로 끝나므로 남은 사건은 쓰이지 않는다).
  *
  * @param context 펼치기 문맥
  * @param event 사건
@@ -405,6 +409,7 @@ function walkInstance(
  * @param isOrdered 순서를 증명했는지
  */
 function handleEvent(context: FlattenContext, event: RouterEvent, prefixes: readonly PathValue[], policy: AppPolicy, counter: OrderCounter, isOrdered: boolean): void {
+  if (context.budget.isExceeded) return;
   const pieces = [...prefixes, ...event.target.basePaths.map((entry) => entry.value)];
   if (event.kind === 'route') return routeEvent(context, event, pieces, policy, counter, isOrdered);
   if (event.kind === 'mount') return mountEvent(context, event, pieces, policy, counter, isOrdered);
@@ -426,7 +431,7 @@ function routeEvent(context: FlattenContext, event: RouteEvent, pieces: readonly
   for (const [element, path] of event.paths.entries()) {
     const compiled = compileJoined([...pieces, path.value]);
     const order = takeOrder(counter, isOrdered && !event.handler.mayCallNext && !event.methodDynamic && !event.site.conditional, { node: event.registrationNode, element });
-    context.routes.push({
+    const route: FlatRoute = {
       handler: event.handler,
       unsupportedMethods: event.unsupportedMethods,
       methods: event.methods,
@@ -439,7 +444,9 @@ function routeEvent(context: FlattenContext, event: RouteEvent, pieces: readonly
       caseInsensitive: false,
       narrowed: false,
       conditional: event.site.conditional,
-    });
+    };
+    context.routes.push(route);
+    context.budget.add(route);
   }
 }
 

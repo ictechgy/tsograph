@@ -5,12 +5,13 @@
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runGraphCommand } from '../../cli/graph-command.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
+import { type GuardedRun, runMainGuarded } from '../../cli/testing.test.ts';
 import { isSafeIdentifier } from '../../exchange/bridge-facts.ts';
 import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
@@ -184,29 +185,133 @@ test('tsconfig 해석 실패와 compiler 입력 상한 초과를 graph와 같은
 });
 
 /**
- * 라우터 DAG 소스를 만든다. 단계마다 다음 라우터를 두 경로에 붙이므로 마지막 라우터의 GET 하나가 사실 2^depth개로 펼쳐진다.
+ * 라우터 DAG 소스를 만든다. 단계마다 다음 라우터를 두 경로에 붙이므로 마지막 라우터의 GET 하나가 펼친 라우트 2^depth개가 된다.
  *
  * @param depth DAG 단계 수
+ * @param second 둘째 mount 경로의 머리 글자. 기본 `b`면 경로가 모두 달라 사실이 2^depth개다. `%61`이면 둘째 경로가 정규화하면
+ *   첫째와 같아(`/%611` → `/a1`) 펼친 라우트가 모두 같은 사실 하나다
+ * @param leafPaths 마지막 라우터에 GET으로 등록할 경로 인자의 소스(문자열 리터럴이나 식)
  * @returns `src/app.js` 내용
  */
-function routerDagSource(depth: number): string {
+function routerDagSource(depth: number, second = 'b', leafPaths: readonly string[] = ["'/x'"]): string {
   const lines = ["const express = require('express');", 'const app = express();'];
   for (let level = 1; level <= depth; level++) lines.push(`const r${level} = express.Router();`);
-  lines.push(`r${depth}.get('/x', (req, res) => res.send('x'));`);
+  for (const path of leafPaths) lines.push(`r${depth}.get(${path}, (req, res) => res.send('x'));`);
   for (let level = depth; level >= 1; level--) {
     const parent = level === 1 ? 'app' : `r${level - 1}`;
-    lines.push(`${parent}.use('/a${level}', r${level});`, `${parent}.use('/b${level}', r${level});`);
+    lines.push(`${parent}.use('/a${level}', r${level});`, `${parent}.use('/${second}${level}', r${level});`);
   }
   return `${lines.join('\n')}\nmodule.exports = app;\n`;
 }
 
+/**
+ * Hono `route()` DAG 소스다. 단계마다 다음 앱을 두 경로에 복사해 붙이므로 마지막 앱의 GET 하나가 사실 2^depth개가 된다.
+ *
+ * @param depth DAG 단계 수
+ * @returns `src/app.ts` 내용
+ */
+function honoDagSource(depth: number): string {
+  const lines = ["import { Hono } from 'hono';", 'const app = new Hono();'];
+  for (let level = 1; level <= depth; level++) lines.push(`const r${level} = new Hono();`);
+  lines.push(`r${depth}.get('/x', (c) => c.text('x'));`);
+  for (let level = depth; level >= 1; level--) {
+    const parent = level === 1 ? 'app' : `r${level - 1}`;
+    lines.push(`${parent}.route('/a${level}', r${level});`, `${parent}.route('/b${level}', r${level});`);
+  }
+  return `${lines.join('\n')}\nexport default app;\n`;
+}
+
+/**
+ * @koa/router 중첩 `use()` DAG 소스다. 둘째 라우터부터 단계마다 다음 라우터를 두 경로에 복사해 붙이므로 사실이 2^(depth-1)개가 된다.
+ *
+ * @param depth 라우터 수
+ * @returns `src/app.ts` 내용
+ */
+function koaDagSource(depth: number): string {
+  const lines = ["import Koa from 'koa';", "import Router from '@koa/router';", 'const app = new Koa();'];
+  for (let level = 1; level <= depth; level++) lines.push(`const r${level} = new Router();`);
+  lines.push(`r${depth}.get('/x', (ctx) => { ctx.body = 'x'; });`);
+  for (let level = depth; level >= 2; level--) lines.push(`r${level - 1}.use('/a${level}', r${level}.routes());`, `r${level - 1}.use('/b${level}', r${level}.routes());`);
+  return `${lines.join('\n')}\napp.use(r1.routes());\nexport default app;\n`;
+}
+
+/**
+ * 합성 파일로 임시 프로젝트를 만들어 CLI를 시간·메모리를 감시하는 자식 프로세스로 실행한다. 펼치기가 지수로 커지는 회귀가
+ * 생겨도 테스트 프로세스의 메모리를 다 쓰지 않고 이 검사만 실패하게 하려는 것이다.
+ *
+ * @param files 프로젝트 기준 경로 → 내용
+ * @param command `--project` 앞의 CLI 인자
+ * @returns 감시한 실행 결과
+ */
+async function runGuardedProject(files: Record<string, string>, command: readonly string[]): Promise<GuardedRun> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-node-flatten-')));
+  try {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), content);
+    }
+    return await runMainGuarded([...command, '--project', root]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** 펼치면 사실이 2^22 = 4,194,304개인 라우터 DAG를 프레임워크별로 만든 프로젝트다. */
+const largeDags: readonly (readonly [string, Record<string, string>])[] = [
+  ['express', { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(22) }],
+  ['hono', { 'package.json': packageJson({ hono: '4.6.0' }), 'src/app.ts': honoDagSource(22) }],
+  ['koa', { 'package.json': packageJson({ koa: '2.16.4', '@koa/router': '13.1.1' }), 'src/app.ts': koaDagSource(23) }],
+];
+
+test('공유 하위 라우터 DAG가 사실 상한을 넘으면 다 펼치기 전에 멈추고 사실 상한으로 알린다', async () => {
+  // 예전에는 펼친 라우트 400만 개와 그 사실을 모두 만든 뒤에야 상한을 봐서, 그 전에 V8 힙이 바닥났다(종료 134).
+  for (const [framework, files] of largeDags) {
+    const result = await runGuardedProject(files, ['routes', '--role', 'server']);
+    assert.equal(result.stopped, undefined, framework);
+    assert.equal(result.status, 2, `${framework}: ${result.stderr}`);
+    assert.equal(result.stdout, '', framework);
+    assert.match(result.stderr, /more than 100000 route-decl facts/u, framework);
+  }
+});
+
+test('graph는 사실 상한을 넘는 Node 라우터 DAG에서도 끝까지 가고 진입점을 표시하지 못한 것을 한계로 알린다', async () => {
+  const result = await runGuardedProject(largeDags[0]![1], ['graph', '--generated-at', '2026-01-01T00:00:00.000Z']);
+  assert.equal(result.stopped, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  const graph = JSON.parse(result.stdout) as { limitations: string[] };
+  assert.ok(graph.limitations.includes('entry-points: the project produces more route-decl facts than the routes limit; route handlers are not marked'));
+});
+
+test('정규화하면 같은 경로에 거듭 붙인 DAG는 펼친 라우트가 사실 상한보다 많아도 같은 사실로 합쳐져 성공한다', async () => {
+  // 2^16 × 등록 2개 = 131,072개 라우트가 정적 `/a1/…/a16/x`와 dynamic `/a1/…/a16{dynamic}` 사실 둘로 합쳐진다. 펼친 라우트나
+  // 원문 경로를 세면 거짓으로 상한을 넘는다.
+  const document = await scanNodeProject({ 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(16, '%61', ["'/x'", 'process.env.P']) });
+  const prefix = Array.from({ length: 16 }, (_, index) => `/a${index + 1}`).join('');
+  assert.deepEqual(factLines(document), [`GET root ${prefix}/x optional #0 ci`, `GET root ${prefix}{dynamic} - dynamic{"templatePrefixes":["${prefix}"]} #1 ci`]);
+});
+
+test('사실 상한 아래의 라우터 DAG는 예전처럼 모두 펼친다', async () => {
+  const cases: readonly Record<string, string>[] = [
+    { 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(12) },
+    { 'package.json': packageJson({ hono: '4.6.0' }), 'src/app.ts': honoDagSource(12) },
+    { 'package.json': packageJson({ koa: '2.16.4', '@koa/router': '13.1.1' }), 'src/app.ts': koaDagSource(13) },
+  ];
+  for (const files of cases) {
+    const document = await scanNodeProject(files);
+    assert.equal(document.facts.length, 4096);
+    assert.equal(new Set(document.facts.map((fact) => fact.channel)).size, 4096);
+  }
+});
+
 test('사실이 인자 펼침 한계(약 12만)를 넘어도 스택 초과·출력 초과가 아니라 사실 상한으로 알린다', async () => {
-  // 2^17 = 131,072개. 64비트 V8 기본 스택(984 KiB)은 8바이트 인자 131,072개(1 MiB)를 한 번에 펼쳐 받지 못한다.
+  // 라우트 2^13 = 8,192개가 선택 그룹 넷으로 템플릿 16개씩, 사실 131,072개다. 펼치는 동안 세는 사실 하한은 라우트마다 첫
+  // 템플릿 하나(8,192개)라 펼치기는 끝까지 가고, 사실을 모두 만든 뒤 조립에서 상한을 본다. 64비트 V8 기본 스택(984 KiB)은
+  // 8바이트 인자 131,072개(1 MiB)를 한 번에 펼쳐 받지 못한다.
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-node-dag-')));
   try {
     mkdirSync(join(root, 'src'));
-    writeFileSync(join(root, 'package.json'), packageJson({ express: '4.21.2' }));
-    writeFileSync(join(root, 'src/app.js'), routerDagSource(17));
+    writeFileSync(join(root, 'package.json'), packageJson({ express: '5.1.0' }));
+    writeFileSync(join(root, 'src/app.js'), routerDagSource(13, 'b', ["'/x{/c1}{/c2}{/c3}{/c4}'"]));
     const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0', now: () => new Date(0) });
     assert.equal(result.exitCode, 2);
     assert.equal(result.standardOutput, '');

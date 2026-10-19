@@ -172,12 +172,14 @@ function nextFacts(part: NextDocumentPart, service: string | undefined): { facts
  * @param input 조립 입력
  * @param registrationOrder registration-order 문서인지
  * @returns 사실과 한계
+ * @throws RouteFactLimitError 펼치는 동안 사실 하한이 상한을 넘어 펼치기를 멈췄을 때(펼친 일부로 사실을 만들지 않는다)
  */
 function nodeFacts(input: RouteDocumentInput, registrationOrder: boolean): { facts: RouteDeclFact[]; limitations: NodeLimitationEntry[] } {
   if (input.node === undefined) return { facts: [], limitations: [] };
   const projectLimitations = nodeProjectLimitations(input.node);
   const analysis = input.node.analysis;
   if (analysis === undefined) return { facts: [], limitations: projectLimitations };
+  if (analysis.factLimitExceeded) throw new RouteFactLimitError();
   const built = buildNodeFacts({ project: analysis.project, frameworks: analysis.frameworks, service: input.service, includeTests: input.includeTests, registrationOrder });
   return { facts: built.facts, limitations: [...projectLimitations, ...built.limitations] };
 }

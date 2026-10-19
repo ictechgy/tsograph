@@ -21,6 +21,7 @@ import { compileExpress4Path } from './express4-path.ts';
 import { eventsByInstance, type FlatProvided, type FlatRoute, type FrameworkRoutes, type OrderCounter, partitionEvents, takeOrder } from './flat-route.ts';
 import { instanceGroupName } from './group-name.ts';
 import { classifyPackageMiddleware } from './middleware-packages.ts';
+import type { NodeFactBudget } from './node-facts.ts';
 import type { NodeProject } from './node-project.ts';
 import { type CompiledPath, isRootVariant, joinVariants, type PathVariant, prefixTemplates, ROOT_VARIANT, templateOf } from './path-model.ts';
 import { compilePte8Path } from './pte8-path.ts';
@@ -387,6 +388,8 @@ interface FlattenContext {
   readonly provided: FlatProvided[];
   middlewareCount: number;
   readonly active: Set<RouterInstance>;
+  /** 프레임워크가 함께 쓰는 사실 하한 계수기. 상한을 넘으면 남은 사건을 펼치지 않는다 */
+  readonly budget: NodeFactBudget;
 }
 
 /**
@@ -423,13 +426,14 @@ interface Prefix {
  * @param instances 인스턴스
  * @param events 사건
  * @param major Express 주 버전(모르면 undefined)
+ * @param budget 사실 하한 계수기(상한을 넘으면 펼치기를 멈춘다)
  * @returns Express 추출 결과
  */
-export function flattenExpress(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], major: number | undefined): FrameworkRoutes {
+export function flattenExpress(project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], major: number | undefined, budget: NodeFactBudget): FrameworkRoutes {
   const express = instances.filter((instance) => instance.framework === 'express');
   const expressEvents = events.filter((event) => event.target.instance.framework === 'express');
   const grammar: ExpressGrammar = major === 4 || major === 5 ? major : undefined;
-  const context: FlattenContext = { byInstance: eventsByInstance(expressEvents), grammar, routes: [], provided: [], middlewareCount: 0, active: new Set() };
+  const context: FlattenContext = { byInstance: eventsByInstance(expressEvents), grammar, routes: [], provided: [], middlewareCount: 0, active: new Set(), budget };
   const mounted = new Set(expressEvents.flatMap((event) => (event.kind === 'mount' ? event.children.map((child) => child.instance) : [])));
   for (const root of express.filter((instance) => !mounted.has(instance))) {
     const counter: OrderCounter = { group: root.kind === 'opaque' ? undefined : instanceGroupName('express', project, root), next: 0, assigned: new Map() };
@@ -484,7 +488,7 @@ function walkRouter(context: FlattenContext, instance: RouterInstance, prefix: P
 }
 
 /**
- * 사건 하나를 펼친다.
+ * 사건 하나를 펼친다. 사실 하한이 상한을 넘었으면 펼치지 않는다(문서는 사실 상한 실패로 끝나므로 남은 사건은 쓰이지 않는다).
  *
  * @param context 펼치기 문맥
  * @param event 사건
@@ -494,6 +498,7 @@ function walkRouter(context: FlattenContext, instance: RouterInstance, prefix: P
  * @param isOrdered 순서를 증명했는지
  */
 function handleEvent(context: FlattenContext, event: RouterEvent, prefix: Prefix, options: ReturnType<typeof routerOptions>, counter: OrderCounter, isOrdered: boolean): void {
+  if (context.budget.isExceeded) return;
   if (event.kind === 'route') return routeEvent(context, event, prefix, options, counter, isOrdered);
   if (event.kind === 'mount') return mountEvent(context, event, prefix, counter, isOrdered);
   if (event.kind === 'provided') return context.provided.push(providedOf(context, event, prefix)), undefined;
@@ -515,7 +520,7 @@ function routeEvent(context: FlattenContext, event: RouteEvent, prefix: Prefix, 
   for (const [element, path] of event.paths.entries()) {
     const compiled = compileWithPrefix(context, prefix, path, options.strict ?? false, openEnded ? 'use' : 'route');
     const provable = isOrdered && !event.handler.mayCallNext && !event.site.conditional;
-    context.routes.push({
+    const route: FlatRoute = {
       handler: event.handler,
       unsupportedMethods: event.unsupportedMethods,
       methods: event.methods,
@@ -528,7 +533,9 @@ function routeEvent(context: FlattenContext, event: RouteEvent, prefix: Prefix, 
       caseInsensitive: prefix.caseInsensitive && options.caseSensitive === false,
       narrowed: false,
       conditional: event.site.conditional,
-    });
+    };
+    context.routes.push(route);
+    context.budget.add(route);
   }
 }
 

@@ -8,6 +8,7 @@
  * - 조건부 등록(if·반복문·단락 평가 등)은 선언 대신 스코프 있는 `route-coverage:`다(pythograph Django와 같은 결정).
  * - 스코프는 한계가 가릴 수 있는 **모든** 요청의 상한일 때만 싣는다. 하나라도 상한을 증명하지 못하면 그 한계는 스코프
  *   없이 문서 전체에 적용한다.
+ * - 어댑터가 펼치는 동안 사실 수의 하한을 세게 해(NodeFactBudget) 사실 상한을 넘는 입력은 다 펼치기 전에 멈춘다.
  */
 
 import type { HttpMethod, ParamConstraint, RouteDeclFact, RouteDeclMethod } from '../../exchange/bridge-facts.ts';
@@ -132,7 +133,7 @@ function dropShadowedEmptyVariants(built: readonly BuiltFact[]): BuiltFact[] {
  * @returns 사실 목록(빈 값 변형 표시 포함)
  */
 function routeFacts(input: NodeFactsInput, route: FlatRoute, tally: Tally): BuiltFact[] {
-  const shape = shapeOf(route);
+  const shape = takeShape(route);
   if (shape.kind === 'capped') tally.capped += 1;
   const methods = route.methods;
   const scopeMethods = methods.includes('ANY') ? undefined : (methods as HttpMethod[]);
@@ -160,12 +161,44 @@ type RouteShape =
   | { readonly kind: 'dynamic' | 'capped'; readonly prefixes: readonly string[] | undefined; range(anchor: string): LimitationRange | undefined };
 
 /**
+ * 사실 하한을 세며(NodeFactBudget) 계산한 라우트의 사실 모양이다. 사실을 조립할 때 같은 라우트의 템플릿을 다시 펼치지 않으려고
+ * 둔다(없으면 계수가 켜진 입력에서 라우트마다 펼치기를 두 번 한다). 라우트는 바뀌지 않는 값이고, 조립이 꺼내 쓰면 지워 남은
+ * 조립·직렬화 동안 붙잡지 않는다.
+ */
+const countedShapes = new WeakMap<FlatRoute, RouteShape>();
+
+/**
+ * 사실 하한을 셀 라우트의 모양이다(라우트마다 한 번 센다). 계산한 모양은 사실 조립이 꺼내 쓰도록 남긴다.
+ *
+ * @param route 라우트
+ * @returns 모양
+ */
+function countedShapeOf(route: FlatRoute): RouteShape {
+  const shape = computeShape(route);
+  countedShapes.set(route, shape);
+  return shape;
+}
+
+/**
+ * 사실을 조립할 라우트의 모양이다. 사실 하한을 세며 계산해 둔 모양이 있으면 꺼내고 지운다.
+ *
+ * @param route 라우트
+ * @returns 모양
+ */
+function takeShape(route: FlatRoute): RouteShape {
+  const shape = countedShapes.get(route);
+  if (shape === undefined) return computeShape(route);
+  countedShapes.delete(route);
+  return shape;
+}
+
+/**
  * 라우트 경로를 펼친 템플릿 또는 dynamic 모양으로 만든다.
  *
  * @param route 라우트
  * @returns 모양
  */
-function shapeOf(route: FlatRoute): RouteShape {
+function computeShape(route: FlatRoute): RouteShape {
   if (route.path.kind === 'dynamic') {
     const prefixes = route.path.prefixes === undefined ? undefined : prefixTemplates(route.path.prefixes);
     return dynamicShape(route.path.reason === 'expansion-capped' ? 'capped' : 'dynamic', prefixes);
@@ -197,6 +230,18 @@ function shapeOf(route: FlatRoute): RouteShape {
  */
 function dynamicShape(kind: 'dynamic' | 'capped', prefixes: readonly string[] | undefined): RouteShape {
   return { kind, prefixes, range: (anchor) => (anchor === 'root' && prefixes !== undefined && prefixes.length > 0 ? { templatePrefixes: prefixes } : undefined) };
+}
+
+/**
+ * 라우트가 반드시 내는 사실 하나의 (앵커, dynamic, channel)이다. 정적 경로는 첫 대안의 기본 템플릿이다 — 빈 값 변형이
+ * 아니라서 구체성 라우터의 그림자 제거(dropShadowedEmptyVariants)에도 남는다. 그 밖에는 dynamic 사실의 원문 channel이다.
+ *
+ * @param route 라우트
+ * @returns 정체성 문자열(앵커·종류 뒤에 channel)
+ */
+function factChannelOf(route: FlatRoute): string {
+  const shape = countedShapeOf(route);
+  return shape.kind === 'static' ? `${route.anchor} static ${shape.templates[0]!.channel}` : `${route.anchor} dynamic ${sanitizeDynamicChannel(route.rawPath)}`;
 }
 
 /**
@@ -406,5 +451,62 @@ class ScopeAccumulator {
       ...(this.methods === undefined || this.methods.size === 0 ? {} : { methods: [...this.methods].sort() }),
     };
     return { text, range };
+  }
+}
+
+/**
+ * 펼치는 동안 문서가 낼 사실 수의 하한을 센다. 공유 하위 라우터를 여러 경로에 붙이면 펼친 라우트가 mount 단계마다 곱으로
+ * 늘어(라우터 22개로 400만 개), 사실을 모두 만든 뒤의 상한 검사(route-document)에 닿기 전에 메모리를 다 쓴다. 그래서
+ * 어댑터가 라우트를 펼칠 때마다 세고, 하한이 상한을 넘으면 펼치기를 멈춘다(문서는 사실 상한 실패로 끝난다).
+ *
+ * 하한은 사실이 반드시 갖는 (method, 앵커, dynamic, channel)이 서로 다른 수다. 이 값이 다른 사실은 중복 제거로 합쳐지지
+ * 않으므로, 같은 라우터를 같은 경로(정규화하면 같은 경로 포함)에 거듭 붙여 펼친 라우트가 많아도 거짓으로 상한을 넘지 않는다.
+ * 조건부 등록과 계약 method가 없는 등록은 사실을 내지 않으므로 세지 않는다. 사실을 낼 (라우트, method) 쌍이 상한 이하이면
+ * 하한도 상한 이하라서, 그 수가 상한을 넘을 때 처음 센다 — 상한 아래 프로젝트는 예전과 같은 일만 한다.
+ */
+export class NodeFactBudget {
+  private readonly keys = new Set<string>();
+  private readonly limit: number;
+  /** 세기 전에 모아 둔 라우트다. 처음 센 뒤에는 undefined다 */
+  private pending: FlatRoute[] | undefined = [];
+  /** 모아 둔 라우트의 (라우트, method) 쌍 수 */
+  private pendingFacts = 0;
+
+  /**
+   * @param limit 문서 하나의 사실 상한
+   */
+  constructor(limit: number) {
+    this.limit = limit;
+  }
+
+  /** 하한이 상한을 넘었는지다. 넘었으면 어댑터는 남은 사건을 펼치지 않는다. */
+  get isExceeded(): boolean {
+    return this.keys.size > this.limit;
+  }
+
+  /**
+   * 펼친 라우트 하나를 더한다.
+   *
+   * @param route 펼친 라우트
+   */
+  add(route: FlatRoute): void {
+    if (route.conditional || route.methods.length === 0) return;
+    if (this.pending === undefined) return this.count(route);
+    this.pending.push(route);
+    this.pendingFacts += route.methods.length;
+    if (this.pendingFacts <= this.limit) return;
+    const routes = this.pending;
+    this.pending = undefined;
+    for (const entry of routes) this.count(entry);
+  }
+
+  /**
+   * 라우트 하나의 사실 정체성을 센다.
+   *
+   * @param route 사실을 낼 라우트
+   */
+  private count(route: FlatRoute): void {
+    const channel = factChannelOf(route);
+    for (const method of route.methods) this.keys.add(`${method} ${channel}`);
   }
 }
