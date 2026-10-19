@@ -3,12 +3,15 @@
  */
 
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { runMainGuarded } from '../../cli/testing.test.ts';
 import { MAX_SOURCE_BYTES } from '../../schema/project-reader.ts';
-import { factLines, limitationsWith, packageJson, scanNodeProject } from './testing.test.ts';
+import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
 
 test('CommonJS exports·클래스 필드·설정 순서·정규식 경로·배열 경로를 다룬다', async () => {
   const document = await scanNodeProject({
@@ -184,4 +187,134 @@ test('route 빌더 순서는 route() 호출 위치이고, 펼친 핸들러·풀�
   assert.equal(limitationsWith(document, 'missing-route-usrs: 2 route declaration(s)').length, 1);
   assert.equal(limitationsWith(document, 'route-coverage: 2 registration(s) of a value passed to use() that tsograph could not resolve').length, 1);
   assert.equal(limitationsWith(document, 'framework-dispatch-unmodeled: 1 middleware registration(s)').length, 1);
+});
+
+/** 선택 그룹 넷(대안 16개)이 든 Express 5 mount 경로다. */
+const optionalMountPath = '/m{/g0}{/g1}{/g2}{/g3}';
+
+/** {@link optionalMountPath}의 첫 대안(그룹을 모두 넣은 것)이다. dynamic 사실의 원문 표기는 단계마다 이것을 잇는다. */
+const optionalMountHead = '/m/g0/g1/g2/g3';
+
+/**
+ * 단계마다 다음 라우터를 {@link optionalMountPath}에 붙이는 Express 5 mount 체인 소스다. 접두사 대안이 단계마다 16배가 된다.
+ *
+ * @param depth mount 단계 수
+ * @param leaf 마지막 라우터 이름을 받아 그 라우터에 넣을 등록 줄을 돌려주는 함수
+ * @returns `src/app.js` 내용
+ */
+function optionalMountChain(depth: number, leaf: (router: string) => readonly string[]): string {
+  const lines = ["const express = require('express');", 'const app = express();'];
+  for (let level = 1; level <= depth; level++) lines.push(`const r${level} = express.Router();`);
+  lines.push(...leaf(`r${depth}`));
+  for (let level = depth; level >= 1; level--) lines.push(`${level === 1 ? 'app' : `r${level - 1}`}.use('${optionalMountPath}', r${level});`);
+  return `${lines.join('\n')}\nmodule.exports = app;\n`;
+}
+
+/**
+ * 접두사 대안이 많은 라우터 아래에 둘 등록 모양들이다: 정적 경로, 풀지 못한 경로, 문법 밖 경로, 앞부분만 아는 mount,
+ * 모르는 mount, 문법 밖 mount, 정적 파일, 조건부 등록, 끝이 열린 use.
+ *
+ * @param router 등록할 라우터 이름
+ * @returns 등록 줄
+ */
+function mixedLeaf(router: string): readonly string[] {
+  return [
+    "const sub = express.Router();", "sub.get('/y', (req, res) => res.send('y'));",
+    "const other = express.Router();", "other.get('/z', (req, res) => res.send('z'));",
+    "const odd = express.Router();", "odd.get('/w', (req, res) => res.send('w'));",
+    `${router}.get('/x', (req, res) => res.send('x'));`,
+    `${router}.get(process.env.P, (req, res) => res.send('p'));`,
+    `${router}.get('/files/*', (req, res) => res.send('f'));`,
+    `${router}.use('/p/' + process.env.Q, sub);`,
+    `${router}.use(process.env.M, other);`,
+    `${router}.use('/q(', odd);`,
+    `${router}.use(express.static('pub'));`,
+    `if (process.env.C) ${router}.get('/c', (req, res) => res.send('c'));`,
+    `${router}.use((req, res) => { res.send('end'); });`,
+  ];
+}
+
+/**
+ * 사실을 (method, 앵커, channel, dynamic, dynamicScope 접두사 수, 순서)로 줄인다. 스코프가 커서 원문 대신 크기를 본다.
+ *
+ * @param document 문서
+ * @returns 줄인 사실(정렬)
+ */
+function factShapes(document: NodeDocumentView): string[] {
+  return document.facts.map((fact) => {
+    const scope = fact.dynamicScope?.['templatePrefixes'] as readonly string[] | undefined;
+    return `${fact.method} ${fact.pathAnchor} ${fact.channel} ${fact.dynamic ? 'dynamic' : 'static'} scope:${scope?.length ?? '-'} #${fact.order?.index ?? '-'}`;
+  }).sort();
+}
+
+/**
+ * 한계의 스코프 크기를 (접두사 수, 접미사 수)로 줄인다.
+ *
+ * @param document 문서
+ * @param prefix 한계 문장 머리
+ * @returns 한계마다 스코프 크기(스코프가 없으면 '-')
+ */
+function scopeSizes(document: NodeDocumentView, prefix: string): string[] {
+  return limitationsWith(document, prefix).map(({ scope }) => (scope === undefined ? '-'
+    : `${(scope['templatePrefixes'] as unknown[] | undefined)?.length ?? 0}/${(scope['templateSuffixes'] as unknown[] | undefined)?.length ?? 0}`));
+}
+
+test('mount 접두사 대안 곱이 상한 안이면 모두 늘어놓아 dynamicScope와 한계 스코프를 싣는다', async () => {
+  // 16 × 16 = 256개다. 펼친 템플릿이 16개를 넘어 상한 초과 dynamic이지만, 접두사 256개는 스코프 상한 안이다.
+  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'src/app.js': optionalMountChain(2, mixedLeaf) });
+  const head = optionalMountHead.repeat(2);
+  assert.deepEqual(factShapes(document), [
+    `ANY root ${head}/ dynamic scope:256 #6`,
+    'GET base /z static scope:- #4',
+    `GET root ${head}/files/* dynamic scope:256 #2`,
+    `GET root ${head}/p/{dynamic}/y dynamic scope:256 #3`,
+    `GET root ${head}/x dynamic scope:256 #0`,
+    `GET root ${head}/{dynamic}/w dynamic scope:256 #5`,
+    `GET root ${head}{dynamic} dynamic scope:256 #1`,
+  ]);
+  assert.equal(limitationsWith(document, 'route-template-expansion-capped: 3 route path(s)').length, 1);
+  assert.deepEqual(scopeSizes(document, 'route-coverage: 6 route declaration(s) have paths'), ['1024/0']);
+  assert.deepEqual(scopeSizes(document, 'route-coverage: 1 route registration(s) run only under a condition'), ['256/0']);
+  assert.deepEqual(scopeSizes(document, 'framework-provided-routes: 1 registration(s) of static files'), ['256/0']);
+  assert.deepEqual(scopeSizes(document, 'unresolved-route-prefix: 1 route declaration(s)'), ['0/1']);
+});
+
+test('mount 접두사 대안 곱이 상한(2,000)을 넘으면 늘어놓지 않고 같은 사실·분류에 스코프만 생략한다', async () => {
+  // 256 × 16 = 4,096개다. 예전에도 dynamicScope(1,000)·한계 스코프(2,000) 상한을 넘어 생략된 크기라 사실·한계 문장은 같다.
+  // 정적 파일 한계만 접두사 4,096개를 늘어놓던 스코프 대신 문서 전체 효과가 된다(안전한 쪽).
+  const document = await scanNodeProject({ 'package.json': packageJson({ express: '5.1.0' }), 'src/app.js': optionalMountChain(3, mixedLeaf) });
+  const head = optionalMountHead.repeat(3);
+  assert.deepEqual(factShapes(document), [
+    `ANY root ${head}/ dynamic scope:- #6`,
+    'GET base /z static scope:- #4',
+    `GET root ${head}/files/* dynamic scope:- #2`,
+    `GET root ${head}/p/{dynamic}/y dynamic scope:- #3`,
+    `GET root ${head}/x dynamic scope:- #0`,
+    `GET root ${head}/{dynamic}/w dynamic scope:- #5`,
+    `GET root ${head}{dynamic} dynamic scope:- #1`,
+  ]);
+  assert.equal(limitationsWith(document, 'route-template-expansion-capped: 3 route path(s)').length, 1);
+  assert.deepEqual(scopeSizes(document, 'route-coverage: 6 route declaration(s) have paths'), ['-']);
+  assert.deepEqual(scopeSizes(document, 'route-coverage: 1 route registration(s) run only under a condition'), ['-']);
+  assert.deepEqual(scopeSizes(document, 'framework-provided-routes: 1 registration(s) of static files'), ['-']);
+  assert.deepEqual(scopeSizes(document, 'unresolved-route-prefix: 1 route declaration(s)'), ['0/1']);
+});
+
+test('mount 접두사 대안이 단계마다 16배로 느는 6단 체인도 대안을 곱하지 않고 상한 초과 dynamic 하나로 끝난다', async () => {
+  // 예전에는 대안 16^6개를 만들다 V8 힙이 바닥나(종료 134) 문서를 내지 못했다. 회귀가 생겨도 테스트 프로세스가 아니라
+  // 이 검사만 실패하도록 시간·메모리를 감시하는 자식 프로세스로 돌린다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-express-variants-')));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'package.json'), packageJson({ express: '5.1.0' }));
+    writeFileSync(join(root, 'src/app.js'), optionalMountChain(6, (router) => [`${router}.get('/x', (req, res) => res.send('x'));`]));
+    const result = await runMainGuarded(['routes', '--role', 'server', '--project', root]);
+    assert.equal(result.stopped, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const document = JSON.parse(result.stdout) as NodeDocumentView;
+    assert.deepEqual(factLines(document), [`GET root ${optionalMountHead.repeat(6)}/x - dynamic #0 ci`]);
+    assert.equal(limitationsWith(document, 'route-template-expansion-capped: 1 route path(s)').length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

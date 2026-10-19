@@ -389,12 +389,28 @@ interface FlattenContext {
   readonly active: Set<RouterInstance>;
 }
 
+/**
+ * 접두사와 경로를 이은 대안을 늘어놓는 최대 수다. 선택 그룹이 든 mount 경로는 단계마다 대안을 곱해(그룹 넷이면 16배) 몇
+ * 단계 만에 수백만 개가 되므로, 곱하기 전에 크기를 본다. 이보다 많은 대안은 어떤 스코프에도 실리지 않는다: 사실의
+ * `dynamicScope`는 1,000개, 한계 스코프는 2,000개(node-facts `MAX_SCOPE_ELEMENTS`)를 넘으면 생략한다. 그래서 넘으면
+ * 늘어놓지 않고 상한 초과(expansion-capped)로 낸다.
+ */
+const MAX_JOINED_ALTERNATIVES = 2000;
+
+/**
+ * 경로 대안 목록이다. 곱이 {@link MAX_JOINED_ALTERNATIVES}를 넘으면 늘어놓지 않고 원문 표기에 쓸 첫 대안만 남긴다.
+ * 그런 곱은 모두 루트일 수 없다(경로 하나를 컴파일한 대안에 루트는 많아야 하나라서, 모두 루트인 곱은 크기가 1이다).
+ */
+type Alternatives =
+  | { readonly listed: readonly PathVariant[] }
+  | { readonly listed: undefined; readonly first: PathVariant };
+
 /** 지금까지 붙인 접두사다. */
 interface Prefix {
   /** 접두사 대안(루트면 `/` 하나). 확정하지 못했으면 undefined */
-  readonly variants: readonly PathVariant[] | undefined;
+  readonly variants: Alternatives | undefined;
   /** 확정하지 못한 접두사의 증명된 앞부분 */
-  readonly proven: readonly PathVariant[] | undefined;
+  readonly proven: Alternatives | undefined;
   readonly anchor: 'root' | 'base';
   /** 지나온 라우터가 모두 대소문자를 무시하는지 */
   readonly caseInsensitive: boolean;
@@ -418,7 +434,7 @@ export function flattenExpress(project: NodeProject, instances: readonly RouterI
   for (const root of express.filter((instance) => !mounted.has(instance))) {
     const counter: OrderCounter = { group: root.kind === 'opaque' ? undefined : instanceGroupName('express', project, root), next: 0, assigned: new Map() };
     const anchor = root.kind === 'app' ? 'root' : 'base';
-    walkRouter(context, root, { variants: [ROOT_VARIANT], proven: undefined, anchor, caseInsensitive: true }, counter, true);
+    walkRouter(context, root, { variants: { listed: [ROOT_VARIANT] }, proven: undefined, anchor, caseInsensitive: true }, counter, true);
   }
   return { framework: 'express', dispatch: 'registration-order', routes: context.routes, provided: context.provided, middlewareCount: context.middlewareCount, notes: [] };
 }
@@ -558,7 +574,7 @@ function compileExpressPath(grammar: ExpressGrammar, path: string, strict: boole
  */
 function extendPrefix(context: FlattenContext, prefix: Prefix, mountPath: PathArgument): Prefix {
   if (prefix.variants === undefined) return prefix;
-  if (mountPath.value.kind === 'unknown') return { variants: [ROOT_VARIANT], proven: undefined, anchor: 'base', caseInsensitive: prefix.caseInsensitive };
+  if (mountPath.value.kind === 'unknown') return { variants: { listed: [ROOT_VARIANT] }, proven: undefined, anchor: 'base', caseInsensitive: prefix.caseInsensitive };
   if (mountPath.value.kind === 'partial') return { variants: undefined, proven: joinAll(prefix.variants, [partialPrefix(context, mountPath.value.head)]), anchor: prefix.anchor, caseInsensitive: prefix.caseInsensitive };
   const compiled = compileExpressPath(context.grammar, mountPath.value.text, false);
   if (compiled.kind === 'dynamic') return { variants: undefined, proven: compiled.prefixes === undefined ? prefix.variants : joinAll(prefix.variants, compiled.prefixes), anchor: prefix.anchor, caseInsensitive: prefix.caseInsensitive };
@@ -580,14 +596,38 @@ function partialPrefix(context: FlattenContext, head: string): PathVariant {
 }
 
 /**
- * 두 대안 목록의 모든 조합을 잇는다.
+ * 두 대안 목록의 모든 조합을 잇는다. 곱이 상한을 넘으면 만들지 않고, 늘어놓았다면 첫째였을 대안만 남긴다.
  *
  * @param prefixes 접두사 대안
- * @param children 자식 대안
+ * @param children 자식 대안(비어 있지 않다)
  * @returns 이은 대안
  */
-function joinAll(prefixes: readonly PathVariant[], children: readonly PathVariant[]): PathVariant[] {
-  return prefixes.flatMap((prefix) => children.map((child) => joinVariants(prefix, child)));
+function joinAll(prefixes: Alternatives, children: readonly PathVariant[]): Alternatives {
+  const { listed } = prefixes;
+  if (listed !== undefined && listed.length * children.length <= MAX_JOINED_ALTERNATIVES) {
+    return { listed: listed.flatMap((prefix) => children.map((child) => joinVariants(prefix, child))) };
+  }
+  return { listed: undefined, first: joinVariants(firstOf(prefixes), children[0]!) };
+}
+
+/**
+ * 대안 목록의 첫 대안이다(원문 표기에 쓴다).
+ *
+ * @param alternatives 대안 목록(비어 있지 않다)
+ * @returns 첫 대안
+ */
+function firstOf(alternatives: Alternatives): PathVariant {
+  return alternatives.listed === undefined ? alternatives.first : alternatives.listed[0]!;
+}
+
+/**
+ * 대안이 모두 루트인지 본다. 늘어놓지 않은 곱은 모두 루트일 수 없다({@link Alternatives}).
+ *
+ * @param alternatives 대안 목록
+ * @returns 모두 루트면 true
+ */
+function isAllRoot(alternatives: Alternatives): boolean {
+  return alternatives.listed !== undefined && alternatives.listed.every(isRootVariant);
 }
 
 /** 접두사를 붙여 컴파일한 결과다. */
@@ -610,21 +650,24 @@ interface JoinedCompile {
  */
 function compileWithPrefix(context: FlattenContext, prefix: Prefix, path: PathArgument, strict: boolean, mode: 'route' | 'use'): JoinedCompile {
   const known = prefix.variants ?? prefix.proven;
-  const lead = (known === undefined || known.every(isRootVariant) ? '' : templateOf(known[0]!)) + (prefix.variants === undefined ? '/{dynamic}' : '');
+  const lead = (known === undefined || isAllRoot(known) ? '' : templateOf(firstOf(known))) + (prefix.variants === undefined ? '/{dynamic}' : '');
   const raw = lead + (path.value.kind === 'literal' ? path.value.text : path.value.kind === 'partial' ? `${path.value.head}{dynamic}` : '{dynamic}');
   const unknownTrailing = (): undefined => undefined;
-  if (prefix.variants === undefined) return { path: { kind: 'dynamic', reason: 'non-literal', prefixes: prefix.proven }, raw, trailingSlash: unknownTrailing };
+  // 늘어놓지 않은 대안(상한 초과)은 스코프로 쓸 접두사가 없다. 예전에도 그만큼 큰 스코프는 생략했다.
+  if (prefix.variants === undefined) return { path: { kind: 'dynamic', reason: 'non-literal', prefixes: prefix.proven?.listed }, raw, trailingSlash: unknownTrailing };
   if (path.value.kind !== 'literal') {
     const head = path.value.kind === 'partial' ? partialPrefix(context, path.value.head) : ROOT_VARIANT;
-    return { path: { kind: 'dynamic', reason: 'non-literal', prefixes: joinAll(prefix.variants, [head]) }, raw, trailingSlash: unknownTrailing };
+    return { path: { kind: 'dynamic', reason: 'non-literal', prefixes: joinAll(prefix.variants, [head]).listed }, raw, trailingSlash: unknownTrailing };
   }
   const compiled = compileExpressPath(context.grammar, path.value.text, mode === 'use' ? false : strict);
   if (compiled.kind === 'dynamic') {
-    return { path: { ...compiled, prefixes: compiled.prefixes === undefined ? undefined : joinAll(prefix.variants, compiled.prefixes) }, raw, trailingSlash: unknownTrailing };
+    return { path: { ...compiled, prefixes: compiled.prefixes === undefined ? undefined : joinAll(prefix.variants, compiled.prefixes).listed }, raw, trailingSlash: unknownTrailing };
   }
   const childIsRoot = compiled.variants.every(isRootVariant);
-  const variants = joinAll(prefix.variants, mode === 'use' ? compiled.variants.flatMap(openEndedVariants) : compiled.variants);
-  const prefixIsRoot = prefix.variants.every(isRootVariant);
+  const variants = joinAll(prefix.variants, mode === 'use' ? compiled.variants.flatMap(openEndedVariants) : compiled.variants).listed;
+  // 템플릿이 대안마다 하나 이상이므로 늘어놓지 못할 만큼 많은 대안은 펼친 템플릿 상한(16)도 넘는다.
+  if (variants === undefined) return { path: { kind: 'dynamic', reason: 'expansion-capped', prefixes: undefined }, raw, trailingSlash: unknownTrailing };
+  const prefixIsRoot = isAllRoot(prefix.variants);
   return {
     path: { kind: 'variants', variants },
     raw,
@@ -657,7 +700,7 @@ function providedOf(context: FlattenContext, event: ProvidedEvent, prefix: Prefi
   const base = { prefixKind: event.prefixKind, description: event.description };
   const extended = extendPrefix(context, prefix, event.prefix ?? { value: { kind: 'literal', text: '/' }, node: event.site.node });
   if (extended.anchor !== 'root') return { ...base, scope: undefined };
-  const prefixes = prefixTemplates(extended.variants ?? extended.proven ?? []);
+  const prefixes = prefixTemplates((extended.variants ?? extended.proven)?.listed ?? []);
   if (prefixes.length === 0) return { ...base, scope: undefined };
   return { ...base, scope: { templatePrefixes: prefixes, ...(event.methods === undefined ? {} : { methods: event.methods }) } };
 }

@@ -143,6 +143,8 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 - **0세그먼트 catch-all**(Hono `/x/*`, Express `:x*?`, @koa/router `:x*`): `/x/{**}`와 `/x` 접두사 decl(`catchAllPrefix: true`, usr가
   있을 때만)을 함께 낸다. **빈 값 변형**(Express 4 `*`, find-my-way 파라미터·`*`)은 그 자리를 빈 값으로 채운 decl을 같은
   method·symbol·location으로 더한다. 펼친 템플릿이 16개를 넘으면 dynamic과 `route-template-expansion-capped:`다.
+  Express는 mount 접두사의 대안을 단계마다 곱하므로(선택 그룹 넷이면 16배), 이은 대안이 2,000개를 넘으면 늘어놓지 않고
+  같은 dynamic·`route-template-expansion-capped:`로 내며 그 접두사의 스코프는 싣지 않는다(문서 전체 효과).
 - **paramConstraints**: 파라미터 정규식이 숫자만 받으면 `int`, slug 문자(`[-A-Za-z0-9_]`)만 받으면 `slug`, 그 밖은 `regex`와 원문,
   catch-all은 정보용 `path`. `/`를 받을 수 있거나 빈 값을 받는 정규식은 dynamic이다(`.+`는 끝 catch-all).
 - **trailingSlash**: 끝 슬래시를 정확히 비교하면 `strict`, 선택이면 `optional`, 빈 값 변형으로 생긴 끝 슬래시는 `strict`, `{**}`로

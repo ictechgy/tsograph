@@ -84,3 +84,15 @@ test('buildRoutePrefix는 fastify lib/plugin-override.js와 같다', () => {
   assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a' }, { kind: 'partial', head: 'b' }), { kind: 'partial', head: '/a/b' });
   assert.deepEqual(buildRoutePrefix({ kind: 'unknown' }, { kind: 'literal', text: '/b' }), { kind: 'unknown' });
 });
+
+test('빈 값 변형으로 펼친 템플릿이 16개를 넘으면 대안 하나든 여럿의 합이든 상한 초과 dynamic이다', async () => {
+  // find-my-way 파라미터는 빈 값도 받는다. `/:a/:b/:c/:d/:e`는 대안 하나가 32개로, `/x/:a/:b/:c/:d?`는 대안 둘이 16 + 8개로 넘는다.
+  const document = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.0.0' }),
+    'src/app.ts': "import Fastify from 'fastify';\nconst app = Fastify();\napp.get('/:a/:b/:c/:d/:e', async () => 'one');\napp.get('/x/:a/:b/:c/:d?', async () => 'two');\napp.get('/y/:a/:b/:c?', async () => 'ok');\nexport default app;\n",
+  });
+  const capped = document.facts.filter((fact) => fact.dynamic).map((fact) => `${fact.channel} ${JSON.stringify(fact.dynamicScope ?? null)}`);
+  assert.deepEqual(capped.sort(), ['/:a/:b/:c/:d/:e {"templatePrefixes":["/{}/{}/{}/{}/{}"]}', '/x/:a/:b/:c/:d%3F {"templatePrefixes":["/x/{}/{}/{}","/x/{}/{}/{}/{}"]}']);
+  assert.equal(document.facts.filter((fact) => !fact.dynamic && fact.channel.startsWith('/y/')).length, 12);
+  assert.equal(limitationsWith(document, 'route-template-expansion-capped: 2 route path(s)').length, 1);
+});

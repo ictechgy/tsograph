@@ -170,13 +170,17 @@ function shapeOf(route: FlatRoute): RouteShape {
     const prefixes = route.path.prefixes === undefined ? undefined : prefixTemplates(route.path.prefixes);
     return dynamicShape(route.path.reason === 'expansion-capped' ? 'capped' : 'dynamic', prefixes);
   }
+  const { variants } = route.path;
+  const capped = (): RouteShape => dynamicShape('capped', prefixTemplates(variants));
+  // 대안마다 템플릿이 하나 이상이라, 대안이나 모은 템플릿이 상한을 넘는 즉시 끝까지 펼친 결과와 같은 상한 초과다.
+  if (variants.length > MAX_TEMPLATE_VARIANTS) return capped();
   const templates: ExpandedTemplate[] = [];
-  for (const variant of route.path.variants) {
+  for (const variant of variants) {
     const expanded = expandVariant(variant);
-    if (expanded === undefined) return dynamicShape('capped', prefixTemplates(route.path.variants));
+    if (expanded === undefined) return capped();
     templates.push(...expanded);
+    if (templates.length > MAX_TEMPLATE_VARIANTS) return capped();
   }
-  if (templates.length > MAX_TEMPLATE_VARIANTS) return dynamicShape('capped', prefixTemplates(route.path.variants));
   return {
     kind: 'static',
     templates,
