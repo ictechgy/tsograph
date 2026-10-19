@@ -236,8 +236,20 @@ function koaDagSource(depth: number): string {
 }
 
 /**
+ * 큰 라우터 DAG 자식의 V8 old 영역 상한(MiB)이다.
+ *
+ * 펼치기가 사실 상한에서 멈추면 살아 있는 힙은 400 MiB 남짓이다(hono·koa가 448 MiB에서 통과하고 384 MiB에서 OOM). 그런데
+ * `npm test`·CI처럼 커버리지를 켠 실행에서는 자식도 `NODE_V8_COVERAGE`를 물려받고, 그때 hono·koa 자식이 끝나기 직전에 회수할
+ * 수 있는 old 영역 쓰레기를 1 GB 가까이 쌓은 채 Mark-Compact 없이 끝나는 일이 잦다(최대 RSS가 약 0.6 GB와 1.5 GB로 갈린다).
+ * 그래서 RSS 감시(1 GiB)만으로는 펼치기 회귀가 아니라 GC 시점 때문에 실패했다. 상한을 주면 V8이 넘기 전에 쓰레기를 회수하므로
+ * 검사가 살아 있는 크기에만 걸리고, 다 펼치던 예전 코드는 상한을 넘어 OOM(종료 134)으로 실패한다. 상한에 V8 밖 메모리를 더해도
+ * RSS 감시 아래에 남는 값이다.
+ */
+const DAG_CHILD_HEAP_MIB = 640;
+
+/**
  * 합성 파일로 임시 프로젝트를 만들어 CLI를 시간·메모리를 감시하는 자식 프로세스로 실행한다. 펼치기가 지수로 커지는 회귀가
- * 생겨도 테스트 프로세스의 메모리를 다 쓰지 않고 이 검사만 실패하게 하려는 것이다.
+ * 생겨도 테스트 프로세스의 메모리를 다 쓰지 않고 이 검사만 실패하게 하려는 것이다. 자식 힙은 `DAG_CHILD_HEAP_MIB`로 막는다.
  *
  * @param files 프로젝트 기준 경로 → 내용
  * @param command `--project` 앞의 CLI 인자
@@ -250,7 +262,7 @@ async function runGuardedProject(files: Record<string, string>, command: readonl
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), content);
     }
-    return await runMainGuarded([...command, '--project', root]);
+    return await runMainGuarded([...command, '--project', root], [`--max-old-space-size=${DAG_CHILD_HEAP_MIB}`]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

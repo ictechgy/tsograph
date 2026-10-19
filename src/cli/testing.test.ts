@@ -67,10 +67,11 @@ export function runNodeGuarded(arguments_: readonly string[]): Promise<GuardedRu
  * CLI 진입점을 시간·RSS 상한 아래의 자식 프로세스로 실행한다.
  *
  * @param arguments_ `tsograph` 뒤의 인자
+ * @param nodeArguments 진입점 앞에 둘 `node` 인자(예: V8 힙 상한). 기본은 없다
  * @returns 종료 코드·출력·감시 중단 이유
  */
-export function runMainGuarded(arguments_: readonly string[]): Promise<GuardedRun> {
-  return runNodeGuarded([mainPath, ...arguments_]);
+export function runMainGuarded(arguments_: readonly string[], nodeArguments: readonly string[] = []): Promise<GuardedRun> {
+  return runNodeGuarded([...nodeArguments, mainPath, ...arguments_]);
 }
 
 /**
