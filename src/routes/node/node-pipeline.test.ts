@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runGraphCommand } from '../../cli/graph-command.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
-import { type GuardedCliRuns, type GuardedRun, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
+import { ambientTypesFreeConfig, type GuardedCliRuns, type GuardedRun, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { isSafeIdentifier } from '../../exchange/bridge-facts.ts';
 import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
@@ -326,8 +326,13 @@ test('graph는 사실 상한을 넘는 Node 라우터 DAG에서도 끝까지 가
 
 test('정규화하면 같은 경로에 거듭 붙인 DAG는 펼친 라우트가 사실 상한보다 많아도 같은 사실로 합쳐져 성공한다', async () => {
   // 2^16 × 등록 2개 = 131,072개 라우트가 정적 `/a1/…/a16/x`와 dynamic `/a1/…/a16{dynamic}` 사실 둘로 합쳐진다. 펼친 라우트나
-  // 원문 경로를 세면 거짓으로 상한을 넘는다.
-  const document = await scanNodeProject({ 'package.json': packageJson({ express: '4.21.2' }), 'src/app.js': routerDagSource(16, '%61', ["'/x'", 'process.env.P']) });
+  // 원문 경로를 세면 거짓으로 상한을 넘는다. 이 절의 같은 프로세스 DAG fixture는 저장소 @types/node를 읽지 않는 tsconfig를 둔다
+  // (펼치기와 무관한 Program 비용).
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.js': routerDagSource(16, '%61', ["'/x'", 'process.env.P']),
+  });
   const prefix = Array.from({ length: 16 }, (_, index) => `/a${index + 1}`).join('');
   assert.deepEqual(factLines(document), [`GET root ${prefix}/x optional #0 ci`, `GET root ${prefix}{dynamic} - dynamic{"templatePrefixes":["${prefix}"]} #1 ci`]);
 });
@@ -350,7 +355,7 @@ test('사실 상한 아래의 라우터 DAG는 예전처럼 모두 펼친다', a
     { 'package.json': packageJson({ koa: '2.16.4', '@koa/router': '13.1.1' }), 'src/app.ts': koaDagSource(13) },
   ];
   for (const files of cases) {
-    const document = await scanNodeProject(files);
+    const document = await scanNodeProject({ ...files, 'tsconfig.json': ambientTypesFreeConfig });
     assert.equal(document.facts.length, 4096);
     assert.equal(new Set(document.facts.map((fact) => fact.channel)).size, 4096);
   }
@@ -364,6 +369,7 @@ test('사실이 인자 펼침 한계(약 12만)를 넘어도 스택 초과·출�
   try {
     mkdirSync(join(root, 'src'));
     writeFileSync(join(root, 'package.json'), packageJson({ express: '5.1.0' }));
+    writeFileSync(join(root, 'tsconfig.json'), ambientTypesFreeConfig);
     writeFileSync(join(root, 'src/app.js'), routerDagSource(13, 'b', ["'/x{/c1}{/c2}{/c3}{/c4}'"]));
     const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0', now: () => new Date(0) });
     assert.equal(result.exitCode, 2);

@@ -1,9 +1,11 @@
 /**
- * 특수 파일 입력(FIFO·장치 링크) 회귀 테스트가 함께 쓰는 도우미다.
+ * 특수 파일 입력(FIFO·장치 링크)과 펼치기·해석 상한 회귀 테스트가 함께 쓰는 도우미다.
  *
  * 그런 입력을 막지 못한 코드는 FIFO에서 영원히 멈추거나 `/dev/zero`를 끝없이 읽어 1초에 GB 단위 메모리를 쓴다.
  * 그래서 검사할 명령은 자식 프로세스에서 돌리고, 부모가 시간이나 RSS 상한을 넘긴 자식을 바로 끝낸다. 회귀가
  * 생겨도 테스트 프로세스와 기계를 멈추지 않고 실패로 끝나게 하려는 것이다.
+ *
+ * 같은 프로세스에서 Program을 만드는 합성 fixture가 저장소의 ambient 선언을 읽지 않게 하는 tsconfig 내용도 둔다.
  */
 
 import assert from 'node:assert/strict';
@@ -29,6 +31,18 @@ const CHILD_RSS_LIMIT_BYTES = 1024 * 1024 * 1024;
 
 /** 시간과 RSS를 확인하는 간격(ms)이다. */
 const POLL_INTERVAL_MS = 50;
+
+/**
+ * 분석 기본 옵션(graph program.ts의 defaultOptions)에 `types: []`만 더한 tsconfig.json 내용이다.
+ *
+ * tsconfig가 없는 임시 프로젝트의 Program은 TypeScript 자동 타입 포함(typeRoots 기본값)이 현재 디렉터리(npm test·CI에서는
+ * 저장소 루트)와 그 조상의 `node_modules/@types`를 읽는다. 그래서 같은 프로세스에서 Program을 만들 때마다 저장소 자신의
+ * @types/node(선언 67개)를 다시 파싱해 커버리지 실행에서 Program 하나에 0.4초 남짓을 쓴다. 그 선언과 무관한 검사는
+ * fixture에 이 설정을 둬 그 비용을 뺀다(628bc19가 graph 합성 Program에 쓴 방식과 같다). 다른 compiler 옵션은 기본값과 같다.
+ */
+export const ambientTypesFreeConfig = JSON.stringify({ compilerOptions: {
+  target: 'es2022', module: 'esnext', moduleResolution: 'bundler', jsx: 'preserve', esModuleInterop: true, resolveJsonModule: true, types: [],
+} });
 
 /** 감시한 자식 실행 결과다. */
 export interface GuardedRun {
