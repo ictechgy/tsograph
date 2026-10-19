@@ -486,3 +486,16 @@ registerScreens([{ path: '${path}', screen: Catalog }]);`;
       + '(symlinks: 0, unreadable directories: 0, oversized files: 0, truncated: false, unreadable files: 1)'));
   });
 });
+
+test('an unparsed tsconfig is reported because path aliases to screens may not resolve', async () => {
+  await fixture({
+    'tsconfig.json': JSON.stringify({ extends: '@tsconfig/node20/tsconfig.json', compilerOptions: { baseUrl: '.', paths: { '@app/*': ['src/*'] } } }),
+    'src/router.ts': `import { registerScreens } from './router-api';
+import { Catalog } from './screens';
+registerScreens([{ path: '/catalog', screen: Catalog }]);`,
+  }, (root) => {
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.deepEqual(doc.facts.map((fact) => fact.urlTemplate), ['/catalog']);
+    assert.ok(doc.limitations.includes('navigation-project-coverage: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve'));
+  });
+});

@@ -164,3 +164,21 @@ test('컴파일러가 읽지 못한 소스는 그 안의 라우트가 빠졌을 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** 해석하지 못한 tsconfig의 route-coverage 한계다(graph의 `graph-config:`와 같은 원인 문구). */
+const unparsedConfig = 'route-coverage: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve';
+
+test('tsconfig 해석 실패와 compiler 입력 상한 초과를 graph와 같은 원인 문구로 route-coverage에 알린다', async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    // 설치하지 않은 extends 때문에 paths 별칭이 풀리지 않고 기본 옵션으로 떨어진다.
+    'tsconfig.json': JSON.stringify({ extends: '@tsconfig/node20/tsconfig.json', compilerOptions: { baseUrl: '.', paths: { '@app/*': ['src/*'] } } }),
+    'src/app.ts': "import express from 'express';\nimport users from '@app/routes';\nimport './huge';\nconst app = express();\n"
+      + "app.use('/users', users);\napp.get('/ok', (req, res) => res.send('ok'));\nexport default app;\n",
+    'src/routes.ts': "import express from 'express';\nconst router = express.Router();\nrouter.get('/:id', (req, res) => res.send('u'));\nexport default router;\n",
+    'src/huge.ts': `// ${'x'.repeat(MAX_NODE_SOURCE_BYTES)}\n`,
+  });
+  assert.equal(limitationsWith(document, unparsedConfig).length, 1);
+  assert.equal(limitationsWith(document, unparsedConfig)[0]!.scope, undefined);
+  assert.equal(limitationsWith(document, 'route-coverage: 1 source, declaration, or package input(s) exceeded 4 MiB; type resolution and route registrations may be incomplete').length, 1);
+});

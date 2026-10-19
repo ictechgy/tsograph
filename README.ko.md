@@ -56,6 +56,8 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 `methodDynamic`·`pathAnchor: "base"`·limitation으로 보존한다. 추가 문장·인자 변환·default/rest가 있는
 래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
+건너뛴 프로젝트 소스, 해석하지 못한 `tsconfig.json`/`jsconfig.json`(기본 compiler 옵션을 써서 경로 별칭이 풀리지
+않을 수 있음), 4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로 `route-call-coverage:`에 알린다.
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
 
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,

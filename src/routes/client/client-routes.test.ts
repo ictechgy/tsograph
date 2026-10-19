@@ -1569,3 +1569,11 @@ test('sources the compiler cannot read are reported as skipped project sources',
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('an unparsed tsconfig is reported with the graph cause wording', async () => {
+  const doc = await scan('export const load = () => fetch("/ok");', [], {
+    'tsconfig.json': JSON.stringify({ extends: '@tsconfig/node20/tsconfig.json', compilerOptions: { baseUrl: '.', paths: { '@app/*': ['src/*'] } } }),
+  });
+  assert.deepEqual(doc.facts.map((fact) => fact.channel), ['/ok']);
+  assert.ok(doc.limitations.includes('route-call-coverage: tsconfig.json could not be parsed; default compiler options were used, so path aliases may not resolve'));
+});

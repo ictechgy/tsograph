@@ -21,6 +21,7 @@ import { scopeIdOf } from '../graph/symbol-ids.ts';
 import { MAX_TEMPLATE_LENGTH } from '../openapi/path-template.ts';
 import { canonicalizeLiteral } from '../openapi/percent-encoding.ts';
 import {
+  compilerConfigGaps,
   hasParseErrors,
   isNodeTestPath,
   loadNodeProject,
@@ -783,6 +784,8 @@ function buildLimitations(
     );
   }
   limitations.push(...sourceDiscoveryLimitations(project.gaps));
+  limitations.push(...compilerConfigGaps(project.configStatus, 'screen registrations')
+    .map((gap) => `navigation-project-coverage: ${gap}`));
   return limitations;
 }
 

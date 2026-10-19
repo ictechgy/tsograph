@@ -13,7 +13,7 @@ import ts from 'typescript';
 
 import type { BridgeLocation } from '../../exchange/bridge-facts.ts';
 import { ByteColumnIndex } from '../../openapi/byte-columns.ts';
-import { createGraphProgram } from '../../graph/program.ts';
+import { createGraphProgram, type ProgramConfigStatus } from '../../graph/program.ts';
 import { collectProjectFiles } from '../../schema/project-files.ts';
 import { isSourceFileName } from '../../schema/source-module.ts';
 
@@ -45,6 +45,11 @@ export interface NodeProject {
   /** 분석 대상 파일(프로젝트 기준 POSIX 경로 → 소스), 경로 순 */
   readonly files: ReadonlyMap<string, ts.SourceFile>;
   readonly gaps: NodeProjectGaps;
+  /**
+   * Program을 만들며 센 설정 공백(설정 해석 실패·compiler 입력 상한 초과)이다. `gaps`에 넣지 않는다 — client 문서는
+   * `gaps`의 값을 모두 참·거짓으로 보는데 객체는 늘 참이기 때문이다. 문구는 {@link compilerConfigGaps}가 만든다.
+   */
+  readonly configStatus: ProgramConfigStatus;
   /** 프로젝트 파일이면 기준 경로, 아니면(의존성·lib) undefined */
   readonly pathOf: (sourceFile: ts.SourceFile) => string | undefined;
   /** 노드 시작(앞 공백·주석 제외)의 계약 위치 */
@@ -60,7 +65,7 @@ export interface NodeProject {
 export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
   const walk = collectProjectFiles(root, { includeFile: isSourceFileName, excludedDirectories: new Set() });
   const candidates = [...walk.files].filter(([, absolute]) => !isOversized(absolute));
-  const { program, checker } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
+  const { program, checker, status } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
   const files = new Map<string, ts.SourceFile>();
   const pathBySourceFile = new Map<ts.SourceFile, string>();
   for (const [path, absolute] of candidates) {
@@ -83,9 +88,30 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       unsafeNames: walk.unsafeNames,
       unreadableFiles: candidates.length - files.size,
     },
+    configStatus: status,
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),
   };
+}
+
+/**
+ * Program 설정 공백을 원인 문장으로 만든다. 접두사는 문서마다 다르므로 호출자가 붙인다.
+ *
+ * 원인 문구는 graph의 `graph-config:`·`oversized-compiler-inputs:`와 같다 — 같은 Program에서 같은 공백을 본
+ * 문서들이 같은 말로 알려야 사용자가 한 가지 고칠 방향(설정·extends 대상 설치, 큰 입력 정리)을 찾는다.
+ *
+ * @param status Program 설정 상태
+ * @param affected 불완전할 수 있는 결과(예: `route registrations`)
+ * @returns 원인 문장(공백이 없으면 빈 목록)
+ */
+export function compilerConfigGaps(status: ProgramConfigStatus, affected: string): string[] {
+  const gaps: string[] = [];
+  if (status.configUnreadable) {
+    gaps.push(`${status.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
+  }
+  const oversized = status.oversizedCompilerInputs ?? 0;
+  if (oversized > 0) gaps.push(`${oversized} source, declaration, or package input(s) exceeded 4 MiB; type resolution and ${affected} may be incomplete`);
+  return gaps;
 }
 
 /**

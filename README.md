@@ -61,6 +61,9 @@ retain `dynamic`, `methodDynamic`, `pathAnchor: "base"` or limitations. Wrappers
 statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
+Skipped project sources, an unparsed `tsconfig.json`/`jsconfig.json` (default compiler options, so path
+aliases may not resolve), and compiler inputs over 4 MiB are also reported under `route-call-coverage:`,
+with the same cause wording as `tsograph graph`.
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
 
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source

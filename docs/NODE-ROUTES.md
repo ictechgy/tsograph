@@ -22,7 +22,9 @@ tsograph가 Hono·Express·Fastify·Koa(@koa/router)·NestJS 프로젝트에서 
 
 분석 대상 코드는 실행하지 않는다. `tsograph graph`와 같은 방식으로 TypeScript `Program`·`TypeChecker`(루트 `tsconfig.json`, 없으면
 `jsconfig.json`, 없으면 번들러 해석 기본값, `allowJs` 켬)를 만들어 import·재수출·기본 내보내기·CommonJS `require`를 따라간다.
-emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서는 Program을 만들지 않는다.
+emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서는 Program을 만들지 않는다. 설정(`extends` 대상 포함)을 해석하지
+못하면 기본 옵션으로 계속하되 경로 별칭이 풀리지 않을 수 있으므로, 4 MiB를 넘어 읽지 않은 compiler 입력과 함께 graph와 같은
+원인 문구의 스코프 없는 `route-coverage:`로 알린다.
 
 ## 해석기
 
@@ -171,7 +173,7 @@ emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서
 | 핸들러가 프로젝트 밖·해석 불가, 마지막 핸들러가 펼침(`get('/x', ...handlers)`) | usr 없음·순서 없음, `missing-route-usrs:`(체인 전용) |
 | 자기 노드를 얻지 못한 인라인 핸들러(계산된 이름 멤버 안), 요청을 넘긴다고 본 미들웨어 | `framework-dispatch-unmodeled:`(체인 전용) |
 | 순서를 증명하지 못한 decl | `route-dispatch-order-unknown:` + 템플릿 스코프 |
-| 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 교환 형식이 금지하는 문자가 든 파일·디렉터리 이름, 컴파일러가 읽지 못한 파일(권한, 걷기 뒤 삭제, 백슬래시가 든 이름), 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
+| 확인하지 않은 주 버전, 모델링하지 않는 서버 프레임워크, symlink·크기 초과(4 MiB)·구문 오류 파일, 교환 형식이 금지하는 문자가 든 파일·디렉터리 이름, 컴파일러가 읽지 못한 파일(권한, 걷기 뒤 삭제, 백슬래시가 든 이름), 해석하지 못한 `tsconfig.json`·`jsconfig.json`, 4 MiB를 넘는 compiler 입력, 따라가지 못한 호출 | `route-framework-version-unknown:`, `route-coverage:`(스코프 없음) |
 
 ## 결정(초안·형제 도구와 다른 부분)
 
