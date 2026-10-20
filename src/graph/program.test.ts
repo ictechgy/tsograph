@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
-import fs, { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import fs, { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo } from '../cli/testing.test.ts';
+import { compilerConfigGaps } from '../routes/node/node-project.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText, readBoundedFileBytes } from './bounded-config-reader.ts';
 import { GraphProjectInputError, createGraphProgram } from './program.ts';
@@ -915,5 +919,399 @@ test('compiler host caps valid tsconfig roots, transitive imports and declaratio
       assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
       assert.equal(unboundedReads, 0);
     } finally { ts.sys.readFile = originalRead; }
+  });
+});
+
+/**
+ * 구문 깊이 상한을 넘는 소스다. 격리 전에는 TypeScript 바인더가 이 `||` 사슬을 재귀로 걷다가 스택을 넘겨 Program을 쓰는
+ * 명령 전체가 실패했다.
+ *
+ * @param name 내보낼 이름
+ * @returns 소스 텍스트
+ */
+function deepLogicalSource(name: string): string {
+  return `declare const a: boolean;\nexport const ${name} = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n`;
+}
+
+test('compiler host는 구문 깊이 상한을 넘는 입력을 Program에서 빼고 호출자 소스와 나머지 입력을 나눠 센다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, files: ['entry.ts', 'selected.ts'] }),
+    'entry.ts': 'import { hidden } from "./hidden"; import { walked } from "./walked"; export function entry() { return hidden || walked; }',
+    'selected.ts': deepLogicalSource('selected'),
+    'hidden.ts': deepLogicalSource('hidden'),
+    'walked.ts': deepLogicalSource('walked'),
+    'parens.ts': `export const parens = ${'('.repeat(3_000)}1${')'.repeat(3_000)};\n`,
+  }, (root) => {
+    const { program, checker, status, deeplyNestedSources } = createGraphProgram(root, [join(root, 'entry.ts'), join(root, 'walked.ts'), join(root, 'parens.ts')]);
+    for (const name of ['selected.ts', 'hidden.ts', 'walked.ts', 'parens.ts']) assert.equal(program.getSourceFile(join(root, name)), undefined, name);
+    const entry = sourceFile(program, join(root, 'entry.ts'));
+    assert.ok(checker.getSymbolsInScope(entry, ts.SymbolFlags.Function).some((symbol) => symbol.name === 'entry'));
+    assert.deepEqual([...deeplyNestedSources].sort(), [join(root, 'parens.ts'), join(root, 'walked.ts')]);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, deeplyNestedCompilerInputs: 2 });
+  });
+});
+
+test('graph는 깊이로 뺀 소스를 노드 없이 parse-errors로 알리고 읽지 못한 소스와 섞지 않으며 완전성을 주장하지 않는다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/app.ts': 'import { deep } from "./deep";\nexport function main() { return helper() || deep; }\nfunction helper() { return false; }\n',
+    'src/deep.ts': deepLogicalSource('deep'),
+    'src/types/shape.d.ts': `declare const shape: ${'Array<'.repeat(3_000)}number${'>'.repeat(3_000)};\n`,
+  }, async (root) => {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(graph.edges.some((edge) => edge.from === 'src/app.ts#main' && edge.to === 'src/app.ts#helper'));
+    assert.ok(graph.nodes.every((node) => node.location.path !== 'src/deep.ts'));
+    assert.deepEqual(graph.limitations.filter((line) => line.startsWith('parse-errors:') || line.startsWith('unreadable-sources:')), [
+      `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; they have no nodes and calls into them stay unlinked; `
+        + 'files: ["src/deep.ts"]; omitted: 0',
+      `parse-errors: 1 declaration, package, or config-selected input(s) ${SYNTAX_DEPTH_CAUSE} and were not loaded; type resolution and calls may be incomplete`,
+    ]);
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
+    assert.equal(graph.statistics.files, 1);
+  });
+});
+
+/** 실행 위치만 바꾼 자식 프로세스 검사가 타입 제거로 직접 실행하는 CLI 진입점이다. */
+const mainPath = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
+
+/**
+ * Program 루트 파일을 기준 디렉터리 상대 경로로 줄인다(정렬).
+ *
+ * @param program Program
+ * @param root 기준 디렉터리
+ * @returns 상대 경로 목록
+ */
+function rootFiles(program: ts.Program, root: string): string[] {
+  return program.getRootFileNames().map((name) => relative(root, name)).sort();
+}
+
+/**
+ * `node_modules/@types/<name>` 선언 패키지 파일을 만든다(TypeScript 자동 타입 포함 대상).
+ *
+ * @param directory 패키지를 둘 디렉터리(프로젝트 기준)
+ * @param name `@types` 아래 패키지 이름
+ * @param declaration `index.d.ts` 내용
+ * @returns 상대 경로 → 내용
+ */
+function typesPackage(directory: string, name: string, declaration: string): Record<string, string> {
+  const base = `${directory}/node_modules/@types/${name}`;
+  return {
+    [`${base}/index.d.ts`]: declaration,
+    [`${base}/package.json`]: JSON.stringify({ name: `@types/${name}`, version: '1.0.0', types: 'index.d.ts' }),
+  };
+}
+
+/** `graph-config:`·coverage 한계가 함께 쓰는 '경계 밖 설정 루트' 원인 문장이다. */
+function outsideRootsGap(count: number, affected: string): string {
+  return `${count} include pattern(s) or files entr(ies) of tsconfig.json point outside the scanned root and were not used as root files; `
+    + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`;
+}
+
+/** `graph-config:`·coverage 한계가 함께 쓰는 '걷기 정책에 막힌 이름 설정 루트' 원인 문장이다. */
+function excludedRootsGap(count: number, affected: string): string {
+  return `${count} files entr(ies) or wildcard-free include path(s) of tsconfig.json name paths in directories the scan skips `
+    + `or through symbolic links and were not used as root files; type resolution and ${affected} may be incomplete `
+    + '(import or reference them from a project source instead)';
+}
+
+test('설정 루트는 걷기가 건너뛰는 디렉터리·symlink 아래를 열거하지 않고 루트 안 선언은 남기며 이름으로 적은 항목만 센다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-link-')));
+  try {
+    writeFileSync(join(outside, 'linked.d.ts'), 'declare const linked: number;\n');
+    await withProject({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { types: [] },
+        include: ['src', 'build', 'dist/**/*', 'out', 'coverage', '.storybook', 'generated', 'src/vendor/**/*', 'src/missing'],
+        files: ['src/types/listed.d.ts', 'build/listed.d.ts', 'src/vendor/linked.d.ts', 'src/missing.d.ts'],
+      }),
+      'src/main.ts': 'export function main() { return 1; }\n',
+      'src/types/global.d.ts': 'declare const projectGlobal: number;\n',
+      'src/types/listed.d.ts': 'declare const listed: number;\n',
+      'build/bundle.ts': 'export const build = 1;\n',
+      'build/listed.d.ts': 'declare const buildListed: number;\n',
+      'dist/chunk.ts': 'export const dist = 1;\n',
+      'out/emitted.ts': 'export const out = 1;\n',
+      'coverage/report.ts': 'export const coverage = 1;\n',
+      '.storybook/main.ts': 'export const storybook = 1;\n',
+      'generated/client.ts': 'export const generated = 1;\n',
+    }, (root) => {
+      symlinkSync(outside, join(root, 'src/vendor'));
+      // `generated/`는 Prisma 생성 출력처럼 호출자의 걷기가 따로 뺀 디렉터리다.
+      const boundary = { root, excludedDirectories: new Set([join(root, 'generated')]) };
+      const { program, status } = createGraphProgram(root, [join(root, 'src/main.ts')], ts.createProgram, undefined, boundary);
+      assert.deepEqual(rootFiles(program, root), ['src/main.ts', 'src/types/global.d.ts', 'src/types/listed.d.ts']);
+      // 글롭(`dist/**/*`·`src/vendor/**/*`)이 고를 파일은 걷기와 같은 정책이라 세지 않는다. 이름으로 적은 include 디렉터리
+      // `build`·`out`·`coverage`·`generated`와 `files`의 `build/listed.d.ts`·`src/vendor/linked.d.ts`(symlink 디렉터리 아래)는
+      // 사용자가 콕 집어 고른 경로라 센다. 점이 든 `.storybook`은 TypeScript가 파일 이름으로 읽어 디렉터리를 고르지 않고,
+      // 없는 `src/missing`·`src/missing.d.ts`는 TypeScript도 아무것도 얻지 못하므로 세지 않는다.
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 6 });
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('이름으로 적은 files가 걷기가 건너뛰는 디렉터리 아래면 graph-config로 알리고, 프로젝트 소스가 참조하면 공백 없이 쓴다', async () => {
+  const files = {
+    'package.json': '{"private":true}',
+    'src/main.ts': 'export function run() { return makeStore() + makeStore(); }\n',
+    'node_modules/globals-pkg/index.d.ts': 'declare function makeStore(): number;\n',
+  };
+  await withProject({
+    ...files,
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'], files: ['node_modules/globals-pkg/index.d.ts'] }),
+  }, async (root) => {
+    const { program, status } = createGraphProgram(root, [join(root, 'src/main.ts')]);
+    assert.deepEqual(rootFiles(program, root), ['src/main.ts']);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 1 });
+    // 예전에는 원인 없이 `unresolved-calls:`만 남고 coverage 완전성을 그대로 주장했다.
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(graph.limitations.includes(`graph-config: ${excludedRootsGap(1, 'calls')}`), graph.limitations.join('\n'));
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')), graph.limitations.join('\n'));
+  });
+  // 안내한 해결 방향: 프로젝트 소스가 참조하면 compiler host가 그 선언을 읽어 공백이 없다.
+  await withProject({
+    ...files,
+    'src/main.ts': `/// <reference path="../node_modules/globals-pkg/index.d.ts" />\n${files['src/main.ts']}`,
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+  }, async (root) => {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.deepEqual(graph.limitations.filter((line) => /^(graph-config|unresolved-calls|effect-inventory):/u.test(line)), []);
+  });
+});
+
+test('정책에 막힌 설정 루트는 TypeScript가 실제로 고를 이름 항목만 세고 글롭 일치·없는 항목·특수 파일은 세지 않는다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: { types: [] },
+      // `.next/types/**/*.ts`는 Next가 생성 설정에 넣는 글롭이라 조용히 둔다. 점 디렉터리 아래 파일 `.types/global.d.ts`와
+      // symlink 디렉터리 `types-link`는 센다. `src`·`next-env.d.ts`는 정책을 통과한다.
+      include: ['src', 'next-env.d.ts', '.next/types/**/*.ts', '.types/global.d.ts', 'types-link'],
+      // 디렉터리·FIFO·없는 파일은 TypeScript도 소스로 읽지 못해 세지 않는다. 일반 파일로 가는 symlink는 센다.
+      files: ['src', 'src/pipe.d.ts', 'src/gone.d.ts', 'src/link.d.ts'],
+    }),
+    'src/main.ts': 'export const main = 1;\n',
+    'next-env.d.ts': 'declare const nextEnv: number;\n',
+    '.next/types/app/page.ts': 'export const page = 1;\n',
+    '.types/global.d.ts': 'declare const dotted: number;\n',
+    'real-types/linked.d.ts': 'declare const linked: number;\n',
+  }, (root) => {
+    makeFifo(join(root, 'src/pipe.d.ts'));
+    symlinkSync(join(root, 'real-types'), join(root, 'types-link'));
+    symlinkSync(join(root, 'real-types/linked.d.ts'), join(root, 'src/link.d.ts'));
+    const { program, status } = createGraphProgram(root, []);
+    assert.deepEqual(rootFiles(program, root), ['next-env.d.ts', 'src/main.ts']);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 3 });
+    assert.deepEqual(compilerConfigGaps(status, 'route registrations'), [excludedRootsGap(3, 'route registrations')]);
+  });
+});
+
+test('include 없는 jsconfig도 build/·dist/ 산출물을 루트로 넣지 않아 그래프가 산출물 없는 프로젝트와 같다', async () => {
+  const files = {
+    'jsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', types: [] } }),
+    'package.json': '{"private":true}',
+    'src/main.js': 'export function apply(callback) { return callback(); }\n'
+      + 'export function work() { return apply(() => helper()); }\nfunction helper() { return 1; }\n',
+  };
+  await withProject(files, async (clean) => {
+    await withProject({
+      ...files,
+      // 4 MiB를 넘는 로컬 번들 하나가 예전에는 compiler 입력 상한으로 bound 디스패치 전체를 껐다.
+      'build/main.js': `/*${'x'.repeat(MAX_SOURCE_BYTES)}*/\nexport function bundled() {}\n`,
+      'dist/chunk.js': 'export function chunk() { return 2; }\n',
+    }, async (built) => {
+      const [expected, actual] = await Promise.all([buildCallGraph(clean, createNodeFileSystem()), buildCallGraph(built, createNodeFileSystem())]);
+      assert.deepEqual(
+        { nodes: actual.nodes, edges: actual.edges, limitations: actual.limitations },
+        { nodes: expected.nodes, edges: expected.edges, limitations: expected.limitations },
+      );
+      assert.ok(actual.edges.some((edge) => edge.evidence === 'bound'));
+    });
+  });
+});
+
+test('경계 밖을 가리키는 include·files는 열거하지 않고 세며 --workspace 경계 안이면 루트로 쓴다', async (t) => {
+  await withProject({
+    // `../../**/*.d.ts`는 임시 디렉터리의 부모(다른 테스트의 파일까지)를 연다. `/**/*`는 TypeScript가 설정 디렉터리로
+    // 되돌리지만 뜻은 파일 시스템 전체라 경계 밖으로 센다.
+    'app/tsconfig.json': JSON.stringify({
+      compilerOptions: { types: [] }, include: ['src', '../shared/**/*', '../../**/*.d.ts', '/**/*'], files: ['../extra/extra.d.ts'],
+    }),
+    'app/package.json': '{"private":true}',
+    'app/src/main.ts': 'export function main() { return sharedAmbient() + extraAmbient(); }\n',
+    'shared/globals.d.ts': 'declare function sharedAmbient(): number;\n',
+    'extra/extra.d.ts': 'declare function extraAmbient(): number;\n',
+  }, async (root) => {
+    const app = join(root, 'app');
+    const originalReaddir = fs.readdirSync;
+    const outsideListings: string[] = [];
+    // 임시 루트 밖 목록 요청은 기록하고 빈 목록을 돌려준다. 고치기 전 코드가 실행 위치·파일 시스템 전체를 열거하지 않게 막는다.
+    t.mock.method(fs, 'readdirSync', function readdirSync(this: unknown, ...arguments_: Parameters<typeof fs.readdirSync>) {
+      const directory = resolve(String(arguments_[0]));
+      if (relative(root, directory).startsWith('..')) {
+        outsideListings.push(directory);
+        return [];
+      }
+      return originalReaddir.apply(this, arguments_);
+    });
+    syncBuiltinESMExports();
+    try {
+      const own = createGraphProgram(app, [join(app, 'src/main.ts')]);
+      assert.deepEqual(rootFiles(own.program, root), ['app/src/main.ts']);
+      assert.equal(own.status.outsideConfigRoots, 4);
+      const widened = createGraphProgram(app, [join(app, 'src/main.ts')], ts.createProgram, undefined, { root, excludedDirectories: new Set() });
+      assert.deepEqual(rootFiles(widened.program, root), ['app/src/main.ts', 'extra/extra.d.ts', 'shared/globals.d.ts']);
+      assert.equal(widened.status.outsideConfigRoots, 2);
+      const graph = await buildCallGraph(app, createNodeFileSystem());
+      assert.ok(graph.limitations.includes(`graph-config: ${outsideRootsGap(4, 'calls')}`), graph.limitations.join('\n'));
+      assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
+      const workspace = await buildCallGraph(app, createNodeFileSystem(), { workspace: root });
+      assert.ok(workspace.limitations.includes(`graph-config: ${outsideRootsGap(2, 'calls')}`), workspace.limitations.join('\n'));
+      assert.deepEqual(outsideListings, []);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test('프로젝트 경로에 든 `*`·`?`는 include 글롭이 아니라 경계 판정이 설정 루트를 버리지 않고 이웃 디렉터리도 열지 않는다', {
+  // Windows 파일 이름에는 `*`·`?`를 쓸 수 없다.
+  skip: process.platform === 'win32',
+}, async () => {
+  const project = (directory: string): Record<string, string> => ({
+    // `${configDir}`는 TypeScript가 설정 디렉터리 절대 경로로 바꿔 넘긴다. 그 경로에도 같은 문자가 든다.
+    [`${directory}/tsconfig.json`]: JSON.stringify({ compilerOptions: { types: [] }, include: ['src', 'types', '${configDir}/extra'] }),
+    [`${directory}/package.json`]: '{"private":true}',
+    [`${directory}/src/main.ts`]: 'export function run() { return makeStore(); }\n',
+    [`${directory}/types/global.d.ts`]: 'declare function makeStore(): number;\n',
+    [`${directory}/extra/more.d.ts`]: 'declare const more: number;\n',
+  });
+  // `weXrd`는 TypeScript가 `we*rd`·`we?rd`를 글롭으로 읽으면 맞는 이웃이다. 그 파일이 루트로 섞이면 안 된다.
+  await withProject({ ...project('we*rd/proj'), ...project('we?rd/proj'), ...project('weXrd/proj') }, async (root) => {
+    for (const directory of ['we*rd/proj', 'we?rd/proj']) {
+      const app = join(root, directory);
+      const { program, status } = createGraphProgram(app, [join(app, 'src/main.ts')]);
+      assert.deepEqual(rootFiles(program, app), ['extra/more.d.ts', 'src/main.ts', 'types/global.d.ts'], directory);
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false }, directory);
+      const graph = await buildCallGraph(app, createNodeFileSystem());
+      assert.deepEqual(graph.limitations.filter((line) => line.startsWith('graph-config:') || line.includes('incomplete(coverage)')), [], directory);
+    }
+  });
+});
+
+test('include의 백슬래시는 TypeScript처럼 경로 구분자로 읽어 밖을 가리키면 세고 안을 가리키면 루트로 쓴다', async () => {
+  await withProject({
+    'app/tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src', 'types\\**\\*.d.ts', '..\\outside\\**\\*.d.ts'] }),
+    'app/package.json': '{"private":true}',
+    'app/src/main.ts': 'export function run() { return insideAmbient() + outsideAmbient(); }\n',
+    'app/types/inside.d.ts': 'declare function insideAmbient(): number;\n',
+    'outside/global.d.ts': 'declare function outsideAmbient(): number;\n',
+  }, async (root) => {
+    const app = join(root, 'app');
+    const { program, status } = createGraphProgram(app, [join(app, 'src/main.ts')]);
+    assert.deepEqual(rootFiles(program, app), ['src/main.ts', 'types/inside.d.ts']);
+    // 같은 뜻의 `../outside/**/*.d.ts`처럼 경계 밖으로 센다. 예전에는 한 이름으로 읽어 안으로 판정하고 세지 않았다.
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, outsideConfigRoots: 1 });
+    const graph = await buildCallGraph(app, createNodeFileSystem());
+    assert.ok(graph.limitations.includes(`graph-config: ${outsideRootsGap(1, 'calls')}`), graph.limitations.join('\n'));
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')), graph.limitations.join('\n'));
+  });
+});
+
+test('설정 include 열거는 걷기와 같은 항목 상한에서 멈추고 잘린 사실을 compiler 공백 문구로 알린다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/a.d.ts': 'declare const a: number;\n',
+    'src/b.d.ts': 'declare const b: number;\n',
+    'src/nested/c.d.ts': 'declare const c: number;\n',
+    'src/other/d.d.ts': 'declare const d: number;\n',
+  }, (root) => {
+    // 방문 항목: 루트 2(tsconfig.json·src) + src 4 + nested 1 + other 1 = 8
+    const full = createGraphProgram(root, [], ts.createProgram, undefined, { root, excludedDirectories: new Set(), maxVisitedEntries: 8 });
+    assert.deepEqual(rootFiles(full.program, root), ['src/a.d.ts', 'src/b.d.ts', 'src/nested/c.d.ts', 'src/other/d.d.ts']);
+    assert.deepEqual(full.status, { configName: 'tsconfig.json', configUnreadable: false });
+    // nested에서 상한을 넘으면 그 뒤 other도 열지 않는다.
+    const capped = createGraphProgram(root, [], ts.createProgram, undefined, { root, excludedDirectories: new Set(), maxVisitedEntries: 6 });
+    assert.deepEqual(rootFiles(capped.program, root), ['src/a.d.ts', 'src/b.d.ts']);
+    assert.equal(capped.status.configRootsTruncated, true);
+    assert.deepEqual(compilerConfigGaps(capped.status, 'route registrations'), [
+      'include patterns of tsconfig.json reached the directory entry limit; later matches were not used as root files; '
+        + 'type resolution and route registrations may be incomplete',
+    ]);
+  });
+});
+
+test('목록을 읽지 못한 include 디렉터리는 TypeScript처럼 비어 있는 것으로 보고 나머지 루트를 쓴다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/a.d.ts': 'declare const a: number;\n',
+    'src/locked/b.d.ts': 'declare const b: number;\n',
+  }, (root) => {
+    chmodSync(join(root, 'src/locked'), 0o000);
+    try {
+      const { program, status } = createGraphProgram(root, []);
+      assert.deepEqual(rootFiles(program, root), ['src/a.d.ts']);
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false });
+    } finally {
+      chmodSync(join(root, 'src/locked'), 0o755);
+    }
+  });
+});
+
+test('tsconfig가 없거나 읽지 못하면 자동 타입 루트를 실행 위치가 아니라 프로젝트 루트와 그 조상에서 찾는다', async (t) => {
+  const source = 'export const a = 1;\n';
+  await withProject({
+    ...typesPackage('runner', 'runner-only', 'declare function runnerAmbient(): number;\n'),
+    'plain/src/a.ts': source,
+    ...typesPackage('own', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'own/src/a.ts': source,
+    'broken/tsconfig.json': '{',
+    ...typesPackage('broken', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'broken/src/a.ts': source,
+    ...typesPackage('nested', 'parent-only', 'declare function parentAmbient(): number;\n'),
+    'nested/app/src/a.ts': source,
+    // 설정이 루트에 있으면 TypeScript가 설정 디렉터리를 쓴다. 설정이 없을 때 맞춰야 하는 기준이다.
+    'configured/tsconfig.json': JSON.stringify({ include: ['src'] }),
+    ...typesPackage('configured', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'configured/src/a.ts': source,
+  }, (root) => {
+    t.mock.method(ts.sys, 'getCurrentDirectory', () => join(root, 'runner'));
+    const typeFiles = (project: string): string[] => {
+      const directory = join(root, project);
+      return createGraphProgram(directory, [join(directory, 'src/a.ts')]).program.getSourceFiles()
+        .map((file) => relative(root, file.fileName))
+        .filter((path) => !path.startsWith('..') && path.includes('node_modules/@types/'))
+        .sort();
+    };
+    assert.deepEqual(typeFiles('plain'), []);
+    assert.deepEqual(typeFiles('own'), ['own/node_modules/@types/own-only/index.d.ts']);
+    assert.deepEqual(typeFiles('broken'), ['broken/node_modules/@types/own-only/index.d.ts']);
+    assert.deepEqual(typeFiles('nested/app'), ['nested/node_modules/@types/parent-only/index.d.ts']);
+    assert.deepEqual(typeFiles('configured'), ['configured/node_modules/@types/own-only/index.d.ts']);
+  });
+});
+
+test('tsconfig 없는 프로젝트의 graph 출력은 실행 위치와 무관하고 프로젝트 자신의 @types를 쓴다', async () => {
+  await withProject({
+    ...typesPackage('project', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'project/src/a.ts': 'export function run(): number {\n  return ownAmbient();\n}\n',
+    'runner/README.txt': 'node_modules가 없는 실행 위치\n',
+  }, (root) => {
+    const run = (cwd: string) => spawnSync(process.execPath, [
+      mainPath, 'graph', '--project', join(root, 'project'), '--generated-at', '2026-01-01T00:00:00.000Z',
+    ], { cwd, encoding: 'utf8', timeout: 60_000 });
+    const fromRunner = run(join(root, 'runner'));
+    const fromProject = run(join(root, 'project'));
+    assert.equal(fromRunner.status, 0, fromRunner.stderr);
+    assert.equal(fromProject.status, 0, fromProject.stderr);
+    assert.equal(fromRunner.stdout, fromProject.stdout);
+    assert.equal((JSON.parse(fromRunner.stdout) as { statistics: { calls: { external: number } } }).statistics.calls.external, 1);
   });
 });

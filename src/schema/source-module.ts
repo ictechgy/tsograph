@@ -10,6 +10,7 @@ import { extname } from 'node:path';
 import ts from 'typescript';
 
 import { SourceText } from './source-text.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from './syntax-depth.ts';
 
 /** import 바인딩 하나다. `imported`는 `default`·`*`·이름 중 하나다. */
 export interface ImportBinding {
@@ -67,8 +68,49 @@ export function isSourceFileName(name: string): boolean {
  * @returns 소스 모듈
  */
 export function parseSourceModule(path: string, absolutePath: string, text: string): SourceModule {
+  return moduleOf(path, absolutePath, text, parseTree(path, absolutePath, text));
+}
+
+/**
+ * 소스 텍스트를 구문 깊이 상한 안에서 파싱해 모듈을 만든다. 파일 하나의 첫 파싱에 쓴다.
+ *
+ * 상한을 넘거나 파싱이 호출 스택을 넘긴 파일은 모듈을 만들지 않는다 — 그 트리를 다른 단계(이름 해석기 Program·출처
+ * 추적·사용 스캔)가 재귀로 걸으면 명령 전체가 스택 초과로 끝나기 때문이다. 같은 텍스트를 다시 파싱하는
+ * {@link parseSourceModule}은 이 검사를 통과한 파일에만 쓴다.
+ *
+ * @param path 프로젝트 기준 경로
+ * @param absolutePath 절대 경로
+ * @param text 파일 텍스트(BOM 제거 뒤)
+ * @returns 소스 모듈, 상한을 넘었으면 {@link TOO_DEEP}
+ */
+export function parseBoundedSourceModule(path: string, absolutePath: string, text: string): SourceModule | typeof TOO_DEEP {
+  const sourceFile = parseWithinSyntaxDepth(() => parseTree(path, absolutePath, text));
+  return sourceFile === TOO_DEEP ? TOO_DEEP : moduleOf(path, absolutePath, text, sourceFile);
+}
+
+/**
+ * 소스 텍스트를 구문 트리로 파싱한다(부모 포인터 포함, 확장자로 스크립트 종류를 고른다).
+ *
+ * @param path 프로젝트 기준 경로
+ * @param absolutePath 절대 경로(트리의 파일 이름)
+ * @param text 파일 텍스트
+ * @returns 구문 트리
+ */
+function parseTree(path: string, absolutePath: string, text: string): ts.SourceFile {
   const kind = scriptKinds.get(extname(path)) ?? ts.ScriptKind.TS;
-  const sourceFile = ts.createSourceFile(absolutePath, text, ts.ScriptTarget.Latest, true, kind);
+  return ts.createSourceFile(absolutePath, text, ts.ScriptTarget.Latest, true, kind);
+}
+
+/**
+ * 파싱한 트리로 모듈(구문 오류 여부·import·export 표)을 만든다.
+ *
+ * @param path 프로젝트 기준 경로
+ * @param absolutePath 절대 경로
+ * @param text 파일 텍스트
+ * @param sourceFile 구문 트리
+ * @returns 소스 모듈
+ */
+function moduleOf(path: string, absolutePath: string, text: string, sourceFile: ts.SourceFile): SourceModule {
   const diagnostics = (sourceFile as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics;
   const tables = collectModuleTables(sourceFile);
   return {

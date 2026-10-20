@@ -36,18 +36,17 @@ export interface PackageObservations {
 }
 
 /**
- * 모듈들의 import·require를 센다.
+ * 모듈들이 가져오는 패키지를 센다.
  *
- * @param modules 소스 모듈
+ * @param modulePackageSets 모듈마다 `modulePackages`로 뽑은 패키지 이름 집합(트리 없이 넘기려고 파싱 직후 뽑는다)
  * @returns 관측 계수
  */
-export function observeDbPackages(modules: readonly SourceModule[]): PackageObservations {
+export function observeDbPackages(modulePackageSets: Iterable<ReadonlySet<string>>): PackageObservations {
   const unsupported = new Map<string, number>();
   const nonRelational = new Map<string, number>();
   let unsupportedFiles = 0;
   let nonRelationalFiles = 0;
-  for (const module of modules) {
-    const packages = modulePackages(module);
+  for (const packages of modulePackageSets) {
     const sql = [...packages].filter((name) => unsupportedSqlPackages.has(name));
     const stores = [...packages].filter((name) => nonRelationalPackages.has(name));
     if (sql.length > 0) unsupportedFiles++;
@@ -74,7 +73,7 @@ export function formatBreakdown(counts: ReadonlyMap<string, number>): string {
  * @param module 소스 모듈
  * @returns 패키지 이름 집합
  */
-function modulePackages(module: SourceModule): Set<string> {
+export function modulePackages(module: SourceModule): Set<string> {
   const specifiers = module.imports.map((binding) => binding.specifier);
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) specifiers.push(node.moduleSpecifier.text);

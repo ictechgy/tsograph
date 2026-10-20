@@ -9,7 +9,8 @@
  *
  * 그래프 노드가 아닌 root id가 있으면 cartograph·kartograph처럼 아는 root로 문서를 내고 그 id를 계약대로
  * `root-not-found`로 기록한 뒤 64로 끝난다(표준 오류에 목록). 프로젝트를 읽지 못하거나 출력이 상한을 넘으면 2다.
- * 분석 대상 코드는 실행하지 않는다(TypeScript 컴파일러 API로 읽기만 한다).
+ * `--tsconfig`는 다른 명령과 같은 검사(`project-paths.ts`)로 `--project` 안의 1 MiB 이하 일반 파일만 받고, 밖이면 그래프를
+ * 만들기 전에 사용 오류(64)다. 분석 대상 코드는 실행하지 않는다(TypeScript 컴파일러 API로 읽기만 한다).
  */
 
 import { isAbsolute, relative } from 'node:path';
@@ -33,6 +34,7 @@ import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFai
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
+import { checkCompilerConfig, resolveProjectRoot } from './project-paths.ts';
 
 /** 기본 최대 도달 노드 수다. */
 export const DEFAULT_MAX_REACHED = 100_000;
@@ -57,19 +59,21 @@ call counts, edges (call, new, callback, reference, jsx, alias, initializer) wit
 
 Options:
   --project <root>            Project root; node ids are relative to it (required)
-  --tsconfig <file>           Config file relative to --project; its options use the config directory
+  --tsconfig <file>           Config file inside --project (relative to it, or absolute); its options
+                              use the config directory
   --workspace <root>         Own sources below this enclosing workspace; ids are relative to it
   --generated-at <timestamp>  Fixed generatedAt (YYYY-MM-DDTHH:mm:ss.sssZ) for byte-identical output
   --format json|ndjson        Graph output format; the process streams graph records
 
-Exit codes: 0 success, 2 input/output failure, 64 usage error.
+Exit codes: 0 success, 2 input/output failure, 64 usage error (including a --tsconfig file
+outside --project).
 Stream failures may leave partial graph output; discard it whenever the exit code is 2.
 `;
 
 /** reach·impact 공통 옵션 설명이다. */
 const traversalOptions = `Options:
   --project <root>            Build and traverse the project call graph (one input mode is required)
-  --tsconfig <file>           Explicit compiler config (live --project input only)
+  --tsconfig <file>           Explicit compiler config inside --project (live --project input only)
   --workspace <root>         Enclosing workspace source boundary (live --project input only)
   --graph-file <path>         Traverse a saved JSON or NDJSON graph without reading project sources
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
@@ -89,8 +93,8 @@ tsograph routes and schema output. Ids that are not graph nodes (typos, or the #
 declaration ids of tsograph schema) are kept in the document as roots without symbol, reported as
 root-not-found (truncated), and listed on stderr; the document is still written and the exit code is 64.
 
-Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error or root-not-found
-(the document is written only for root-not-found).
+Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error (including a
+--tsconfig file outside --project) or root-not-found (the document is written only for root-not-found).
 `;
 
 /** reach 명령 사용법이다. */
@@ -137,7 +141,7 @@ export async function runGraphCommand(arguments_: readonly string[], environment
         : !['json', 'ndjson'].includes(parsed.valueFlags.get('--format') ?? 'json') ? '--format takes json or ndjson.'
           : (parsed.valueFlags.has('--project') ? undefined : '--project <root> is required.');
   if (problem !== undefined) return usageFailure(`tsograph: ${problem}\n${graphUsage}`);
-  const loaded = await loadGraph(parsed!.valueFlags.get('--project')!, withClock(environment, generatedAt ?? undefined), buildOptions(parsed!.valueFlags));
+  const loaded = await loadGraph(parsed!.valueFlags.get('--project')!, withClock(environment, generatedAt ?? undefined), buildOptions(parsed!.valueFlags), graphUsage);
   if ('exitCode' in loaded) return loaded;
   const document = createGraphSnapshot(loaded.graph, loaded.header);
   const format = parsed!.valueFlags.get('--format') === 'ndjson' ? 'ndjson' : 'json';
@@ -209,7 +213,7 @@ async function runTraversalCommand(
   const parsed = parseTraversalArguments(arguments_);
   if (parsed === 'help') return success(usage);
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${usage}`);
-  const loaded = await loadTraversalInput(parsed.input, withClock(environment, parsed.generatedAt), parsed.buildOptions);
+  const loaded = await loadTraversalInput(parsed.input, withClock(environment, parsed.generatedAt), parsed.buildOptions, usage);
   if ('exitCode' in loaded) return loaded;
   const roots = resolveRoots(parsed.rootIds, new Set(loaded.graph.nodes.map((node) => node.id)));
   const rendered = render(createTraversalDocument({
@@ -372,31 +376,26 @@ async function loadTraversalInput(
   input: TraversalArguments['input'],
   environment: GraphEnvironment,
   options: GraphBuildOptions,
+  usage: string,
 ): Promise<LoadedGraph | CommandResult> {
   return input.kind === 'project'
-    ? loadGraph(input.path, environment, options)
+    ? loadGraph(input.path, environment, options, usage)
     : loadSavedGraph(input.path, environment);
 }
 
 /**
- * 프로젝트를 정규화하고 그래프를 만든다.
+ * 프로젝트를 정규화하고 그래프를 만든다. `--tsconfig`는 workspace 검사 뒤, 그래프를 만들기 전에 확인하고 받은 값을
+ * 그대로 생성기에 넘긴다.
  *
  * @param projectArgument `--project` 값
  * @param environment 실행 환경
+ * @param options 명시 설정·workspace
+ * @param usage 명령 사용법(`--tsconfig` 사용 오류에 붙인다)
  * @returns 그래프와 머리, 또는 실패 결과
  */
-async function loadGraph(projectArgument: string, environment: GraphEnvironment, options: GraphBuildOptions = {}): Promise<LoadedGraph | CommandResult> {
-  let project: string;
-  try {
-    project = await environment.fileSystem.realPath(projectArgument);
-    if ((await environment.fileSystem.status(project)).kind !== 'directory') throw new Error('not a directory');
-  } catch {
-    // 없음·권한·파일은 같은 해결 방향이라 한 문구로 알린다. 경로 원문은 싣지 않는다.
-    return inputFailure('--project does not name a readable directory; pass the project root.');
-  }
-  if (!isSafeIdentifier(project)) {
-    return inputFailure('the project path contains characters the exchange format forbids; rename or move the project.');
-  }
+async function loadGraph(projectArgument: string, environment: GraphEnvironment, options: GraphBuildOptions, usage: string): Promise<LoadedGraph | CommandResult> {
+  const project = await resolveProjectRoot(environment.fileSystem, projectArgument, 'pass the project root.');
+  if (typeof project !== 'string') return project;
   let graph: CallGraph;
   let identityRoot = project;
   if (options.workspace !== undefined) {
@@ -408,6 +407,10 @@ async function loadGraph(projectArgument: string, environment: GraphEnvironment,
     const descendant = relative(identityRoot, project);
     if (descendant.split(/[\\/]/u)[0] === '..' || isAbsolute(descendant)) return inputFailure(new GraphProjectInputError('workspace').message);
   }
+  const configFailure = options.tsconfig === undefined
+    ? undefined
+    : await checkCompilerConfig(environment.fileSystem, project, options.tsconfig, usage);
+  if (configFailure !== undefined) return configFailure;
   try {
     graph = await (environment.buildGraph ?? buildCallGraph)(project, environment.fileSystem, options);
   } catch (error) {

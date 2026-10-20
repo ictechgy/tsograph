@@ -8,6 +8,7 @@ import { createNodeFileSystem } from '../cli/file-system.ts';
 import { ambientTypesFreeConfig } from '../cli/testing.test.ts';
 import { isCanonicalTemplate } from '../exchange/route-template-grammar.ts';
 import { buildCallGraph } from '../graph/build-graph.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import {
   extractNavigationRoutes,
   MAX_ROUTER_MODELS,
@@ -211,6 +212,23 @@ function broken(`,
     assert.deepEqual(doc.facts.map((fact) => [fact.urlTemplate, fact.dynamic]), [[null, true]]);
     assert.ok(doc.limitations.some((entry) => entry.includes('mutated route container: 1')));
     assert.ok(doc.limitations.some((entry) => entry.includes('1 production source file(s) had parse errors')));
+  });
+});
+
+test('구문 깊이 상한을 넘는 production 소스는 그 파일만 빼고 등록을 그대로 읽으며 테스트 소스는 세지 않는다', async () => {
+  const deep = `declare const a: boolean;\nexport const o = ${Array.from({ length: 3_000 }, () => 'a').join(' && ')};\n`;
+  await fixture({
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/router.ts': "import { registerScreens } from './router-api';\nimport { Catalog } from './screens';\n"
+      + "registerScreens([{ path: '/catalog', screen: Catalog }]);\n",
+    'src/deep.ts': deep,
+    'src/__tests__/deep.ts': deep,
+  }, (root) => {
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.deepEqual(doc.facts.map((fact) => fact.urlTemplate), ['/catalog']);
+    assert.deepEqual(doc.limitations.filter((entry) => entry.startsWith('navigation-source-coverage:')),
+      [`navigation-source-coverage: 1 production source file(s) ${SYNTAX_DEPTH_CAUSE} and were not scanned`]);
+    assert.ok(!doc.limitations.some((entry) => entry.startsWith('navigation-project-coverage:')), doc.limitations.join('\n'));
   });
 });
 

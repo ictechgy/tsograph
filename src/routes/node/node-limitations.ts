@@ -2,6 +2,7 @@
  * Node 백엔드 추출 전체에 걸린 서버 측 한계(감지·버전·스캔 공백)를 만든다. 라우트 하나하나의 한계는 `node-facts.ts`다.
  */
 
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 import type { FrameworkRoutes } from './flat-route.ts';
 import type { LimitationEntry } from './node-facts.ts';
 import { compilerConfigGaps, MAX_NODE_SOURCE_BYTES } from './node-project.ts';
@@ -47,6 +48,7 @@ export function nodeProjectLimitations(result: NodeRoutesResult): LimitationEntr
     [gaps.oversizedFiles, `route-coverage: ${gaps.oversizedFiles} source file(s) exceed ${MAX_NODE_SOURCE_BYTES} bytes and were not analyzed`],
     [gaps.unreadableFiles, `route-coverage: ${gaps.unreadableFiles} source file(s) could not be read by the compiler and were not analyzed`],
     [analysis.syntaxErrorFiles, `route-coverage: ${analysis.syntaxErrorFiles} source file(s) have syntax errors; route registrations in them may be incomplete`],
+    [analysis.deeplyNestedFiles, `route-coverage: ${analysis.deeplyNestedFiles} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; route registrations in them are missing`],
     [analysis.truncatedCalls, `route-coverage: ${analysis.truncatedCalls} function call(s) were not followed (recursion, depth ${MAX_CALL_DEPTH}, or the frame limit); routes registered inside them may be missing`],
   ];
   entries.push(...candidates.filter(([count]) => count > 0).map(([, text]) => ({ text })));

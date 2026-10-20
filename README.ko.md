@@ -59,17 +59,32 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 건너뛴 프로젝트 소스, 해석하지 못한 `tsconfig.json`/`jsconfig.json`(기본 compiler 옵션을 써서 경로 별칭이 풀리지
-않을 수 있음), 4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로 `route-call-coverage:`에 알린다.
+않을 수 있음), 프로젝트 밖을 가리키거나 건너뛰는 디렉터리·symlink 경로를 이름으로 적은 설정 `include`·`files` 항목
+([`tsograph graph`](#tsograph-graph-tsograph-reach-tsograph-impact)와 같은 걷기 정책이라 compiler 루트 파일로 쓰지 않음),
+4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로 `route-call-coverage:`에 알린다.
+구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(선언·패키지 입력 포함)는 그 파일만 compiler Program에서
+빼고 여기서 센다. 생성·압축 파일 하나가 실행 전체를 실패시키지 않는다([구문 깊이](#tsograph-schema)).
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
+
+설정 변경 분석 예산은 프로젝트 전체가 아니라 지점마다 둔다. 탈출 지점(알 수 없는 호출의 인자·수신자, `new`,
+tagged template)과 색인 지점은 하나마다 20,000단계를 쓰고, 이미 본 상태는 지점 사이에 함께 쓴다. 단계 전체는 분석
+소스 문자당 8단계, wrapper 호출 재검사는 200회차까지라 무관한 파일 수가 결과를 바꾸지 않는다. 예산을 넘은 지점은
+무엇을 바꿀 수 있었는지 좁히지 못하므로 `route-call-coverage:`로 변경 분석 미완을 알리고 axios·ky 클라이언트와
+요청 설정을 모두 dynamic으로 둔다.
 
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
 HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로
 매칭한다. 미상 URL 선행 값과 `{{NAME}}` 빌드 토큰에서 복원한 경로는 dynamic으로 유지한다.
-[명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
+변경 분석이 미완이면 모델 호출은 사라지지 않고 모델의 동사·`service`와 `channel: null`·`pathAnchor: "base"`의
+dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
+
+`--client-model`과 `--tsconfig`(client Program의 compiler 설정)는 realpath가 `--project` 안인 일반 파일만 받는다. 상대 경로는
+`--project` 기준이고 절대 경로도 안이면 받는다. 직접이든 symlink로든 `--project` 밖이면 `openapi`·`navigation`·
+`graph`/`reach`/`impact`와 같은 사용법 오류(`64`)이고, 없거나 읽지 못하는 파일·1 MiB를 넘는 설정은 `2`다.
 
 JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
-부분 문서 없이 실패한다. 분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 출력 초과가 아니라
+부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
 ## 요구 사항
@@ -204,7 +219,9 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
   넘는 출력(사실 100,000개 초과, 16 Mi 문자 초과), `64` 사용법 오류. route 파일 하나를 읽지 못하는 것은
   실패가 아니라 limitation이다. 여러 경로에 붙인 Node 라우터는 같은 사실로 합쳐지거나 사실을 내지 않는(조건부)
   등록까지 세어 200,000개까지만 펼친다. 넘으면 사실 수가 아니라 펼친 등록 수를 원인으로 든 문구로 `2`다.
-  분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 역시 `2`이며,
+  구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만 뺀다. Next.js route 파일은 건너뛰고 Node 백엔드
+  소스는 Program에서 빼며 둘 다 `route-coverage:`로 센다. 그런 `next.config.*`는 읽지 못한 설정
+  (`unresolved-route-prefix:`)으로 본다. 그래도 분석이 호출 스택을 넘기면 `2`이며,
   `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
   부분 문서는 내지 않는다.
 
@@ -273,7 +290,7 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
 
 | 상황 | 결과 |
 |---|---|
-| 설정이 함수·비객체를 내보내거나, 내보내기가 없거나, 구문 오류 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| 설정이 함수·비객체를 내보내거나, 내보내기가 없거나, 구문 오류이거나, 구문 중첩이 400단을 넘음(또는 파싱이 호출 스택을 넘김) | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | `basePath`가 문자열 리터럴이 아니거나 Next.js가 거부하는 값 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | 설정을 감싼 호출(`withX(config)`) | 안쪽 리터럴 값을 쓰고 `root`, 그리고 `unresolved-route-prefix:`(감싼 함수가 값을 바꾸거나 라우트를 더할 수 있다) |
 | `pageExtensions`가 리터럴 문자열 배열이 아님 | 기본 확장자 + `route-coverage:` |
@@ -285,7 +302,7 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
 | `next.config.*`가 symlink | 읽지 않고 `pathAnchor: "base"` + `unresolved-route-prefix:`. 끊어진 symlink는 Next의 `existsSync`처럼 없는 파일로 본다 |
 | `package.json`이 symlink | 읽지 않고 `route-framework-version-unknown:` |
 | `public/`이나 proxy/middleware 파일이 symlink | 읽지 않되 `framework-provided-routes:` 근거로는 남긴다 |
-| Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
+| Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 route 파일(건너뜀), 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
 | `package.json`에 `next`가 없거나 범위가 주 버전 16에 한정되지 않음 | `route-framework-version-unknown:` |
 | `app/`·`pages/` 디렉터리가 없음 | 사실 0건 + `route-coverage:` |
 | 핸들러를 CommonJS(`module.exports = …`)로 내보냄 | `symbol.usr` 없는 사실 + `missing-route-usrs:` |
@@ -412,12 +429,25 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
   상대 경로다. 소스를 모을 때 심볼릭 링크는 따라가지 않는다. 모듈 해석은 실제 경로가 프로젝트 안에
   머무는 링크로만 설정과 `package.json`을 읽는다.
 - 종료 코드: `0` 성공(사실 0건도 성공이며 완전성의 증거가 아니다), `2` 읽을 수 없는 프로젝트·
-  사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다. 분석이 호출 스택을
-  넘기면(대개 깊이 중첩된 생성·압축 소스) 역시 `2`이며, `schema`·`routes`·`graph`/`reach`/`impact`·
-  `navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고 부분 문서는 내지 않는다.
+  사실 100,000개 초과·출력 16 Mi 문자 초과, `64` 사용법 오류. `1`은 예약이다. 깊이 중첩된 소스는 실행 전체를
+  실패시키지 않고 그 파일만 빠진다(아래 구문 깊이 항목). 그래도 분석이 호출 스택을 넘기면 `2`이며,
+  `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
+  부분 문서는 내지 않는다.
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
   generator 출력 디렉터리(프로젝트 루트나 그 조상으로 풀리는 output은 이 제외에도 클라이언트 출처 판정에도 쓰지 않고 `unresolved-generator-outputs:`로 알린다), 4 MiB 넘는 파일(개수로 센다). 모을 파일이나 내려갈 디렉터리의 이름에 교환 형식이 금지하는 문자(C0·C1 제어 문자, DEL, U+2028/U+2029, 짝 없는 서러게이트)가 있으면 건너뛰고 `unsafe-names:`로 센다(`graph`도 같은 접두사를 쓰고, 이 걷기를 함께 쓰는 Node 백엔드·client·navigation 스캔은 `route-coverage:`·`route-call-coverage:`·`navigation-project-coverage:`로 알린다). 경로에 그런 문자가 든 Prisma 스키마·TypedSQL 사실도 내지 않고 `unsafe-names:`로 센다. 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
   선언을 찾을 때만 읽는다.
+- 메모리: 소스 파일 하나의 스캔이 끝나면 그 파일의 구문 트리를 바로 놓는다. 파일 사이 단계는 노드가 없는 파일별
+  요약(import·export 표, 패키지 이름)과 소스 텍스트만 들고 있다가, 뒤 단계가 트리를 다시 필요로 하면 텍스트에서 다시
+  파싱한다. 그래서 최대 메모리는 모든 구문 트리의 합이 아니라 소스 텍스트 크기를 따라 는다. 예외는 ORM·SQL 드라이버
+  단계([Node ORM과 SQL 드라이버](#node-orm과-sql-드라이버))다. 지원 패키지를 가져오거나 `D1Database`를 언급하는 소스가
+  하나라도 있으면 그 이름 해석기가 모든 소스로 TypeScript Program 하나를 만든다. 그래서 그 단계가 끝날 때까지 모든
+  트리를 붙잡고, 그 뒤에야 파일마다 놓는다. 그런 대형 저장소는 여전히 V8 기본 힙을 넘길 수 있고, 그때 프로세스는 종료
+  코드 계약 밖에서 중단된다. 더 좁은 `--project`를 주거나 `NODE_OPTIONS=--max-old-space-size=<MiB>`로 힙을 늘린다.
+- 구문 깊이: 파싱 직후 소스마다 구문 트리 깊이를 재귀 없이 잰다. 400단보다 깊게 중첩되거나 파싱이 호출 스택을 넘긴
+  소스(생성·압축 코드의 긴 `||`·메서드 사슬, 괄호 수백 겹 등)는 뒤 단계에서 모두 빼고 경로와 함께 `parse-errors:`에
+  싣는다. 나머지 소스는 그대로 분석하고, 뺀 파일을 가리키는 import는 추적하지 않는다. D1 바인딩을 읽는 선언 파일도
+  같은 규칙이고, 그런 `prisma.config`는 `unresolved-prisma-config:`로 센다. 상한은 TypeScript 바인더가 넘치기 시작한
+  깊이(`||` 사슬 640단, Node 22 실측)보다 넉넉히 낮고, 공개 npm 소스의 최대 깊이는 220 안팎이다.
 
 ### 사실
 
@@ -550,6 +580,24 @@ SQL은 가족 공유 어휘 추출기(dartograph `sql_relations.dart`·cartograp
 - 그 밖의 문자열 리터럴은 SQL 동사와 관계 키워드가 대문자일 때만 읽는다(strict). 소문자 SQL처럼 보이는
   리터럴은 `skipped-sql-literals:`로 센다.
 
+추출기는 다음 세 경우의 이름을 relation-use로 내지 않는다. persistence 생산자 계열이 공통 사례(같은 SQL 문자열과
+기대 관계)로 고정한 규칙이다.
+
+- 함수 인자 안의 `FROM`: 그 `FROM`을 감싼 가장 안쪽 `(`가 함수 이름(SQL 절 키워드가 아닌 비인용 이름) 바로 뒤에
+  있고 그 괄호가 `SELECT`·`WITH`·`VALUES`로 시작하지 않으면 관계가 아니다. 예: `EXTRACT(YEAR FROM created_at)`,
+  `TRIM(BOTH ' ' FROM name)`, `SUBSTRING(name FROM 2 FOR 3)`. 하위 질의(`FROM (SELECT …)`·`IN (SELECT …)`)와 CTE
+  본문(`AS MATERIALIZED (DELETE FROM t …)`)의 `FROM`은 그대로 관계다. 다른 키워드 뒤 괄호 속 문장
+  (`COPY (DELETE FROM t …)` 등)은 함수 인자로 읽으므로 그 `FROM`은 관계를 내지 않는다.
+- 같은 문장(`;`로 나뉜 구간)이 정의한 CTE 이름을 가리키는 한정자 없는 피연산자
+  (`WITH recent AS (…) SELECT * FROM recent`). 비인용 이름끼리는 대소문자를 무시하고 인용 이름은 그대로 비교한다.
+  `public.recent`는 CTE가 아니다. CTE 본문이 읽는 관계는 그대로 내지만, 테이블과 같은 이름의 CTE는 그 문장의
+  테이블 사용도 가린다.
+- `IS [NOT] DISTINCT FROM`의 `FROM`.
+
+이 셋은 미해석 피연산자로도 세지 않으므로 그 자리의 바인드 플레이스홀더(`$queryRaw`의
+`IS DISTINCT FROM ${value}`)는 dynamic 사실을 더하지 않는다. 이 규칙이 알아보는 단어는 strict 모드에서도
+대소문자를 가리지 않는다.
+
 ### Node ORM과 SQL 드라이버
 
 이름 규칙·출처·오라클은 [docs/PERSISTENCE.md](docs/PERSISTENCE.md)에 있다. 요약:
@@ -632,13 +680,24 @@ tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <
 
 TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
 없으면 `jsconfig.json`, 둘 다 없으면 번들러식 기본값 위의 `Program`·`TypeChecker`, `allowJs`는 항상 켠다).
-분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다.
+분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다. 읽을 수 있는 설정이 없으면 자동 타입 루트
+(`node_modules/@types`)를 설정이 루트에 있을 때처럼 프로젝트 루트와 그 상위에서 찾는다. 그래서 결과가 실행 위치에
+따라 달라지지 않는다. Node 백엔드·client·navigation의 Program도 같다.
 
-`--tsconfig`는 `--project` 기준 JSON compiler 설정을 명시하고 상대 옵션은 그 파일의 디렉터리에서 해석한다.
-명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는
+`--tsconfig`는 `--project` 안의 JSON compiler 설정 파일을 명시한다(상대 경로는 `--project` 기준, 절대 경로도 realpath가
+안이면 받는다). 상대 옵션은 받은 경로의 디렉터리에서 해석한다. 명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다.
+직접이든 symlink로든 `--project` 밖 설정은 분석 전에 사용법 오류(`64`)다(안의 설정이 밖의 공용 설정을 `extends`하는 것은
+된다). 없거나 읽지 못하는 설정·1 MiB를 넘는 설정은 `2`다. `routes --role client`·`navigation`의 `--tsconfig`도 같다.
+`--workspace`는 프로젝트를 포함하는
 소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
 적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
-symlink는 제외한다. 루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
+symlink는 제외하며, `tsconfig.json`/`jsconfig.json`의 `include`·`files`가 고르는 루트 파일에도 같은 걷기 정책을 적용한다
+(`--project` 안, `--workspace`를 주면 그 안; `node_modules`·`dist`·`build`·`out`·`coverage`·점·Prisma 생성 출력 디렉터리 제외;
+symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열거). 시작 디렉터리가 그 루트 밖인 include 패턴과 루트 밖
+`files` 항목은 열거하지도 루트 파일로 쓰지도 않고 `graph-config:`로 센다. 이름으로 적은 `files` 항목이나 와일드카드 없는
+include 경로가 그 제외 디렉터리 안이거나 symlink를 거치면 역시 쓰지 않고 같은 곳에 센다. 그 디렉터리에서 글롭이 고를
+파일은 걷기처럼 세지 않는다. 두 곳의 파일 모두 프로젝트 소스가 import하거나 참조하면 읽는다.
+루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
 실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
@@ -670,9 +729,10 @@ String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증�
   limitation과 표준 오류는 두 종류를 구별한다: `#model:`·`#typedsql:` [선언 id](#사실)는 어떤 순회도 닿지 않는 것으로
   이미 아는 비노드 id이고(순회 root에서 빼면 된다), 그 밖은 모르는 id다. 형제 생산자처럼 strict 옵션은 따로 없다.
 - 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음(문서 없음), `64` 사용법 오류(표준 출력 비어
-  있음) 또는 root-not-found(문서 출력). 분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 역시 `2`이며,
-  `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
-  부분 문서는 내지 않는다.
+  있음) 또는 root-not-found(문서 출력). 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만
+  compiler Program에서 뺀다. 노드가 없고 `parse-errors:`에 실리며 분석 완전성을 인정하지 않는다. 그래도 분석이 호출
+  스택을 넘기면 `2`이며, `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나
+  나누라는 같은 문구를 쓰고 부분 문서는 내지 않는다.
 
 ### 노드와 간선
 
@@ -927,10 +987,13 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
   대상 타입과 겹칠 수 없을 때만 제외한다. 구조적으로 서로 대입할 수 없는 타입도 교차 객체로 겹칠 수 있으므로 계속 모름이다.
   `any`·`unknown`·generic/instantiable 대상 타입에는 이 제외 규칙을 쓰지 않는다. 메서드를 바꾸는 같은 이름 속성 쓰기(몽키 패치)가 있으면 그 메서드는
   bound하지 않는다.
-- **테스트 소스는 별개 프로그램이다.** 테스트 소스(`*.test.*`·`*.spec.*`·`__tests__/`·`__mocks__/` — `routes`와
-  같은 규칙)가 아닌 파일의 호출은 테스트 소스를 뺀 프로그램으로 흐름·후보를 구한다. 그래서 단위 테스트가 주입한
-  목(mock)이 운영 간선을 막지 않는다. 테스트 소스 안의 호출은 프로젝트 전체로 구한다. 테스트가 아닌 파일이 테스트
-  소스를 import하면 모든 호출을 전체로 구한다.
+- **테스트 소스는 별개 프로그램이다.** 테스트 소스는 `routes`와 같은 규칙이다: `*.test.*`·`*.spec.*`·`__tests__/`·
+  `__mocks__/`이고, Node 백엔드 프레임워크를 감지하면(서버 라우트 발견과 같은 감지) `test/`·`tests/`·`e2e/` 아래 파일과
+  `*.e2e-spec.*`·`*.e2e.*`도 테스트다. 다만 Next.js 라우터 디렉터리(`app`·`pages` 또는 `src/app`·`src/pages`) 안은
+  폴더 이름이 URL 세그먼트라 이 추가 규칙을 쓰지 않는다(`app/api/test/route.ts`는 운영 소스). 테스트 소스가 아닌
+  파일의 호출은 테스트 소스를 뺀 프로그램으로 흐름·후보를 구한다. 그래서 테스트가 주입한 목(mock)이 운영 간선을
+  막지도 않고 테스트 구현을 운영 간선에 더하지도 않는다. 테스트 소스 안의 호출은 프로젝트 전체로 구한다. 테스트가
+  아닌 파일이 테스트 소스를 import하면 모든 호출을 전체로 구한다.
 - 독립적인 실행 효과 목록은 전체·운영 분석의 기대 소스와 파일 색인, 소스 revision, runtime 모듈 간선,
   실행 연산을 대조한다. 열거·참조 및 별칭 폐쇄·초기화 범위·ambient 안전성은 별도 판정이며, 열거가
   완료되어도 모르는 효과가 남을 수 있다. 참조·별칭 폐쇄는 실행 위치의 근거를 대조한다.
@@ -1108,7 +1171,9 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
+스캔 루트 밖이거나, 건너뛰는 디렉터리·symlink 경로를 이름으로 적었거나, 열거 상한 뒤라 쓰지 않은 설정 루트도 `graph-config:`로 알리고 분석 완전성을 인정하지 않는다.
 걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, TypeScript가 경로 구분자로 읽는 백슬래시가 든 이름)는 노드가 되지 않으며 `unreadable-sources:`로 세고 역시 분석 완전성을 인정하지 않는다.
+구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스·선언·패키지 입력도 같은 방식으로 Program에서 빠지고 `parse-errors:`로 알린다(소스는 경로와 함께). 역시 분석 완전성을 인정하지 않는다.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고

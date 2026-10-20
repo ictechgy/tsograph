@@ -20,6 +20,7 @@ import { isFunctionValued, skipWrappers } from '../graph/node-collector.ts';
 import { scopeIdOf } from '../graph/symbol-ids.ts';
 import { MAX_TEMPLATE_LENGTH } from '../openapi/path-template.ts';
 import { canonicalizeLiteral } from '../openapi/percent-encoding.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import {
   compilerConfigGaps,
   hasParseErrors,
@@ -211,6 +212,7 @@ export function extractNavigationRoutes(
     tally,
     models.models.length - matchedModels.size,
     parseErrors,
+    project.deeplyNestedFiles.filter((path) => !isNodeTestPath(path)).length,
   );
   return {
     format: 'navigation-facts',
@@ -751,6 +753,7 @@ function buildLimitations(
   tally: ExtractionTally,
   unmatchedModels: number,
   parseErrors: number,
+  deeplyNested: number,
 ): string[] {
   const limitations: string[] = [];
   const dynamicCounts = [
@@ -782,6 +785,9 @@ function buildLimitations(
     limitations.push(
       `navigation-source-coverage: ${parseErrors} production source file(s) had parse errors and were not scanned`,
     );
+  }
+  if (deeplyNested > 0) {
+    limitations.push(`navigation-source-coverage: ${deeplyNested} production source file(s) ${SYNTAX_DEPTH_CAUSE} and were not scanned`);
   }
   limitations.push(...sourceDiscoveryLimitations(project.gaps));
   limitations.push(...compilerConfigGaps(project.configStatus, 'screen registrations')

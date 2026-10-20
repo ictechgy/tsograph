@@ -6,6 +6,13 @@
 
 아직 npm에 발행하지 않은 릴리스 후보이다.
 
+### Breaking
+
+- graph·reach·impact·routes client: realpath가 `--project` 밖인 `--tsconfig`(`../shared/tsconfig.json`, 밖의
+  절대 경로, 밖을 가리키는 symlink)는 그래프·compiler Program을 만들기 전에 사용 오류(64)로 끝난다. 예전에는
+  검사 없이 그 설정을 그대로 썼다. 밖의 공용 설정은 프로젝트 안 설정의 `extends`로 쓴다(안 설정이 밖 설정을
+  `extends`하는 것은 그대로 된다). 상대 경로는 지금처럼 `--project` 기준이고, 절대 경로는 realpath가 안이면 받는다.
+
 ### Added
 
 - 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
@@ -40,6 +47,80 @@
 
 - routes server·graph: path-to-regexp 8 경로 컴파일이 파라미터나 끝이 아닌 `/`가 많은 긴 경로에서 길이의
   제곱으로 느려지지 않는다. 출력은 같다.
+
+- schema: SQL 텍스트 관계 추출이 같은 `;` 문장 안의 CTE 이름(`WITH recent AS (…) SELECT * FROM recent`),
+  함수 인자 안의 FROM(`EXTRACT(YEAR FROM created_at)`·`TRIM(BOTH ' ' FROM name)`·`SUBSTRING(name FROM 2 FOR 3)`),
+  `IS [NOT] DISTINCT FROM`의 피연산자를 relation-use로 내지 않는다. 계열 생산자와 같은 공통 사례 14개(같은 SQL
+  문자열과 기대 관계)로 고정했다. 그 자리의 바인드 플레이스홀더(`$queryRaw`의 `IS DISTINCT FROM ${value}`)도
+  미해석으로 세지 않아 dynamic 사실과 `dynamic-relation-names:` 계수를 더하지 않는다. 그런 SQL이 거짓 관계
+  (`recent`·`created_at`·`$1` 등)를 내 isthmus가 `relation-use-without-decl` error를 내던 문제다. 같은 규칙
+  때문에 절 키워드가 아닌 단어 뒤 괄호 속 문장(`COPY (DELETE FROM t …)`)의 FROM과, 테이블과 같은 이름의 CTE를
+  정의한 문장 안의 그 테이블 사용도 이제 관계로 나오지 않는다(README `SQL text`).
+
+- routes client: 설정 변경 분석 예산(20,000단계)을 프로젝트 전체가 함께 쓰지 않고 질의(알 수 없는 호출 지점의
+  인자·수신자, `new`, tagged template, 색인 지점)마다 따로 둔다. 질의 사이에는 방문 메모를 함께 쓰고, 단계마다
+  전체 작업을 분석 소스 문자당 8단계로 묶으며, wrapper 재검사도 프로젝트 총횟수 20,000 대신 호출 지점당
+  200회차로 센다. 파일이 수백 개를 넘는 프로젝트에서 HTTP와 무관한 파일 수만으로 axios·ky·init을 준 fetch 호출이
+  모두 `channel: null`이 되고 wrapper 경유 호출이 문서에서 사라지던 문제다(합성 1,000~10,000파일: 정적 사실
+  0개 → 파일당 4개). 고정 예산을 넘는 질의 하나는 지금처럼 변경 분석 전체를 미완(`route-call-coverage:`)으로 두고
+  모든 axios·ky 클라이언트와 요청 설정을 dynamic으로 낸다.
+
+- routes client: 변경 분석이 미완이어도 `--client-model` typed 호출을 버리지 않고 모델의 동사·`service`와
+  `channel: null`·`pathAnchor: "base"`의 dynamic 사실로 남긴다. 예전에는 그 호출이 문서에서 사라졌다. 변경을
+  확인한 수신자는 지금처럼 승격하지 않는다.
+
+- schema: 파일 하나의 스캔을 마치면 그 파일의 구문 트리를 놓고, 파일 사이 단계에는 노드 없는 요약과 소스
+  텍스트만 남긴다(트리가 다시 필요한 파일만 다시 파싱한다). 출력은 같다. ORM·SQL 드라이버 이름 해석 단계가 돌지
+  않는 합성 프로젝트에서 최대 RSS가 5,000파일 1,020 MiB → 537 MiB, 20,000파일 3,496 MiB → 1,026 MiB로 줄고,
+  힙 768 MiB에서 OOM(134)으로 끝나던 5,000·10,000파일 프로젝트가 끝난다. 지원 ORM·SQL 드라이버 패키지를
+  import하거나 `D1Database`를 언급하는 소스가 있으면 그 단계의 Program이 모든 트리를 담으므로 그 단계의 최대
+  메모리는 그대로다(README `Memory` 항목).
+
+- schema·routes(server·client)·navigation·graph(reach·impact 포함): 구문 중첩이 400단을 넘거나 파싱이 호출
+  스택을 넘긴 소스 파일은 그 파일만 분석에서 빼고 나머지를 분석한다(종료 0). 뺀 파일은 schema·graph
+  `parse-errors:`, server `route-coverage:`, client `route-call-coverage:`, navigation
+  `navigation-source-coverage:`로 알린다. Next.js route 파일은 건너뛰어 `route-coverage:`로 세고, 그런
+  `next.config.*`·`prisma.config`는 읽지 못한 설정(`unresolved-route-prefix:`·`unresolved-prisma-config:`)이 된다.
+  compiler Program을 쓰는 명령은 선언·패키지 입력에도 같은 상한을 두며, graph는 그런 입력이 있으면 coverage
+  완전성을 주장하지 않는다. 예전에는 그런 파일 하나(괄호 수백 겹의 약 2 KB 파일, 640항 `||` 사슬 등)로 문서
+  전체가 코드 2로 끝났다. 상한은 실측에서 TypeScript 바인더가 넘친 깊이(`||` 사슬 640단, Node 22)보다 넉넉히
+  낮고 공개 npm 소스의 최대 깊이(약 220)보다 높다. 모양에 따라 예전에는 분석되던 깊이 401~1,000의 파일도 이제
+  빠진다. 그래도 분석이 호출 스택을 넘기면 지금처럼 공용 문구로 코드 2다.
+
+- graph·reach·impact·routes(Node 백엔드·client)·navigation: tsconfig/jsconfig의 `include`·`files`가 고르는
+  compiler 루트 파일을 소스 걷기와 같은 정책으로 거른다. 프로젝트 안(graph는 `--workspace`를 주면 workspace
+  안)만 쓰고, `node_modules`·`dist`·`build`·`out`·`coverage`·점 디렉터리 아래(graph는 Prisma 생성 출력 아래도)와
+  symlink 경유는 빼며, 디렉터리 항목은 500,000개까지만 열거한다. 시작 디렉터리가 그 밖인 include 패턴과 밖의
+  `files` 항목은 열거하지도 루트 파일로 쓰지도 않는다. 이름으로 적은 `files` 항목과 와일드카드 없는 include 경로가
+  그 제외 디렉터리 안이거나 symlink를 거치는 경우도 쓰지 않는다(그 디렉터리에서 글롭이 고를 파일은 걷기처럼 세지
+  않는다). 그 수와 열거 상한 도달은 `graph-config:`(server `route-coverage:`, client `route-call-coverage:`,
+  navigation `navigation-project-coverage:`)로 알리며, graph는 그때 coverage 완전성을 주장하지 않는다. 그런 파일도
+  프로젝트 소스가 import하거나 참조하면 지금처럼 읽는다. 로컬 빌드 산출물이 Program에 들어가 수 배 느려지거나(합성
+  build/ 3×3 MB: 1.34초 → 0.47초), 4 MiB를 넘는 번들 하나가 `oversized-compiler-inputs:`로 bound 디스패치를
+  끄거나, 상위 글롭(`../../**/*`)이 프로젝트 밖 트리를 열거·로드하던 문제다.
+
+- graph·reach·impact·routes(Node 백엔드·client)·navigation: tsconfig/jsconfig가 없거나 읽지 못해 기본 옵션을 쓸
+  때 자동 타입 루트(`node_modules/@types`)를 실행 위치가 아니라 프로젝트 루트와 그 상위에서 찾는다(설정이 루트에
+  있을 때와 같다). 실행 위치에 따라 타입 해석·외부 호출 판정이 달라지고 프로젝트 자신의 `@types`가 쓰이지 않던
+  문제다.
+
+- graph·reach·impact: Node 백엔드 프레임워크(Hono·Express·Fastify·Koa·NestJS)를 감지한 프로젝트는 routes와 같은
+  테스트 경로 규칙으로 production·test 프로그램을 나눈다. `*.test.*`·`*.spec.*`·`__tests__/`·`__mocks__/`에 더해
+  `test/`·`tests/`·`e2e/` 아래와 `*.e2e-spec.*`·`*.e2e.*`도 테스트 소스다. Next.js 라우터 디렉터리(`app`·`pages`
+  또는 `src/app`·`src/pages`) 안은 지금처럼 Next 규칙이라 `app/api/test/route.ts`는 운영 소스로 남는다. `test/`
+  아래 목이 운영 bound 간선을 막아 reach가 비고 `unresolved-calls:`만 남거나, 테스트 클래스가 운영 reach에
+  bound로 섞이던 문제다. 프레임워크를 감지하지 못한 프로젝트(Next 전용·라이브러리)는 그대로다.
+
+- navigation: `--project` 밖(직접이든 symlink로든)의 `--router-model`·`--tsconfig`는 입력 실패(2) 대신 사용
+  오류(64)로 끝나고(openapi 스펙·routes client 모델과 같다), realpath가 `--project` 안이면 절대 경로
+  `--tsconfig`도 받는다(예전 2). openapi·routes·schema·navigation·graph가 프로젝트·입력 파일 검증을 한곳에서
+  하며, 밖 입력 파일 문구는 `tsograph: <입력> is outside --project; <해결 방향>`에 명령 사용법을 붙인 같은
+  형식이다(routes client 모델 문구도 이 형식으로 바뀌고 코드 64는 그대로다). graph·routes client의 없는·읽지
+  못하는·1 MiB를 넘는 `--tsconfig`는 지금처럼 2이며 navigation과 같은 문구를 낸다. navigation이 symlink로 고른
+  `--tsconfig`는 이제 받은 경로의 디렉터리를 상대 옵션(`baseUrl`·`paths`·`include`·`extends`)의 기준으로 쓴다
+  (`tsc -p`·graph·routes client와 같다). 예전에는 링크 대상의 디렉터리가 기준이었다. 그래서 대상 디렉터리 기준으로
+  상대 옵션을 적은 링크 설정은 별칭·include 해석과 사실이 달라질 수 있고, limitation에 실리는 설정 이름도 링크
+  이름이 된다. 대상 디렉터리 기준이 필요하면 실제 설정 경로를 `--tsconfig`로 준다. 링크가 아닌 설정은 그대로다.
 
 ### Fixed
 

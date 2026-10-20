@@ -29,6 +29,7 @@ import {
   type ScanGaps,
   walkFiles,
 } from './project-scan.ts';
+import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { parseSource, scriptKindOf, type SourcePosition } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
 import { exportBindingId } from '../graph/symbol-ids.ts';
@@ -64,6 +65,8 @@ export interface RouteGaps extends ScanGaps {
   unreadableFiles: number;
   unparsedFiles: number;
   syntaxErrorFiles: number;
+  /** 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 건너뛴 route 파일 수다. */
+  deeplyNestedFiles: number;
   unresolvedExportFiles: number;
   pagesWithoutDefaultExport: number;
 }
@@ -155,6 +158,7 @@ function createRouteGaps(): RouteGaps {
     unreadableFiles: 0,
     unparsedFiles: 0,
     syntaxErrorFiles: 0,
+    deeplyNestedFiles: 0,
     unresolvedExportFiles: 0,
     pagesWithoutDefaultExport: 0,
   };
@@ -290,6 +294,10 @@ async function readModuleExports(context: RouteFileContext, file: string): Promi
     return undefined;
   }
   const parsed = parseSource(file, read.text, scriptKind);
+  if (parsed === TOO_DEEP) {
+    context.gaps.deeplyNestedFiles += 1;
+    return undefined;
+  }
   if (parsed.hasSyntaxErrors) context.gaps.syntaxErrorFiles += 1;
   return { module: collectModuleExports(parsed.sourceFile), positionOf: parsed.positionOf };
 }
@@ -314,6 +322,7 @@ function pageKeyOf(name: string, pageExtensions: readonly string[]): string | un
  * 테스트 소스 경로인지 판정한다: `*.test.*`·`*.spec.*` 파일, `__tests__`·`__mocks__` 디렉터리.
  *
  * `test`·`tests` 폴더는 Next에서 실제 URL 세그먼트일 수 있어(`app/api/test/route.ts`) 쓰지 않는다.
+ * 프로젝트의 아무 파일이나 판정할 때(graph)는 Node 백엔드 감지를 함께 보는 `isProjectTestPath`(project-routes.ts)를 쓴다.
  *
  * @param path 프로젝트 기준 경로
  * @returns 테스트 소스면 true

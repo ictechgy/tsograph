@@ -14,6 +14,7 @@ import type { ModuleResolver } from '../module-resolver.ts';
 import { packageName } from '../db-packages.ts';
 import type { RelationFactSink } from '../relation-facts.ts';
 import type { SourceModule } from '../source-module.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from '../syntax-depth.ts';
 import { collectD1Bindings, D1_TYPE_NAME, driverRules } from './driver-rules.ts';
 import { DriverUsage } from './driver-usage.ts';
 import { DrizzleCatalog } from './drizzle-catalog.ts';
@@ -41,7 +42,7 @@ const DRIZZLE_PACKAGE = 'drizzle-orm';
 const TYPEORM_PACKAGES: readonly string[] = ['typeorm', '@nestjs/typeorm'];
 
 /** 프로젝트 모듈 지정자를 한 번 훑은 결과다. */
-interface ProjectPackages {
+export interface ProjectPackages {
   /** ORM 표면과 관련 있는 모듈(지원 패키지 import·require·동적 import 또는 `D1Database` 참조)이 있는지 여부다. */
   readonly hasOrmModule: boolean;
   /**
@@ -49,6 +50,14 @@ interface ProjectPackages {
    * 지정자 패키지 이름이다. 이름 해석기는 이 자리의 지정자로만 외부 패키지 값을 만든다.
    */
   readonly names: ReadonlySet<string>;
+}
+
+/** 모듈 하나의 ORM 게이트 재료다. 파싱 직후 트리 없이 남기려고 뽑는다. */
+export interface OrmModulePackages {
+  /** 모듈이 ORM 표면과 관련 있는지 여부다(`ProjectPackages.hasOrmModule`의 재료). */
+  readonly isOrmModule: boolean;
+  /** 외부 패키지 값이 생길 수 있는 모든 자리의 지정자 패키지 이름이다(`ProjectPackages.names`의 재료). */
+  readonly names: readonly string[];
 }
 
 /** 모듈 하나의 지정자다. */
@@ -61,7 +70,13 @@ interface ModuleSpecifiers {
 
 /** ORM 단계 입력이다. */
 export interface OrmExtractionInput {
-  readonly modules: readonly SourceModule[];
+  /**
+   * 모든 소스 모듈(경로 순)을 돌려주는 함수다. 게이트가 열렸을 때만 부른다 — 이름 해석기가 모든 모듈로 Program을 만들므로
+   * 그때만 모든 트리를 함께 붙잡는다.
+   */
+  readonly modules: () => readonly SourceModule[];
+  /** 모든 모듈의 게이트 재료를 모은 결과다(`projectPackages`). */
+  readonly packages: ProjectPackages;
   readonly resolver: ModuleResolver;
   readonly sink: RelationFactSink;
   /** 선언 파일(`.d.ts`) 텍스트를 돌려주는 함수다(D1 바인딩 선언 수집용). */
@@ -93,52 +108,84 @@ interface UsageScanners {
 export function extractOrmFacts(input: OrmExtractionInput): OrmExtraction {
   const counts = emptyOrmCounts();
   const consumed = new Set<ts.Node>();
-  const packages = projectPackages(input.modules);
+  const { packages } = input;
   if (!packages.hasOrmModule) return { counts, consumed };
-  const d1Bindings = collectBindings(input);
-  const evaluator = new OrmEvaluator(new OrmBinder(input.modules, input.resolver));
+  const modules = input.modules();
+  const d1Bindings = collectBindings(modules, input.declarationFiles, counts);
+  const evaluator = new OrmEvaluator(new OrmBinder(modules, input.resolver));
   const drizzle = new DrizzleCatalog(evaluator, counts);
   const typeorm = new TypeormCatalog(evaluator, counts);
   const sequelize = new SequelizeCatalog(evaluator, counts);
   for (const rules of [drizzle.rules(), typeorm.rules(), sequelize.rules(), driverRules(d1Bindings)]) evaluator.addRules(rules);
   // Drizzle·TypeORM 선언은 그 패키지 지정자에서 온 값으로만 생긴다. 지정자가 없으면 모든 호출·클래스를 평가해도
   // 결과가 늘 비므로 건너뛴다(drizzle.config casing 관찰과 TypeORM 기본 이름 옵션 확정은 그대로 한다).
-  drizzle.discover(input.modules, packages.names.has(DRIZZLE_PACKAGE));
+  drizzle.discover(modules, packages.names.has(DRIZZLE_PACKAGE));
   evaluator.resetCache();
-  typeorm.discover(TYPEORM_PACKAGES.some((name) => packages.names.has(name)) ? input.modules : []);
+  typeorm.discover(TYPEORM_PACKAGES.some((name) => packages.names.has(name)) ? modules : []);
   evaluator.resetCache();
-  sequelize.discover(input.modules);
+  sequelize.discover(modules);
   evaluator.resetCache();
-  const context: OrmContext = { evaluator, emitter: new OrmFactEmitter(input.sink, counts, consumed, input.modules) };
+  const context: OrmContext = { evaluator, emitter: new OrmFactEmitter(input.sink, counts, consumed, modules) };
   emitDeclarations(context, drizzle, typeorm, sequelize);
   const scanners: UsageScanners = {
     drizzle: new DrizzleUsage(context, drizzle), typeorm: new TypeormUsage(context, typeorm),
     sequelize: new SequelizeUsage(context, sequelize), knex: new KnexUsage(context), driver: new DriverUsage(context),
   };
-  for (const module of input.modules) scanModule(module, scanners);
+  for (const module of modules) scanModule(module, scanners);
   counts.evaluationTruncated = evaluator.evaluationTruncated;
   return { counts, consumed };
 }
 
 /**
- * 모든 모듈의 지정자를 한 번 훑어 ORM 단계 게이트와 ORM별 선언 탐색 게이트의 재료를 모은다.
+ * 모듈 하나의 지정자를 훑어 ORM 단계 게이트와 ORM별 선언 탐색 게이트의 재료를 뽑는다.
  *
- * @param modules 소스 모듈
+ * @param module 소스 모듈
+ * @returns 게이트 재료
+ */
+export function ormModulePackages(module: SourceModule): OrmModulePackages {
+  const specifiers = moduleSpecifiers(module);
+  const names: string[] = [];
+  for (const specifier of specifiers.all) {
+    const name = packageName(specifier);
+    if (name !== undefined) names.push(name);
+  }
+  return { isOrmModule: isOrmModule(module, specifiers.gate), names };
+}
+
+/**
+ * 모든 모듈의 게이트 재료를 모은다.
+ *
+ * @param modules 모듈마다 `ormModulePackages`로 뽑은 재료
  * @returns 단계 게이트 여부와 지정자 패키지 이름
  */
-function projectPackages(modules: readonly SourceModule[]): ProjectPackages {
+export function projectPackages(modules: Iterable<OrmModulePackages>): ProjectPackages {
   let hasOrmModule = false;
   const names = new Set<string>();
   for (const module of modules) {
-    const specifiers = moduleSpecifiers(module);
-    hasOrmModule ||= isOrmModule(module, specifiers.gate);
-    for (const specifier of specifiers.all) {
-      const name = packageName(specifier);
-      if (name !== undefined) names.add(name);
-    }
+    hasOrmModule ||= module.isOrmModule;
+    for (const name of module.names) names.add(name);
   }
   return { hasOrmModule, names };
 }
+
+/**
+ * 따옴표 바로 뒤의 지원 패키지 이름이나 `D1Database`처럼 ORM 게이트를 열 법한 글자가 텍스트에 있는지 본다.
+ *
+ * 판정은 파싱 뒤 `ormModulePackages`가 한다. 이 검사는 파싱 순서만 정한다 — 게이트를 여는 모듈을 먼저 파싱해야 그 앞에서
+ * 놓은 트리를 ORM Program용으로 다시 파싱하는 양이 준다. 틀려도(이스케이프로 쓴 지정자 등) 결과는 같고 다시 파싱만 는다.
+ *
+ * @param text 소스 텍스트
+ * @returns 열 법하면 true
+ */
+export function likelyOrmText(text: string): boolean {
+  return likelyOrmPattern.test(text);
+}
+
+/** `likelyOrmText`의 패턴이다(지원 패키지 이름 앞 따옴표·백틱, 또는 D1 타입 이름). */
+const likelyOrmPattern = new RegExp(
+  `${D1_TYPE_NAME}|['"\`](?:${[...SUPPORTED_ORM_PACKAGES].map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|')})`,
+  'u',
+);
 
 /**
  * 모듈이 ORM 표면과 관련 있는지 본다(지원 패키지 import·require·동적 import 또는 `D1Database` 참조).
@@ -187,14 +234,22 @@ function declarationSpecifier(node: ts.Node): string | undefined {
 /**
  * 소스와 선언 파일에서 `D1Database` 바인딩 이름을 모은다.
  *
- * @param input 입력
+ * 선언 파일은 여기서 처음 파싱하므로 소스와 같은 구문 깊이 상한을 건다. 넘는 파일은 바인딩을 읽지 않고 센다 — 방문기가
+ * 재귀로 걸어 명령 전체가 스택 초과로 끝나지 않게 하기 위해서다.
+ *
+ * @param modules 소스 모듈
+ * @param declarationFiles 선언 파일 텍스트를 돌려주는 함수
+ * @param counts 계수(깊이로 건너뛴 선언 파일이 더해진다)
  * @returns 바인딩 이름
  */
-function collectBindings(input: OrmExtractionInput): Set<string> {
+function collectBindings(modules: readonly SourceModule[], declarationFiles: OrmExtractionInput['declarationFiles'], counts: OrmCounts): Set<string> {
   const names = new Set<string>();
-  for (const module of input.modules) if (module.text.text.includes(D1_TYPE_NAME)) collectD1Bindings(module.sourceFile, names);
-  for (const file of input.declarationFiles()) {
-    if (file.text.includes(D1_TYPE_NAME)) collectD1Bindings(ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS), names);
+  for (const module of modules) if (module.text.text.includes(D1_TYPE_NAME)) collectD1Bindings(module.sourceFile, names);
+  for (const file of declarationFiles()) {
+    if (!file.text.includes(D1_TYPE_NAME)) continue;
+    const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS));
+    if (sourceFile === TOO_DEEP) counts.deeplyNestedFiles.push(file.path);
+    else collectD1Bindings(sourceFile, names);
   }
   return names;
 }

@@ -26,6 +26,7 @@ verifyRoutesErrors();
 verifySchema();
 verifyGraph();
 verifyNavigation();
+verifyProjectInputFiles();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -212,4 +213,46 @@ registerScreens([{ path: '/catalog/:item', screen: Catalog }]);`);
     writeFileSync(join(root, 'router-model.json'), '{');
     verify(run(args).status === 2, 'navigation model failure');
   } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+/**
+ * 명령마다 realpath가 --project 밖인 입력 파일(스펙·client 모델·router 모델·--tsconfig)은 문서 없는 사용 오류 64,
+ * 없는 입력 파일은 2이고, --project 안이면 절대 경로 --tsconfig도 받는지 확인한다.
+ */
+function verifyProjectInputFiles() {
+  const root = mkdtempSync(join(tmpdir(), 'tsograph-input-files-'));
+  try {
+    const project = join(root, 'project');
+    const config = JSON.stringify({ include: [], compilerOptions: { types: [] } });
+    const routerModel = JSON.stringify({ format: 'router-models', version: 1, models: [{
+      factory: { path: 'src/router-api.ts', name: 'registerScreens' }, routesArgument: 0,
+      pathProperty: 'path', screenProperty: 'screen', pathSyntax: 'colon' }] });
+    mkdirSync(join(project, 'src'), { recursive: true });
+    mkdirSync(join(root, 'outside'));
+    writeFileSync(join(project, 'src/router-api.ts'), 'export function registerScreens(input: unknown) { return input; }');
+    for (const directory of [project, join(root, 'outside')]) {
+      writeFileSync(join(directory, 'tsconfig.json'), config);
+      writeFileSync(join(directory, 'router-model.json'), routerModel);
+      writeFileSync(join(directory, 'client-model.json'), '{}');
+    }
+    writeFileSync(join(root, 'outside/spec.json'), '{"openapi": "3.0.0", "info": {"title": "x", "version": "1"}, "paths": {}}');
+    const commands = [
+      ['openapi spec', (file) => ['openapi', file('spec.json', true), '--service', 'x', '--project', project]],
+      ['routes client model', (file) => ['routes', '--role', 'client', '--project', project, '--client-model', file('client-model.json')]],
+      ['routes tsconfig', (file) => ['routes', '--role', 'client', '--project', project, '--tsconfig', file('tsconfig.json')]],
+      ['navigation router model', (file) => ['navigation', '--project', project, '--router-model', file('router-model.json')]],
+      ['navigation tsconfig', (file) => ['navigation', '--project', project, '--router-model', 'router-model.json', '--tsconfig', file('tsconfig.json')]],
+      ['graph tsconfig', (file) => ['graph', '--project', project, '--tsconfig', file('tsconfig.json')]],
+      ['reach tsconfig', (file) => ['reach', '--project', project, '--tsconfig', file('tsconfig.json'), 'src/router-api.ts#registerScreens']],
+      ['impact tsconfig', (file) => ['impact', '--project', project, '--tsconfig', file('tsconfig.json'), 'src/router-api.ts#registerScreens']],
+    ];
+    for (const [name, build] of commands) {
+      const outside = run(build((file, absolute) => (absolute ? join(root, 'outside', file) : `../outside/${file}`)));
+      verify(outside.status === 64 && outside.stdout === '' && /is outside --project; /u.test(outside.stderr), `${name} outside --project`);
+      verify(run(build((file) => join(project, `missing-${file}`))).status === 2, `${name} missing file`);
+    }
+    verify(run(['graph', '--project', project, '--tsconfig', join(project, 'tsconfig.json')]).status === 0, 'graph absolute tsconfig inside --project');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }

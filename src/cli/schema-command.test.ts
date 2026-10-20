@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -7,6 +9,7 @@ import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { runCli } from './run-cli.ts';
 import { MAX_SCHEMA_OUTPUT_LENGTH, runSchemaCommand, type SchemaEnvironment } from './schema-command.ts';
+import { runMainGuarded } from './testing.test.ts';
 import type { RelationUseFact } from '../schema/relation-facts.ts';
 
 const fixture = fileURLToPath(new URL('../../fixtures/schema/prisma-app/', import.meta.url));
@@ -118,4 +121,50 @@ test('분배기가 schema 명령과 도움말을 안다', async () => {
   assert.match((await runCli(['--help'], env)).standardOutput, /schema {7}Extract Prisma/u);
   assert.match((await runCli(['help', 'schema'], env)).standardOutput, /^Usage: tsograph schema/u);
   assert.equal((await runCli(['schema'], env)).exitCode, 64);
+});
+
+/**
+ * 파일마다 구문 트리를 놓는지 보는 자식의 V8 힙 상한(MiB)이다. 아래 합성 프로젝트(소스 약 3.8 Mi 문자)는 모든 트리를
+ * 끝까지 붙잡던 구조에서 힙 160 MiB로도 OOM(종료 134)으로 끝났고 224 MiB에서야 문서를 냈다. 파일마다 트리를 놓는
+ * 구조는 48 MiB에서 끝난다(TypeScript 적재분과 소스 텍스트가 대부분이다). 양쪽에 두 배쯤 여유를 둔 값이다.
+ */
+const RELEASE_CHILD_HEAP_MIB = 96;
+
+/** 힙 상한 검사 프로젝트의 합성 서비스 파일 수다(파일당 약 4.8 K 문자). */
+const RELEASE_SERVICE_FILES = 800;
+
+/**
+ * 관계 사용이 없는 합성 서비스 파일 하나의 내용이다(메서드 24개, 약 4.8 K 문자).
+ *
+ * @param index 파일 번호
+ * @returns 파일 내용
+ */
+function syntheticServiceSource(index: number): string {
+  const lines = [`export class Service${index} {`];
+  for (let method = 0; method < 24; method++) {
+    lines.push(`  method${method}(id: number, label: string) {`);
+    lines.push(`    const value = { id: id + ${method}, name: label + '-${index}', tags: ['a${method}', 'b${index}'] };`);
+    lines.push(`    return value.tags.length > ${method} ? value : { ...value, id: value.id * 2 };`);
+    lines.push('  }');
+  }
+  lines.push('}');
+  return `${lines.join('\n')}\n`;
+}
+
+test('ORM 게이트가 닫힌 프로젝트는 파일마다 구문 트리를 놓아, 모든 트리를 합친 크기보다 작은 힙에서도 같은 문서를 낸다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-schema-heap-')));
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'heap-app', private: true }));
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'src/query.ts'), "export function listUsers(run: (sql: string) => unknown) {\n  return run('SELECT id FROM users');\n}\n");
+    for (let index = 0; index < RELEASE_SERVICE_FILES; index++) writeFileSync(join(root, 'src', `m${index}.ts`), syntheticServiceSource(index));
+    const run = await runMainGuarded(['schema', '--project', root], [`--max-old-space-size=${RELEASE_CHILD_HEAP_MIB}`]);
+    assert.equal(run.stopped, undefined);
+    assert.equal(run.status, 0, run.stderr.slice(0, 400));
+    const document = JSON.parse(run.stdout);
+    assert.deepEqual(document.facts.map((fact: RelationUseFact) => `${fact.location.path}:${fact.location.line} ${fact.channel}`), ['src/query.ts:2 users']);
+    assert.deepEqual(document.limitations, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

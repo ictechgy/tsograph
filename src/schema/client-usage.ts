@@ -19,9 +19,10 @@ import ts from 'typescript';
 
 import type { BindingEvaluator, BindingKind, ClassMembers, EvaluationContext } from './client-binding.ts';
 import { Scope } from './client-binding.ts';
+import type { ClientProvenance, KnowledgeRead, ProjectKnowledge } from './client-provenance.ts';
 import { enclosingSymbol, isFunctionLike } from './enclosing-symbol.ts';
 import type { CatalogModel, PrismaCatalog } from './prisma-catalog.ts';
-import { dynamicChannel, type RelationFactSink } from './relation-facts.ts';
+import { dynamicChannel, type FactInput, type RelationFactSink } from './relation-facts.ts';
 import { bindingElements, type ScopeBuilder } from './scope-builder.ts';
 import type { SourceModule } from './source-module.ts';
 import { looksLikeSql, sqlRelations } from './sql-relations.ts';
@@ -36,6 +37,72 @@ export interface UsageCounts {
   unresolvedReceivers: number;
   /** 클라이언트에서 알 수 없는 delegate를 접근한 수(dynamic으로 냄)다. */
   unknownDelegates: number;
+}
+
+/** 스캐너가 사실 입력을 넣는 곳이다(수집기 또는 스캔 기록). */
+export type FactTarget = Pick<RelationFactSink, 'add'>;
+
+/**
+ * 파일 하나를 스캔한 기록이다. 사실 입력과 계수를 모아 두었다가 확정할 때 수집기에 넣는다.
+ *
+ * 파싱 직후 그때의 출처 추정 표로 스캔해 두고 트리를 놓기 위해서다. 스캔은 트리와 출처 표에서 읽은 값으로만 정해지므로,
+ * 읽은 칸이 고정점 뒤의 표에서도 같은 값이면 이 기록이 곧 고정점 뒤에 스캔한 결과다.
+ */
+export interface UsageRecord {
+  /** 수집기에 넣을 사실 입력(스캔이 넣은 순서)이다. */
+  readonly facts: readonly FactInput[];
+  /** 스캔이 더한 계수다. */
+  readonly counts: UsageCounts;
+  /** 스캔이 읽은 출처 표 칸이다. */
+  readonly reads: readonly KnowledgeRead[];
+}
+
+/** 사용 스캔 기록의 선택 입력이다. */
+export interface UsageRecordOptions {
+  /** ORM·드라이버 게이트가 먼저 읽은 노드다. */
+  readonly preconsumed?: ReadonlySet<ts.Node> | undefined;
+  /** 스캔이 읽을 출처 표다. 기본은 고정점 표(`provenance.knowledge`)다. */
+  readonly knowledge?: ProjectKnowledge;
+}
+
+/**
+ * 파일 하나를 출처 표 하나로 스캔해 기록한다. 수집기와 프로젝트 계수는 건드리지 않는다.
+ *
+ * @param module 소스 모듈
+ * @param provenance 출처 계산기
+ * @param catalog 스키마 이름 표. `'non-relational'`이면 delegate 접근을 사실로 내지 않는다
+ * @param options 먼저 읽은 노드와 읽을 출처 표
+ * @returns 스캔 기록
+ */
+export function recordUsage(
+  module: SourceModule,
+  provenance: ClientProvenance,
+  catalog: PrismaCatalog | undefined | 'non-relational',
+  options: UsageRecordOptions = {},
+): UsageRecord {
+  const facts: FactInput[] = [];
+  const counts: UsageCounts = { dynamicRelations: 0, skippedSqlLiterals: 0, unresolvedReceivers: 0, unknownDelegates: 0 };
+  const target: FactTarget = { add: (input) => { facts.push(input); } };
+  const knowledge = options.knowledge ?? provenance.knowledge;
+  const { reads } = knowledge.record(() => {
+    new ClientUsageScanner(module, provenance.analyze(module, knowledge), catalog, target, counts, options.preconsumed).scan();
+  });
+  return { facts, counts, reads };
+}
+
+/**
+ * 스캔 기록을 수집기와 계수에 넣는다. 수집기에는 스캐너가 직접 넣었을 때와 같은 순서로 넣는다.
+ *
+ * @param record 스캔 기록
+ * @param sink 사실 수집기
+ * @param counts 프로젝트 계수(갱신된다)
+ */
+export function commitUsage(record: UsageRecord, sink: FactTarget, counts: UsageCounts): void {
+  for (const input of record.facts) sink.add(input);
+  counts.dynamicRelations += record.counts.dynamicRelations;
+  counts.skippedSqlLiterals += record.counts.skippedSqlLiterals;
+  counts.unresolvedReceivers += record.counts.unresolvedReceivers;
+  counts.unknownDelegates += record.counts.unknownDelegates;
 }
 
 /** Prisma 7 모델 delegate의 연산 이름이다. */
@@ -71,8 +138,8 @@ export class ClientUsageScanner {
   private readonly catalog: PrismaCatalog | undefined;
   /** delegate 접근을 사실로 낼지 여부다. 비관계(MongoDB) 스키마면 끈다. */
   private readonly emitsDelegates: boolean;
-  /** 사실 수집기다. */
-  private readonly sink: RelationFactSink;
+  /** 사실 수집기(또는 스캔 기록)다. */
+  private readonly sink: FactTarget;
   /** 계수다. */
   private readonly counts: UsageCounts;
   /** 게이트가 이미 읽은 노드(그 아래 리터럴은 다시 읽지 않는다)다. */
@@ -93,7 +160,7 @@ export class ClientUsageScanner {
    * @param module 소스 모듈
    * @param analysis 모듈 스코프·평가기·빌더
    * @param catalog 스키마 이름 표. `'non-relational'`이면 delegate 접근을 사실로 내지 않는다
-   * @param sink 사실 수집기
+   * @param sink 사실 수집기(또는 스캔 기록)
    * @param counts 계수
    * @param preconsumed ORM·드라이버 게이트가 먼저 읽은 노드
    */
@@ -101,7 +168,7 @@ export class ClientUsageScanner {
     module: SourceModule,
     analysis: { readonly scope: Scope; readonly evaluator: BindingEvaluator; readonly builder: ScopeBuilder },
     catalog: PrismaCatalog | undefined | 'non-relational',
-    sink: RelationFactSink,
+    sink: FactTarget,
     counts: UsageCounts,
     preconsumed: ReadonlySet<ts.Node> = new Set(),
   ) {

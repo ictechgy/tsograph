@@ -29,6 +29,11 @@ export interface OrmCounts {
   readonly unreadableDeclarations: Map<string, number>;
   /** 값 평가가 문맥에 기댄(순환 감지·깊이 상한으로 끊긴) 타입 값의 재계산 상한에 닿아 일부 값을 모르는 값으로 끊었는지 여부다. */
   evaluationTruncated: boolean;
+  /**
+   * 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 D1 바인딩 선언을 읽지 않은 선언 파일(프로젝트 기준 경로)이다. 소스
+   * 파일과 같은 `parse-errors:` 문장으로 알린다.
+   */
+  readonly deeplyNestedFiles: string[];
 }
 
 /**
@@ -39,7 +44,7 @@ export interface OrmCounts {
 export function emptyOrmCounts(): OrmCounts {
   return {
     dynamicRelations: 0, unresolvedReceivers: new Map(), namingUnverified: new Set(), unreadableDeclarations: new Map(),
-    evaluationTruncated: false,
+    evaluationTruncated: false, deeplyNestedFiles: [],
   };
 }
 

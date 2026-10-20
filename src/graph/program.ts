@@ -6,7 +6,11 @@
  * 코드는 실행하지 않고(emit 없음), 진단도 계산하지 않는다 — 심볼 해석만 필요하기 때문이다.
  *
  * 루트 파일은 tsconfig가 고른 파일과 호출자가 준 프로젝트 소스(설정이 빠뜨린 스크립트·라우트 포함)의
- * 합집합이다. `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
+ * 합집합이다. tsconfig가 고르는 파일은 걷기 정책(경계 안, 제외 디렉터리·symlink 밖)을 통과한 것만 쓴다
+ * (`config-roots.ts`). `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
+ *
+ * compiler host의 현재 디렉터리는 실행 위치가 아니라 프로젝트 루트다. 설정이 없으면 TypeScript가 자동 타입 루트
+ * (`node_modules/@types`)를 그 디렉터리와 조상에서 찾으므로, 실행 위치와 무관하게 tsconfig가 루트에 있을 때와 같다.
  */
 
 import { existsSync } from 'node:fs';
@@ -15,7 +19,9 @@ import { basename, dirname, join, resolve } from 'node:path';
 import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { ConfigRootBoundary, type ConfigRootGaps, type ScanBoundary } from './config-roots.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
@@ -43,14 +49,22 @@ const defaultOptions: ts.CompilerOptions = {
   resolveJsonModule: true,
 };
 
-/** Program을 만들면서 센 설정 공백이다. */
-export interface ProgramConfigStatus {
+/**
+ * Program을 만들면서 센 설정 공백이다. 설정 루트 경계의 공백({@link ConfigRootGaps}: 경계 밖이라 쓰지 않은 include·`files`
+ * 항목 수, 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않은 이름 항목 수, include 열거의 항목 상한 도달)도 싣는다.
+ */
+export interface ProgramConfigStatus extends ConfigRootGaps {
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
   readonly configUnreadable: boolean;
   /** compiler host가 크기 상한 때문에 읽지 못한 고유 입력 수다. */
   readonly oversizedCompilerInputs?: number;
+  /**
+   * 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 compiler host가 뺀 입력 중 호출자가 준 소스가 아닌 것(설정이 고른
+   * 파일·전이 import·선언·패키지)의 고유 수다. 호출자가 준 소스는 {@link GraphProgram.deeplyNestedSources}에 있다.
+   */
+  readonly deeplyNestedCompilerInputs?: number;
 }
 
 /** 만든 Program과 checker, 설정 상태다. */
@@ -58,6 +72,11 @@ export interface GraphProgram {
   readonly program: ts.Program;
   readonly checker: ts.TypeChecker;
   readonly status: ProgramConfigStatus;
+  /**
+   * 호출자가 준 소스 중 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 Program에서 뺀 것의 절대 경로다. 읽지 못한
+   * 소스와 원인이 달라 호출자가 따로 센다.
+   */
+  readonly deeplyNestedSources: ReadonlySet<string>;
 }
 
 /**
@@ -66,7 +85,10 @@ export interface GraphProgram {
  * @param root 프로젝트 realpath
  * @param sourcePaths 루트로 넣을 프로젝트 소스 절대 경로(선언 파일 포함 가능)
  * @param createProgram TypeScript Program factory (기본값은 `ts.createProgram`)
- * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config
+ * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config. CLI는 realpath가 `--project` 안인 1 MiB 이하
+ *   일반 파일인지 먼저 확인하고 받은 값을 그대로 넘긴다(`cli/project-paths.ts`). 상대 옵션의 기준은 이 경로의 디렉터리다
+ *   (`tsc -p`처럼 링크를 풀지 않는다).
+ * @param boundary 설정이 고르는 루트 파일이 머물 걷기 경계(기본은 root, 추가 제외 디렉터리 없음)
  * @returns Program·checker·설정 상태
  */
 export function createGraphProgram(
@@ -74,21 +96,37 @@ export function createGraphProgram(
   sourcePaths: readonly string[],
   createProgram: typeof ts.createProgram = ts.createProgram,
   explicitConfig?: string,
+  boundary: ScanBoundary = { root, excludedDirectories: new Set() },
 ): GraphProgram {
-  const config = readProjectConfig(root, explicitConfig);
+  const config = readProjectConfig(root, boundary, explicitConfig);
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
+  // 설정이 없거나 읽지 못하면 TypeScript는 자동 타입 루트를 host의 현재 디렉터리와 그 조상의 `node_modules/@types`에서
+  // 찾는다. 실행 위치 대신 프로젝트 루트를 주어 tsconfig가 루트에 있을 때와 같은 타입을 쓴다. 설정이 있으면 TypeScript가
+  // 설정 디렉터리를 쓰고, 루트·import·옵션 경로는 모두 절대 경로라 다른 해석은 바뀌지 않는다.
+  host.getCurrentDirectory = () => root;
   const oversized = new Set<string>();
   // tsconfig 루트·전이 import·선언·package.json 모두 같은 bounded reader를 거친다.
   // 수집 단계에서 제외한 파일이 compiler host를 통해 다시 무제한 읽히지 않게 한다.
   host.readFile = boundedInputReader((fileName) => oversized.add(fileName));
+  const deeplyNested = new Set<string>();
+  // SDK 캐시보다 먼저 감싸 프로젝트·의존성 입력만 깊이를 잰다(번들 lib는 캐시가 따로 만든다).
+  limitSyntaxDepth(host, (fileName) => deeplyNested.add(fileName));
   const cacheLease = sdkSourceFileCache.install(host, options);
   let primaryFailed = false;
   try {
     const program = createProgram({ rootNames, options, host });
     const checker = program.getTypeChecker();
-    return { program, checker, status: { ...config.status, ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}) } };
+    const sources = new Set(sourcePaths.map((path) => resolve(path)));
+    const deeplyNestedSources = new Set([...deeplyNested].filter((path) => sources.has(path)));
+    const otherDeeplyNested = deeplyNested.size - deeplyNestedSources.size;
+    return {
+      program, checker, deeplyNestedSources, status: {
+        ...config.status, ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
+        ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
+      },
+    };
   } catch (error) {
     primaryFailed = true;
     throw error;
@@ -137,6 +175,26 @@ function boundedInputReader(onOversized: (fileName: string) => void): (fileName:
   };
 }
 
+/**
+ * compiler host가 만드는 SourceFile에 구문 깊이 상한을 건다.
+ *
+ * 상한을 넘거나 파싱이 호출 스택을 넘긴 파일은 없는 파일(undefined)로 돌려준다. 그래서 TypeScript 바인더·검사기와
+ * tsograph 방문기가 그 파일을 걷지 않고, 그 파일을 가리키는 import는 풀리지 않은 모듈이 된다. 깊은 파일 하나 때문에
+ * Program을 쓰는 명령 전체가 스택 초과로 끝나지 않게 하기 위해서다.
+ *
+ * @param host compiler host(`getSourceFile`을 바꾼다)
+ * @param onTooDeep 뺀 입력의 절대 경로를 받는다
+ */
+function limitSyntaxDepth(host: ts.CompilerHost, onTooDeep: (fileName: string) => void): void {
+  const original = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
+    const sourceFile = parseWithinSyntaxDepth(() => original(fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile));
+    if (sourceFile !== TOO_DEEP) return sourceFile;
+    onTooDeep(resolve(fileName));
+    return undefined;
+  };
+}
+
 /** 설정 파일에서 읽은 옵션·루트 파일·상태다. */
 interface ProjectConfig {
   readonly options: ts.CompilerOptions;
@@ -145,13 +203,14 @@ interface ProjectConfig {
 }
 
 /**
- * 프로젝트 루트의 설정 파일을 읽는다. 없거나 읽지 못하면 기본 옵션이다.
+ * 프로젝트 루트의 설정 파일을 읽는다. 없거나 읽지 못하면 기본 옵션이다. 설정이 고른 루트 파일은 걷기 경계로 거른다.
  *
  * @param root 프로젝트 realpath
+ * @param boundary 설정 루트 파일이 머물 걷기 경계
  * @param explicitConfig 자동 탐색 대신 사용할 root 기준 상대 경로나 절대 경로
  * @returns 옵션·루트 파일·상태
  */
-function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig {
+function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?: string): ProjectConfig {
   const configName = explicitConfig === undefined ? configNames.find((name) => existsSync(join(root, name))) : basename(explicitConfig);
   if (configName === undefined) return { options: defaultOptions, fileNames: [], status: { configName, configUnreadable: false } };
   const path = explicitConfig === undefined ? join(root, configName) : resolve(root, explicitConfig);
@@ -169,7 +228,9 @@ function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig
     }
     return unreadableConfig(configName);
   }
-  const host: ts.ParseConfigHost = { ...ts.sys, readFile };
+  // include 글롭은 경계 필터가 걷기 정책 안에서만 펼친다(`ts.sys.readDirectory`는 상한 없이 링크·빌드 산출물까지 연다).
+  const roots = new ConfigRootBoundary(boundary);
+  const host: ts.ParseConfigHost = { ...ts.sys, readFile, readDirectory: roots.readDirectory };
   const parsed = ts.parseJsonConfigFileContent(
     read.config,
     host,
@@ -184,7 +245,35 @@ function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig
     }
     return unreadableConfig(configName);
   }
-  return { options: parsed.options, fileNames: parsed.fileNames, status: { configName, configUnreadable: false } };
+  return { options: parsed.options, fileNames: roots.admit(parsed.fileNames), status: { configName, configUnreadable: false, ...roots.gaps() } };
+}
+
+/**
+ * 설정 루트 경계가 남긴 공백을 원인 문장으로 만든다. 접두사는 문서마다 다르므로 호출자가 붙인다(graph `graph-config:`,
+ * routes·navigation은 각 coverage 접두사). 같은 Program 공백을 본 문서들이 같은 말로 알리게 하려고 한곳에 둔다.
+ *
+ * @param status Program 설정 상태
+ * @param affected 불완전할 수 있는 결과(예: `calls`, `route registrations`)
+ * @returns 원인 문장(공백이 없으면 빈 목록)
+ */
+export function configRootGaps(status: ProgramConfigStatus, affected: string): string[] {
+  const gaps: string[] = [];
+  const outside = status.outsideConfigRoots ?? 0;
+  if (outside > 0) {
+    gaps.push(`${outside} include pattern(s) or files entr(ies) of ${status.configName} point outside the scanned root and were not used as root files; `
+      + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`);
+  }
+  const excluded = status.excludedConfigRoots ?? 0;
+  if (excluded > 0) {
+    gaps.push(`${excluded} files entr(ies) or wildcard-free include path(s) of ${status.configName} name paths in directories the scan skips `
+      + `or through symbolic links and were not used as root files; type resolution and ${affected} may be incomplete `
+      + '(import or reference them from a project source instead)');
+  }
+  if (status.configRootsTruncated === true) {
+    gaps.push(`include patterns of ${status.configName} reached the directory entry limit; later matches were not used as root files; `
+      + `type resolution and ${affected} may be incomplete`);
+  }
+  return gaps;
 }
 
 /**

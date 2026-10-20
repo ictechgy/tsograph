@@ -64,20 +64,39 @@ statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 Skipped project sources, an unparsed `tsconfig.json`/`jsconfig.json` (default compiler options, so path
-aliases may not resolve), and compiler inputs over 4 MiB are also reported under `route-call-coverage:`,
-with the same cause wording as `tsograph graph`.
+aliases may not resolve), config `include`/`files` entries outside the project or naming paths in skipped directories or
+through symlinks (not used as compiler root files, the same walk policy as
+[`tsograph graph`](#tsograph-graph-tsograph-reach-tsograph-impact)), and compiler inputs over 4 MiB are also reported under
+`route-call-coverage:`, with the same cause wording as `tsograph graph`. A source (or declaration and package input) that nests
+syntax more than 400 levels deep or overflows the parser's call stack is left out of the compiler program
+on its own and counted there too, so one generated or minified file no longer fails the whole run
+([syntax depth](#tsograph-schema)).
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
+
+Configuration mutation analysis is budgeted per site, not per project: each escape site (an unknown
+call's arguments and receiver, a `new` expression, or a tagged template) and each indexing site gets
+20,000 steps, visited states are shared across sites, each phase is capped at 8 steps per analyzed source
+character, and a wrapper call is rechecked for at most 200 rounds, so unrelated files do not change the
+result. A site over its budget cannot be narrowed to what it might change, so `route-call-coverage:`
+reports the mutation analysis as incomplete and every axios/ky client and request configuration stays dynamic.
 
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
 than a global name or method shape. Unknown leading URL values and `{{NAME}}` build placeholders keep
-recovered paths dynamic. See [typed client models](docs/CLIENT-MODELS.md).
+recovered paths dynamic. When the mutation analysis is incomplete, model calls stay as dynamic facts
+(`channel: null`, `pathAnchor: "base"`) with the model's method and `service` instead of disappearing.
+See [typed client models](docs/CLIENT-MODELS.md).
+
+`--client-model` and `--tsconfig` (the compiler config of the client program) take regular files whose real path is
+inside `--project`: a relative path resolves against `--project`, and an absolute path is accepted when it is inside.
+A file outside `--project`, directly or through a symlink, is a usage error (`64`), as in `openapi`, `navigation`, and
+`graph`/`reach`/`impact`; a missing or unreadable file, or a config over 1 MiB, exits `2`.
 
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
 data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
-document. An analysis that exceeds the call stack (typically on a deeply nested generated or minified
-source) is reported with that cause, not as oversized output. Large traversals can use `--max-depth`
+document. An analysis that still exceeds the call stack after deeply nested files are left out is
+reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
 
 ## Requirements
@@ -293,10 +312,13 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
   Node routers mounted at several paths are flattened at most to 200,000 route registrations, counting
   registrations that merge into one fact or emit none (conditional ones); past that the command exits
   `2` with a message that names the flattened registrations, not the fact count, as the cause.
-  An analysis that exceeds the call stack (typically on a deeply nested generated or minified
-  source) also exits `2`, with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`,
-  and `navigation` that names the cause and asks to exclude or split such files; no partial
-  document is written.
+  A source that nests syntax more than 400 levels deep or overflows the parser's call stack is left
+  out on its own: a Next.js route file is skipped and a Node backend source is left out of the
+  program, both counted under `route-coverage:`, and such a `next.config.*` is treated as
+  unresolved (`unresolved-route-prefix:`). An analysis that
+  still exceeds the call stack exits `2`, with one message shared by `schema`, `routes`,
+  `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or split such
+  files; no partial document is written.
 
 ### Verified Next.js semantics (next 16.2.7)
 
@@ -369,7 +391,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 
 | Situation | Result |
 |---|---|
-| Config exports a function, a non-object, nothing, or has syntax errors | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| Config exports a function, a non-object, nothing, or has syntax errors, or nests syntax more than 400 levels deep (or overflows the parser's call stack) | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | `basePath` is not a string literal, or is a value Next.js rejects | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | Config passes through wrapper calls (`withX(config)`) | values read from the wrapped literal, `root`, plus `unresolved-route-prefix:` (a wrapper may change them or add routes) |
 | `pageExtensions` is not a literal string array | default extensions + `route-coverage:` |
@@ -381,7 +403,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | `next.config.*` is a symbolic link | not read, `pathAnchor: "base"` + `unresolved-route-prefix:`; a dangling link is treated as absent, like Next's `existsSync` |
 | `package.json` is a symbolic link | not read, `route-framework-version-unknown:` |
 | `public/` or a proxy/middleware file is a symbolic link | not read; still reported under `framework-provided-routes:` |
-| Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
+| Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, route files that nest syntax more than 400 levels deep or overflow the parser's call stack (skipped), non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
 | `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
 | No `app/` or `pages/` directory | zero facts + `route-coverage:` |
 | Handler exported through CommonJS (`module.exports = …`) | fact without `symbol.usr` + `missing-route-usrs:` |
@@ -532,13 +554,31 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   the project.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness),
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
-  `64` usage error. `1` is reserved. An analysis that exceeds the call stack (typically on a
-  deeply nested generated or minified source) also exits `2`, with one message shared by `schema`,
-  `routes`, `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or
-  split such files; no partial document is written.
+  `64` usage error. `1` is reserved. A deeply nested source is left out on its own (see Syntax
+  depth below) instead of failing the run. An analysis that still exceeds the call stack exits `2`,
+  with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that
+  names the cause and asks to exclude or split such files; no partial document is written.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
   Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
+- Memory: a source file's syntax tree is released as soon as that file's own scans finish. The
+  cross-file steps keep only node-free per-file summaries (import and export tables, package names)
+  and the source text, and re-parse a file from its text when a later step needs its tree again, so
+  peak memory grows with the source text rather than with every syntax tree at once. The exception
+  is the ORM and SQL driver phase ([Node ORMs and SQL drivers](#node-orms-and-sql-drivers)): when a
+  source imports a supported package or mentions `D1Database`, its name resolver builds one
+  TypeScript Program over all sources, so every tree is held until that phase ends and only then
+  released file by file. Very large repositories of that kind can still exhaust the default V8
+  heap, and the process then aborts outside the exit-code contract; narrow `--project` or raise the
+  heap with `NODE_OPTIONS=--max-old-space-size=<MiB>`.
+- Syntax depth: right after parsing, each source's syntax tree depth is measured without recursion.
+  A source that nests more than 400 levels deep, or whose parse overflows the call stack (long
+  `||` or method chains and hundreds of nested parentheses in generated or minified code), is left
+  out of every later step and listed under `parse-errors:` with its path; the other sources are
+  still analyzed, and imports of a skipped file stay untraced. Declaration files read for D1
+  bindings follow the same rule, and such a `prisma.config` counts under `unresolved-prisma-config:`.
+  The limit sits well below the depth where TypeScript's binder overflowed (640 levels for `||`
+  chains, measured on Node 22); public npm sources reach at most about 220.
 
 ### Facts
 
@@ -693,6 +733,26 @@ same SQL yields the same relations in every producer.
 - Other string literals are read only when their SQL verb and relation keywords are uppercase
   (strict mode); lowercase SQL-looking literals are counted under `skipped-sql-literals:`.
 
+The extractor does not report three kinds of names as relation uses. The persistence producers pin
+these rules with shared cases (the same SQL strings and expected relations):
+
+- A `FROM` inside function arguments: the innermost `(` around it follows a function name (an
+  unquoted name that is not an SQL clause keyword), and the group does not start with `SELECT`,
+  `WITH`, or `VALUES`, as in `EXTRACT(YEAR FROM created_at)`, `TRIM(BOTH ' ' FROM name)`, or
+  `SUBSTRING(name FROM 2 FOR 3)`. Subqueries (`FROM (SELECT …)`, `IN (SELECT …)`) and CTE bodies
+  (`AS MATERIALIZED (DELETE FROM t …)`) still yield relations. A parenthesized statement after
+  another keyword, such as `COPY (DELETE FROM t …)`, is read as function arguments, so its `FROM`
+  yields nothing.
+- An unqualified operand naming a CTE that the same `;`-separated statement defines
+  (`WITH recent AS (…) SELECT * FROM recent`). Unquoted names compare case-insensitively and quoted
+  names exactly; `public.recent` is not a CTE. Relations read by the CTE body are kept, but a CTE
+  named like a table also hides that table's uses in the statement.
+- The `FROM` of `IS [NOT] DISTINCT FROM`.
+
+None of these counts as an unresolved operand, so a bind placeholder there
+(`IS DISTINCT FROM ${value}` in `$queryRaw`) adds no dynamic fact. Keyword case does not matter for
+these rules, even in strict mode.
+
 ### Node ORMs and SQL drivers
 
 Naming rules, sources, and the naming oracle are documented in Korean in
@@ -789,13 +849,26 @@ tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
 `Program` and `TypeChecker` over the root `tsconfig.json`, else `jsconfig.json`, else bundler-style
 defaults; `allowJs` is always on). The analyzed code is never executed and no diagnostics are
-computed.
+computed. Without a readable config, automatic type roots (`node_modules/@types`) are looked up from the
+project root and its ancestors, as if the config sat at the root, so the result does not depend on the
+working directory; the Node backend, client, and navigation programs behave the same way.
 
-`--tsconfig` selects a JSON compiler config relative to `--project`, using its own directory for relative options;
-an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
+`--tsconfig` selects a JSON compiler config file inside `--project` (a relative path resolves against `--project`; an
+absolute path is accepted when its real path is inside), using the directory of the given path for relative options;
+an invalid explicit config fails rather than silently falling back. A config outside `--project`, directly or through a
+symlink, is a usage error (`64`) before any analysis (a config inside may still reach a shared config outside through
+`extends`); a missing or unreadable config, or one over 1 MiB, exits `2`. `routes --role client` and `navigation` check `--tsconfig`
+the same way. `--workspace` selects an enclosing
 source boundary and workspace-relative ids for calls across packages. The selected project's compiler
 options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. The root `package.json`
+records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded,
+also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `files` select: those roots follow the same walk
+policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
+generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include
+pattern that starts outside that root, or a `files` entry outside it, is neither enumerated nor used as a root file and is
+counted under `graph-config:`. A `files` entry or wildcard-free include path that names a location in those skipped
+directories or through a symlink is not used either and is counted there too; glob matches in them stay silent, as in
+the walk. Files in both places still load when project sources import or reference them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
 failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
 explicitly; the CLI never executes `.pnp.cjs`.
@@ -835,10 +908,12 @@ The reader still holds the bounded input and reconstructed graph in memory. Reca
   [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
   traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
 - Exit codes: `0` success, `2` input/output failure or a bounded exchange/API output exceeding 16 Mi characters, `64`
-  usage error (empty stdout) or root-not-found (document written). An analysis that exceeds the
-  call stack (typically on a deeply nested generated or minified source) also exits `2`, with one
-  message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that names the
-  cause and asks to exclude or split such files; no partial document is written.
+  usage error (empty stdout) or root-not-found (document written). A source that nests syntax more
+  than 400 levels deep or overflows the parser's call stack is left out of the compiler program on its
+  own: it has no nodes, it is listed under `parse-errors:`, and coverage is not claimed complete. An
+  analysis that still exceeds the call stack exits `2`, with one message shared by `schema`, `routes`,
+  `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or split such
+  files; no partial document is written.
 
 ### Nodes and edges
 
@@ -1152,11 +1227,15 @@ What `bound` guarantees, and what it does not:
   overlap that type. Structurally unrelated types can still overlap through an intersection and therefore
   remain unknown; `any`, `unknown`, and generic/instantiable target types never use this exclusion. A same-named property write that replaces a
   method (monkey patching) blocks `bound` for that method.
-- **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
-  `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the
-  program without test sources, so mocks injected by unit tests do not block production edges. Call
-  sites inside test sources use the whole project. If a non-test file imports a test source, the whole
-  project is used everywhere.
+- **Test sources are separate programs.** Test sources follow the `routes` rule: `*.test.*`,
+  `*.spec.*`, `__tests__/`, and `__mocks__/`; when a Node backend framework is detected (the same
+  detection as server route discovery), also files under `test/`, `tests/`, and `e2e/` and
+  `*.e2e-spec.*`/`*.e2e.*` files, except inside the Next.js router directories (`app`/`pages`, or
+  `src/app`/`src/pages`), whose folder names are URL segments (`app/api/test/route.ts` stays a
+  production source). For call sites outside test sources, flows and candidates come from the
+  program without test sources, so mocks injected by tests neither block production edges nor add
+  test implementations to them. Call sites inside test sources use the whole project. If a non-test
+  file imports a test source, the whole project is used everywhere.
 - An independent effect inventory reconciles the expected whole or production sources with their
   file indexes, source revisions, runtime module edges, and executable operations. Enumeration,
   runtime reference/alias closure, initialization coverage, and ambient safety are separate checks;
@@ -1359,7 +1438,9 @@ candidate edge).
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
+Config-selected roots outside the scanned root, config entries that name paths in skipped directories or through symlinks, or roots past the enumeration limit are reported under `graph-config:` and prevent complete-coverage claims as well.
 A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
+A source, declaration, or package input that nests syntax more than 400 levels deep or overflows the parser's call stack is excluded from the program the same way and reported under `parse-errors:` (sources with their paths); it prevents complete-coverage claims too.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in

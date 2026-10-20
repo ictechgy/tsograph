@@ -4,10 +4,11 @@ import ts from 'typescript';
 import { formatBridgeTimestamp, type BridgeLocation, type HttpMethod } from '../../exchange/bridge-facts.ts';
 import { readBoundedFileBytes } from '../../graph/bounded-config-reader.ts';
 import { scopeIdOf } from '../../graph/symbol-ids.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
-import { ClientValues, configValue, type ClientConfig } from './client-values.ts';
+import { ClientValues, configValue, DEFAULT_CLIENT_MUTATION_BUDGET, type ClientConfig, type ClientMutationBudget } from './client-values.ts';
 import { ClientWrappers } from './client-wrappers.ts';
 import { typedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
@@ -41,7 +42,6 @@ interface Sink {
 }
 /** 계약 동사 집합이다. */
 const methods = new Set<string>(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']);
-const MAX_ESCAPE_RECHECKS = 20_000;
 /** ky major를 읽는 루트 `package.json` 최대 크기(바이트)다. */
 const MAX_KY_MANIFEST_BYTES = 1024 * 1024;
 
@@ -111,10 +111,11 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
   if (typed !== undefined) {
     const pathArgument = call.arguments[typed.method.pathArgument];
     const root = values.rootSymbol(typed.receiver);
-    if (values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root)) return undefined;
+    // 변경을 확인한 수신자는 모델 호출로 승격하지 않는다. 변경 분석이 미완이면 사실을 버리지 않고 모델 동사의 dynamic 사실로 남긴다.
+    if (root !== undefined && values.mutated.has(root)) return undefined;
     return { library: 'typed', configs: [], ...(pathArgument === undefined ? {} : { path: substitute(pathArgument) }),
       forcedMethod: typed.method.method, typedBase: typed.method.base, ...(typed.method.service === undefined ? {} : { typedService: typed.method.service }),
-      unsafe: false };
+      unsafe: values.mutationAnalysisIncomplete };
   }
   if (call.questionDotToken !== undefined) return undefined;
   const forwarded = wrappers?.target(callee);
@@ -192,14 +193,20 @@ function composition(sink: Sink, values: ClientValues, major: number | undefined
   return { join: kind, base, unsafe, allowAbsolute: resolved?.kind !== ts.SyntaxKind.FalseKeyword };
 }
 
-/** 호출 측 스캔과 사실 조립을 실행한다. */
+/**
+ * 호출 측 스캔과 사실 조립을 실행한다.
+ *
+ * `mutationBudget`은 설정 변경 분석의 질의·단계 예산이다. CLI는 기본값을 쓰고, 테스트만 작은 값을 주입한다.
+ */
 export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date,
-  typedModels?: TypedClientModels, tsconfig?: string): ClientRouteDocument {
+  typedModels?: TypedClientModels, tsconfig?: string, mutationBudget?: ClientMutationBudget): ClientRouteDocument {
   const project = loadNodeProject(root, tsconfig);
-  const values = new ClientValues(project, includeTests);
+  const values = new ClientValues(project, includeTests, mutationBudget);
   const preliminaryWrappers = new ClientWrappers(values, includeTests);
   const deferredWrapperCalls: ts.CallExpression[] = [];
+  // 알 수 없는 호출 지점 하나(인자 전체와 수신자)가 변경 질의 하나이고, 질의마다 고정 예산을 새로 쓴다.
   const escapeCall = (call: ts.CallExpression): void => {
+    values.beginMutationQuery();
     for (const argument of call.arguments) values.markMutated(argument, true);
     const callee = unwrap(call.expression);
     if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
@@ -215,8 +222,10 @@ export function extractClientRoutes(root: string, service: string | undefined, i
         if (sinkOf(node, values, preliminaryWrappers, typedModels) === undefined) escapeCall(node);
         else deferredWrapperCalls.push(node);
       } else if (ts.isNewExpression(node)) {
+        values.beginMutationQuery();
         for (const argument of node.arguments ?? []) values.markMutated(argument, true);
       } else if (ts.isTaggedTemplateExpression(node)) {
+        values.beginMutationQuery();
         if (ts.isTemplateExpression(node.template)) {
           for (const span of node.template.templateSpans) values.markMutated(span.expression, true);
         }
@@ -230,15 +239,16 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     inspect(source);
   }
   let pendingWrappers = deferredWrapperCalls;
-  let escapeRechecks = 0;
-  while (pendingWrappers.length > 0 && !values.mutationAnalysisIncomplete) {
+  const recheckRounds = (mutationBudget ?? DEFAULT_CLIENT_MUTATION_BUDGET).escapeRecheckRounds;
+  // 회차마다 남은 wrapper 호출을 모두 한 번씩 다시 본다. 호출 지점마다 재검사 횟수(회차)에 상한을 두어 호출 수와 무관하다.
+  for (let round = 0; pendingWrappers.length > 0 && !values.mutationAnalysisIncomplete; round++) {
+    if (round >= recheckRounds) {
+      values.mutationAnalysisIncomplete = true; break;
+    }
     const rechecked = new ClientWrappers(values, includeTests);
     const stillProven: ts.CallExpression[] = [];
     const before = values.mutated.size;
     for (const call of pendingWrappers) {
-      if (++escapeRechecks > MAX_ESCAPE_RECHECKS) {
-        values.mutationAnalysisIncomplete = true; break;
-      }
       if (sinkOf(call, values, rechecked, typedModels) === undefined) escapeCall(call);
       else stillProven.push(call);
     }
@@ -287,6 +297,8 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   if (wrappers.incomplete) limitations.add('route-call-coverage: wrapper alias or forwarding analysis exceeded fixed bounds; affected calls remain dynamic');
   if (values.mutationAnalysisIncomplete) limitations.add('route-call-coverage: client configuration mutation analysis is incomplete because provenance was unsupported or fixed bounds were reached; affected configuration remains dynamic');
   if (Object.values(project.gaps).some((gap) => Boolean(gap))) limitations.add('route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped');
+  const deeplyNested = project.deeplyNestedFiles.filter((path) => includeTests || !isNodeTestPath(path)).length;
+  if (deeplyNested > 0) limitations.add(`route-call-coverage: ${deeplyNested} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; requests in them are missing`);
   for (const gap of compilerConfigGaps(project.configStatus, 'requests')) limitations.add(`route-call-coverage: ${gap}`);
   return { format: 'bridge-facts', version: 1, tool: { name: 'tsograph', version: toolVersion }, generatedAt: formatBridgeTimestamp(generatedAt),
     platform: 'js', target: 'http', roles: ['client'], sourceSets: { tests: includeTests ? 'included' : 'excluded' }, project: root,

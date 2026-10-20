@@ -4,7 +4,33 @@ import { declarationOf, resolveAlias, symbolAt, unwrap } from '../node/symbols.t
 import { isNodeTestPath, type NodeProject } from '../node/node-project.ts';
 import type { UrlPart } from './url-compose.ts';
 
-const MAX_MUTATION_WORK = 20_000;
+/**
+ * 최상위 변경 질의 하나(알 수 없는 호출 지점 하나, 색인·변경 표시 지점 하나)가 쓸 수 있는 작업 단위 상한이다.
+ *
+ * 예전에는 이 값을 프로젝트 전체가 함께 써서, HTTP와 무관한 파일 수만으로 예산이 바닥났다. 지금은 질의마다 새로 채우고,
+ * 질의 사이에는 방문 메모(`#mutationVisited`·`#assignmentExpansionVisited`)를 유지해 이미 본 상태는 1단위만 쓴다.
+ * 실측에서 질의 하나의 최댓값은 tsograph 비테스트 소스 149파일(2.2 Mi 문자)에서 6,269단위, 합성 5,000파일에서 14단위였다.
+ * 값은 예전 전역 예산과 같게 두어, 속성 2만 개 객체 하나를 넘기는 단일 질의 폭주는 예전처럼 끊긴다.
+ */
+const MAX_MUTATION_QUERY_WORK = 20_000;
+/**
+ * 분석 소스 UTF-16 코드 단위 하나가 단계(색인, 변경 질의)마다 보태는 작업 단위다.
+ *
+ * 질의마다 예산을 새로 채워도 단계 전체 작업은 max(질의 상한, 이 값 × 분석 소스 길이)를 넘지 않는다. 그래서 상태
+ * projection이 갈라지는 적대 입력에서도 작업 총량이 입력 크기에 선형이다(속성 19,000개 객체를 호출 19,000개가 서로 다른
+ * 속성으로 넘기는 765 KB 파일은 이 상한이 없으면 약 3.6억 단위다). 실측 단계 작업은 소스 단위당 tsograph 비테스트 소스 전체
+ * 0.48, 가장 무거운 단일 파일 2.54(`value-flow.ts`), fixture 0.03~0.18이었다.
+ */
+const MUTATION_WORK_PER_SOURCE_UNIT = 8;
+/**
+ * wrapper 호출 하나를 다시 검사하는 최대 횟수(재검사 회차 수)다. 회차마다 아직 증명된 wrapper 호출을 모두 한 번씩 다시 본다.
+ *
+ * 예전에는 재검사 총횟수 20,000을 프로젝트 전체가 함께 써서, wrapper 호출이 2만 개를 넘으면 첫 회차만으로 미완이 됐다.
+ * 회차는 탈출이 다음 wrapper를 무너뜨리는 사슬 길이만큼만 필요하다. 예전 총횟수 상한 안에서 끝나던 분석은 회차마다 남은
+ * 호출이 하나 이상 줄어 199회차를 넘지 않으므로, 200회차는 그런 분석을 모두 그대로 끝낸다. 회차마다 전체 AST를 다시
+ * 색인하므로 최악 시간도 예전 상한과 같은 차수다.
+ */
+const MAX_ESCAPE_RECHECK_ROUNDS = 200;
 const MAX_PROJECTION_DEPTH = 16;
 /** URL 식 하나를 조각으로 펼칠 때 거치는 최대 단계(`parts`·query 꼬리 판정 호출) 수다. 실제 URL 식은 수십 단계면 끝난다. */
 const MAX_URL_PART_STEPS = 4096;
@@ -53,6 +79,25 @@ interface UrlPartBudget {
   exceeded: boolean;
 }
 
+/** 설정 변경 분석의 작업 예산이다. 테스트는 작은 값을 주입해 질의 단위 동작을 확인한다. */
+export interface ClientMutationBudget {
+  /** 최상위 질의 하나가 쓸 수 있는 작업 단위 수다. */
+  readonly queryWork: number;
+  /** 단계마다 분석 소스 UTF-16 코드 단위 하나가 단계 전체 상한에 보태는 작업 단위 수다. */
+  readonly workPerSourceUnit: number;
+  /** wrapper 호출 하나를 다시 검사하는 최대 회차 수다. */
+  readonly escapeRecheckRounds: number;
+}
+
+/** 기본 변경 분석 예산이다. 값의 근거는 각 상수 주석에 있다. */
+export const DEFAULT_CLIENT_MUTATION_BUDGET: ClientMutationBudget = {
+  queryWork: MAX_MUTATION_QUERY_WORK, workPerSourceUnit: MUTATION_WORK_PER_SOURCE_UNIT,
+  escapeRecheckRounds: MAX_ESCAPE_RECHECK_ROUNDS,
+};
+
+/** 한 단계(색인 또는 변경 질의)의 누적 작업과, 상한에 한 번이라도 닿았는지다. */
+interface MutationPhase { work: number; exhausted: boolean }
+
 /** null은 전개·변경으로 전체 설정을 알 수 없다는 뜻이다. */
 export type ClientConfig = ReadonlyMap<string, ts.Expression> | null;
 /** 속성 없음(undefined)과 값 미상(null)을 구분한다. */
@@ -78,21 +123,32 @@ export class ClientValues {
   readonly #closedNonClassRoots = new Map<ts.Symbol, number | false>();
   readonly #mutationVisited = new Map<ts.Node, Set<string>>();
   readonly #assignmentExpansionVisited = new Map<ts.Symbol, Set<string>>();
-  #buildWork = 0;
-  #mutationWork = 0;
+  readonly #queryWorkLimit: number;
+  readonly #phaseWorkLimit: number;
+  /** 지금 최상위 질의가 쓴 작업 단위다. {@link beginMutationQuery}가 질의마다 0으로 되돌린다. */
+  #queryWork = 0;
+  /** 색인 단계의 누적 작업이다. 색인이 끝나면 변경 질의 단계의 새 누적으로 바꾼다. */
+  #phase: MutationPhase = { work: 0, exhausted: false };
   #classSourceVersion = 0;
   #building = true;
   #bindingGraphComplete = false;
 
-  /** 직접 대입·증감·Object.assign·interceptor 등록의 루트 심볼을 모은다. */
-  constructor(project: NodeProject, includeTests = false) {
+  /**
+   * 직접 대입·증감·Object.assign·interceptor 등록의 루트 심볼을 모은다.
+   *
+   * 색인·변경 표시 패스는 노드 하나를, 뒤따르는 생성·멤버 저장·상속 색인은 항목 하나를 한 질의로 본다.
+   */
+  constructor(project: NodeProject, includeTests = false, budget: ClientMutationBudget = DEFAULT_CLIENT_MUTATION_BUDGET) {
     this.project = project;
+    this.#queryWorkLimit = budget.queryWork;
+    this.#phaseWorkLimit = Math.max(budget.queryWork, budget.workPerSourceUnit * analyzedSourceUnits(project, includeTests));
     const constructions: ts.NewExpression[] = [];
     const classStores: PendingClassStore[] = [];
     const projectClasses = new Set<ts.ClassLikeDeclaration>();
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const indexAliases = (node: ts.Node): void => {
+        this.beginMutationQuery();
         if (ts.isClassLike(node)) projectClasses.add(node);
         if (ts.isPropertyDeclaration(node) && ts.isClassLike(node.parent) && node.initializer !== undefined) {
           const key = staticName(node.name);
@@ -136,10 +192,14 @@ export class ClientValues {
       indexAliases(source);
     }
     this.#bindingGraphComplete = true;
-    for (const construction of constructions) this.#indexConstructionSources(construction);
+    for (const construction of constructions) {
+      this.beginMutationQuery();
+      this.#indexConstructionSources(construction);
+    }
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const indexStores = (node: ts.Node): void => {
+        this.beginMutationQuery();
         if (ts.isBinaryExpression(node) && [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken,
           ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken].includes(node.operatorToken.kind)
           && memberAssignmentTarget(node.left)) {
@@ -157,29 +217,37 @@ export class ClientValues {
     do {
       previousClassSourceVersion = this.#classSourceVersion;
       for (const store of classStores) {
+        this.beginMutationQuery();
         if (!this.#chargeMutation()) break;
         this.#indexClassStore(store, 'static');
       }
     } while (!this.mutationAnalysisIncomplete && previousClassSourceVersion !== this.#classSourceVersion);
     if (!this.mutationAnalysisIncomplete) for (const store of classStores) {
+      this.beginMutationQuery();
       if (!this.#chargeMutation()) break;
       this.#indexClassStore(store, 'instance');
     }
     if (!this.mutationAnalysisIncomplete) for (const child of projectClasses) {
       const clauses = child.heritageClauses?.filter(clause => clause.token === ts.SyntaxKind.ExtendsKeyword) ?? [];
       if (clauses.length !== 1 || clauses[0]!.types.length !== 1) continue;
+      this.beginMutationQuery();
       for (const base of this.#projectClassReferences(clauses[0]!.types[0]!.expression)) {
         const children = this.#subclasses.get(base) ?? new Set();
         children.add(child); this.#subclasses.set(base, children);
       }
     }
     this.#building = false;
+    this.#phase = { work: 0, exhausted: false };
     if (!this.mutationAnalysisIncomplete) {
-      for (const value of this.#unknownMemberStoreSources) this.markMutated(value, true);
+      for (const value of this.#unknownMemberStoreSources) {
+        this.beginMutationQuery();
+        this.markMutated(value, true);
+      }
     }
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const visit = (node: ts.Node): void => {
+        this.beginMutationQuery();
         let target: ts.Expression | undefined;
         if (ts.isDeleteExpression(node)) target = node.expression;
         if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
@@ -1004,15 +1072,28 @@ export class ClientValues {
     }
   }
 
-  /** 한 ClientValues instance의 alias/escape traversal 전체가 같은 20k work를 공유한다. */
+  /**
+   * 최상위 변경 질의 하나를 시작한다: 알 수 없는 호출의 인자·수신자, `new` 인자, tagged template, 색인·변경 표시 지점 하나.
+   *
+   * 질의 예산만 새로 채운다. 단계 누적과 방문 메모는 그대로라 같은 상태를 다시 보는 질의는 거의 작업을 쓰지 않는다.
+   */
+  beginMutationQuery(): void { this.#queryWork = 0; }
+
+  /**
+   * 작업 한 단위를 쓴다. 질의 예산이나 단계 상한을 넘으면 그 단계의 남은 작업을 멈추고 분석 전체를 미완으로 둔다.
+   *
+   * 끊긴 질의가 무엇을 바꿀 수 있었는지는 증명하지 못한다(남은 작업 목록의 루트만 표시하면 별칭의 별칭을 놓친다). 그래서
+   * 그 질의만 좁혀 표시하지 않고, 예전 전역 예산을 다 썼을 때처럼 모든 클라이언트·설정을 dynamic으로 둔다.
+   */
   #chargeMutation(): boolean {
-    const work = this.#building ? this.#buildWork : this.#mutationWork;
-    if (work >= MAX_MUTATION_WORK) {
+    const phase = this.#phase;
+    if (phase.exhausted || phase.work >= this.#phaseWorkLimit || this.#queryWork >= this.#queryWorkLimit) {
+      phase.exhausted = true;
       this.mutationAnalysisIncomplete = true;
       return false;
     }
-    if (this.#building) this.#buildWork++;
-    else this.#mutationWork++;
+    phase.work++;
+    this.#queryWork++;
     return true;
   }
 
@@ -1703,6 +1784,15 @@ export class ClientValues {
     const head = this.urlParts(node, depth + 1, budget)[0];
     return head !== undefined && 'literal' in head && (head.literal.startsWith('?') || (head.literal === '' && ts.isStringLiteralLike(node)));
   }
+}
+
+/** 변경 분석이 읽는 소스(테스트 제외 규칙 적용)의 UTF-16 코드 단위 합이다. 단계 작업 상한의 크기 기준이다. */
+function analyzedSourceUnits(project: NodeProject, includeTests: boolean): number {
+  let units = 0;
+  for (const [path, source] of project.files) {
+    if (includeTests || !isNodeTestPath(path)) units += source.text.length;
+  }
+  return units;
 }
 
 /** URL 식 예산에서 한 단계를 쓴다. 이미 넘었거나 이번에 넘으면 false이고 넘었다고 적는다. */

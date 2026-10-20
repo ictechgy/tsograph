@@ -27,6 +27,7 @@ import {
 import { dispatchOrderProblem } from '../exchange/dispatch-order.ts';
 import { httpLimitationScopeProblem } from '../exchange/http-limitation-scope.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
+import { MAX_SYNTAX_DEPTH, SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import type { NextRouteConfig } from './next-config.ts';
 import type { DeclaredRoute, FrameworkSources, NextRoutesResult, RouteGaps } from './next-routes.ts';
 import type { NextVersionStatus } from './project-config.ts';
@@ -407,6 +408,7 @@ function configLimitations(config: NextRouteConfig, decision: BasePathDecision):
     'function-export': 'it exports a function whose result depends on execution',
     'non-literal-export': 'its export does not resolve to an object literal',
     'syntax-error': 'it has syntax errors',
+    'too-deep': `it nests syntax more than ${MAX_SYNTAX_DEPTH} levels deep or overflows the parser's call stack`,
     unreadable: 'it could not be read as UTF-8 text within the size limit',
     symlink: 'it is a symbolic link, which tsograph does not follow',
   };
@@ -485,6 +487,7 @@ function gapLimitations(gaps: RouteGaps): string[] {
     [gaps.unreadableFiles, `route-coverage: ${gaps.unreadableFiles} route file(s) could not be read as UTF-8 text within ${MAX_ROUTE_FILE_BYTES} bytes and were skipped`],
     [gaps.unparsedFiles, `route-coverage: ${gaps.unparsedFiles} route file(s) use a non-JavaScript page extension and were not parsed`],
     [gaps.syntaxErrorFiles, `route-coverage: ${gaps.syntaxErrorFiles} route file(s) have syntax errors; their exported handlers may be incomplete`],
+    [gaps.deeplyNestedFiles, `route-coverage: ${gaps.deeplyNestedFiles} route file(s) ${SYNTAX_DEPTH_CAUSE} and were skipped`],
     [gaps.unresolvedExportFiles, `route-coverage: ${gaps.unresolvedExportFiles} route file(s) use export * or CommonJS exports whose names cannot be enumerated statically; their HTTP method handlers may be incomplete`],
     [gaps.unmodeledFiles, `route-coverage: ${gaps.unmodeledFiles} route file(s) are under parallel-route slots (@name) or intercepting-route segments ((.)name), which Next.js documents for pages only; they were not modeled`],
     [gaps.invalidSegmentFiles, `route-coverage: ${gaps.invalidSegmentFiles} route file(s) use dynamic segment names Next.js rejects at build time and were skipped`],

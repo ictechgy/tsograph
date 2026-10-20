@@ -18,13 +18,14 @@ import type { CommandFileSystem } from '../cli/file-system.ts';
 import { isSafeIdentifier, type RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
-import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
-import { extractProjectRoutes } from '../routes/project-routes.ts';
+import { emptyNextRoutesResult, type NextRoutesResult } from '../routes/next-routes.ts';
+import { extractProjectRoutes, isProjectTestPath, projectTestSourceRule, type TestSourceRule } from '../routes/project-routes.ts';
 import { createRouteDocument, type RouteFactLimitCause, RouteFactLimitError } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
 import { loadPrismaProject } from '../schema/prisma-project.ts';
 import { isSourceFileName } from '../schema/source-module.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
@@ -44,7 +45,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -70,6 +71,8 @@ interface GraphInputs {
   readonly declarations: readonly string[];
   readonly walk: ProjectFiles;
   readonly oversized: number;
+  /** 걷기가 따로 건너뛴 디렉터리(Prisma 생성 출력)다. 설정이 고르는 루트 파일도 같은 디렉터리를 뺀다. */
+  readonly excludedDirectories: ReadonlySet<string>;
 }
 
 /** 라우트 쪽 입력이다. */
@@ -82,6 +85,8 @@ interface RouteInputs {
    * Node 라우터 펼치기 상한 초과를 나눠 진입점 한계 문장이 실제 원인을 가리키게 한다. 상한 안이면 undefined다.
    */
   readonly factLimitCause: RouteFactLimitCause | undefined;
+  /** routes와 같은 테스트 소스 판정 규칙이다(production·test 프로그램을 나눌 때 쓴다). */
+  readonly testSources: TestSourceRule;
 }
 
 /** limitation을 만드는 데 필요한 계수다. */
@@ -92,6 +97,10 @@ interface GraphCounts {
   readonly config: ProgramConfigStatus;
   readonly inputs: GraphInputs;
   readonly parseErrorFiles: readonly string[];
+  /** 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 노드 파일이 되지 못한 소스의 프로젝트 기준 경로(경로 순) */
+  readonly deeplyNestedFiles: readonly string[];
+  /** 같은 이유로 Program에서 뺀 소스 밖 입력(선언·패키지·설정이 고른 파일) 수 */
+  readonly deeplyNestedInputs: number;
   /** 걷기가 골랐지만 compiler host가 읽지 못해 노드 파일이 되지 못한 소스 수 */
   readonly unreadableSources: number;
   readonly unresolvedExports: number;
@@ -132,16 +141,28 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   }
   const routes = await loadRouteInputs(project, fileSystem);
   const inputs = collectGraphInputs(project, routes.extraction);
-  const { program, checker, status } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
+  // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
+  const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
+  const { program, checker, status, deeplyNestedSources } = createGraphProgram(
+    selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config, boundary,
+  );
   const files = nodeFiles(program, inputs.sources);
+  const deeplyNestedFiles = [...inputs.sources].filter(([, absolute]) => deeplyNestedSources.has(resolve(absolute))).map(([path]) => path);
+  const deeplyNestedInputs = deeplyNestedSources.size - deeplyNestedFiles.length + (status.deeplyNestedCompilerInputs ?? 0);
   // 걷기가 고른 소스 중 Program에 없는 것은 compiler host가 읽지 못했다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
   // 읽는 백슬래시 이름). host의 'unreadable' 전체를 세면 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조한다.
-  const unreadableSources = inputs.sources.size - files.size;
+  // 구문 깊이 상한으로 뺀 소스는 원인이 달라 따로 센다.
+  const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length;
   const walk = inputs.walk;
-  const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0;
-  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
-    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0;
-  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
+  const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0 || deeplyNestedInputs > 0;
+  // 경계 밖이거나, 이름으로 적었지만 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않았거나, 상한 뒤라 열거하지 못한 설정 루트는
+  // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
+  const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
+    || status.configRootsTruncated === true;
+  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
+    && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
+    && deeplyNestedFiles.length === 0;
+  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete, routes.testSources);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
     routeFacts: routes.facts,
@@ -152,12 +173,13 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete ? 'incomplete-scan' : openProgramReason(project, inputs, parseErrorFiles.length, unreadableSources);
+  const openProgram = compilerInputsIncomplete ? 'incomplete-scan'
+    : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
-    ...analysis, config: status, inputs, parseErrorFiles, unreadableSources, unmatchedCrons, openProgram,
+    ...analysis, config: status, inputs, parseErrorFiles, deeplyNestedFiles, deeplyNestedInputs, unreadableSources, unmatchedCrons, openProgram,
     cronConfigUnreadable: crons.unreadable,
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
@@ -176,7 +198,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
  *
  * @param project 프로젝트 realpath
  * @param inputs 입력 파일
- * @param parseErrors 구문 오류 파일 수
+ * @param parseErrors 구문 오류이거나 구문 깊이 상한으로 뺀 파일 수
  * @param unreadableSources 걷기가 골랐지만 compiler host가 읽지 못한 소스 수
  * @returns 이유, 닫힌 프로그램이면 undefined
  */
@@ -237,15 +259,16 @@ interface FileAnalysis {
  * @param files 노드 파일
  * @param expectedPaths 프로젝트 상대 경로 → authoritative 절대 입력 경로
  * @param coverageComplete 파일 걷기와 compiler 설정을 빠짐없이 해석했는지
+ * @param testSources 테스트 소스 판정 규칙(routes와 같다: Node 백엔드면 `test/` 등도 테스트)
  * @returns 저장소와 계수
  */
-function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean): FileAnalysis {
+function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean, testSources: TestSourceRule): FileAnalysis {
   const store = new GraphStore();
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
   const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
   const resolveModule = createModuleResolver(program, checker);
-  const testPaths = new Set([...files.keys()].filter(isTestSourcePath));
+  const testPaths = new Set([...files.keys()].filter((path) => isProjectTestPath(path, testSources)));
   const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
   const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, files.get(path)]));
   const effectBudget = { visited: 0, records: 0 };
@@ -300,11 +323,12 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
 }
 
 /**
- * 서버 라우트(Next.js·Node 백엔드)를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙).
+ * 서버 라우트(Next.js·Node 백엔드)를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙). 같은 추출 결과(프레임워크 감지·
+ * 라우터 디렉터리)로 테스트 소스 판정 규칙도 정해, 진입점과 production·test 분리가 한 규칙을 따르게 한다.
  *
  * @param project 프로젝트 realpath
  * @param fileSystem 파일 시스템
- * @returns 추출 결과·route-decl 사실·페이지 확장자
+ * @returns 추출 결과·route-decl 사실·페이지 확장자·테스트 소스 규칙
  */
 async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): Promise<RouteInputs> {
   const routes = await extractProjectRoutes(fileSystem, project, false);
@@ -323,7 +347,7 @@ async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): 
     factLimitCause = error instanceof RouteFactLimitError ? error.limitCause : undefined;
     facts = [];
   }
-  return { extraction, facts, pageExtensions, factLimitCause };
+  return { extraction, facts, pageExtensions, factLimitCause, testSources: projectTestSourceRule(routes) };
 }
 
 /**
@@ -353,7 +377,7 @@ function collectGraphInputs(project: string, extraction: NextRoutesResult): Grap
     }
   }
   const sorted = new Map([...sources].sort(([left], [right]) => compareStrings(left, right)));
-  return { sources: sorted, declarations, walk, oversized };
+  return { sources: sorted, declarations, walk, oversized, excludedDirectories: generated };
 }
 
 /**
@@ -577,11 +601,13 @@ function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: Li
  * @param counts 계수
  * @returns limitation 목록
  */
-function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactLimit }: GraphCounts): string[] {
+function inputLimitations(counts: GraphCounts): string[] {
+  const { config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactLimit } = counts;
   const result: string[] = [];
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
+  result.push(...configRootGaps(config, 'calls').map((gap) => `graph-config: ${gap}`));
   if ((config.oversizedCompilerInputs ?? 0) > 0) {
     result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
   }
@@ -589,6 +615,7 @@ function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, 
     result.push(`parse-errors: ${parseErrorFiles.length} source file(s) have syntax errors; their calls may be incomplete`
       + parseErrorFileSuffix(parseErrorFiles));
   }
+  result.push(...deepInputLimitations(counts));
   if (inputs.oversized > 0) result.push(`oversized-sources: ${inputs.oversized} file(s) larger than 4 MiB were skipped`);
   if (inputs.walk.unreadableDirectories > 0) result.push(`unreadable-sources: ${inputs.walk.unreadableDirectories} directory entr(ies) could not be read and were skipped`);
   if (unreadableSources > 0) result.push(`unreadable-sources: ${unreadableSources} source file(s) could not be read by the compiler and were skipped`);
@@ -602,6 +629,25 @@ function inputLimitations({ config, inputs, parseErrorFiles, unreadableSources, 
   if (routeFactLimit === 'flattened-routes') {
     result.push("entry-points: the project's routers expand to more route registrations than the flattening limit when routers mounted at "
       + 'several paths are flattened; route handlers are not marked');
+  }
+  return result;
+}
+
+/**
+ * 구문 깊이 상한으로 Program에서 뺀 입력의 limitation이다. 소스는 노드가 없고, 소스 밖 입력은 타입 해석을 막는다.
+ *
+ * @param counts 계수
+ * @returns limitation 목록
+ */
+function deepInputLimitations({ deeplyNestedFiles, deeplyNestedInputs }: GraphCounts): string[] {
+  const result: string[] = [];
+  if (deeplyNestedFiles.length > 0) {
+    result.push(`parse-errors: ${deeplyNestedFiles.length} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; `
+      + 'they have no nodes and calls into them stay unlinked' + parseErrorFileSuffix(deeplyNestedFiles));
+  }
+  if (deeplyNestedInputs > 0) {
+    result.push(`parse-errors: ${deeplyNestedInputs} declaration, package, or config-selected input(s) ${SYNTAX_DEPTH_CAUSE} `
+      + 'and were not loaded; type resolution and calls may be incomplete');
   }
   return result;
 }

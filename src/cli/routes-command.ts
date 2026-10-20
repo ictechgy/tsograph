@@ -3,11 +3,10 @@
  *
  * 흐름: 인자 검증 → 프로젝트 경로 정규화 → package.json·next.config 읽기 → Next.js route 파일 스캔과 Node 백엔드
  * 라우터 해석 → 문서 조립 → 키 정렬 JSON 출력. 파일 하나를 읽지 못하는 것은 limitation이고, 프로젝트 자체를 읽지
- * 못하거나 출력이 상한을 넘으면 코드 2, 잘못된 호출은 사용법과 코드 64다. 분석이 호출 스택을 넘기면(깊이 중첩된
+ * 못하거나 출력이 상한을 넘으면 코드 2, 잘못된 호출은 사용법과 코드 64다. client 역할의 `--client-model`·`--tsconfig`가
+ * `--project` 밖이면 다른 명령과 같은 사용 오류(64)다(`project-paths.ts`). 분석이 호출 스택을 넘기면(깊이 중첩된
  * 생성 코드 등) 다른 명령과 같은 원인 문구의 코드 2다. 분석 대상 코드는 실행하지 않는다.
  */
-
-import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
@@ -31,6 +30,7 @@ import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFai
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH, MAX_SERVICE_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
+import { checkCompilerConfig, resolveProjectFile, resolveProjectRoot } from './project-paths.ts';
 
 /** routes 명령 사용법이다. */
 export const routesUsage = `Usage: tsograph routes --role server|client --project <root> [--service <name>] [--client-model <file>] [--include-tests] [--format json]
@@ -45,13 +45,15 @@ Options:
   --project <root>   Project root (the directory with package.json, next.config.*, app/ or pages/)
   --service <name>   Service identity recorded on the document and every fact
   --client-model <file>
-                     Bounded JSON typed HTTP client model for opaque transports (client role only)
-  --tsconfig <file>   Compiler config relative to --project (client role only)
+                     Bounded JSON typed HTTP client model inside --project for opaque transports
+                     (client role only)
+  --tsconfig <file>   Compiler config file inside --project (client role only)
   --include-tests    Also emit routes declared in test sources (*.test.*, *.spec.*, __tests__/;
                      for Node backends also test/, tests/, e2e/) with testSource: true
   --format json      Output format (json is the only format)
 
-Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error.
+Exit codes: 0 success, 2 unreadable project or oversized output, 64 usage error
+(including a --client-model or --tsconfig file outside --project).
 `;
 
 /** routes 명령의 실행 환경이다. */
@@ -82,7 +84,7 @@ export async function runRoutesCommand(arguments_: readonly string[], environmen
   const parsed = parseRoutesArguments(arguments_);
   if (parsed === 'help') return success(routesUsage);
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${routesUsage}`);
-  const project = await resolveProject(environment.fileSystem, parsed.projectArgument);
+  const project = await resolveProjectRoot(environment.fileSystem, parsed.projectArgument, 'pass the project root.');
   if (typeof project !== 'string') return project;
   return extractDocument(project, parsed, environment);
 }
@@ -114,28 +116,6 @@ function parseRoutesArguments(arguments_: readonly string[]): RoutesArguments | 
   const tsconfig = parsed.valueFlags.get('--tsconfig');
   if (tsconfig !== undefined && role !== 'client') return '--tsconfig is available only with --role client.';
   return { role, projectArgument, service, includeTests: parsed.booleanFlags.has('--include-tests'), clientModel, tsconfig };
-}
-
-/**
- * 프로젝트 경로를 realpath로 정규화하고 디렉터리인지 확인한다.
- *
- * @param fileSystem 파일 시스템
- * @param projectArgument `--project` 값
- * @returns 프로젝트 realpath 또는 실패 결과
- */
-async function resolveProject(fileSystem: CommandFileSystem, projectArgument: string): Promise<string | CommandResult> {
-  let project: string;
-  try {
-    project = await fileSystem.realPath(projectArgument);
-    if ((await fileSystem.status(project)).kind !== 'directory') throw new Error('not a directory');
-  } catch {
-    // 원인(없음·권한·파일)은 같은 해결 방향이라 한 문구로 보고한다. 경로 원문은 싣지 않는다.
-    return inputFailure('--project does not name a readable directory; pass the project root.');
-  }
-  if (!isSafeIdentifier(project)) {
-    return inputFailure('the project path contains characters the exchange format forbids; rename or move the project.');
-  }
-  return project;
 }
 
 /**
@@ -183,6 +163,11 @@ async function extractClientDocument(project: string, parsed: RoutesArguments, e
     && typedModels.models.some((model) => model.methods.some((method) => method.service !== undefined && method.service !== parsed.service))) {
     return inputFailure('the client model declares a service that conflicts with --service; use one service identity.');
   }
+  // 모델·service 오류를 먼저 알리던 순서를 지킨다(설정 오류는 예전에 추출 단계에서 났다).
+  const configFailure = parsed.tsconfig === undefined
+    ? undefined
+    : await checkCompilerConfig(environment.fileSystem, project, parsed.tsconfig, routesUsage);
+  if (configFailure !== undefined) return configFailure;
   try {
     return renderDocument(() => extractClientRoutes(project, parsed.service, parsed.includeTests, environment.toolVersion, environment.now(), typedModels, parsed.tsconfig));
   } catch (error) {
@@ -191,24 +176,19 @@ async function extractClientDocument(project: string, parsed: RoutesArguments, e
   }
 }
 
-/** 명시 모델 파일을 프로젝트 안에서 bounded하게 읽고 JSON parser에 넘긴다. */
+/** 명시 모델 파일을 프로젝트 안에서 bounded하게 읽고 JSON parser에 넘긴다. 크기는 포함 검사가 본 상태로 판정한다. */
 async function loadClientModel(fileSystem: CommandFileSystem, project: string, argument: string): Promise<TypedClientModels | CommandResult> {
-  const requested = isAbsolute(argument) ? argument : resolve(project, argument);
-  let modelPath: string;
-  try { modelPath = await fileSystem.realPath(requested); }
-  catch { return inputFailure('unable to read the client model file; pass an existing readable JSON file.'); }
-  let status;
-  try { status = await fileSystem.status(modelPath); }
-  catch { return inputFailure('unable to read the client model file; pass an existing readable JSON file.'); }
-  if (status.kind !== 'file') return inputFailure('unable to read the client model file; pass an existing readable JSON file.');
-  const rel = relative(project, modelPath);
-  if (rel === '' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    return usageFailure('tsograph: the client model file must be inside --project.');
-  }
-  if (!isSafeIdentifier(rel)) return inputFailure('the client model path contains characters the exchange format forbids; rename or move the file.');
-  if (status.size > MAX_TYPED_CLIENT_MODEL_BYTES) return inputFailure(`the client model exceeds ${MAX_TYPED_CLIENT_MODEL_BYTES} bytes; split the model file.`);
+  const model = await resolveProjectFile(fileSystem, project, argument, {
+    subject: 'the client model file',
+    unreadable: 'unable to read the client model file; pass an existing readable JSON file.',
+    outsideRemedy: 'move it under the project root.',
+    usage: routesUsage,
+  });
+  if ('exitCode' in model) return model;
+  if (!isSafeIdentifier(model.projectPath)) return inputFailure('the client model path contains characters the exchange format forbids; rename or move the file.');
+  if (model.status.size > MAX_TYPED_CLIENT_MODEL_BYTES) return inputFailure(`the client model exceeds ${MAX_TYPED_CLIENT_MODEL_BYTES} bytes; split the model file.`);
   let bytes: Uint8Array;
-  try { bytes = await fileSystem.readBytes(modelPath, MAX_TYPED_CLIENT_MODEL_BYTES); }
+  try { bytes = await fileSystem.readBytes(model.path, MAX_TYPED_CLIENT_MODEL_BYTES); }
   catch { return inputFailure('unable to read the client model file; check file permissions.'); }
   if (bytes.byteLength > MAX_TYPED_CLIENT_MODEL_BYTES) return inputFailure(`the client model exceeds ${MAX_TYPED_CLIENT_MODEL_BYTES} bytes; split the model file.`);
   let text: string;

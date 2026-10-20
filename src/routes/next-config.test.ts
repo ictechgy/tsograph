@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { DEFAULT_PAGE_EXTENSIONS, type NextRouteConfig, readNextRouteConfig } from './next-config.ts';
 import { parseSource, scriptKindOf } from './source-file.ts';
 
 /** 설정 텍스트를 읽는다. */
 function read(text: string, fileName = 'next.config.ts'): NextRouteConfig {
   const parsed = parseSource(fileName, text, scriptKindOf(fileName)!);
+  if (parsed === TOO_DEEP) throw new Error('test source unexpectedly exceeded the syntax depth limit');
   return readNextRouteConfig(fileName, parsed.sourceFile, parsed.hasSyntaxErrors);
 }
 
