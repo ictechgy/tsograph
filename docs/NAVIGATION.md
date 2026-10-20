@@ -48,7 +48,10 @@ USR은 graph와 같은 규칙이며 source 위치는 1 기반 UTF-8 열이다. �
 설정은 project 안의 1 MiB JSON이며 중복 key·닫힌 schema·깊이·모델 상한을 검사한다.
 `--router-model`과 `--tsconfig`는 realpath가 `--project` 안인 일반 파일이어야 한다(상대 경로는 `--project` 기준, 절대 경로도
 안이면 받는다). 직접이든 symlink로든 밖이면 openapi 스펙·routes client 모델과 같은 사용법 오류(코드 64)이고, 없거나 읽지
-못하거나 크기 상한(모델 1 MiB, `--tsconfig` 1 MiB)을 넘으면 코드 2다.
+못하거나 크기 상한(모델 1 MiB, `--tsconfig` 1 MiB)을 넘으면 코드 2다. `--tsconfig`의 상대 옵션(`baseUrl`·`paths`·`include`·
+`extends`)은 받은 경로의 디렉터리를 기준으로 해석한다(`tsc -p`·graph·routes client와 같다). symlink로 고른 설정도 링크를
+풀지 않으므로 링크가 있는 디렉터리가 기준이고, limitation의 설정 이름도 링크 이름이다. 0.10.0은 링크 대상의 디렉터리를
+기준으로 썼다. 대상 디렉터리 기준으로 적은 설정은 실제 경로를 `--tsconfig`로 준다.
 등록 깊이는 64, 사실은 100,000개로 제한하며 상한 뒤를 조용히 버리지 않는다. 출력은
 `navigation-facts` v1이고 HTTP method/service/authority를 갖지 않는다. 실제 HTTP 요청은
 `routes --role client`로 따로 추출한다. isthmus의 `trace-navigation`이 같은 project의 정방향

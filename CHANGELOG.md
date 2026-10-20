@@ -116,7 +116,11 @@
   `--tsconfig`도 받는다(예전 2). openapi·routes·schema·navigation·graph가 프로젝트·입력 파일 검증을 한곳에서
   하며, 밖 입력 파일 문구는 `tsograph: <입력> is outside --project; <해결 방향>`에 명령 사용법을 붙인 같은
   형식이다(routes client 모델 문구도 이 형식으로 바뀌고 코드 64는 그대로다). graph·routes client의 없는·읽지
-  못하는·1 MiB를 넘는 `--tsconfig`는 지금처럼 2이며 navigation과 같은 문구를 낸다.
+  못하는·1 MiB를 넘는 `--tsconfig`는 지금처럼 2이며 navigation과 같은 문구를 낸다. navigation이 symlink로 고른
+  `--tsconfig`는 이제 받은 경로의 디렉터리를 상대 옵션(`baseUrl`·`paths`·`include`·`extends`)의 기준으로 쓴다
+  (`tsc -p`·graph·routes client와 같다). 예전에는 링크 대상의 디렉터리가 기준이었다. 그래서 대상 디렉터리 기준으로
+  상대 옵션을 적은 링크 설정은 별칭·include 해석과 사실이 달라질 수 있고, limitation에 실리는 설정 이름도 링크
+  이름이 된다. 대상 디렉터리 기준이 필요하면 실제 설정 경로를 `--tsconfig`로 준다. 링크가 아닌 설정은 그대로다.
 
 ### Fixed
 
