@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import type { ExtractionResult } from './extract.ts';
+import { MAX_SYNTAX_DEPTH } from './syntax-depth.ts';
 import { extractProject, factLines, prismaBase } from './testing.test.ts';
 
 /**
@@ -68,6 +69,47 @@ test('schema parse-error limitation은 안전한 상대 파일 10개와 생략 �
     + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
   assert.ok(!limitation?.includes('\nunsafe'));
   assert.ok(result.limitations.includes(unsafeWalkNames(1)));
+});
+
+/**
+ * 구문 깊이 상한을 넘는 파일들이다. 고치기 전에는 하나만 있어도 schema 전체가 스택 초과로 끝났다: 괄호는 파서, `||`
+ * 사슬은 이름 해석기 Program의 TypeScript 바인더, 메서드 사슬은 tsograph 방문기가 넘쳤다.
+ */
+const deeplyNestedSources: Readonly<Record<string, string>> = {
+  'src/deep/parens.ts': `export const p = ${'('.repeat(3_000)}1${')'.repeat(3_000)};\n`,
+  'src/deep/logical.ts': `declare const a: boolean;\nexport const o = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n`,
+  'src/deep/chain.ts': `declare const api: any;\nexport const v = api${'.get(1)'.repeat(3_000)};\n`,
+};
+
+test('구문 중첩이 상한을 넘는 소스는 그 파일만 parse-errors로 빼고 상한 안의 파일은 그대로 분석한다', () => {
+  // `export const s = a + …;`의 깊이는 항 수 + 4라 이 파일은 상한과 같은 깊이다(빼지 않는다).
+  const atLimit = Array.from({ length: MAX_SYNTAX_DEPTH - 4 }, () => '"a"').join(' + ');
+  const result = extractProject({
+    'src/ok.ts': "import { Pool } from 'pg';\nconst pool = new Pool();\nexport const users = () => pool.query('SELECT id FROM users');\n",
+    'src/edge.ts': `import { Pool } from 'pg';\nconst pool = new Pool();\nexport const s = ${atLimit};\n`
+      + "export const accounts = () => pool.query('SELECT id FROM accounts');\n",
+    ...deeplyNestedSources,
+  });
+  const lines = factLines(result);
+  assert.ok(lines.some((line) => line.startsWith('src/ok.ts:') && line.includes(' users ')), lines.join('\n'));
+  assert.ok(lines.some((line) => line.startsWith('src/edge.ts:') && line.includes(' accounts ')), lines.join('\n'));
+  assert.ok(!lines.some((line) => line.startsWith('src/deep/')));
+  assert.deepEqual(result.limitations.filter((line) => line.startsWith('parse-errors:')), [
+    `parse-errors: 3 source file(s) nest syntax more than ${MAX_SYNTAX_DEPTH} levels deep or overflow the parser's call stack and were not analyzed; `
+      + 'files: ["src/deep/chain.ts","src/deep/logical.ts","src/deep/parens.ts"]; omitted: 0',
+  ]);
+});
+
+test('D1 바인딩을 읽는 선언 파일이 구문 깊이 상한을 넘으면 그 파일만 parse-errors로 빼고 계속한다', () => {
+  const result = extractProject({
+    'worker-configuration.d.ts': `interface Env { MAIN_DB: D1Database; DEEP: ${'Array<'.repeat(3_000)}number${'>'.repeat(3_000)} }\n`,
+    'src/ok.ts': "import { Pool } from 'pg';\nconst pool = new Pool();\nexport const users = () => pool.query('SELECT id FROM users');\n",
+  });
+  assert.ok(factLines(result).some((line) => line.startsWith('src/ok.ts:') && line.includes(' users ')));
+  assert.deepEqual(result.limitations.filter((line) => line.startsWith('parse-errors:')), [
+    `parse-errors: 1 source file(s) nest syntax more than ${MAX_SYNTAX_DEPTH} levels deep or overflow the parser's call stack and were not analyzed; `
+      + 'files: ["worker-configuration.d.ts"]; omitted: 0',
+  ]);
 });
 
 /**

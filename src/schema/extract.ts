@@ -32,9 +32,10 @@ import { isDeclarationFileName, loadPrismaProject, type PrismaProject } from './
 import { ProjectReader } from './project-reader.ts';
 import { toPosixRelative } from './project-files.ts';
 import { type RelationUseFact, RelationFactSink } from './relation-facts.ts';
-import { isSourceFileName, parseSourceModule, type SourceModule } from './source-module.ts';
+import { isSourceFileName, parseBoundedSourceModule, parseSourceModule, type SourceModule } from './source-module.ts';
 import { SourceText } from './source-text.ts';
 import { sqlRelations } from './sql-relations.ts';
+import { SYNTAX_DEPTH_CAUSE, TOO_DEEP } from './syntax-depth.ts';
 import { dynamicChannel } from './relation-facts.ts';
 
 /** 추출 결과다. */
@@ -48,6 +49,8 @@ export interface ExtractionResult {
 /** 추출 전체의 계수다. */
 interface ExtractionCounts extends UsageCounts {
   parseErrorFiles: string[];
+  /** 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 분석에서 뺀 파일(프로젝트 기준 경로)이다. */
+  deeplyNestedFiles: string[];
 }
 
 /** limitation 한 줄에 싣는 parse-error 파일 수 상한이다. */
@@ -65,7 +68,7 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   const sink = new RelationFactSink();
   const counts: ExtractionCounts = {
     dynamicRelations: 0, skippedSqlLiterals: 0, unresolvedReceivers: 0, unknownDelegates: 0,
-    parseErrorFiles: [],
+    parseErrorFiles: [], deeplyNestedFiles: [],
   };
   const relational = isRelational(project.catalog);
   if (relational && project.catalog !== undefined) emitSchemaFacts(project.catalog, sink);
@@ -76,6 +79,7 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   const entries = parseSources(sources, usage, counts);
   const orm = ormStage(entries, { resolver, sink, declarationFiles: () => declarationFiles(root, project, reader) });
   counts.dynamicRelations += orm.counts.dynamicRelations;
+  counts.deeplyNestedFiles.push(...orm.counts.deeplyNestedFiles);
   provenance.run(entries);
   scanEntries(entries, usage, orm.consumed, { sink, counts });
   emitTypedSql(root, project.typedSqlFiles, reader, sink, counts);
@@ -198,17 +202,25 @@ function readSources(root: string, project: PrismaProject, reader: ProjectReader
  * 없다 — 첫 라운드는 빈 출처 표로 모듈마다 따로 계산하고, 추정 표로 한 기록은 읽은 칸으로 따로 확인하며, 모듈 목록은
  * 경로 순으로 돌려준다.
  *
+ * 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘긴 파일은 요약을 만들지 않고 센다. 그래서 뒤 단계(이름 해석기
+ * Program·출처 고정점·사용 스캔·패키지 계수)가 그 파일을 보지 않는다. 그 파일을 가리키는 import는 export를 모르는
+ * 모듈로 남는다(해석기의 소스 집합은 파싱 전에 만들었으므로 경로는 풀리지만 export 표가 없다).
+ *
  * @param sources 읽은 소스(경로 순)
  * @param usage 사용 스캔 문맥
- * @param counts 계수(parse-error 파일이 더해진다)
- * @returns 소스 요약(경로 순)
+ * @param counts 계수(parse-error 파일과 깊이로 뺀 파일이 더해진다)
+ * @returns 소스 요약(경로 순, 뺀 파일 제외)
  */
 function parseSources(sources: readonly SourceInput[], usage: UsageStage, counts: ExtractionCounts): SourceEntry[] {
-  const entries: SourceEntry[] = [];
+  const entries: (SourceEntry | undefined)[] = [];
   let gated = false;
   for (const index of parseOrder(sources)) {
     const source = sources[index]!;
-    const module = parseSourceModule(source.path, source.absolutePath, source.text);
+    const module = parseBoundedSourceModule(source.path, source.absolutePath, source.text);
+    if (module === TOO_DEEP) {
+      counts.deeplyNestedFiles.push(source.path);
+      continue;
+    }
     if (module.hasParseErrors) counts.parseErrorFiles.push(module.path);
     const entry = new SourceEntry(source, module);
     gated ||= entry.orm.isOrmModule;
@@ -217,7 +229,7 @@ function parseSources(sources: readonly SourceInput[], usage: UsageStage, counts
     else entry.usage = recordUsage(module, usage.provenance, usage.catalog, { knowledge: usage.provenance.guesses });
     entries[index] = entry;
   }
-  return entries;
+  return entries.filter((entry) => entry !== undefined);
 }
 
 /** Prisma 클라이언트를 만들 법한 소스의 글자다(클래스 이름 또는 Prisma 모듈 지정자). */
@@ -546,6 +558,10 @@ function inputLimitations({ project, counts, reader, unreadableConfigs, sink }: 
   if (counts.parseErrorFiles.length > 0) {
     result.push(`parse-errors: ${counts.parseErrorFiles.length} source file(s) could not be parsed completely`
       + parseErrorFileSuffix(counts.parseErrorFiles));
+  }
+  if (counts.deeplyNestedFiles.length > 0) {
+    result.push(`parse-errors: ${counts.deeplyNestedFiles.length} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed`
+      + parseErrorFileSuffix(counts.deeplyNestedFiles));
   }
   if (unreadableConfigs > 0) {
     result.push(`unreadable-module-configs: ${unreadableConfigs} tsconfig/jsconfig file(s) could not be parsed; imports under them use default resolution`);

@@ -541,10 +541,10 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   the project.
 - Exit codes: `0` success (zero facts is still success, not proof of completeness),
   `2` unreadable project, more than 100,000 facts, or output over 16 Mi characters,
-  `64` usage error. `1` is reserved. An analysis that exceeds the call stack (typically on a
-  deeply nested generated or minified source) also exits `2`, with one message shared by `schema`,
-  `routes`, `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or
-  split such files; no partial document is written.
+  `64` usage error. `1` is reserved. A deeply nested source is left out on its own (see Syntax
+  depth below) instead of failing the run. An analysis that still exceeds the call stack exits `2`,
+  with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that
+  names the cause and asks to exclude or split such files; no partial document is written.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
   Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
@@ -558,6 +558,14 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
   released file by file. Very large repositories of that kind can still exhaust the default V8
   heap, and the process then aborts outside the exit-code contract; narrow `--project` or raise the
   heap with `NODE_OPTIONS=--max-old-space-size=<MiB>`.
+- Syntax depth: right after parsing, each source's syntax tree depth is measured without recursion.
+  A source that nests more than 400 levels deep, or whose parse overflows the call stack (long
+  `||` or method chains and hundreds of nested parentheses in generated or minified code), is left
+  out of every later step and listed under `parse-errors:` with its path; the other sources are
+  still analyzed, and imports of a skipped file stay untraced. Declaration files read for D1
+  bindings follow the same rule, and such a `prisma.config` counts under `unresolved-prisma-config:`.
+  The limit sits well below the depth where TypeScript's binder overflowed (640 levels for `||`
+  chains, measured on Node 22); public npm sources reach at most about 220.
 
 ### Facts
 

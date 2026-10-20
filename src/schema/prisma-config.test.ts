@@ -28,3 +28,12 @@ test('리터럴이 아닌 값·펼침·단축 속성·default export 없음은 �
   assert.deepEqual(readPrismaConfig('prisma.config.ts', 'export default a.b;\n').schema, unresolved);
   assert.deepEqual(readPrismaConfig('prisma.config.mjs', 'exports.x = 1;\nexport default { typedSql: "x" };\n').typedSqlPath, unresolved);
 });
+
+test('파서가 스택을 넘기거나 구문 깊이 상한을 넘는 설정은 읽지 못함이고 명령을 멈추지 않는다', () => {
+  const unresolved = { kind: 'unresolved' };
+  const parens = `export default { schema: ${'('.repeat(3_000)}"a"${')'.repeat(3_000)} };\n`;
+  const concatenation = `export default { schema: ${Array.from({ length: 3_000 }, () => '"a"').join(' + ')} };\n`;
+  for (const text of [parens, concatenation]) {
+    assert.deepEqual(readPrismaConfig('prisma.config.ts', text), { schema: unresolved, typedSqlPath: unresolved });
+  }
+});

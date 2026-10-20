@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { ambientTypesFreeConfig } from './testing.test.ts';
@@ -107,22 +108,25 @@ function writeDeeplyNestedProject(root: string, generated: string): void {
 }
 
 /**
- * 분석기 스택을 넘기는 생성 코드다. 다섯 명령이 넘치기 시작한 깊이(macOS arm64·Node 22.20 실측: 사슬 500~1,000단,
- * 쉼표 1,500~2,000항)의 3배 이상으로 잡아 플랫폼마다 프레임 크기가 조금 달라도 넘치게 한다.
+ * 구문 깊이 상한을 크게 넘는 생성 코드다. 격리 전에는 다섯 명령이 넘치기 시작한 깊이(macOS arm64·Node 22.20 실측: 사슬
+ * 500~1,000단, 쉼표 1,500~2,000항)의 3배 이상이라, 플랫폼마다 프레임 크기가 조금 달라도 격리하지 않으면 넘친다.
  */
 const deeplyNestedSources: Readonly<Record<string, string>> = {
   'method chain': `declare const builder: { step(): typeof builder };\nexport const built = builder${'.step()'.repeat(3_000)};\n`,
   'comma sequence': `declare function a(): number;\nexport const value = (${Array.from({ length: 6_000 }, () => 'a()').join(',')});\n`,
 };
 
-test('분석 중 스택 초과는 다섯 명령 모두 같은 원인 문구와 코드 2로 끝나고 출력 초과로 오진하지 않는다', async () => {
+test('깊이 중첩된 생성 파일은 schema에서 그 파일만 parse-errors로 빠지고 Program을 쓰는 명령은 공용 원인 문구의 2로 끝난다', async () => {
   const expected = stackExhaustionFailure().standardError;
   for (const [label, generated] of Object.entries(deeplyNestedSources)) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-deep-nesting-')));
     try {
       writeDeeplyNestedProject(root, generated);
+      const schema = await runCli(['schema', '--project', root], environment);
+      assert.equal(schema.exitCode, 0, `${label}: schema`);
+      assert.ok((JSON.parse(schema.standardOutput) as { limitations: string[] }).limitations.includes(
+        `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; files: ["src/generated.ts"]; omitted: 0`), `${label}: schema`);
       for (const arguments_ of [
-        ['schema', '--project', root],
         ['graph', '--project', root],
         ['routes', '--role', 'server', '--project', root],
         ['routes', '--role', 'client', '--project', root],

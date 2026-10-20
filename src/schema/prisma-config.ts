@@ -9,6 +9,8 @@
 
 import ts from 'typescript';
 
+import { parseWithinSyntaxDepth, TOO_DEEP } from './syntax-depth.ts';
+
 /** 설정 속성 하나의 정적 값이다. */
 export type ConfigValue =
   | { readonly kind: 'absent' }
@@ -40,7 +42,9 @@ const UNRESOLVED: ConfigValue = { kind: 'unresolved' };
  */
 export function readPrismaConfig(fileName: string, text: string): PrismaConfigPaths {
   const kind = /\.[cm]?js$/u.test(fileName) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-  const sourceFile = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
+  // 파서가 스택을 넘기거나 구문이 소스와 같은 깊이 상한을 넘는 설정은 값을 읽지 않는다(읽지 못한 설정과 같은 계수).
+  const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind));
+  if (sourceFile === TOO_DEEP) return { schema: UNRESOLVED, typedSqlPath: UNRESOLVED };
   const config = defaultExportObject(sourceFile);
   if (config === undefined) return { schema: UNRESOLVED, typedSqlPath: UNRESOLVED };
   const typedSql = propertyValue(config, 'typedSql');

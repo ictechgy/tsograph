@@ -14,6 +14,7 @@ import type { ModuleResolver } from '../module-resolver.ts';
 import { packageName } from '../db-packages.ts';
 import type { RelationFactSink } from '../relation-facts.ts';
 import type { SourceModule } from '../source-module.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from '../syntax-depth.ts';
 import { collectD1Bindings, D1_TYPE_NAME, driverRules } from './driver-rules.ts';
 import { DriverUsage } from './driver-usage.ts';
 import { DrizzleCatalog } from './drizzle-catalog.ts';
@@ -110,7 +111,7 @@ export function extractOrmFacts(input: OrmExtractionInput): OrmExtraction {
   const { packages } = input;
   if (!packages.hasOrmModule) return { counts, consumed };
   const modules = input.modules();
-  const d1Bindings = collectBindings(modules, input.declarationFiles);
+  const d1Bindings = collectBindings(modules, input.declarationFiles, counts);
   const evaluator = new OrmEvaluator(new OrmBinder(modules, input.resolver));
   const drizzle = new DrizzleCatalog(evaluator, counts);
   const typeorm = new TypeormCatalog(evaluator, counts);
@@ -233,15 +234,22 @@ function declarationSpecifier(node: ts.Node): string | undefined {
 /**
  * 소스와 선언 파일에서 `D1Database` 바인딩 이름을 모은다.
  *
+ * 선언 파일은 여기서 처음 파싱하므로 소스와 같은 구문 깊이 상한을 건다. 넘는 파일은 바인딩을 읽지 않고 센다 — 방문기가
+ * 재귀로 걸어 명령 전체가 스택 초과로 끝나지 않게 하기 위해서다.
+ *
  * @param modules 소스 모듈
  * @param declarationFiles 선언 파일 텍스트를 돌려주는 함수
+ * @param counts 계수(깊이로 건너뛴 선언 파일이 더해진다)
  * @returns 바인딩 이름
  */
-function collectBindings(modules: readonly SourceModule[], declarationFiles: OrmExtractionInput['declarationFiles']): Set<string> {
+function collectBindings(modules: readonly SourceModule[], declarationFiles: OrmExtractionInput['declarationFiles'], counts: OrmCounts): Set<string> {
   const names = new Set<string>();
   for (const module of modules) if (module.text.text.includes(D1_TYPE_NAME)) collectD1Bindings(module.sourceFile, names);
   for (const file of declarationFiles()) {
-    if (file.text.includes(D1_TYPE_NAME)) collectD1Bindings(ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS), names);
+    if (!file.text.includes(D1_TYPE_NAME)) continue;
+    const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS));
+    if (sourceFile === TOO_DEEP) counts.deeplyNestedFiles.push(file.path);
+    else collectD1Bindings(sourceFile, names);
   }
   return names;
 }
