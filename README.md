@@ -1215,11 +1215,15 @@ What `bound` guarantees, and what it does not:
   overlap that type. Structurally unrelated types can still overlap through an intersection and therefore
   remain unknown; `any`, `unknown`, and generic/instantiable target types never use this exclusion. A same-named property write that replaces a
   method (monkey patching) blocks `bound` for that method.
-- **Test sources are separate programs.** For call sites outside test sources (`*.test.*`,
-  `*.spec.*`, `__tests__/`, `__mocks__/` — the `routes` rule), flows and candidates come from the
-  program without test sources, so mocks injected by unit tests do not block production edges. Call
-  sites inside test sources use the whole project. If a non-test file imports a test source, the whole
-  project is used everywhere.
+- **Test sources are separate programs.** Test sources follow the `routes` rule: `*.test.*`,
+  `*.spec.*`, `__tests__/`, and `__mocks__/`; when a Node backend framework is detected (the same
+  detection as server route discovery), also files under `test/`, `tests/`, and `e2e/` and
+  `*.e2e-spec.*`/`*.e2e.*` files, except inside the Next.js router directories (`app`/`pages`, or
+  `src/app`/`src/pages`), whose folder names are URL segments (`app/api/test/route.ts` stays a
+  production source). For call sites outside test sources, flows and candidates come from the
+  program without test sources, so mocks injected by tests neither block production edges nor add
+  test implementations to them. Call sites inside test sources use the whole project. If a non-test
+  file imports a test source, the whole project is used everywhere.
 - An independent effect inventory reconciles the expected whole or production sources with their
   file indexes, source revisions, runtime module edges, and executable operations. Enumeration,
   runtime reference/alias closure, initialization coverage, and ambient safety are separate checks;

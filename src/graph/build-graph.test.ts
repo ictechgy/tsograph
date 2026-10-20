@@ -16,6 +16,7 @@ import { runRoutesCommand } from '../cli/routes-command.ts';
 import { runSchemaCommand } from '../cli/schema-command.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded } from '../cli/testing.test.ts';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
+import { extractProjectRoutes, isProjectTestPath, projectTestSourceRule } from '../routes/project-routes.ts';
 import { buildCallGraph, projectSpecifierMatcher } from './build-graph.ts';
 import { createModuleResolver } from './dispatch.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
@@ -596,5 +597,161 @@ test('컴파일러가 읽지 못한 소스는 노드 없이 건너뛰지 않고 
     assert.ok(target.limitations.some((line) => line.startsWith('effect-inventory: incomplete(coverage)')));
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 합성 파일로 임시 프로젝트를 만들어 콜백에 넘기고 끝나면 지운다.
+ *
+ * @param files 프로젝트 기준 경로 → 내용
+ * @param run 프로젝트 realpath를 받는 검사
+ * @returns 검사 결과
+ */
+async function inSyntheticProject<T>(files: Readonly<Record<string, string>>, run: (project: string) => Promise<T>): Promise<T> {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-test-sources-')));
+  try {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(join(project, path, '..'), { recursive: true });
+      writeFileSync(join(project, path), content);
+    }
+    return await run(project);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** 운영 서비스다: 운영 코드만 보면 `persist`의 인터페이스 호출은 `SqlStore` 하나로만 흐른다. */
+const persistService = [
+  'export interface Store { save(value: string): void; }',
+  'function write(value: string) { return value; }',
+  'export class SqlStore implements Store { save(value: string) { write(value); } }',
+  'export function persist(store: Store) { store.save("x"); }',
+  'export function main() { persist(new SqlStore()); }',
+].join('\n');
+
+/** 프로젝트 구현이 없는 외부 목을 주입하는 테스트다. 운영 흐름에 섞이면 `persist`의 bound를 막는다. */
+const externalMockTest = [
+  'import { persist } from "../src/service";',
+  'declare const vi: { fn(): (value: string) => void };',
+  'export const check = () => persist({ save: vi.fn() });',
+].join('\n');
+
+/** 프로젝트 클래스 목을 주입하는 테스트다. 운영 흐름에 섞이면 production reach에 들어간다. */
+const classMockTest = [
+  'import { persist, type Store } from "../src/service";',
+  'function recordCall(value: string) { return value; }',
+  'class MockStore implements Store { save(value: string) { recordCall(value); } }',
+  'export const check = () => persist(new MockStore());',
+].join('\n');
+
+/**
+ * `persist`의 인터페이스 호출이 bound로 이어진 대상(정렬)이다.
+ *
+ * @param target 그래프
+ * @returns 대상 id 목록
+ */
+function boundFromPersist(target: CallGraph): string[] {
+  return target.edges.filter((edge) => edge.from === 'src/service.ts#persist' && edge.evidence === 'bound').map((edge) => edge.to).sort();
+}
+
+test('Node 백엔드를 감지하면 test/·tests/·e2e/ 아래 목은 운영 bound를 막지도 섞이지도 않는다(routes와 같은 테스트 규칙)', async () => {
+  const express = JSON.stringify({ private: true, dependencies: { express: '4.21.2' } });
+  for (const [path, mock] of [['test/service.ts', externalMockTest], ['test/service.ts', classMockTest], ['tests/service.ts', classMockTest], ['e2e/service.ts', externalMockTest]] as const) {
+    const target = await inSyntheticProject({
+      'package.json': express, 'tsconfig.json': ambientTypesFreeConfig, 'src/service.ts': persistService, [path]: mock,
+    }, (project) => buildCallGraph(project, fileSystem));
+    assert.deepEqual(boundFromPersist(target), ['src/service.ts#SqlStore.save'], path);
+    const reached = traverse(target, {
+      rootIds: ['src/service.ts#persist'], direction: 'dependencies', dispatch: 'bound', maxDepth: 8, maxReached: 100,
+    }).reached.map((row) => row.id).sort();
+    assert.deepEqual(reached, ['src/service.ts#SqlStore.save', 'src/service.ts#write'], path);
+    // 테스트 안의 호출은 지금처럼 프로젝트 전체로 구한다: 테스트 함수에서 persist까지는 direct 간선이다.
+    assert.ok(edgeLines(target).has(`${path}#check -> src/service.ts#persist call`), path);
+  }
+});
+
+test('Node 백엔드를 감지하지 못한 프로젝트의 test/는 지금 규칙대로 운영 소스로 남는다', async () => {
+  for (const [mock, expected] of [[externalMockTest, []], [classMockTest, ['src/service.ts#SqlStore.save', 'test/service.ts#MockStore.save']]] as const) {
+    const target = await inSyntheticProject({
+      'package.json': JSON.stringify({ private: true, dependencies: {} }), 'tsconfig.json': ambientTypesFreeConfig,
+      'src/service.ts': persistService, 'test/service.ts': mock,
+    }, (project) => buildCallGraph(project, fileSystem));
+    assert.deepEqual(boundFromPersist(target), expected);
+  }
+});
+
+test('Next 라우터 디렉터리 안의 test/ 폴더는 Node 백엔드를 감지해도 운영 소스다(app/api/test/route.ts는 /api/test)', async () => {
+  const target = await inSyntheticProject({
+    'package.json': JSON.stringify({ private: true, dependencies: { next: '16.2.7', express: '4.21.2' } }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/service.ts': persistService,
+    'test/service.ts': externalMockTest,
+    'app/api/test/route.ts': [
+      'import { persist, type Store } from "../../../src/service";',
+      'function audit(value: string) { return value; }',
+      'class RouteStore implements Store { save(value: string) { audit(value); } }',
+      'export function GET() { persist(new RouteStore()); return new Response("ok"); }',
+    ].join('\n'),
+  }, (project) => buildCallGraph(project, fileSystem));
+  // route 파일의 구현은 운영 흐름이고, 라우터 디렉터리 밖 test/의 외부 목은 운영 흐름이 아니다.
+  assert.deepEqual(boundFromPersist(target), ['app/api/test/route.ts#RouteStore.save', 'src/service.ts#SqlStore.save']);
+  assert.deepEqual(target.nodes.find((node) => node.id === 'app/api/test/route.ts#GET')?.entries, ['route-handler']);
+});
+
+test('graph의 테스트 소스 판정은 routes가 route-decl에 다는 testSource와 같다(Next 라우터 디렉터리·Node 백엔드 소스)', async () => {
+  /** Express 앱 하나가 경로 하나를 등록하는 소스다. */
+  const expressApp = (path: string): string => `import express from "express";\nconst app = express();\napp.get("${path}", (req, res) => res.send("ok"));\nexport default app;\n`;
+  await inSyntheticProject({
+    'package.json': JSON.stringify({ private: true, dependencies: { next: '16.2.7', express: '4.21.2' } }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'app/api/test/route.ts': 'export async function GET() { return new Response("ok"); }\n',
+    'pages/api/hello.test.ts': 'export default function handler(_request: unknown, response: { end(): void }) { response.end(); }\n',
+    'src/server.ts': expressApp('/health'),
+    'test/server.ts': expressApp('/fixture'),
+    'e2e/app.ts': expressApp('/e2e'),
+    'src/app.e2e.ts': expressApp('/suffix'),
+  }, async (project) => {
+    const result = await runRoutesCommand(['--role', 'server', '--project', project, '--include-tests'], immutableCommandEnvironment);
+    assert.equal(result.exitCode, 0, result.standardError);
+    const facts = (JSON.parse(result.standardOutput) as { facts: { testSource?: boolean; location: { path: string } }[] }).facts;
+    const testSourceByPath = Object.fromEntries(facts.map((fact) => [fact.location.path, fact.testSource === true]));
+    assert.deepEqual(testSourceByPath, {
+      'app/api/test/route.ts': false,
+      'e2e/app.ts': true,
+      'pages/api/hello.test.ts': true,
+      'src/app.e2e.ts': true,
+      'src/server.ts': false,
+      'test/server.ts': true,
+    });
+    const rule = projectTestSourceRule(await extractProjectRoutes(fileSystem, project, false));
+    assert.deepEqual(rule, { nodeBackend: true, routerDirectories: ['app', 'pages'] });
+    for (const [path, testSource] of Object.entries(testSourceByPath)) assert.equal(isProjectTestPath(path, rule), testSource, path);
+  });
+});
+
+test('테스트 소스 판정: Next 라우터 디렉터리 안은 Next 규칙, 밖은 Node 백엔드를 감지했을 때만 Node 규칙', () => {
+  const rules = {
+    nodeWithRouters: { nodeBackend: true, routerDirectories: ['src/app', 'pages'] },
+    nodeOnly: { nodeBackend: true, routerDirectories: [] },
+    nextOnly: { nodeBackend: false, routerDirectories: ['app'] },
+  };
+  /** 경로마다 [nodeWithRouters, nodeOnly, nextOnly] 규칙의 기대 판정이다. */
+  const cases: readonly (readonly [path: string, expected: readonly [boolean, boolean, boolean]])[] = [
+    ['test/service.ts', [true, true, false]],
+    ['tests/helpers/store.ts', [true, true, false]],
+    ['e2e/app.ts', [true, true, false]],
+    ['src/app.e2e.ts', [true, true, false]],
+    ['test/app.e2e-spec.ts', [true, true, false]],
+    ['src/service.test.ts', [true, true, true]],
+    ['src/__mocks__/store.ts', [true, true, true]],
+    ['src/app/api/test/route.ts', [false, true, false]],
+    ['src/app/api/__tests__/route.ts', [true, true, true]],
+    ['pages/test/index.ts', [false, true, false]],
+    // 라우터 디렉터리는 경로 성분 단위로 맞춘다(`src/application`은 `src/app` 안이 아니다).
+    ['src/application/test/store.ts', [true, true, false]],
+    ['src/main.ts', [false, false, false]],
+  ];
+  for (const [path, expected] of cases) {
+    assert.deepEqual([rules.nodeWithRouters, rules.nodeOnly, rules.nextOnly].map((rule) => isProjectTestPath(path, rule)), expected, path);
   }
 });

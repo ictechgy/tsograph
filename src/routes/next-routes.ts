@@ -322,6 +322,7 @@ function pageKeyOf(name: string, pageExtensions: readonly string[]): string | un
  * 테스트 소스 경로인지 판정한다: `*.test.*`·`*.spec.*` 파일, `__tests__`·`__mocks__` 디렉터리.
  *
  * `test`·`tests` 폴더는 Next에서 실제 URL 세그먼트일 수 있어(`app/api/test/route.ts`) 쓰지 않는다.
+ * 프로젝트의 아무 파일이나 판정할 때(graph)는 Node 백엔드 감지를 함께 보는 `isProjectTestPath`(project-routes.ts)를 쓴다.
  *
  * @param path 프로젝트 기준 경로
  * @returns 테스트 소스면 true

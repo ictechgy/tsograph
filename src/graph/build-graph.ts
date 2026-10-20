@@ -18,8 +18,8 @@ import type { CommandFileSystem } from '../cli/file-system.ts';
 import { isSafeIdentifier, type RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
 import { DEFAULT_PAGE_EXTENSIONS } from '../routes/next-config.ts';
-import { emptyNextRoutesResult, isTestSourcePath, type NextRoutesResult } from '../routes/next-routes.ts';
-import { extractProjectRoutes } from '../routes/project-routes.ts';
+import { emptyNextRoutesResult, type NextRoutesResult } from '../routes/next-routes.ts';
+import { extractProjectRoutes, isProjectTestPath, projectTestSourceRule, type TestSourceRule } from '../routes/project-routes.ts';
 import { createRouteDocument, type RouteFactLimitCause, RouteFactLimitError } from '../routes/route-document.ts';
 import { collectProjectFiles, type ProjectFiles } from '../schema/project-files.ts';
 import { MAX_SOURCE_BYTES, ProjectReader } from '../schema/project-reader.ts';
@@ -85,6 +85,8 @@ interface RouteInputs {
    * Node 라우터 펼치기 상한 초과를 나눠 진입점 한계 문장이 실제 원인을 가리키게 한다. 상한 안이면 undefined다.
    */
   readonly factLimitCause: RouteFactLimitCause | undefined;
+  /** routes와 같은 테스트 소스 판정 규칙이다(production·test 프로그램을 나눌 때 쓴다). */
+  readonly testSources: TestSourceRule;
 }
 
 /** limitation을 만드는 데 필요한 계수다. */
@@ -158,7 +160,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
-  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
+  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete, routes.testSources);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
     routeFacts: routes.facts,
@@ -255,15 +257,16 @@ interface FileAnalysis {
  * @param files 노드 파일
  * @param expectedPaths 프로젝트 상대 경로 → authoritative 절대 입력 경로
  * @param coverageComplete 파일 걷기와 compiler 설정을 빠짐없이 해석했는지
+ * @param testSources 테스트 소스 판정 규칙(routes와 같다: Node 백엔드면 `test/` 등도 테스트)
  * @returns 저장소와 계수
  */
-function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean): FileAnalysis {
+function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>, expectedPaths: ReadonlyMap<string, string>, coverageComplete: boolean, testSources: TestSourceRule): FileAnalysis {
   const store = new GraphStore();
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
   const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
   const resolveModule = createModuleResolver(program, checker);
-  const testPaths = new Set([...files.keys()].filter(isTestSourcePath));
+  const testPaths = new Set([...files.keys()].filter((path) => isProjectTestPath(path, testSources)));
   const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
   const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, files.get(path)]));
   const effectBudget = { visited: 0, records: 0 };
@@ -318,11 +321,12 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
 }
 
 /**
- * 서버 라우트(Next.js·Node 백엔드)를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙).
+ * 서버 라우트(Next.js·Node 백엔드)를 추출한다(테스트 소스 제외, routes 명령과 같은 규칙). 같은 추출 결과(프레임워크 감지·
+ * 라우터 디렉터리)로 테스트 소스 판정 규칙도 정해, 진입점과 production·test 분리가 한 규칙을 따르게 한다.
  *
  * @param project 프로젝트 realpath
  * @param fileSystem 파일 시스템
- * @returns 추출 결과·route-decl 사실·페이지 확장자
+ * @returns 추출 결과·route-decl 사실·페이지 확장자·테스트 소스 규칙
  */
 async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): Promise<RouteInputs> {
   const routes = await extractProjectRoutes(fileSystem, project, false);
@@ -341,7 +345,7 @@ async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): 
     factLimitCause = error instanceof RouteFactLimitError ? error.limitCause : undefined;
     facts = [];
   }
-  return { extraction, facts, pageExtensions, factLimitCause };
+  return { extraction, facts, pageExtensions, factLimitCause, testSources: projectTestSourceRule(routes) };
 }
 
 /**

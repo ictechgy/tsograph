@@ -180,6 +180,7 @@ export function hasParseErrors(sourceFile: ts.SourceFile): boolean {
 /**
  * Node 백엔드 테스트 소스 경로인지 판정한다: `__tests__`·`__mocks__`·`test`·`tests`·`e2e` 디렉터리, `*.test.*`·`*.spec.*`·
  * `*.e2e-spec.*`·`*.e2e.*` 파일. Next.js와 달리 이 프레임워크들은 폴더 이름이 URL이 아니므로 `test/`도 테스트로 본다.
+ * graph는 Next 라우터 디렉터리를 이 규칙에서 빼는 `isProjectTestPath`(project-routes.ts)로 같은 규칙을 쓴다.
  *
  * @param path 프로젝트 기준 경로
  * @returns 테스트 소스면 true
