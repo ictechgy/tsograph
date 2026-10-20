@@ -1112,6 +1112,50 @@ test('경계 밖을 가리키는 include·files는 열거하지 않고 세며 --
   });
 });
 
+test('프로젝트 경로에 든 `*`·`?`는 include 글롭이 아니라 경계 판정이 설정 루트를 버리지 않고 이웃 디렉터리도 열지 않는다', {
+  // Windows 파일 이름에는 `*`·`?`를 쓸 수 없다.
+  skip: process.platform === 'win32',
+}, async () => {
+  const project = (directory: string): Record<string, string> => ({
+    // `${configDir}`는 TypeScript가 설정 디렉터리 절대 경로로 바꿔 넘긴다. 그 경로에도 같은 문자가 든다.
+    [`${directory}/tsconfig.json`]: JSON.stringify({ compilerOptions: { types: [] }, include: ['src', 'types', '${configDir}/extra'] }),
+    [`${directory}/package.json`]: '{"private":true}',
+    [`${directory}/src/main.ts`]: 'export function run() { return makeStore(); }\n',
+    [`${directory}/types/global.d.ts`]: 'declare function makeStore(): number;\n',
+    [`${directory}/extra/more.d.ts`]: 'declare const more: number;\n',
+  });
+  // `weXrd`는 TypeScript가 `we*rd`·`we?rd`를 글롭으로 읽으면 맞는 이웃이다. 그 파일이 루트로 섞이면 안 된다.
+  await withProject({ ...project('we*rd/proj'), ...project('we?rd/proj'), ...project('weXrd/proj') }, async (root) => {
+    for (const directory of ['we*rd/proj', 'we?rd/proj']) {
+      const app = join(root, directory);
+      const { program, status } = createGraphProgram(app, [join(app, 'src/main.ts')]);
+      assert.deepEqual(rootFiles(program, app), ['extra/more.d.ts', 'src/main.ts', 'types/global.d.ts'], directory);
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false }, directory);
+      const graph = await buildCallGraph(app, createNodeFileSystem());
+      assert.deepEqual(graph.limitations.filter((line) => line.startsWith('graph-config:') || line.includes('incomplete(coverage)')), [], directory);
+    }
+  });
+});
+
+test('include의 백슬래시는 TypeScript처럼 경로 구분자로 읽어 밖을 가리키면 세고 안을 가리키면 루트로 쓴다', async () => {
+  await withProject({
+    'app/tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src', 'types\\**\\*.d.ts', '..\\outside\\**\\*.d.ts'] }),
+    'app/package.json': '{"private":true}',
+    'app/src/main.ts': 'export function run() { return insideAmbient() + outsideAmbient(); }\n',
+    'app/types/inside.d.ts': 'declare function insideAmbient(): number;\n',
+    'outside/global.d.ts': 'declare function outsideAmbient(): number;\n',
+  }, async (root) => {
+    const app = join(root, 'app');
+    const { program, status } = createGraphProgram(app, [join(app, 'src/main.ts')]);
+    assert.deepEqual(rootFiles(program, app), ['src/main.ts', 'types/inside.d.ts']);
+    // 같은 뜻의 `../outside/**/*.d.ts`처럼 경계 밖으로 센다. 예전에는 한 이름으로 읽어 안으로 판정하고 세지 않았다.
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, outsideConfigRoots: 1 });
+    const graph = await buildCallGraph(app, createNodeFileSystem());
+    assert.ok(graph.limitations.includes(`graph-config: ${outsideRootsGap(1, 'calls')}`), graph.limitations.join('\n'));
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')), graph.limitations.join('\n'));
+  });
+});
+
 test('설정 include 열거는 걷기와 같은 항목 상한에서 멈추고 잘린 사실을 compiler 공백 문구로 알린다', async () => {
   await withProject({
     'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),

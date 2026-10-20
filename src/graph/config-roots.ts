@@ -143,14 +143,20 @@ export class ConfigRootBoundary {
   }
 
   /**
-   * include 패턴의 시작 디렉터리가 경계 안인지 본다. 밖이면 센다.
+   * include 패턴이 경계 안에서 시작하는지 본다. 밖이면 센다.
+   *
+   * TypeScript처럼 `\`를 경로 구분자로 읽고(`normalizeSlashes`) `.`·`..`를 접은 절대 패턴으로 판정한다. 패턴이 경계 안이면
+   * 열거 시작 경로(와일드카드 앞 리터럴 부분)도 경계 안이고, 패턴이 밖이면 시작 경로도 밖이라 와일드카드 위치를 따로 찾지
+   * 않는다. 찾으면 오히려 틀린다: 경계 경로나 `${configDir}`로 치환된 설정 디렉터리에 든 `*`·`?`는 사용자가 쓴 글롭이
+   * 아니다. TypeScript는 그 문자도 와일드카드로 읽어 그 조상부터 열거하려 하지만, 그 디렉터리는 {@link #entries}가 경계
+   * 밖이라 열지 않고, 패턴이 뜻한 경계 안 파일은 설정 디렉터리 열거로 그대로 찾는다.
    *
    * @param base 설정 디렉터리
    * @param include include 패턴(상대·절대)
    * @returns 열거하면 true
    */
   #keepsInclude(base: string, include: string): boolean {
-    if (isInside(this.#root, includeBasePath(resolve(base, include)))) return true;
+    if (isInside(this.#root, resolve(base, include.replaceAll('\\', '/')))) return true;
     this.#outside++;
     return false;
   }
@@ -235,20 +241,6 @@ export class ConfigRootBoundary {
     }
     return this.#admitsDirectory(dirname(path)) && entryKind(path) === 'file';
   }
-}
-
-/**
- * include 패턴이 열거를 시작하는 경로다: 와일드카드(`*`·`?`)가 처음 나오는 경로 성분 앞까지다. TypeScript도 이 앞부분
- * 아래만 연다(`getIncludeBasePath`). 와일드카드가 없으면 패턴 자신이다(파일이든 디렉터리든 경계 판정 결과는 같다).
- *
- * @param absolutePattern 정규화한 절대 include 패턴
- * @returns 시작 경로(첫 성분부터 와일드카드면 파일 시스템 루트)
- */
-function includeBasePath(absolutePattern: string): string {
-  const segments = absolutePattern.split(sep);
-  const wildcard = segments.findIndex((segment) => /[*?]/u.test(segment));
-  if (wildcard === -1) return absolutePattern;
-  return segments.slice(0, wildcard).join(sep) || sep;
 }
 
 /**
