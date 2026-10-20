@@ -8,6 +8,7 @@ import { createNodeFileSystem } from '../../cli/file-system.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { buildCallGraph } from '../../graph/build-graph.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 import { extractClientRoutes } from './client-routes.ts';
 import { DEFAULT_CLIENT_MUTATION_BUDGET, type ClientMutationBudget } from './client-values.ts';
 import { parseTypedClientModels } from './typed-client-model.ts';
@@ -1701,6 +1702,19 @@ test('sources whose names contain forbidden characters are skipped without expos
   });
   assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.location.path, fact.symbol?.usr]), [['/ok', 'src/client.ts', 'src/client.ts#load']]);
   assert.ok(doc.limitations.includes(skippedProjectSources));
+});
+
+test('구문 깊이 상한을 넘는 소스는 그 파일만 빼고 다른 호출을 그대로 내며 분석한 파일 범위로 센다', async () => {
+  const deep = `declare const api: any;\nexport const built = api${'.get(1)'.repeat(3_000)};\n`;
+  const more = { 'tsconfig.json': ambientTypesFreeConfig, 'src/deep.ts': deep, 'src/deep.test.ts': deep };
+  const deepFiles = (count: number) => `route-call-coverage: ${count} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; requests in them are missing`;
+  const doc = await scan('export const load = () => fetch("/ok");', [], more);
+  assert.deepEqual(doc.facts.map((fact) => fact.channel), ['/ok']);
+  assert.ok(doc.limitations.includes(deepFiles(1)), doc.limitations.join('\n'));
+  // 읽지 못한·건너뛴 소스와 원인이 달라 그 문장으로 세지 않는다.
+  assert.ok(!doc.limitations.includes(skippedProjectSources));
+  const withTests = await scan('export const load = () => fetch("/ok");', ['--include-tests'], more);
+  assert.ok(withTests.limitations.includes(deepFiles(2)), withTests.limitations.join('\n'));
 });
 
 test('sources the compiler cannot read are reported as skipped project sources', {

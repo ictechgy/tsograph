@@ -16,6 +16,7 @@ import { ByteColumnIndex } from '../../openapi/byte-columns.ts';
 import { createGraphProgram, type ProgramConfigStatus } from '../../graph/program.ts';
 import { collectProjectFiles } from '../../schema/project-files.ts';
 import { isSourceFileName } from '../../schema/source-module.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 
 /** 분석하는 소스 파일 하나의 최대 크기(바이트)다. `graph`·`schema`와 같다. */
 export const MAX_NODE_SOURCE_BYTES = 4 * 1024 * 1024;
@@ -50,6 +51,11 @@ export interface NodeProject {
    * `gaps`의 값을 모두 참·거짓으로 보는데 객체는 늘 참이기 때문이다. 문구는 {@link compilerConfigGaps}가 만든다.
    */
   readonly configStatus: ProgramConfigStatus;
+  /**
+   * 걷기가 고른 소스 중 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 Program에서 뺀 파일의 기준 경로다(경로 순).
+   * `gaps`에 넣지 않는다 — 명령마다 분석하는 파일(테스트 포함 여부)이 달라 각자 세어 parse-errors 계열 문장으로 낸다.
+   */
+  readonly deeplyNestedFiles: readonly string[];
   /** 프로젝트 파일이면 기준 경로, 아니면(의존성·lib) undefined */
   readonly pathOf: (sourceFile: ts.SourceFile) => string | undefined;
   /** 노드 시작(앞 공백·주석 제외)의 계약 위치 */
@@ -65,12 +71,16 @@ export interface NodeProject {
 export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
   const walk = collectProjectFiles(root, { includeFile: isSourceFileName, excludedDirectories: new Set() });
   const candidates = [...walk.files].filter(([, absolute]) => !isOversized(absolute));
-  const { program, checker, status } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
+  const { program, checker, status, deeplyNestedSources } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
   const files = new Map<string, ts.SourceFile>();
   const pathBySourceFile = new Map<ts.SourceFile, string>();
+  const deeplyNestedFiles: string[] = [];
   for (const [path, absolute] of candidates) {
     const sourceFile = program.getSourceFile(resolve(absolute));
-    if (sourceFile === undefined) continue;
+    if (sourceFile === undefined) {
+      if (deeplyNestedSources.has(resolve(absolute))) deeplyNestedFiles.push(path);
+      continue;
+    }
     files.set(path, sourceFile);
     pathBySourceFile.set(sourceFile, path);
   }
@@ -86,9 +96,10 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       truncated: walk.truncated,
       oversizedFiles: walk.files.size - candidates.length,
       unsafeNames: walk.unsafeNames,
-      unreadableFiles: candidates.length - files.size,
+      unreadableFiles: candidates.length - files.size - deeplyNestedFiles.length,
     },
     configStatus: status,
+    deeplyNestedFiles,
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),
   };
@@ -97,8 +108,9 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
 /**
  * Program 설정 공백을 원인 문장으로 만든다. 접두사는 문서마다 다르므로 호출자가 붙인다.
  *
- * 원인 문구는 graph의 `graph-config:`·`oversized-compiler-inputs:`와 같다 — 같은 Program에서 같은 공백을 본
- * 문서들이 같은 말로 알려야 사용자가 한 가지 고칠 방향(설정·extends 대상 설치, 큰 입력 정리)을 찾는다.
+ * 원인 문구는 graph의 `graph-config:`·`oversized-compiler-inputs:`·`parse-errors:`(깊이로 뺀 입력)와 같다 — 같은
+ * Program에서 같은 공백을 본 문서들이 같은 말로 알려야 사용자가 한 가지 고칠 방향(설정·extends 대상 설치, 큰 입력·
+ * 깊이 중첩된 생성 파일 정리)을 찾는다.
  *
  * @param status Program 설정 상태
  * @param affected 불완전할 수 있는 결과(예: `route registrations`)
@@ -111,6 +123,11 @@ export function compilerConfigGaps(status: ProgramConfigStatus, affected: string
   }
   const oversized = status.oversizedCompilerInputs ?? 0;
   if (oversized > 0) gaps.push(`${oversized} source, declaration, or package input(s) exceeded 4 MiB; type resolution and ${affected} may be incomplete`);
+  const deeplyNested = status.deeplyNestedCompilerInputs ?? 0;
+  if (deeplyNested > 0) {
+    gaps.push(`${deeplyNested} declaration, package, or config-selected input(s) ${SYNTAX_DEPTH_CAUSE} and were not loaded; `
+      + `type resolution and ${affected} may be incomplete`);
+  }
   return gaps;
 }
 

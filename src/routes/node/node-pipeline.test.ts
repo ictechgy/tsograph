@@ -13,6 +13,7 @@ import { runGraphCommand } from '../../cli/graph-command.ts';
 import { runRoutesCommand } from '../../cli/routes-command.ts';
 import { ambientTypesFreeConfig, type GuardedCliRuns, type GuardedRun, runCliGuarded, runMainGuarded } from '../../cli/testing.test.ts';
 import { isSafeIdentifier } from '../../exchange/bridge-facts.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 import { MAX_NODE_SOURCE_BYTES } from './node-project.ts';
 import { factLines, limitationsWith, type NodeDocumentView, packageJson, scanNodeProject } from './testing.test.ts';
 
@@ -185,6 +186,25 @@ test('tsconfig 해석 실패와 compiler 입력 상한 초과를 graph와 같은
   assert.equal(limitationsWith(document, unparsedConfig).length, 1);
   assert.equal(limitationsWith(document, unparsedConfig)[0]!.scope, undefined);
   assert.equal(limitationsWith(document, 'route-coverage: 1 source, declaration, or package input(s) exceeded 4 MiB; type resolution and route registrations may be incomplete').length, 1);
+});
+
+test('구문 깊이 상한을 넘는 소스·선언은 그 파일만 Program에서 빼고 원인을 route-coverage로 알린다', async () => {
+  const deep = `declare const a: boolean;\nexport const o = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n`;
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/app.ts': "import express from 'express';\nimport { o } from './deep';\nconst app = express();\n"
+      + "app.get('/ok', (req, res) => res.send(String(o)));\nexport default app;\n",
+    'src/deep.ts': deep,
+    // 테스트 소스는 server 문서가 분석하지 않으므로 세지 않는다.
+    'test/deep.ts': deep,
+    'src/types/shape.d.ts': `declare const shape: ${'Array<'.repeat(3_000)}number${'>'.repeat(3_000)};\n`,
+  });
+  assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+  assert.equal(limitationsWith(document, `route-coverage: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; route registrations in them are missing`).length, 1);
+  assert.equal(limitationsWith(document, `route-coverage: 1 declaration, package, or config-selected input(s) ${SYNTAX_DEPTH_CAUSE} and were not loaded; `
+    + 'type resolution and route registrations may be incomplete').length, 1);
+  assert.equal(document.limitations.some((text) => text.includes('could not be read by the compiler')), false);
 });
 
 /**

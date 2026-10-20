@@ -9,6 +9,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo } from '../cli/testing.test.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText, readBoundedFileBytes } from './bounded-config-reader.ts';
 import { GraphProjectInputError, createGraphProgram } from './program.ts';
@@ -915,5 +916,54 @@ test('compiler host caps valid tsconfig roots, transitive imports and declaratio
       assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
       assert.equal(unboundedReads, 0);
     } finally { ts.sys.readFile = originalRead; }
+  });
+});
+
+/**
+ * 구문 깊이 상한을 넘는 소스다. 격리 전에는 TypeScript 바인더가 이 `||` 사슬을 재귀로 걷다가 스택을 넘겨 Program을 쓰는
+ * 명령 전체가 실패했다.
+ *
+ * @param name 내보낼 이름
+ * @returns 소스 텍스트
+ */
+function deepLogicalSource(name: string): string {
+  return `declare const a: boolean;\nexport const ${name} = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n`;
+}
+
+test('compiler host는 구문 깊이 상한을 넘는 입력을 Program에서 빼고 호출자 소스와 나머지 입력을 나눠 센다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, files: ['entry.ts', 'selected.ts'] }),
+    'entry.ts': 'import { hidden } from "./hidden"; import { walked } from "./walked"; export function entry() { return hidden || walked; }',
+    'selected.ts': deepLogicalSource('selected'),
+    'hidden.ts': deepLogicalSource('hidden'),
+    'walked.ts': deepLogicalSource('walked'),
+    'parens.ts': `export const parens = ${'('.repeat(3_000)}1${')'.repeat(3_000)};\n`,
+  }, (root) => {
+    const { program, checker, status, deeplyNestedSources } = createGraphProgram(root, [join(root, 'entry.ts'), join(root, 'walked.ts'), join(root, 'parens.ts')]);
+    for (const name of ['selected.ts', 'hidden.ts', 'walked.ts', 'parens.ts']) assert.equal(program.getSourceFile(join(root, name)), undefined, name);
+    const entry = sourceFile(program, join(root, 'entry.ts'));
+    assert.ok(checker.getSymbolsInScope(entry, ts.SymbolFlags.Function).some((symbol) => symbol.name === 'entry'));
+    assert.deepEqual([...deeplyNestedSources].sort(), [join(root, 'parens.ts'), join(root, 'walked.ts')]);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, deeplyNestedCompilerInputs: 2 });
+  });
+});
+
+test('graph는 깊이로 뺀 소스를 노드 없이 parse-errors로 알리고 읽지 못한 소스와 섞지 않으며 완전성을 주장하지 않는다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/app.ts': 'import { deep } from "./deep";\nexport function main() { return helper() || deep; }\nfunction helper() { return false; }\n',
+    'src/deep.ts': deepLogicalSource('deep'),
+    'src/types/shape.d.ts': `declare const shape: ${'Array<'.repeat(3_000)}number${'>'.repeat(3_000)};\n`,
+  }, async (root) => {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(graph.edges.some((edge) => edge.from === 'src/app.ts#main' && edge.to === 'src/app.ts#helper'));
+    assert.ok(graph.nodes.every((node) => node.location.path !== 'src/deep.ts'));
+    assert.deepEqual(graph.limitations.filter((line) => line.startsWith('parse-errors:') || line.startsWith('unreadable-sources:')), [
+      `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; they have no nodes and calls into them stay unlinked; `
+        + 'files: ["src/deep.ts"]; omitted: 0',
+      `parse-errors: 1 declaration, package, or config-selected input(s) ${SYNTAX_DEPTH_CAUSE} and were not loaded; type resolution and calls may be incomplete`,
+    ]);
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
+    assert.equal(graph.statistics.files, 1);
   });
 });

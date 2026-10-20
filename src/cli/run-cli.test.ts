@@ -5,7 +5,6 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
-import { stackExhaustionFailure } from './command-result.ts';
 import { createNodeFileSystem } from './file-system.ts';
 import { ambientTypesFreeConfig } from './testing.test.ts';
 import { fileURLToPath } from 'node:url';
@@ -81,7 +80,7 @@ test('예상하지 못한 내부 예외도 종료 코드 계약(2)과 원인 없
  * 깊이 중첩된 생성 파일 하나와 다섯 명령이 각각 분석할 소스(Express 앱·fetch 호출·navigation 등록)를 둔 합성 프로젝트를 만든다.
  *
  * tsconfig.json은 저장소의 @types/node를 읽지 않는 설정이다. Program을 만드는 명령마다 그 선언을 다시 파싱하는 비용이
- * 커버리지 실행에서 이 검사 시간의 8할을 넘었고, 스택 초과 분류와는 무관하다.
+ * 커버리지 실행에서 이 검사 시간의 8할을 넘었고, 깊이 격리와는 무관하다.
  *
  * @param root 프로젝트 루트
  * @param generated `src/generated.ts` 내용
@@ -116,27 +115,33 @@ const deeplyNestedSources: Readonly<Record<string, string>> = {
   'comma sequence': `declare function a(): number;\nexport const value = (${Array.from({ length: 6_000 }, () => 'a()').join(',')});\n`,
 };
 
-test('깊이 중첩된 생성 파일은 schema에서 그 파일만 parse-errors로 빠지고 Program을 쓰는 명령은 공용 원인 문구의 2로 끝난다', async () => {
-  const expected = stackExhaustionFailure().standardError;
+/** 깊은 파일 하나를 뺀 뒤에도 명령마다 남아야 하는 정상 파일의 흔적과, 그 파일을 알리는 limitation이다. */
+const isolatedOutputs: readonly { readonly command: readonly string[]; readonly extra: readonly string[]; readonly fact: string; readonly limitation: string }[] = [
+  { command: ['schema'], extra: [], fact: '',
+    limitation: `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; files: ["src/generated.ts"]; omitted: 0` },
+  { command: ['graph'], extra: [], fact: '"src/app.ts#',
+    limitation: `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; they have no nodes and calls into them stay unlinked; `
+      + 'files: ["src/generated.ts"]; omitted: 0' },
+  { command: ['routes', '--role', 'server'], extra: [], fact: '"/ok"',
+    limitation: `route-coverage: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; route registrations in them are missing` },
+  { command: ['routes', '--role', 'client'], extra: [], fact: '"/api/items"',
+    limitation: `route-call-coverage: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; requests in them are missing` },
+  { command: ['navigation'], extra: ['--router-model', 'router-model.json'], fact: '"/catalog"',
+    limitation: `navigation-source-coverage: 1 production source file(s) ${SYNTAX_DEPTH_CAUSE} and were not scanned` },
+];
+
+test('깊이 중첩된 생성 파일 하나는 다섯 명령 모두 그 파일만 빼고 정상 파일 사실과 원인 limitation을 낸다', async () => {
   for (const [label, generated] of Object.entries(deeplyNestedSources)) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-deep-nesting-')));
     try {
       writeDeeplyNestedProject(root, generated);
-      const schema = await runCli(['schema', '--project', root], environment);
-      assert.equal(schema.exitCode, 0, `${label}: schema`);
-      assert.ok((JSON.parse(schema.standardOutput) as { limitations: string[] }).limitations.includes(
-        `parse-errors: 1 source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; files: ["src/generated.ts"]; omitted: 0`), `${label}: schema`);
-      for (const arguments_ of [
-        ['graph', '--project', root],
-        ['routes', '--role', 'server', '--project', root],
-        ['routes', '--role', 'client', '--project', root],
-        ['navigation', '--project', root, '--router-model', 'router-model.json'],
-      ]) {
-        const result = await runCli(arguments_, environment);
-        const name = `${label}: ${arguments_.slice(0, arguments_.indexOf('--project')).join(' ')}`;
-        assert.equal(result.exitCode, 2, name);
-        assert.equal(result.standardOutput, '', name);
-        assert.equal(result.standardError, expected, name);
+      for (const expected of isolatedOutputs) {
+        const result = await runCli([...expected.command, '--project', root, ...expected.extra], environment);
+        const name = `${label}: ${expected.command.join(' ')}`;
+        assert.equal(result.exitCode, 0, `${name}: ${result.standardError}`);
+        const document = JSON.parse(result.standardOutput) as { facts?: unknown[]; nodes?: unknown[]; limitations: string[] };
+        assert.ok(JSON.stringify(document.facts ?? document.nodes).includes(expected.fact), name);
+        assert.ok(document.limitations.includes(expected.limitation), `${name}: ${document.limitations.join('\n')}`);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

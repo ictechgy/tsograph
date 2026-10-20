@@ -60,6 +60,8 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 건너뛴 프로젝트 소스, 해석하지 못한 `tsconfig.json`/`jsconfig.json`(기본 compiler 옵션을 써서 경로 별칭이 풀리지
 않을 수 있음), 4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로 `route-call-coverage:`에 알린다.
+구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(선언·패키지 입력 포함)는 그 파일만 compiler Program에서
+빼고 여기서 센다. 생성·압축 파일 하나가 실행 전체를 실패시키지 않는다([구문 깊이](#tsograph-schema)).
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
 
 설정 변경 분석 예산은 프로젝트 전체가 아니라 지점마다 둔다. 탈출 지점(알 수 없는 호출의 인자·수신자, `new`,
@@ -76,7 +78,7 @@ dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을
 
 JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
-부분 문서 없이 실패한다. 분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 출력 초과가 아니라
+부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
 ## 요구 사항
@@ -211,7 +213,8 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
   넘는 출력(사실 100,000개 초과, 16 Mi 문자 초과), `64` 사용법 오류. route 파일 하나를 읽지 못하는 것은
   실패가 아니라 limitation이다. 여러 경로에 붙인 Node 라우터는 같은 사실로 합쳐지거나 사실을 내지 않는(조건부)
   등록까지 세어 200,000개까지만 펼친다. 넘으면 사실 수가 아니라 펼친 등록 수를 원인으로 든 문구로 `2`다.
-  분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 역시 `2`이며,
+  구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만 Node 백엔드 Program에서 빼고
+  `route-coverage:`로 센다. 그래도 분석이 호출 스택을 넘기면 `2`이며,
   `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
   부분 문서는 내지 않는다.
 
@@ -708,9 +711,10 @@ String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증�
   limitation과 표준 오류는 두 종류를 구별한다: `#model:`·`#typedsql:` [선언 id](#사실)는 어떤 순회도 닿지 않는 것으로
   이미 아는 비노드 id이고(순회 root에서 빼면 된다), 그 밖은 모르는 id다. 형제 생산자처럼 strict 옵션은 따로 없다.
 - 종료 코드: `0` 성공, `2` 프로젝트를 읽을 수 없거나 출력이 16 Mi 문자를 넘음(문서 없음), `64` 사용법 오류(표준 출력 비어
-  있음) 또는 root-not-found(문서 출력). 분석이 호출 스택을 넘기면(대개 깊이 중첩된 생성·압축 소스) 역시 `2`이며,
-  `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
-  부분 문서는 내지 않는다.
+  있음) 또는 root-not-found(문서 출력). 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만
+  compiler Program에서 뺀다. 노드가 없고 `parse-errors:`에 실리며 분석 완전성을 인정하지 않는다. 그래도 분석이 호출
+  스택을 넘기면 `2`이며, `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나
+  나누라는 같은 문구를 쓰고 부분 문서는 내지 않는다.
 
 ### 노드와 간선
 
@@ -1147,6 +1151,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 `overridden-methods:`, `missing-dependencies:`,
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
 걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, TypeScript가 경로 구분자로 읽는 백슬래시가 든 이름)는 노드가 되지 않으며 `unreadable-sources:`로 세고 역시 분석 완전성을 인정하지 않는다.
+구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스·선언·패키지 입력도 같은 방식으로 Program에서 빠지고 `parse-errors:`로 알린다(소스는 경로와 함께). 역시 분석 완전성을 인정하지 않는다.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, 그리고

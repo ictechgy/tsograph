@@ -4,6 +4,7 @@ import ts from 'typescript';
 import { formatBridgeTimestamp, type BridgeLocation, type HttpMethod } from '../../exchange/bridge-facts.ts';
 import { readBoundedFileBytes } from '../../graph/bounded-config-reader.ts';
 import { scopeIdOf } from '../../graph/symbol-ids.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
 import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
@@ -296,6 +297,8 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   if (wrappers.incomplete) limitations.add('route-call-coverage: wrapper alias or forwarding analysis exceeded fixed bounds; affected calls remain dynamic');
   if (values.mutationAnalysisIncomplete) limitations.add('route-call-coverage: client configuration mutation analysis is incomplete because provenance was unsupported or fixed bounds were reached; affected configuration remains dynamic');
   if (Object.values(project.gaps).some((gap) => Boolean(gap))) limitations.add('route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped');
+  const deeplyNested = project.deeplyNestedFiles.filter((path) => includeTests || !isNodeTestPath(path)).length;
+  if (deeplyNested > 0) limitations.add(`route-call-coverage: ${deeplyNested} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; requests in them are missing`);
   for (const gap of compilerConfigGaps(project.configStatus, 'requests')) limitations.add(`route-call-coverage: ${gap}`);
   return { format: 'bridge-facts', version: 1, tool: { name: 'tsograph', version: toolVersion }, generatedAt: formatBridgeTimestamp(generatedAt),
     platform: 'js', target: 'http', roles: ['client'], sourceSets: { tests: includeTests ? 'included' : 'excluded' }, project: root,

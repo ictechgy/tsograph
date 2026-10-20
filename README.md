@@ -65,7 +65,10 @@ objects, computed method access, runtime configuration, ky prefix+baseUrl combin
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 Skipped project sources, an unparsed `tsconfig.json`/`jsconfig.json` (default compiler options, so path
 aliases may not resolve), and compiler inputs over 4 MiB are also reported under `route-call-coverage:`,
-with the same cause wording as `tsograph graph`.
+with the same cause wording as `tsograph graph`. A source (or declaration and package input) that nests
+syntax more than 400 levels deep or overflows the parser's call stack is left out of the compiler program
+on its own and counted there too, so one generated or minified file no longer fails the whole run
+([syntax depth](#tsograph-schema)).
 The libraries are development-only dependencies for the oracle; the CLI does not execute analyzed code.
 
 Configuration mutation analysis is budgeted per site, not per project: each escape site (an unknown
@@ -85,8 +88,8 @@ See [typed client models](docs/CLIENT-MODELS.md).
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
 data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
-document. An analysis that exceeds the call stack (typically on a deeply nested generated or minified
-source) is reported with that cause, not as oversized output. Large traversals can use `--max-depth`
+document. An analysis that still exceeds the call stack after deeply nested files are left out is
+reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
 
 ## Requirements
@@ -302,10 +305,11 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
   Node routers mounted at several paths are flattened at most to 200,000 route registrations, counting
   registrations that merge into one fact or emit none (conditional ones); past that the command exits
   `2` with a message that names the flattened registrations, not the fact count, as the cause.
-  An analysis that exceeds the call stack (typically on a deeply nested generated or minified
-  source) also exits `2`, with one message shared by `schema`, `routes`, `graph`/`reach`/`impact`,
-  and `navigation` that names the cause and asks to exclude or split such files; no partial
-  document is written.
+  A source that nests syntax more than 400 levels deep or overflows the parser's call stack is left
+  out of the Node backend program on its own and counted under `route-coverage:`. An analysis that
+  still exceeds the call stack exits `2`, with one message shared by `schema`, `routes`,
+  `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or split such
+  files; no partial document is written.
 
 ### Verified Next.js semantics (next 16.2.7)
 
@@ -882,10 +886,12 @@ The reader still holds the bounded input and reconstructed graph in memory. Reca
   [declaration ids](#facts) are known non-nodes that no traversal reaches (leave them out of
   traversal roots), anything else is an unknown id. There is no strict flag, matching the siblings.
 - Exit codes: `0` success, `2` input/output failure or a bounded exchange/API output exceeding 16 Mi characters, `64`
-  usage error (empty stdout) or root-not-found (document written). An analysis that exceeds the
-  call stack (typically on a deeply nested generated or minified source) also exits `2`, with one
-  message shared by `schema`, `routes`, `graph`/`reach`/`impact`, and `navigation` that names the
-  cause and asks to exclude or split such files; no partial document is written.
+  usage error (empty stdout) or root-not-found (document written). A source that nests syntax more
+  than 400 levels deep or overflows the parser's call stack is left out of the compiler program on its
+  own: it has no nodes, it is listed under `parse-errors:`, and coverage is not claimed complete. An
+  analysis that still exceeds the call stack exits `2`, with one message shared by `schema`, `routes`,
+  `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or split such
+  files; no partial document is written.
 
 ### Nodes and edges
 
@@ -1407,6 +1413,7 @@ candidate edge).
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
 A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
+A source, declaration, or package input that nests syntax more than 400 levels deep or overflows the parser's call stack is excluded from the program the same way and reported under `parse-errors:` (sources with their paths); it prevents complete-coverage claims too.
 
 `unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in

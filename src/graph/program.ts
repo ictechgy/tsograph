@@ -16,6 +16,7 @@ import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
@@ -51,6 +52,11 @@ export interface ProgramConfigStatus {
   readonly configUnreadable: boolean;
   /** compiler host가 크기 상한 때문에 읽지 못한 고유 입력 수다. */
   readonly oversizedCompilerInputs?: number;
+  /**
+   * 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 compiler host가 뺀 입력 중 호출자가 준 소스가 아닌 것(설정이 고른
+   * 파일·전이 import·선언·패키지)의 고유 수다. 호출자가 준 소스는 {@link GraphProgram.deeplyNestedSources}에 있다.
+   */
+  readonly deeplyNestedCompilerInputs?: number;
 }
 
 /** 만든 Program과 checker, 설정 상태다. */
@@ -58,6 +64,11 @@ export interface GraphProgram {
   readonly program: ts.Program;
   readonly checker: ts.TypeChecker;
   readonly status: ProgramConfigStatus;
+  /**
+   * 호출자가 준 소스 중 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 Program에서 뺀 것의 절대 경로다. 읽지 못한
+   * 소스와 원인이 달라 호출자가 따로 센다.
+   */
+  readonly deeplyNestedSources: ReadonlySet<string>;
 }
 
 /**
@@ -83,12 +94,23 @@ export function createGraphProgram(
   // tsconfig 루트·전이 import·선언·package.json 모두 같은 bounded reader를 거친다.
   // 수집 단계에서 제외한 파일이 compiler host를 통해 다시 무제한 읽히지 않게 한다.
   host.readFile = boundedInputReader((fileName) => oversized.add(fileName));
+  const deeplyNested = new Set<string>();
+  // SDK 캐시보다 먼저 감싸 프로젝트·의존성 입력만 깊이를 잰다(번들 lib는 캐시가 따로 만든다).
+  limitSyntaxDepth(host, (fileName) => deeplyNested.add(fileName));
   const cacheLease = sdkSourceFileCache.install(host, options);
   let primaryFailed = false;
   try {
     const program = createProgram({ rootNames, options, host });
     const checker = program.getTypeChecker();
-    return { program, checker, status: { ...config.status, ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}) } };
+    const sources = new Set(sourcePaths.map((path) => resolve(path)));
+    const deeplyNestedSources = new Set([...deeplyNested].filter((path) => sources.has(path)));
+    const otherDeeplyNested = deeplyNested.size - deeplyNestedSources.size;
+    return {
+      program, checker, deeplyNestedSources, status: {
+        ...config.status, ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
+        ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
+      },
+    };
   } catch (error) {
     primaryFailed = true;
     throw error;
@@ -133,6 +155,26 @@ function boundedInputReader(onOversized: (fileName: string) => void): (fileName:
     const result = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
     if (result.ok) return result.text;
     if (result.reason === 'too-large') onOversized(resolve(fileName));
+    return undefined;
+  };
+}
+
+/**
+ * compiler host가 만드는 SourceFile에 구문 깊이 상한을 건다.
+ *
+ * 상한을 넘거나 파싱이 호출 스택을 넘긴 파일은 없는 파일(undefined)로 돌려준다. 그래서 TypeScript 바인더·검사기와
+ * tsograph 방문기가 그 파일을 걷지 않고, 그 파일을 가리키는 import는 풀리지 않은 모듈이 된다. 깊은 파일 하나 때문에
+ * Program을 쓰는 명령 전체가 스택 초과로 끝나지 않게 하기 위해서다.
+ *
+ * @param host compiler host(`getSourceFile`을 바꾼다)
+ * @param onTooDeep 뺀 입력의 절대 경로를 받는다
+ */
+function limitSyntaxDepth(host: ts.CompilerHost, onTooDeep: (fileName: string) => void): void {
+  const original = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
+    const sourceFile = parseWithinSyntaxDepth(() => original(fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile));
+    if (sourceFile !== TOO_DEEP) return sourceFile;
+    onTooDeep(resolve(fileName));
     return undefined;
   };
 }

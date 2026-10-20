@@ -37,6 +37,8 @@ export interface NodeRoutesResult {
     readonly truncatedCalls: number;
     /** 분석한(테스트 제외 등) 파일 중 구문 오류가 있는 파일 수 */
     readonly syntaxErrorFiles: number;
+    /** 분석할(테스트 제외 등) 파일 중 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 Program에서 뺀 파일 수 */
+    readonly deeplyNestedFiles: number;
     /**
      * 펼치기를 상한에서 멈췄으면 그 원인이다: 펼친 라우트가 낼 사실의 하한이 사실 상한을 넘었거나(`facts`), 펼친 라우트 수가
      * 펼치기 상한을 넘었다(`flattened-routes`). 원인이 있으면 frameworks는 일부뿐이고, 문서 조립은 그 원인을 실은 사실 상한
@@ -82,7 +84,10 @@ export async function extractNodeRoutes(input: NodeRoutesInput, detected?: Detec
   if (frameworks.fastify !== undefined) results.push(flattenFastify(project, interpretation.instances, interpretation.events));
   if (frameworks.nest !== undefined) results.push(...extractNestRoutes(project, frameworks.nest, includeFile));
   const syntaxErrorFiles = [...project.files].filter(([path, sourceFile]) => includeFile(path) && hasParseErrors(sourceFile)).length;
-  return { detected: frameworks, analysis: { project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles, factLimitCause: budget.exceededCause } };
+  const deeplyNestedFiles = project.deeplyNestedFiles.filter(includeFile).length;
+  return { detected: frameworks, analysis: {
+    project, frameworks: results, truncatedCalls: interpretation.truncatedCalls, syntaxErrorFiles, deeplyNestedFiles, factLimitCause: budget.exceededCause,
+  } };
 }
 
 /**

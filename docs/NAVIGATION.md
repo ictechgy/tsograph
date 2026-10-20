@@ -31,8 +31,9 @@ route 배열 binding에 직접 대입이나 표준 mutator 호출을 관찰하�
 증명할 수 없는 값은 `unproven route container`로 구분한다. 두 경우 모두 배열 내용을 추측하지
 않고 dynamic 사실을 낸다. binding AST 분석이 1,000,000 node 상한을 넘으면 alias·mutation
 완전성을 주장할 수 없으므로 부분 navigation 문서를 내지 않고 명령이 코드 2로 실패한다.
-깊이 중첩된 소스(생성·압축 코드 등)로 분석이 호출 스택을 넘겨도 부분 문서 없이 코드 2이며, `schema`·`routes`·
-`graph`와 같은 원인 문구를 낸다.
+구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(생성·압축 코드 등)는 그 파일만 Program에서 빼고
+`navigation-source-coverage:`로 센다(production 소스만). 그래도 분석이 호출 스택을 넘기면 부분 문서 없이 코드 2이며,
+`schema`·`routes`·`graph`와 같은 원인 문구를 낸다.
 
 screen은 프로젝트 function/class/불변 arrow 선언 또는 JSX 태그로 증명해야 한다.
 USR은 graph와 같은 규칙이며 source 위치는 1 기반 UTF-8 열이다. 테스트와 구문 오류
