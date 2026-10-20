@@ -59,7 +59,9 @@ axios 1.20.0·ky 1.10.0(`prefixUrl`)·ky 2.1.0(`prefix`/`baseUrl`) 결합을 ist
 래퍼, 클래스 메서드, URL/Request 객체, 계산된 메서드,
 런타임 설정, ky prefix+baseUrl 동시 사용, 전역 fetch 교체는 증명 범위 밖이다. 0건이어도 coverage 한계가 남는다.
 건너뛴 프로젝트 소스, 해석하지 못한 `tsconfig.json`/`jsconfig.json`(기본 compiler 옵션을 써서 경로 별칭이 풀리지
-않을 수 있음), 4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로 `route-call-coverage:`에 알린다.
+않을 수 있음), 프로젝트 밖을 가리키는 설정 `include`·`files` 항목([`tsograph graph`](#tsograph-graph-tsograph-reach-tsograph-impact)와
+같은 걷기 정책이라 compiler 루트 파일로 쓰지 않음), 4 MiB를 넘는 compiler 입력도 `tsograph graph`와 같은 원인 문구로
+`route-call-coverage:`에 알린다.
 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(선언·패키지 입력 포함)는 그 파일만 compiler Program에서
 빼고 여기서 센다. 생성·압축 파일 하나가 실행 전체를 실패시키지 않는다([구문 깊이](#tsograph-schema)).
 라이브러리는 오라클용 개발 의존성이며 CLI는 분석 대상 코드를 실행하지 않는다.
@@ -680,7 +682,11 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는
 소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
 적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
-symlink는 제외한다. 루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
+symlink는 제외하며, `tsconfig.json`/`jsconfig.json`의 `include`·`files`가 고르는 루트 파일에도 같은 걷기 정책을 적용한다
+(`--project` 안, `--workspace`를 주면 그 안; `node_modules`·`dist`·`build`·`out`·`coverage`·점·Prisma 생성 출력 디렉터리 제외;
+symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열거). 시작 디렉터리가 그 루트 밖인 include 패턴과 루트 밖
+`files` 항목은 열거하지도 루트 파일로 쓰지도 않고 `graph-config:`로 센다. 그곳 파일도 프로젝트 소스가 import하면 읽는다.
+루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
 실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
@@ -1151,6 +1157,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
+스캔 루트 밖이거나 열거 상한 뒤라 쓰지 않은 설정 루트도 `graph-config:`로 알리고 분석 완전성을 인정하지 않는다.
 걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, TypeScript가 경로 구분자로 읽는 백슬래시가 든 이름)는 노드가 되지 않으며 `unreadable-sources:`로 세고 역시 분석 완전성을 인정하지 않는다.
 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스·선언·패키지 입력도 같은 방식으로 Program에서 빠지고 `parse-errors:`로 알린다(소스는 경로와 함께). 역시 분석 완전성을 인정하지 않는다.
 

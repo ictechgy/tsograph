@@ -6,7 +6,8 @@
  * 코드는 실행하지 않고(emit 없음), 진단도 계산하지 않는다 — 심볼 해석만 필요하기 때문이다.
  *
  * 루트 파일은 tsconfig가 고른 파일과 호출자가 준 프로젝트 소스(설정이 빠뜨린 스크립트·라우트 포함)의
- * 합집합이다. `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
+ * 합집합이다. tsconfig가 고르는 파일은 걷기 정책(경계 안, 제외 디렉터리·symlink 밖)을 통과한 것만 쓴다
+ * (`config-roots.ts`). `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
  */
 
 import { existsSync } from 'node:fs';
@@ -15,6 +16,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { ConfigRootBoundary, type ConfigRootGaps, type ScanBoundary } from './config-roots.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
@@ -44,8 +46,11 @@ const defaultOptions: ts.CompilerOptions = {
   resolveJsonModule: true,
 };
 
-/** Program을 만들면서 센 설정 공백이다. */
-export interface ProgramConfigStatus {
+/**
+ * Program을 만들면서 센 설정 공백이다. 설정 루트 경계의 공백({@link ConfigRootGaps}: 경계 밖이라 쓰지 않은 include·`files`
+ * 항목 수, include 열거의 항목 상한 도달)도 싣는다.
+ */
+export interface ProgramConfigStatus extends ConfigRootGaps {
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
@@ -78,6 +83,7 @@ export interface GraphProgram {
  * @param sourcePaths 루트로 넣을 프로젝트 소스 절대 경로(선언 파일 포함 가능)
  * @param createProgram TypeScript Program factory (기본값은 `ts.createProgram`)
  * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config
+ * @param boundary 설정이 고르는 루트 파일이 머물 걷기 경계(기본은 root, 추가 제외 디렉터리 없음)
  * @returns Program·checker·설정 상태
  */
 export function createGraphProgram(
@@ -85,8 +91,9 @@ export function createGraphProgram(
   sourcePaths: readonly string[],
   createProgram: typeof ts.createProgram = ts.createProgram,
   explicitConfig?: string,
+  boundary: ScanBoundary = { root, excludedDirectories: new Set() },
 ): GraphProgram {
-  const config = readProjectConfig(root, explicitConfig);
+  const config = readProjectConfig(root, boundary, explicitConfig);
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
@@ -187,13 +194,14 @@ interface ProjectConfig {
 }
 
 /**
- * 프로젝트 루트의 설정 파일을 읽는다. 없거나 읽지 못하면 기본 옵션이다.
+ * 프로젝트 루트의 설정 파일을 읽는다. 없거나 읽지 못하면 기본 옵션이다. 설정이 고른 루트 파일은 걷기 경계로 거른다.
  *
  * @param root 프로젝트 realpath
+ * @param boundary 설정 루트 파일이 머물 걷기 경계
  * @param explicitConfig 자동 탐색 대신 사용할 root 기준 상대 경로나 절대 경로
  * @returns 옵션·루트 파일·상태
  */
-function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig {
+function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?: string): ProjectConfig {
   const configName = explicitConfig === undefined ? configNames.find((name) => existsSync(join(root, name))) : basename(explicitConfig);
   if (configName === undefined) return { options: defaultOptions, fileNames: [], status: { configName, configUnreadable: false } };
   const path = explicitConfig === undefined ? join(root, configName) : resolve(root, explicitConfig);
@@ -211,7 +219,9 @@ function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig
     }
     return unreadableConfig(configName);
   }
-  const host: ts.ParseConfigHost = { ...ts.sys, readFile };
+  // include 글롭은 경계 필터가 걷기 정책 안에서만 펼친다(`ts.sys.readDirectory`는 상한 없이 링크·빌드 산출물까지 연다).
+  const roots = new ConfigRootBoundary(boundary);
+  const host: ts.ParseConfigHost = { ...ts.sys, readFile, readDirectory: roots.readDirectory };
   const parsed = ts.parseJsonConfigFileContent(
     read.config,
     host,
@@ -226,7 +236,29 @@ function readProjectConfig(root: string, explicitConfig?: string): ProjectConfig
     }
     return unreadableConfig(configName);
   }
-  return { options: parsed.options, fileNames: parsed.fileNames, status: { configName, configUnreadable: false } };
+  return { options: parsed.options, fileNames: roots.admit(parsed.fileNames), status: { configName, configUnreadable: false, ...roots.gaps() } };
+}
+
+/**
+ * 설정 루트 경계가 남긴 공백을 원인 문장으로 만든다. 접두사는 문서마다 다르므로 호출자가 붙인다(graph `graph-config:`,
+ * routes·navigation은 각 coverage 접두사). 같은 Program 공백을 본 문서들이 같은 말로 알리게 하려고 한곳에 둔다.
+ *
+ * @param status Program 설정 상태
+ * @param affected 불완전할 수 있는 결과(예: `calls`, `route registrations`)
+ * @returns 원인 문장(공백이 없으면 빈 목록)
+ */
+export function configRootGaps(status: ProgramConfigStatus, affected: string): string[] {
+  const gaps: string[] = [];
+  const outside = status.outsideConfigRoots ?? 0;
+  if (outside > 0) {
+    gaps.push(`${outside} include pattern(s) or files entr(ies) of ${status.configName} point outside the scanned root and were not used as root files; `
+      + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`);
+  }
+  if (status.configRootsTruncated === true) {
+    gaps.push(`include patterns of ${status.configName} reached the directory entry limit; later matches were not used as root files; `
+      + `type resolution and ${affected} may be incomplete`);
+  }
+  return gaps;
 }
 
 /**

@@ -45,7 +45,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -71,6 +71,8 @@ interface GraphInputs {
   readonly declarations: readonly string[];
   readonly walk: ProjectFiles;
   readonly oversized: number;
+  /** 걷기가 따로 건너뛴 디렉터리(Prisma 생성 출력)다. 설정이 고르는 루트 파일도 같은 디렉터리를 뺀다. */
+  readonly excludedDirectories: ReadonlySet<string>;
 }
 
 /** 라우트 쪽 입력이다. */
@@ -137,7 +139,11 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   }
   const routes = await loadRouteInputs(project, fileSystem);
   const inputs = collectGraphInputs(project, routes.extraction);
-  const { program, checker, status, deeplyNestedSources } = createGraphProgram(selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config);
+  // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
+  const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
+  const { program, checker, status, deeplyNestedSources } = createGraphProgram(
+    selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config, boundary,
+  );
   const files = nodeFiles(program, inputs.sources);
   const deeplyNestedFiles = [...inputs.sources].filter(([, absolute]) => deeplyNestedSources.has(resolve(absolute))).map(([path]) => path);
   const deeplyNestedInputs = deeplyNestedSources.size - deeplyNestedFiles.length + (status.deeplyNestedCompilerInputs ?? 0);
@@ -147,7 +153,9 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0 || deeplyNestedInputs > 0;
-  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !walk.truncated && inputs.oversized === 0
+  // 경계 밖이라 쓰지 않았거나 상한 뒤라 열거하지 못한 설정 루트는 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
+  const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || status.configRootsTruncated === true;
+  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete);
@@ -363,7 +371,7 @@ function collectGraphInputs(project: string, extraction: NextRoutesResult): Grap
     }
   }
   const sorted = new Map([...sources].sort(([left], [right]) => compareStrings(left, right)));
-  return { sources: sorted, declarations, walk, oversized };
+  return { sources: sorted, declarations, walk, oversized, excludedDirectories: generated };
 }
 
 /**
@@ -593,6 +601,7 @@ function inputLimitations(counts: GraphCounts): string[] {
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
+  result.push(...configRootGaps(config, 'calls').map((gap) => `graph-config: ${gap}`));
   if ((config.oversizedCompilerInputs ?? 0) > 0) {
     result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
   }

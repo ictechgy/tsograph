@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import fs, { constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { ambientTypesFreeConfig, linkToDevZero, makeFifo } from '../cli/testing.test.ts';
+import { compilerConfigGaps } from '../routes/node/node-project.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { buildCallGraph } from './build-graph.ts';
@@ -965,5 +966,169 @@ test('graph는 깊이로 뺀 소스를 노드 없이 parse-errors로 알리고 �
     ]);
     assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
     assert.equal(graph.statistics.files, 1);
+  });
+});
+
+/**
+ * Program 루트 파일을 기준 디렉터리 상대 경로로 줄인다(정렬).
+ *
+ * @param program Program
+ * @param root 기준 디렉터리
+ * @returns 상대 경로 목록
+ */
+function rootFiles(program: ts.Program, root: string): string[] {
+  return program.getRootFileNames().map((name) => relative(root, name)).sort();
+}
+
+/** `graph-config:`·coverage 한계가 함께 쓰는 '경계 밖 설정 루트' 원인 문장이다. */
+function outsideRootsGap(count: number, affected: string): string {
+  return `${count} include pattern(s) or files entr(ies) of tsconfig.json point outside the scanned root and were not used as root files; `
+    + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`;
+}
+
+test('설정 루트는 걷기가 건너뛰는 디렉터리·symlink 아래를 열거하지 않고 루트 안 선언은 남긴다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-link-')));
+  try {
+    writeFileSync(join(outside, 'linked.d.ts'), 'declare const linked: number;\n');
+    await withProject({
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { types: [] },
+        include: ['src', 'build', 'dist/**/*', 'out', 'coverage', '.storybook', 'generated', 'src/vendor/**/*', 'src/missing'],
+        files: ['src/types/listed.d.ts', 'build/listed.d.ts', 'src/vendor/linked.d.ts', 'src/missing.d.ts'],
+      }),
+      'src/main.ts': 'export function main() { return 1; }\n',
+      'src/types/global.d.ts': 'declare const projectGlobal: number;\n',
+      'src/types/listed.d.ts': 'declare const listed: number;\n',
+      'build/bundle.ts': 'export const build = 1;\n',
+      'build/listed.d.ts': 'declare const buildListed: number;\n',
+      'dist/chunk.ts': 'export const dist = 1;\n',
+      'out/emitted.ts': 'export const out = 1;\n',
+      'coverage/report.ts': 'export const coverage = 1;\n',
+      '.storybook/main.ts': 'export const storybook = 1;\n',
+      'generated/client.ts': 'export const generated = 1;\n',
+    }, (root) => {
+      symlinkSync(outside, join(root, 'src/vendor'));
+      // `generated/`는 Prisma 생성 출력처럼 호출자의 걷기가 따로 뺀 디렉터리다.
+      const boundary = { root, excludedDirectories: new Set([join(root, 'generated')]) };
+      const { program, status } = createGraphProgram(root, [join(root, 'src/main.ts')], ts.createProgram, undefined, boundary);
+      assert.deepEqual(rootFiles(program, root), ['src/main.ts', 'src/types/global.d.ts', 'src/types/listed.d.ts']);
+      // 제외 디렉터리·symlink 아래는 걷기와 같은 정책이라 따로 세지 않는다(걷기가 symlink를 이미 센다).
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false });
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('include 없는 jsconfig도 build/·dist/ 산출물을 루트로 넣지 않아 그래프가 산출물 없는 프로젝트와 같다', async () => {
+  const files = {
+    'jsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', types: [] } }),
+    'package.json': '{"private":true}',
+    'src/main.js': 'export function apply(callback) { return callback(); }\n'
+      + 'export function work() { return apply(() => helper()); }\nfunction helper() { return 1; }\n',
+  };
+  await withProject(files, async (clean) => {
+    await withProject({
+      ...files,
+      // 4 MiB를 넘는 로컬 번들 하나가 예전에는 compiler 입력 상한으로 bound 디스패치 전체를 껐다.
+      'build/main.js': `/*${'x'.repeat(MAX_SOURCE_BYTES)}*/\nexport function bundled() {}\n`,
+      'dist/chunk.js': 'export function chunk() { return 2; }\n',
+    }, async (built) => {
+      const [expected, actual] = await Promise.all([buildCallGraph(clean, createNodeFileSystem()), buildCallGraph(built, createNodeFileSystem())]);
+      assert.deepEqual(
+        { nodes: actual.nodes, edges: actual.edges, limitations: actual.limitations },
+        { nodes: expected.nodes, edges: expected.edges, limitations: expected.limitations },
+      );
+      assert.ok(actual.edges.some((edge) => edge.evidence === 'bound'));
+    });
+  });
+});
+
+test('경계 밖을 가리키는 include·files는 열거하지 않고 세며 --workspace 경계 안이면 루트로 쓴다', async (t) => {
+  await withProject({
+    // `../../**/*.d.ts`는 임시 디렉터리의 부모(다른 테스트의 파일까지)를 연다. `/**/*`는 TypeScript가 설정 디렉터리로
+    // 되돌리지만 뜻은 파일 시스템 전체라 경계 밖으로 센다.
+    'app/tsconfig.json': JSON.stringify({
+      compilerOptions: { types: [] }, include: ['src', '../shared/**/*', '../../**/*.d.ts', '/**/*'], files: ['../extra/extra.d.ts'],
+    }),
+    'app/package.json': '{"private":true}',
+    'app/src/main.ts': 'export function main() { return sharedAmbient() + extraAmbient(); }\n',
+    'shared/globals.d.ts': 'declare function sharedAmbient(): number;\n',
+    'extra/extra.d.ts': 'declare function extraAmbient(): number;\n',
+  }, async (root) => {
+    const app = join(root, 'app');
+    const originalReaddir = fs.readdirSync;
+    const outsideListings: string[] = [];
+    // 임시 루트 밖 목록 요청은 기록하고 빈 목록을 돌려준다. 고치기 전 코드가 실행 위치·파일 시스템 전체를 열거하지 않게 막는다.
+    t.mock.method(fs, 'readdirSync', function readdirSync(this: unknown, ...arguments_: Parameters<typeof fs.readdirSync>) {
+      const directory = resolve(String(arguments_[0]));
+      if (relative(root, directory).startsWith('..')) {
+        outsideListings.push(directory);
+        return [];
+      }
+      return originalReaddir.apply(this, arguments_);
+    });
+    syncBuiltinESMExports();
+    try {
+      const own = createGraphProgram(app, [join(app, 'src/main.ts')]);
+      assert.deepEqual(rootFiles(own.program, root), ['app/src/main.ts']);
+      assert.equal(own.status.outsideConfigRoots, 4);
+      const widened = createGraphProgram(app, [join(app, 'src/main.ts')], ts.createProgram, undefined, { root, excludedDirectories: new Set() });
+      assert.deepEqual(rootFiles(widened.program, root), ['app/src/main.ts', 'extra/extra.d.ts', 'shared/globals.d.ts']);
+      assert.equal(widened.status.outsideConfigRoots, 2);
+      const graph = await buildCallGraph(app, createNodeFileSystem());
+      assert.ok(graph.limitations.includes(`graph-config: ${outsideRootsGap(4, 'calls')}`), graph.limitations.join('\n'));
+      assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
+      const workspace = await buildCallGraph(app, createNodeFileSystem(), { workspace: root });
+      assert.ok(workspace.limitations.includes(`graph-config: ${outsideRootsGap(2, 'calls')}`), workspace.limitations.join('\n'));
+      assert.deepEqual(outsideListings, []);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test('설정 include 열거는 걷기와 같은 항목 상한에서 멈추고 잘린 사실을 compiler 공백 문구로 알린다', async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/a.d.ts': 'declare const a: number;\n',
+    'src/b.d.ts': 'declare const b: number;\n',
+    'src/nested/c.d.ts': 'declare const c: number;\n',
+    'src/other/d.d.ts': 'declare const d: number;\n',
+  }, (root) => {
+    // 방문 항목: 루트 2(tsconfig.json·src) + src 4 + nested 1 + other 1 = 8
+    const full = createGraphProgram(root, [], ts.createProgram, undefined, { root, excludedDirectories: new Set(), maxVisitedEntries: 8 });
+    assert.deepEqual(rootFiles(full.program, root), ['src/a.d.ts', 'src/b.d.ts', 'src/nested/c.d.ts', 'src/other/d.d.ts']);
+    assert.deepEqual(full.status, { configName: 'tsconfig.json', configUnreadable: false });
+    // nested에서 상한을 넘으면 그 뒤 other도 열지 않는다.
+    const capped = createGraphProgram(root, [], ts.createProgram, undefined, { root, excludedDirectories: new Set(), maxVisitedEntries: 6 });
+    assert.deepEqual(rootFiles(capped.program, root), ['src/a.d.ts', 'src/b.d.ts']);
+    assert.equal(capped.status.configRootsTruncated, true);
+    assert.deepEqual(compilerConfigGaps(capped.status, 'route registrations'), [
+      'include patterns of tsconfig.json reached the directory entry limit; later matches were not used as root files; '
+        + 'type resolution and route registrations may be incomplete',
+    ]);
+  });
+});
+
+test('목록을 읽지 못한 include 디렉터리는 TypeScript처럼 비어 있는 것으로 보고 나머지 루트를 쓴다', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+    'src/a.d.ts': 'declare const a: number;\n',
+    'src/locked/b.d.ts': 'declare const b: number;\n',
+  }, (root) => {
+    chmodSync(join(root, 'src/locked'), 0o000);
+    try {
+      const { program, status } = createGraphProgram(root, []);
+      assert.deepEqual(rootFiles(program, root), ['src/a.d.ts']);
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false });
+    } finally {
+      chmodSync(join(root, 'src/locked'), 0o755);
+    }
   });
 });

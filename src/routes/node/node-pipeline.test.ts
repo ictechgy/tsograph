@@ -188,6 +188,18 @@ test('tsconfig 해석 실패와 compiler 입력 상한 초과를 graph와 같은
   assert.equal(limitationsWith(document, 'route-coverage: 1 source, declaration, or package input(s) exceeded 4 MiB; type resolution and route registrations may be incomplete').length, 1);
 });
 
+test('설정 include·files가 프로젝트 밖을 가리키면 루트로 쓰지 않고 graph와 같은 원인 문구로 route-coverage에 알린다', async () => {
+  const document = await scanNodeProject({
+    'package.json': packageJson({ express: '4.21.2' }),
+    // 없는 형제 디렉터리를 가리켜 고치기 전 코드도 임시 디렉터리 전체를 열거하지 않는다.
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src', '../missing-shared/**/*'], files: ['../missing-extra.d.ts'] }),
+    'src/app.ts': "import express from 'express';\nconst app = express();\napp.get('/ok', (req, res) => res.send('ok'));\nexport default app;\n",
+  });
+  assert.deepEqual(document.facts.map((fact) => fact.channel), ['/ok']);
+  assert.equal(limitationsWith(document, 'route-coverage: 2 include pattern(s) or files entr(ies) of tsconfig.json point outside the scanned root '
+    + 'and were not used as root files; type resolution and route registrations may be incomplete (analyze a root that contains them)').length, 1);
+});
+
 test('구문 깊이 상한을 넘는 소스·선언은 그 파일만 Program에서 빼고 원인을 route-coverage로 알린다', async () => {
   const deep = `declare const a: boolean;\nexport const o = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n`;
   const document = await scanNodeProject({

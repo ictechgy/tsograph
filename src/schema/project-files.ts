@@ -166,12 +166,13 @@ function admitsName(name: string, state: WalkState): boolean {
 }
 
 /**
- * 이름으로 건너뛰는 디렉터리인지 본다.
+ * 이름으로 건너뛰는 디렉터리인지 본다. graph Program의 설정 루트 열거(`graph/config-roots.ts`)도 같은 판정을 써서
+ * 걷기가 뺀 디렉터리를 tsconfig/jsconfig include가 다시 넣지 않게 한다.
  *
  * @param name 디렉터리 이름
  * @returns 건너뛰면 true
  */
-function isSkippedDirectory(name: string): boolean {
+export function isSkippedDirectory(name: string): boolean {
   return name.startsWith('.') || SKIPPED_DIRECTORY_NAMES.has(name);
 }
 

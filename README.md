@@ -64,8 +64,9 @@ statements, rewritten/default/rest arguments, class methods, URL/Request
 objects, computed method access, runtime configuration, ky prefix+baseUrl combinations and global
 fetch replacement are outside the proven scope. The coverage limitation remains even for zero calls.
 Skipped project sources, an unparsed `tsconfig.json`/`jsconfig.json` (default compiler options, so path
-aliases may not resolve), and compiler inputs over 4 MiB are also reported under `route-call-coverage:`,
-with the same cause wording as `tsograph graph`. A source (or declaration and package input) that nests
+aliases may not resolve), config `include`/`files` entries outside the project (not used as compiler root files, the
+same walk policy as [`tsograph graph`](#tsograph-graph-tsograph-reach-tsograph-impact)), and compiler inputs over 4 MiB are also reported under
+`route-call-coverage:`, with the same cause wording as `tsograph graph`. A source (or declaration and package input) that nests
 syntax more than 400 levels deep or overflows the parser's call stack is left out of the compiler program
 on its own and counted there too, so one generated or minified file no longer fails the whole run
 ([syntax depth](#tsograph-schema)).
@@ -848,7 +849,12 @@ computed.
 an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
 source boundary and workspace-relative ids for calls across packages. The selected project's compiler
 options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded. The root `package.json`
+records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded,
+also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `files` select: those roots follow the same walk
+policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
+generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include
+pattern that starts outside that root, or a `files` entry outside it, is neither enumerated nor used as a root file and is
+counted under `graph-config:`; files there still load when project sources import them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
 failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
 explicitly; the CLI never executes `.pnp.cjs`.
@@ -1414,6 +1420,7 @@ candidate edge).
 `unresolved-calls:`, `partial-dispatch:`, `bound-dispatch:`, `candidate-dispatch:`, `dispatch-budget:`,
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
+Config-selected roots outside the scanned root, or past the enumeration limit, are reported under `graph-config:` and prevent complete-coverage claims as well.
 A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
 A source, declaration, or package input that nests syntax more than 400 levels deep or overflows the parser's call stack is excluded from the program the same way and reported under `parse-errors:` (sources with their paths); it prevents complete-coverage claims too.
 
