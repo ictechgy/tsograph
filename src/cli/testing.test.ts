@@ -35,10 +35,11 @@ const POLL_INTERVAL_MS = 50;
 /**
  * 분석 기본 옵션(graph program.ts의 defaultOptions)에 `types: []`만 더한 tsconfig.json 내용이다.
  *
- * tsconfig가 없는 임시 프로젝트의 Program은 TypeScript 자동 타입 포함(typeRoots 기본값)이 현재 디렉터리(npm test·CI에서는
- * 저장소 루트)와 그 조상의 `node_modules/@types`를 읽는다. 그래서 같은 프로세스에서 Program을 만들 때마다 저장소 자신의
- * @types/node(선언 67개)를 다시 파싱해 커버리지 실행에서 Program 하나에 0.4초 남짓을 쓴다. 그 선언과 무관한 검사는
- * fixture에 이 설정을 둬 그 비용을 뺀다(628bc19가 graph 합성 Program에 쓴 방식과 같다). 다른 compiler 옵션은 기본값과 같다.
+ * TypeScript 자동 타입 포함(typeRoots 기본값)은 프로젝트 루트(설정이 있으면 설정 디렉터리)와 그 조상의
+ * `node_modules/@types`를 읽는다. 예전에는 설정이 없으면 실행 위치(npm test·CI에서는 저장소 루트) 기준이라 Program마다
+ * 저장소 자신의 @types/node(선언 67개)를 다시 파싱했다. 지금은 임시 디렉터리의 조상만 보지만, 그 조상에 `@types`가
+ * 있는 기계에서도 선언과 무관한 검사가 같은 Program을 만들도록 fixture에 이 설정을 둔다(628bc19가 graph 합성 Program에
+ * 쓴 방식과 같다). 다른 compiler 옵션은 기본값과 같다.
  *
  * `include: []`라 설정이 루트 파일을 더하지 않는다(TypeScript의 '입력 없음' 18003은 분석기가 무시한다). 그래서 Program의
  * 루트는 tsconfig가 없을 때처럼 걷기가 고른 소스뿐이고, 걷기가 뺀 금지 문자 이름·읽지 못한 파일을 설정이 다시 넣지 않는다.
@@ -59,10 +60,10 @@ export interface GuardedRun {
 /**
  * Node 자식 프로세스를 시간·RSS 상한 아래에서 실행한다.
  *
- * 자식의 현재 디렉터리는 임시 디렉터리다. tsconfig가 없는 프로젝트의 Program은 TypeScript 자동 타입 포함(typeRoots
- * 기본값)이 현재 디렉터리와 그 조상의 `node_modules/@types`를 읽는다. 저장소 루트에서 실행한 테스트의 자식이 그대로
- * 물려받으면 저장소 자신의 `@types/node`(선언 파일 67개)를 자식마다 다시 파싱해, 커버리지 실행에서 자식 하나에 0.5초
- * 남짓을 더 쓴다. 감시하는 검사(특수 파일·펼치기 상한)와 무관한 비용이고 인자는 모두 절대 경로라 결과는 같다.
+ * 자식의 현재 디렉터리는 임시 디렉터리다. 인자는 모두 절대 경로라 결과는 실행 위치와 무관하다. 예전에는 tsconfig가 없는
+ * 프로젝트의 자동 타입 루트가 실행 위치 기준이라, 저장소 루트를 물려받은 자식이 저장소의 `@types/node`(선언 파일
+ * 67개)를 자식마다 다시 파싱했다(지금은 프로젝트 루트 기준이다). 임시 디렉터리 실행은 그런 실행 위치 의존을 다시
+ * 들이지 않으려고 그대로 둔다.
  *
  * @param arguments_ `node` 실행 파일 뒤의 인자
  * @param timeoutMs 자식 실행 시간 상한(ms). 기본은 명령 하나의 상한이다

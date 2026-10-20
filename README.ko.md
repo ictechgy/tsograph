@@ -676,7 +676,9 @@ tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <
 
 TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
 없으면 `jsconfig.json`, 둘 다 없으면 번들러식 기본값 위의 `Program`·`TypeChecker`, `allowJs`는 항상 켠다).
-분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다.
+분석 대상 코드는 실행하지 않고 진단도 계산하지 않는다. 읽을 수 있는 설정이 없으면 자동 타입 루트
+(`node_modules/@types`)를 설정이 루트에 있을 때처럼 프로젝트 루트와 그 상위에서 찾는다. 그래서 결과가 실행 위치에
+따라 달라지지 않는다. Node 백엔드·client·navigation의 Program도 같다.
 
 `--tsconfig`는 `--project` 기준 JSON compiler 설정을 명시하고 상대 옵션은 그 파일의 디렉터리에서 해석한다.
 명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는

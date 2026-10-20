@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs, { chmodSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
@@ -969,6 +971,9 @@ test('graph는 깊이로 뺀 소스를 노드 없이 parse-errors로 알리고 �
   });
 });
 
+/** 실행 위치만 바꾼 자식 프로세스 검사가 타입 제거로 직접 실행하는 CLI 진입점이다. */
+const mainPath = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
+
 /**
  * Program 루트 파일을 기준 디렉터리 상대 경로로 줄인다(정렬).
  *
@@ -978,6 +983,22 @@ test('graph는 깊이로 뺀 소스를 노드 없이 parse-errors로 알리고 �
  */
 function rootFiles(program: ts.Program, root: string): string[] {
   return program.getRootFileNames().map((name) => relative(root, name)).sort();
+}
+
+/**
+ * `node_modules/@types/<name>` 선언 패키지 파일을 만든다(TypeScript 자동 타입 포함 대상).
+ *
+ * @param directory 패키지를 둘 디렉터리(프로젝트 기준)
+ * @param name `@types` 아래 패키지 이름
+ * @param declaration `index.d.ts` 내용
+ * @returns 상대 경로 → 내용
+ */
+function typesPackage(directory: string, name: string, declaration: string): Record<string, string> {
+  const base = `${directory}/node_modules/@types/${name}`;
+  return {
+    [`${base}/index.d.ts`]: declaration,
+    [`${base}/package.json`]: JSON.stringify({ name: `@types/${name}`, version: '1.0.0', types: 'index.d.ts' }),
+  };
 }
 
 /** `graph-config:`·coverage 한계가 함께 쓰는 '경계 밖 설정 루트' 원인 문장이다. */
@@ -1130,5 +1151,56 @@ test('목록을 읽지 못한 include 디렉터리는 TypeScript처럼 비어 �
     } finally {
       chmodSync(join(root, 'src/locked'), 0o755);
     }
+  });
+});
+
+test('tsconfig가 없거나 읽지 못하면 자동 타입 루트를 실행 위치가 아니라 프로젝트 루트와 그 조상에서 찾는다', async (t) => {
+  const source = 'export const a = 1;\n';
+  await withProject({
+    ...typesPackage('runner', 'runner-only', 'declare function runnerAmbient(): number;\n'),
+    'plain/src/a.ts': source,
+    ...typesPackage('own', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'own/src/a.ts': source,
+    'broken/tsconfig.json': '{',
+    ...typesPackage('broken', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'broken/src/a.ts': source,
+    ...typesPackage('nested', 'parent-only', 'declare function parentAmbient(): number;\n'),
+    'nested/app/src/a.ts': source,
+    // 설정이 루트에 있으면 TypeScript가 설정 디렉터리를 쓴다. 설정이 없을 때 맞춰야 하는 기준이다.
+    'configured/tsconfig.json': JSON.stringify({ include: ['src'] }),
+    ...typesPackage('configured', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'configured/src/a.ts': source,
+  }, (root) => {
+    t.mock.method(ts.sys, 'getCurrentDirectory', () => join(root, 'runner'));
+    const typeFiles = (project: string): string[] => {
+      const directory = join(root, project);
+      return createGraphProgram(directory, [join(directory, 'src/a.ts')]).program.getSourceFiles()
+        .map((file) => relative(root, file.fileName))
+        .filter((path) => !path.startsWith('..') && path.includes('node_modules/@types/'))
+        .sort();
+    };
+    assert.deepEqual(typeFiles('plain'), []);
+    assert.deepEqual(typeFiles('own'), ['own/node_modules/@types/own-only/index.d.ts']);
+    assert.deepEqual(typeFiles('broken'), ['broken/node_modules/@types/own-only/index.d.ts']);
+    assert.deepEqual(typeFiles('nested/app'), ['nested/node_modules/@types/parent-only/index.d.ts']);
+    assert.deepEqual(typeFiles('configured'), ['configured/node_modules/@types/own-only/index.d.ts']);
+  });
+});
+
+test('tsconfig 없는 프로젝트의 graph 출력은 실행 위치와 무관하고 프로젝트 자신의 @types를 쓴다', async () => {
+  await withProject({
+    ...typesPackage('project', 'own-only', 'declare function ownAmbient(): number;\n'),
+    'project/src/a.ts': 'export function run(): number {\n  return ownAmbient();\n}\n',
+    'runner/README.txt': 'node_modules가 없는 실행 위치\n',
+  }, (root) => {
+    const run = (cwd: string) => spawnSync(process.execPath, [
+      mainPath, 'graph', '--project', join(root, 'project'), '--generated-at', '2026-01-01T00:00:00.000Z',
+    ], { cwd, encoding: 'utf8', timeout: 60_000 });
+    const fromRunner = run(join(root, 'runner'));
+    const fromProject = run(join(root, 'project'));
+    assert.equal(fromRunner.status, 0, fromRunner.stderr);
+    assert.equal(fromProject.status, 0, fromProject.stderr);
+    assert.equal(fromRunner.stdout, fromProject.stdout);
+    assert.equal((JSON.parse(fromRunner.stdout) as { statistics: { calls: { external: number } } }).statistics.calls.external, 1);
   });
 });

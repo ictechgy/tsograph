@@ -22,6 +22,7 @@ tsograph가 Hono·Express·Fastify·Koa(@koa/router)·NestJS 프로젝트에서 
 
 분석 대상 코드는 실행하지 않는다. `tsograph graph`와 같은 방식으로 TypeScript `Program`·`TypeChecker`(루트 `tsconfig.json`, 없으면
 `jsconfig.json`, 없으면 번들러 해석 기본값, `allowJs` 켬)를 만들어 import·재수출·기본 내보내기·CommonJS `require`를 따라간다.
+설정이 없으면 자동 타입 루트(`node_modules/@types`)는 실행 위치가 아니라 프로젝트 루트와 그 상위에서 찾는다.
 emit·타입 진단은 하지 않는다. Next.js만 감지한 프로젝트에서는 Program을 만들지 않는다. 설정(`extends` 대상 포함)을 해석하지
 못하면 기본 옵션으로 계속하되 경로 별칭이 풀리지 않을 수 있으므로, 4 MiB를 넘어 읽지 않은 compiler 입력과 함께 graph와 같은
 원인 문구의 스코프 없는 `route-coverage:`로 알린다. 설정의 `include`·`files`가 고르는 루트 파일은 소스 걷기와 같은 정책을

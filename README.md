@@ -843,7 +843,9 @@ tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
 `Program` and `TypeChecker` over the root `tsconfig.json`, else `jsconfig.json`, else bundler-style
 defaults; `allowJs` is always on). The analyzed code is never executed and no diagnostics are
-computed.
+computed. Without a readable config, automatic type roots (`node_modules/@types`) are looked up from the
+project root and its ancestors, as if the config sat at the root, so the result does not depend on the
+working directory; the Node backend, client, and navigation programs behave the same way.
 
 `--tsconfig` selects a JSON compiler config relative to `--project`, using its own directory for relative options;
 an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing

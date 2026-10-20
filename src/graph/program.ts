@@ -8,6 +8,9 @@
  * 루트 파일은 tsconfig가 고른 파일과 호출자가 준 프로젝트 소스(설정이 빠뜨린 스크립트·라우트 포함)의
  * 합집합이다. tsconfig가 고르는 파일은 걷기 정책(경계 안, 제외 디렉터리·symlink 밖)을 통과한 것만 쓴다
  * (`config-roots.ts`). `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
+ *
+ * compiler host의 현재 디렉터리는 실행 위치가 아니라 프로젝트 루트다. 설정이 없으면 TypeScript가 자동 타입 루트
+ * (`node_modules/@types`)를 그 디렉터리와 조상에서 찾으므로, 실행 위치와 무관하게 tsconfig가 루트에 있을 때와 같다.
  */
 
 import { existsSync } from 'node:fs';
@@ -97,6 +100,10 @@ export function createGraphProgram(
   const options = analysisOptions(config.options);
   const rootNames = [...new Set([...config.fileNames, ...sourcePaths].map((path) => resolve(path)))].sort();
   const host = ts.createCompilerHost(options, true);
+  // 설정이 없거나 읽지 못하면 TypeScript는 자동 타입 루트를 host의 현재 디렉터리와 그 조상의 `node_modules/@types`에서
+  // 찾는다. 실행 위치 대신 프로젝트 루트를 주어 tsconfig가 루트에 있을 때와 같은 타입을 쓴다. 설정이 있으면 TypeScript가
+  // 설정 디렉터리를 쓰고, 루트·import·옵션 경로는 모두 절대 경로라 다른 해석은 바뀌지 않는다.
+  host.getCurrentDirectory = () => root;
   const oversized = new Set<string>();
   // tsconfig 루트·전이 import·선언·package.json 모두 같은 bounded reader를 거친다.
   // 수집 단계에서 제외한 파일이 compiler host를 통해 다시 무제한 읽히지 않게 한다.
