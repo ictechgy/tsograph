@@ -3,11 +3,12 @@
  *
  * 흐름: 인자 검증 → 스펙·프로젝트 경로 정규화 → 크기 상한 안에서 읽기 →
  * UTF-8 디코드 → 트리 파싱 → 문서 조립 → 키 정렬 JSON 출력.
- * 실패는 원인과 해결 방향을 담은 코드 2, 잘못된 호출은 사용법과 코드 64다.
+ * 실패는 원인과 해결 방향을 담은 코드 2, 잘못된 호출은 사용법과 코드 64다. `--project` 밖 스펙도 다른 명령의 밖 입력
+ * 파일과 같은 사용 오류(64)·문구 형식이다(`project-paths.ts`).
  * 오류 문구에는 스펙 원문과 절대 경로를 넣지 않는다.
  */
 
-import { dirname, isAbsolute, relative, sep } from 'node:path';
+import { dirname } from 'node:path';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
@@ -17,6 +18,7 @@ import { SpecContentError } from '../openapi/spec-version.ts';
 import { type CommandResult, inputFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { parseArguments } from './parse-arguments.ts';
+import { outsideProjectFailure, projectRelativePath, resolveProjectDirectory } from './project-paths.ts';
 
 /** 스펙 파일 크기 상한(바이트)이다. isthmus의 입력 파일 상한과 같은 규모다. */
 export const MAX_SPEC_BYTES = 16 * 1024 * 1024;
@@ -127,7 +129,7 @@ async function loadSpec(parsed: OpenApiArguments, fileSystem: CommandFileSystem)
   if (typeof project !== 'string') return project;
   const specPath = projectRelativePath(project, specReal);
   if (specPath === undefined) {
-    return usageFailure(`tsograph: the spec file is outside --project; pass a project root that contains it.\n${openApiUsage}`);
+    return outsideProjectFailure('the spec file', 'pass a project root that contains it.', openApiUsage);
   }
   if (!isSafeIdentifier(project) || !isSafeIdentifier(specPath)) {
     return inputFailure('the project or spec path contains characters the exchange format forbids; rename or move the files.');
@@ -138,7 +140,7 @@ async function loadSpec(parsed: OpenApiArguments, fileSystem: CommandFileSystem)
 }
 
 /**
- * 프로젝트 루트를 정한다. 명시 옵션이 없으면 스펙 파일의 디렉터리다.
+ * 프로젝트 루트를 정한다. 명시 옵션이 없으면 스펙 파일의 디렉터리다. 교환 형식 문자 검사는 스펙 경로와 함께 한다.
  *
  * @param fileSystem 파일 시스템
  * @param projectArgument `--project` 값
@@ -151,12 +153,7 @@ async function resolveProject(
   specReal: string,
 ): Promise<string | CommandResult> {
   if (projectArgument === undefined) return dirname(specReal);
-  const project = await realPathOf(fileSystem, projectArgument);
-  const status = project === undefined ? undefined : await statusOf(fileSystem, project);
-  if (project === undefined || status?.kind !== 'directory') {
-    return inputFailure('--project does not name a readable directory; pass the join root that contains the spec.');
-  }
-  return project;
+  return resolveProjectDirectory(fileSystem, projectArgument, 'pass the join root that contains the spec.');
 }
 
 /**
@@ -321,19 +318,6 @@ async function statusOf(fileSystem: CommandFileSystem, path: string) {
     // stat 실패도 호출자가 "읽을 수 없음"으로 보고한다(undefined가 신호다).
     return undefined;
   }
-}
-
-/**
- * 프로젝트 루트 기준 POSIX 상대 경로를 만든다.
- *
- * @param project 프로젝트 realpath
- * @param target 대상 realpath
- * @returns 상대 경로. 루트 밖이면 undefined
- */
-function projectRelativePath(project: string, target: string): string | undefined {
-  const path = relative(project, target);
-  if (path === '' || isAbsolute(path) || path === '..' || path.startsWith(`..${sep}`)) return undefined;
-  return path.split(sep).join('/');
 }
 
 /**

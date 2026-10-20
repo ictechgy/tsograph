@@ -78,6 +78,10 @@ HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이�
 변경 분석이 미완이면 모델 호출은 사라지지 않고 모델의 동사·`service`와 `channel: null`·`pathAnchor: "base"`의
 dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
 
+`--client-model`과 `--tsconfig`(client Program의 compiler 설정)는 realpath가 `--project` 안인 일반 파일만 받는다. 상대 경로는
+`--project` 기준이고 절대 경로도 안이면 받는다. 직접이든 symlink로든 `--project` 밖이면 `openapi`·`navigation`·
+`graph`/`reach`/`impact`와 같은 사용법 오류(`64`)이고, 없거나 읽지 못하는 파일·1 MiB를 넘는 설정은 `2`다.
+
 JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 때문에만 교환 상한인 16 Mi 문자를
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
 부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
@@ -680,8 +684,11 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 (`node_modules/@types`)를 설정이 루트에 있을 때처럼 프로젝트 루트와 그 상위에서 찾는다. 그래서 결과가 실행 위치에
 따라 달라지지 않는다. Node 백엔드·client·navigation의 Program도 같다.
 
-`--tsconfig`는 `--project` 기준 JSON compiler 설정을 명시하고 상대 옵션은 그 파일의 디렉터리에서 해석한다.
-명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다. `--workspace`는 프로젝트를 포함하는
+`--tsconfig`는 `--project` 안의 JSON compiler 설정 파일을 명시한다(상대 경로는 `--project` 기준, 절대 경로도 realpath가
+안이면 받는다). 상대 옵션은 받은 경로의 디렉터리에서 해석한다. 명시한 설정이 잘못되면 기본값으로 숨기지 않고 실패한다.
+직접이든 symlink로든 `--project` 밖 설정은 분석 전에 사용법 오류(`64`)다(안의 설정이 밖의 공용 설정을 `extends`하는 것은
+된다). 없거나 읽지 못하는 설정·1 MiB를 넘는 설정은 `2`다. `routes --role client`·`navigation`의 `--tsconfig`도 같다.
+`--workspace`는 프로젝트를 포함하는
 소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
 적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
 symlink는 제외하며, `tsconfig.json`/`jsconfig.json`의 `include`·`files`가 고르는 루트 파일에도 같은 걷기 정책을 적용한다

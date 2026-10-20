@@ -127,7 +127,7 @@ test('--help succeeds while unknown options, positionals, modes and missing inpu
   }
 });
 
-test('model read, containment, JSON and UTF-8 failures are code 2 with safe remediation', async () => {
+test('model read, JSON and UTF-8 failures are code 2 and a model outside --project is a usage error', async () => {
   await fixture(async ({ root, modelPath }) => {
     const marker = 'PRIVATE_MODEL_CONTENT';
     writeFileSync(modelPath, `{"secret":"${marker}"}`);
@@ -167,8 +167,13 @@ test('model read, containment, JSON and UTF-8 failures are code 2 with safe reme
         '--project', root,
         '--router-model', outside,
       ], environment());
-      assertSafeInputFailure(escaped, root, outsideRoot);
-      assert.match(escaped.standardError, /inside --project/u);
+      // openapi 스펙·routes client 모델과 같은 사용 오류(64)·문구 형식이다.
+      assert.equal(escaped.exitCode, 64, escaped.standardError);
+      assert.equal(escaped.standardOutput, '');
+      assert.equal(
+        escaped.standardError,
+        `tsograph: the router model file is outside --project; move it under the project root.\n${navigationUsage}`,
+      );
     } finally {
       rmSync(outsideRoot, { recursive: true, force: true });
     }
@@ -204,11 +209,12 @@ test('project and model status races fail safely without leaking underlying erro
     assertSafeInputFailure(unsafe, root);
     assert.match(unsafe.standardError, /exchange format forbids/u);
 
+    // realpath 뒤 상태 확인에서 사라진 모델이다. 크기도 그 한 번의 상태로 판정한다.
     let modelStatuses = 0;
     const disappearingModel: CommandFileSystem = {
       ...actual,
       status: async (path) => {
-        if (path === modelPath && ++modelStatuses === 2) throw new Error('PRIVATE_MODEL_STATUS');
+        if (path === modelPath && ++modelStatuses === 1) throw new Error('PRIVATE_MODEL_STATUS');
         return actual.status(path);
       },
     };
@@ -217,7 +223,7 @@ test('project and model status races fail safely without leaking underlying erro
       '--router-model', 'router-model.json',
     ], environment(disappearingModel));
     assertSafeInputFailure(raced, root, 'PRIVATE_MODEL_STATUS');
-    assert.match(raced.standardError, /existing readable JSON/u);
+    assert.match(raced.standardError, /readable file inside --project/u);
   });
 });
 
@@ -251,7 +257,7 @@ test('router model bounded read accepts the exact byte cap and rejects cap plus 
   });
 });
 
-test('tsconfig must be a readable project-relative file and parse failures are code 2', async () => {
+test('tsconfig must be a readable file inside --project: absolute inside is accepted, outside is a usage error', async () => {
   await fixture(async ({ root }) => {
     const config = join(root, 'tsconfig.json');
     writeFileSync(config, '{');
@@ -263,13 +269,37 @@ test('tsconfig must be a readable project-relative file and parse failures are c
     assertSafeInputFailure(malformed, root);
     assert.match(malformed.standardError, /compiler config/u);
 
+    // graph·routes client와 같은 규칙: realpath가 --project 안이면 절대 경로도 받고, 상대 경로와 같은 설정을 쓴다.
+    writeFileSync(config, JSON.stringify({ compilerOptions: { types: [] } }));
+    const relative = await runNavigationCommand([
+      '--project', root,
+      '--router-model', 'router-model.json',
+      '--tsconfig', 'tsconfig.json',
+    ], environment());
+    assert.equal(relative.exitCode, 0, relative.standardError);
     const absolute = await runNavigationCommand([
       '--project', root,
       '--router-model', 'router-model.json',
       '--tsconfig', config,
     ], environment());
-    assertSafeInputFailure(absolute, root);
-    assert.match(absolute.standardError, /relative to --project/u);
+    assert.equal(absolute.exitCode, 0, absolute.standardError);
+    assert.equal(absolute.standardOutput, relative.standardOutput);
+
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-navigation-outside-')));
+    try {
+      writeFileSync(join(outsideRoot, 'tsconfig.json'), '{}');
+      const escaped = await runNavigationCommand([
+        '--project', root,
+        '--router-model', 'router-model.json',
+        '--tsconfig', join(outsideRoot, 'tsconfig.json'),
+      ], environment());
+      assert.equal(escaped.exitCode, 64, escaped.standardError);
+      assert.equal(escaped.standardOutput, '');
+      assert.match(escaped.standardError, /^tsograph: the --tsconfig file is outside --project; [^\n]+\nUsage: tsograph navigation /u);
+      assert.ok(!escaped.standardError.includes(outsideRoot));
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
 
     const missing = await runNavigationCommand([
       '--project', root,
@@ -295,11 +325,12 @@ test('compiler config size and status races retain specific safe failures', asyn
 
     writeFileSync(config, '{}');
     const actual = createNodeFileSystem();
+    // realpath 뒤 상태 확인에서 사라진 설정이다. 크기도 그 한 번의 상태로 판정한다.
     let configStatuses = 0;
     const disappearingConfig: CommandFileSystem = {
       ...actual,
       status: async (path) => {
-        if (path === config && ++configStatuses === 2) throw new Error('PRIVATE_CONFIG_STATUS');
+        if (path === config && ++configStatuses === 1) throw new Error('PRIVATE_CONFIG_STATUS');
         return actual.status(path);
       },
     };

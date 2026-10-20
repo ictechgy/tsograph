@@ -85,7 +85,9 @@ export interface GraphProgram {
  * @param root 프로젝트 realpath
  * @param sourcePaths 루트로 넣을 프로젝트 소스 절대 경로(선언 파일 포함 가능)
  * @param createProgram TypeScript Program factory (기본값은 `ts.createProgram`)
- * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config
+ * @param explicitConfig root 기준 상대 경로나 절대 경로로 고른 compiler config. CLI는 realpath가 `--project` 안인 1 MiB 이하
+ *   일반 파일인지 먼저 확인하고 받은 값을 그대로 넘긴다(`cli/project-paths.ts`). 상대 옵션의 기준은 이 경로의 디렉터리다
+ *   (`tsc -p`처럼 링크를 풀지 않는다).
  * @param boundary 설정이 고르는 루트 파일이 머물 걷기 경계(기본은 root, 추가 제외 디렉터리 없음)
  * @returns Program·checker·설정 상태
  */

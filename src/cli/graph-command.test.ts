@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -71,21 +71,84 @@ test('graph streams JSON or NDJSON with backpressure and reports sink failures w
   assert.ok(!failed.standardError.includes('/secret'));
 });
 
+/**
+ * 임시 프로젝트를 만들어 검사에 넘기고 지운다.
+ *
+ * @param files 프로젝트 기준 경로 → 내용
+ * @param run 프로젝트 realpath를 받는 검사
+ */
+async function withTemporaryProject(files: Readonly<Record<string, string>>, run: (project: string) => Promise<void>): Promise<void> {
+  const project = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-cli-')));
+  try {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(join(project, path, '..'), { recursive: true });
+      writeFileSync(join(project, path), content);
+    }
+    await run(project);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 test('explicit config and workspace are passed only to live graph inputs', async () => {
-  let received: unknown;
-  const result = await runGraphCommand(['--project', '.', '--tsconfig', 'config/check.json', '--workspace', '.'], environment({
-    buildGraph: async (_project, _fs, options) => { received = options; return tinyGraph; },
-  }));
-  assert.equal(result.exitCode, 0, result.standardError);
-  assert.deepEqual(received, { tsconfig: 'config/check.json', workspace: '.' });
+  await withTemporaryProject({ 'config/check.json': '{}' }, async (project) => {
+    let received: unknown;
+    const result = await runGraphCommand(['--project', project, '--tsconfig', 'config/check.json', '--workspace', project], environment({
+      buildGraph: async (_project, _fs, options) => { received = options; return tinyGraph; },
+    }));
+    assert.equal(result.exitCode, 0, result.standardError);
+    assert.deepEqual(received, { tsconfig: 'config/check.json', workspace: project });
+  });
   const failed = await runReachCommand(['--graph-file', 'file.json', '--tsconfig', 'config.json', 'a.ts#a'], environment());
   assert.equal(failed.exitCode, 64);
+});
+
+test('--tsconfig는 realpath가 --project 안인 일반 파일이면 받은 경로를 그대로 넘기고 밖이면 그래프를 만들지 않고 64다', async () => {
+  await withTemporaryProject({ 'tsconfig.json': '{}', 'configs/base.json': '{}' }, async (project) => {
+    const accepted: unknown[] = [];
+    const builder = environment({ buildGraph: async (_project, _fs, options) => { accepted.push(options?.tsconfig); return tinyGraph; } });
+    const inside = [join(project, 'tsconfig.json')];
+    if (process.platform !== 'win32') {
+      // 설정 디렉터리(상대 옵션 기준)는 TypeScript처럼 받은 경로로 정하므로 링크도 풀지 않고 넘긴다.
+      symlinkSync(join(project, 'configs/base.json'), join(project, 'linked.json'));
+      inside.push('linked.json');
+    }
+    for (const tsconfig of inside) {
+      const result = await runGraphCommand(['--project', project, '--tsconfig', tsconfig], builder);
+      assert.equal(result.exitCode, 0, result.standardError);
+    }
+    assert.deepEqual(accepted, inside);
+
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-outside-')));
+    try {
+      writeFileSync(join(outsideRoot, 'tsconfig.json'), '{}');
+      let builds = 0;
+      const counted = environment({ buildGraph: async () => { builds++; return tinyGraph; } });
+      for (const [run, usage] of [[runGraphCommand, graphUsage], [runReachCommand, reachUsage], [runImpactCommand, impactUsage]] as const) {
+        const result = await run(['--project', project, '--tsconfig', join(outsideRoot, 'tsconfig.json'), ...(run === runGraphCommand ? [] : ['a.ts#a'])], counted);
+        assert.equal(result.exitCode, 64, result.standardError);
+        assert.equal(result.standardOutput, '');
+        assert.ok(result.standardError.startsWith('tsograph: the --tsconfig file is outside --project; '), result.standardError);
+        assert.ok(result.standardError.endsWith(`\n${usage}`));
+        assert.ok(!result.standardError.includes(outsideRoot));
+      }
+      assert.equal(builds, 0);
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 test('explicit input failures keep actionable reasons and internal builder failures remain internal', async () => {
   const invalid = await runGraphCommand(['--project', fixture, '--tsconfig', 'missing.json'], environment());
   assert.equal(invalid.exitCode, 2);
-  assert.match(invalid.standardError, /explicit compiler config and its extends must be readable JSON files within 1 MiB/);
+  assert.match(invalid.standardError, /--tsconfig must name a readable compiler config file inside --project/);
+  await withTemporaryProject({ 'tsconfig.json': JSON.stringify({ extends: './missing-base.json' }), 'src/a.ts': 'export const a = 1;\n' }, async (project) => {
+    // 고른 설정은 안에 있지만 extends를 읽지 못하는 경우는 Program 단계의 원인 문구다.
+    const brokenExtends = await runGraphCommand(['--project', project, '--tsconfig', 'tsconfig.json'], environment());
+    assert.equal(brokenExtends.exitCode, 2);
+    assert.match(brokenExtends.standardError, /explicit compiler config and its extends must be readable JSON files within 1 MiB/);
+  });
   await assert.rejects(runGraphCommand(['--project', '.'], environment({ buildGraph: async () => { throw new TypeError('internal'); } })), TypeError);
   const fake = { ...createNodeFileSystem(), realPath: async (path: string) => path === 'workspace' ? '/work/unsafe\n' : '/work/project',
     status: async () => ({ kind: 'directory' as const, size: 0, modifiedAt: fixedNow }) };

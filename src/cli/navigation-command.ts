@@ -1,13 +1,10 @@
 /**
  * `tsograph navigation` — 명시적 router model로 screen-route navigation 사실을 만든다.
  *
- * 모델과 compiler config는 project 안의 일반 파일만 받는다. 모델은 bounded byte read와
- * fatal UTF-8 decode 뒤 검증하며, 분석 대상 코드는 실행하지 않는다. 출력은 키 정렬 JSON이고
- * 읽기·설정·분석·크기 실패는 원문 경로나 내용을 노출하지 않는 코드 2 결과로 닫는다.
+ * 모델과 compiler config는 realpath가 project 안인 일반 파일만 받는다(검증은 다른 명령과 같은 `project-paths.ts`).
+ * 밖이면 사용 오류(64)다. 모델은 bounded byte read와 fatal UTF-8 decode 뒤 검증하며, 분석 대상 코드는 실행하지 않는다.
+ * 출력은 키 정렬 JSON이고 읽기·설정·분석·크기 실패는 원문 경로나 내용을 노출하지 않는 코드 2 결과로 닫는다.
  */
-import { isAbsolute, relative, resolve, sep } from 'node:path';
-
-import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { MAX_GRAPH_CONFIG_BYTES } from '../graph/bounded-config-reader.ts';
 import { GraphProjectInputError } from '../graph/program.ts';
@@ -32,6 +29,7 @@ import {
 import type { CommandFileSystem } from './file-system.ts';
 import { MAX_OUTPUT_LENGTH } from './openapi-command.ts';
 import { parseArguments } from './parse-arguments.ts';
+import { checkCompilerConfig, resolveProjectFile, resolveProjectRoot } from './project-paths.ts';
 
 /** navigation 명령 사용법이다. */
 export const navigationUsage = `Usage: tsograph navigation --project <root> --router-model <file> [options]
@@ -43,12 +41,13 @@ unresolved routes remain dynamic facts with measured limitations.
 Options:
   --project <root>            Project root; locations and graph ids are relative to it (required)
   --router-model <file>       Bounded router-models v1 JSON file inside --project (required)
-  --tsconfig <file>           Compiler config relative to --project
+  --tsconfig <file>           Compiler config file inside --project (relative to it, or absolute)
   --generated-at <timestamp>  Fixed generatedAt (YYYY-MM-DDTHH:mm:ss.sssZ) for byte-identical output
   --format json               Output format (json is the only format)
   --help                      Show this help
 
-Exit codes: 0 success, 2 unreadable/invalid input or oversized output, 64 usage error.
+Exit codes: 0 success, 2 unreadable/invalid input or oversized output, 64 usage error
+(including an input file outside --project).
 `;
 
 /** navigation 명령의 실행 환경이다. */
@@ -79,7 +78,7 @@ export async function runNavigationCommand(
   const parsed = parseNavigationArguments(arguments_);
   if (parsed === 'help') return success(navigationUsage);
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${navigationUsage}`);
-  const project = await resolveProject(environment.fileSystem, parsed.project);
+  const project = await resolveProjectRoot(environment.fileSystem, parsed.project, 'pass the project root.');
   if (typeof project !== 'string') return project;
   const models = await loadRouterModels(
     environment.fileSystem,
@@ -87,14 +86,14 @@ export async function runNavigationCommand(
     parsed.routerModel,
   );
   if ('exitCode' in models) return models;
-  const tsconfig = parsed.tsconfig === undefined
+  const configFailure = parsed.tsconfig === undefined
     ? undefined
-    : await resolveCompilerConfig(environment.fileSystem, project, parsed.tsconfig);
-  if (tsconfig !== undefined && typeof tsconfig !== 'string') return tsconfig;
+    : await checkCompilerConfig(environment.fileSystem, project, parsed.tsconfig, navigationUsage);
+  if (configFailure !== undefined) return configFailure;
   return extractAndRender(
     project,
     models,
-    tsconfig,
+    parsed.tsconfig,
     parsed.generatedAt ?? environment.now(),
     environment.toolVersion,
   );
@@ -131,52 +130,23 @@ function parseNavigationArguments(
   };
 }
 
-/** 프로젝트 realpath가 읽을 수 있는 디렉터리인지 확인한다. */
-async function resolveProject(
-  fileSystem: CommandFileSystem,
-  argument: string,
-): Promise<string | CommandResult> {
-  let project: string;
-  try {
-    project = await fileSystem.realPath(argument);
-    if ((await fileSystem.status(project)).kind !== 'directory') throw new Error('not-directory');
-  } catch {
-    return inputFailure('--project does not name a readable directory; pass the project root.');
-  }
-  if (!isSafeIdentifier(project)) {
-    return inputFailure(
-      'the project path contains characters the exchange format forbids; rename or move the project.',
-    );
-  }
-  return project;
-}
-
-/** router model을 project 안에서 bounded하게 읽고 검증한다. */
+/** router model을 project 안에서 bounded하게 읽고 검증한다. 크기는 포함 검사가 본 상태로 판정한다. */
 async function loadRouterModels(
   fileSystem: CommandFileSystem,
   project: string,
   argument: string,
 ): Promise<RouterModels | CommandResult> {
-  const file = await resolveProjectFile(
-    fileSystem,
-    project,
-    argument,
-    true,
-    'the router model must be a readable file inside --project; move it under the project root.',
-  );
-  if (typeof file !== 'string') return file;
-  let size: number;
-  try {
-    size = (await fileSystem.status(file)).size;
-  } catch {
-    return inputFailure(
-      'unable to read the router model file; pass an existing readable JSON file inside --project.',
-    );
-  }
-  if (size > MAX_ROUTER_MODEL_BYTES) return routerModelTooLarge();
+  const file = await resolveProjectFile(fileSystem, project, argument, {
+    subject: 'the router model file',
+    unreadable: 'the router model must be a readable file inside --project; move it under the project root.',
+    outsideRemedy: 'move it under the project root.',
+    usage: navigationUsage,
+  });
+  if ('exitCode' in file) return file;
+  if (file.status.size > MAX_ROUTER_MODEL_BYTES) return routerModelTooLarge();
   let bytes: Uint8Array;
   try {
-    bytes = await fileSystem.readBytes(file, MAX_ROUTER_MODEL_BYTES);
+    bytes = await fileSystem.readBytes(file.path, MAX_ROUTER_MODEL_BYTES);
   } catch {
     return inputFailure('unable to read the router model file; check file permissions and retry.');
   }
@@ -195,63 +165,6 @@ async function loadRouterModels(
     }
     return inputFailure('the router model could not be validated; fix it to match router-models v1.');
   }
-}
-
-/** 선택한 compiler config가 project 안의 상대 일반 파일인지 확인한다. */
-async function resolveCompilerConfig(
-  fileSystem: CommandFileSystem,
-  project: string,
-  argument: string,
-): Promise<string | CommandResult> {
-  if (isAbsolute(argument)) {
-    return inputFailure('--tsconfig must be relative to --project; pass a project-relative config file.');
-  }
-  const file = await resolveProjectFile(
-    fileSystem,
-    project,
-    argument,
-    false,
-    '--tsconfig must name a readable compiler config inside --project.',
-  );
-  if (typeof file !== 'string') return file;
-  let status;
-  try {
-    status = await fileSystem.status(file);
-  } catch {
-    return inputFailure(
-      '--tsconfig must name a readable compiler config; check the relative path and permissions.',
-    );
-  }
-  if (status.size > MAX_GRAPH_CONFIG_BYTES) {
-    return inputFailure(
-      `the compiler config exceeds ${MAX_GRAPH_CONFIG_BYTES} bytes; split or reduce the config.`,
-    );
-  }
-  return relative(project, file);
-}
-
-/** realpath containment와 일반 파일 종류를 함께 확인한다. */
-async function resolveProjectFile(
-  fileSystem: CommandFileSystem,
-  project: string,
-  argument: string,
-  allowAbsolute: boolean,
-  failure: string,
-): Promise<string | CommandResult> {
-  if (!allowAbsolute && isAbsolute(argument)) return inputFailure(failure);
-  const requested = isAbsolute(argument) ? argument : resolve(project, argument);
-  let file: string;
-  try {
-    file = await fileSystem.realPath(requested);
-    if ((await fileSystem.status(file)).kind !== 'file') throw new Error('not-file');
-  } catch {
-    return inputFailure(failure);
-  }
-  const path = relative(project, file);
-  if (path === '' || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) {
-    return inputFailure(failure);
-  }
-  return file;
 }
 
 /** 추출 오류를 CLI 계약으로 바꾸고 sorted JSON 상한 안에서 직렬화한다. */

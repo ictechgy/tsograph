@@ -7,13 +7,13 @@
  * 절대 경로와 소스 원문을 넣지 않는다.
  */
 
-import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
 import { extractPersistenceFacts, type ExtractionResult } from '../schema/extract.ts';
 import { createPersistenceDocument, MAX_SCHEMA_FACTS, SchemaFactLimitError } from '../schema/schema-document.ts';
 import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import { parseArguments } from './parse-arguments.ts';
+import { resolveProjectRoot } from './project-paths.ts';
 
 /** 출력 문서의 최대 길이(UTF-16 코드 단위)다. isthmus의 파일당 입력 상한과 같다. */
 export const MAX_SCHEMA_OUTPUT_LENGTH = 16 * 1024 * 1024;
@@ -51,7 +51,7 @@ export async function runSchemaCommand(arguments_: readonly string[], environmen
   const parsed = parseSchemaArguments(arguments_);
   if (parsed === 'help') return success(schemaUsage);
   if (parsed.error !== undefined) return usageFailure(`tsograph: ${parsed.error}\n${schemaUsage}`);
-  const project = await resolveProject(environment.fileSystem, parsed.project);
+  const project = await resolveProjectRoot(environment.fileSystem, parsed.project, 'pass the join root to scan.');
   if (typeof project !== 'string') return project;
   let extraction: ExtractionResult;
   try {
@@ -83,28 +83,6 @@ function parseSchemaArguments(arguments_: readonly string[]): SchemaArguments | 
   const project = parsed.valueFlags.get('--project');
   if (project === undefined) return { error: '--project <root> is required.' };
   return { project };
-}
-
-/**
- * 프로젝트 루트를 realpath로 정규화하고 디렉터리인지 확인한다.
- *
- * @param fileSystem 파일 시스템
- * @param argument `--project` 값
- * @returns 프로젝트 realpath 또는 실패 결과
- */
-async function resolveProject(fileSystem: CommandFileSystem, argument: string): Promise<string | CommandResult> {
-  let project: string;
-  try {
-    project = await fileSystem.realPath(argument);
-    if ((await fileSystem.status(project)).kind !== 'directory') throw new Error('not a directory');
-  } catch {
-    // 없는 경로·권한 없음·파일은 모두 같은 원인 문구로 알린다(경로 원문은 싣지 않는다).
-    return inputFailure('--project does not name a readable directory; pass the join root to scan.');
-  }
-  if (!isSafeIdentifier(project)) {
-    return inputFailure('the project path contains characters the exchange format forbids; rename or move the project.');
-  }
-  return project;
 }
 
 /**

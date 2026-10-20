@@ -86,6 +86,11 @@ recovered paths dynamic. When the mutation analysis is incomplete, model calls s
 (`channel: null`, `pathAnchor: "base"`) with the model's method and `service` instead of disappearing.
 See [typed client models](docs/CLIENT-MODELS.md).
 
+`--client-model` and `--tsconfig` (the compiler config of the client program) take regular files whose real path is
+inside `--project`: a relative path resolves against `--project`, and an absolute path is accepted when it is inside.
+A file outside `--project`, directly or through a symlink, is a usage error (`64`), as in `openapi`, `navigation`, and
+`graph`/`reach`/`impact`; a missing or unreadable file, or a config over 1 MiB, exits `2`.
+
 JSON output keeps sorted keys and readable indentation. If only the indentation exceeds the
 16 Mi character exchange limit, the same complete document is emitted as compact JSON. Fact and
 data limits stay unchanged; a compact document that still exceeds the limit fails without a partial
@@ -847,8 +852,12 @@ computed. Without a readable config, automatic type roots (`node_modules/@types`
 project root and its ancestors, as if the config sat at the root, so the result does not depend on the
 working directory; the Node backend, client, and navigation programs behave the same way.
 
-`--tsconfig` selects a JSON compiler config relative to `--project`, using its own directory for relative options;
-an invalid explicit config fails rather than silently falling back. `--workspace` selects an enclosing
+`--tsconfig` selects a JSON compiler config file inside `--project` (a relative path resolves against `--project`; an
+absolute path is accepted when its real path is inside), using the directory of the given path for relative options;
+an invalid explicit config fails rather than silently falling back. A config outside `--project`, directly or through a
+symlink, is a usage error (`64`) before any analysis (a config inside may still reach a shared config outside through
+`extends`); a missing or unreadable config, or one over 1 MiB, exits `2`. `routes --role client` and `navigation` check `--tsconfig`
+the same way. `--workspace` selects an enclosing
 source boundary and workspace-relative ids for calls across packages. The selected project's compiler
 options apply to all owned sources; separate package configurations are not merged, and a limitation
 records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded,

@@ -201,6 +201,38 @@ test('client model option is wired through routes and service conflicts fail cle
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('client의 --tsconfig와 --client-model은 --project 안의 일반 파일만 받고 밖이면 64, 1 MiB를 넘는 설정은 2다', async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-config-cli-')));
+  try {
+    const project = join(directory, 'project');
+    mkdirSync(join(project, 'src'), { recursive: true });
+    mkdirSync(join(directory, 'outside'));
+    writeFileSync(join(project, 'package.json'), '{}');
+    writeFileSync(join(project, 'tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(project, 'src/client.ts'), 'export function load() { return fetch("/api/items"); }\n');
+    writeFileSync(join(directory, 'outside/tsconfig.json'), ambientTypesFreeConfig);
+    writeFileSync(join(directory, 'outside/model.json'), '{}');
+    const relative = await run(['--role', 'client', '--project', project, '--tsconfig', 'tsconfig.json']);
+    assert.equal(relative.exitCode, 0, relative.standardError);
+    const absolute = await run(['--role', 'client', '--project', project, '--tsconfig', join(project, 'tsconfig.json')]);
+    assert.equal(absolute.exitCode, 0, absolute.standardError);
+    assert.equal(absolute.standardOutput, relative.standardOutput);
+
+    for (const [option, file] of [['--tsconfig', '../outside/tsconfig.json'], ['--client-model', '../outside/model.json']] as const) {
+      const outside = await run(['--role', 'client', '--project', project, option, file]);
+      assert.equal(outside.exitCode, 64, outside.standardError);
+      assert.equal(outside.standardOutput, '');
+      assert.match(outside.standardError, /^tsograph: the [^\n]+ is outside --project; [^\n]+\nUsage: tsograph routes /u);
+      assert.ok(!outside.standardError.includes(directory));
+    }
+
+    writeFileSync(join(project, 'tsconfig.json'), Buffer.alloc(1024 * 1024 + 1, 0x20));
+    const oversized = await run(['--role', 'client', '--project', project, '--tsconfig', 'tsconfig.json']);
+    assert.equal(oversized.exitCode, 2);
+    assert.match(oversized.standardError, /^tsograph: the compiler config exceeds 1048576 bytes; split or reduce the config\.\n$/u);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('client 조립 중 스택 초과가 아닌 RangeError는 출력 초과로 바꾸지 않고 내부 오류로 전파한다', async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-client-clock-')));
   try {

@@ -148,3 +148,94 @@ test('깊이 중첩된 생성 파일 하나는 다섯 명령 모두 그 파일�
     }
   }
 });
+
+/**
+ * 입력 파일 검증 검사용 배치를 만든다. `project/`에는 다섯 명령이 분석할 작은 소스와 입력 파일을 두고, 그 형제
+ * `outside/`에 같은 입력 파일을 둔다.
+ *
+ * @param root 임시 디렉터리 realpath
+ */
+function writeContainmentLayout(root: string): void {
+  const routerModel = JSON.stringify({ format: 'router-models', version: 1, models: [{
+    factory: { path: 'src/router-api.ts', name: 'registerScreens' }, routesArgument: 0,
+    pathProperty: 'path', screenProperty: 'screen', pathSyntax: 'colon',
+  }] });
+  const clientModel = JSON.stringify({ format: 'http-client-models', version: 1, models: [{
+    receiver: { kind: 'type', path: 'src/api.ts', name: 'Api' }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  }] });
+  const files: Record<string, string> = {
+    'project/package.json': '{}',
+    'project/tsconfig.json': ambientTypesFreeConfig,
+    'project/src/api.ts': 'export interface Api { get(path: string): unknown }\n',
+    'project/src/router-api.ts': 'export function registerScreens(input: unknown) { return input; }\n',
+    'project/src/screens.ts': 'export function Catalog() { return null; }\n',
+    'project/src/router.ts': "import { registerScreens } from './router-api';\nimport { Catalog } from './screens';\n"
+      + "registerScreens([{ path: '/catalog', screen: Catalog }]);\n",
+    'project/router-model.json': routerModel,
+    'project/client-model.json': clientModel,
+    'outside/tsconfig.json': ambientTypesFreeConfig,
+    'outside/router-model.json': routerModel,
+    'outside/client-model.json': clientModel,
+    'outside/spec.json': JSON.stringify({ openapi: '3.0.0', info: { title: 'x', version: '1' }, paths: { '/a': { get: {} } } }),
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content);
+  }
+}
+
+/**
+ * 명령별 입력 파일 인자다. `file`은 입력 파일 자리에 넣을 값을 받는다(밖·없는 파일 경로).
+ * openapi 스펙만 실행 위치 기준 위치 인자라 절대 경로를 받고, 나머지는 `--project` 기준 상대 경로를 받는다.
+ */
+const inputFileArguments: readonly { readonly name: string; readonly build: (project: string, file: (name: string) => string) => string[] }[] = [
+  { name: 'openapi spec', build: (project, file) => ['openapi', file('spec.json'), '--service', 'x', '--project', project] },
+  { name: 'routes client model', build: (project, file) => ['routes', '--role', 'client', '--project', project, '--client-model', file('client-model.json')] },
+  { name: 'routes tsconfig', build: (project, file) => ['routes', '--role', 'client', '--project', project, '--tsconfig', file('tsconfig.json')] },
+  { name: 'navigation router model', build: (project, file) => ['navigation', '--project', project, '--router-model', file('router-model.json')] },
+  { name: 'navigation tsconfig', build: (project, file) => ['navigation', '--project', project, '--router-model', 'router-model.json', '--tsconfig', file('tsconfig.json')] },
+  { name: 'graph tsconfig', build: (project, file) => ['graph', '--project', project, '--tsconfig', file('tsconfig.json')] },
+  { name: 'reach tsconfig', build: (project, file) => ['reach', '--project', project, '--tsconfig', file('tsconfig.json'), 'src/screens.ts#Catalog'] },
+  { name: 'impact tsconfig', build: (project, file) => ['impact', '--project', project, '--tsconfig', file('tsconfig.json'), 'src/screens.ts#Catalog'] },
+];
+
+test('realpath가 --project 밖인 입력 파일은 다섯 명령 모두 같은 형식의 사용 오류(64)이고 없는 입력 파일은 입력 실패(2)다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-input-files-')));
+  try {
+    writeContainmentLayout(root);
+    const project = join(root, 'project');
+    for (const { name, build } of inputFileArguments) {
+      const arguments_ = build(project, (file) => (file === 'spec.json' ? join(root, 'outside', file) : `../outside/${file}`));
+      const outside = await runCli(arguments_, environment);
+      assert.equal(outside.exitCode, 64, `${name}: ${outside.standardError}`);
+      assert.equal(outside.standardOutput, '', name);
+      assert.match(outside.standardError, new RegExp(`^tsograph: the [^\\n]+ is outside --project; [^\\n]+\\nUsage: tsograph ${arguments_[0]} `, 'u'), name);
+      assert.ok(!outside.standardError.includes(root), name);
+
+      const missing = await runCli(build(project, (file) => join(project, `missing-${file}`)), environment);
+      assert.equal(missing.exitCode, 2, `${name}: ${missing.standardError}`);
+      assert.equal(missing.standardOutput, '', name);
+      assert.match(missing.standardError, /^tsograph: /u, name);
+      assert.doesNotMatch(missing.standardError, /Usage:/u, name);
+      assert.ok(!missing.standardError.includes(root), name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--tsconfig는 graph·routes client·navigation 모두 realpath가 --project 안이면 절대 경로도 받는다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-input-files-')));
+  try {
+    writeContainmentLayout(root);
+    const project = join(root, 'project');
+    for (const { name, build } of inputFileArguments.filter((entry) => entry.name.endsWith('tsconfig'))) {
+      const absolute = await runCli(build(project, (file) => join(project, file)), environment);
+      assert.equal(absolute.exitCode, 0, `${name}: ${absolute.standardError}`);
+      const relative = await runCli(build(project, (file) => file), environment);
+      assert.equal(absolute.standardOutput, relative.standardOutput, name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
