@@ -306,7 +306,9 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
   registrations that merge into one fact or emit none (conditional ones); past that the command exits
   `2` with a message that names the flattened registrations, not the fact count, as the cause.
   A source that nests syntax more than 400 levels deep or overflows the parser's call stack is left
-  out of the Node backend program on its own and counted under `route-coverage:`. An analysis that
+  out on its own: a Next.js route file is skipped and a Node backend source is left out of the
+  program, both counted under `route-coverage:`, and such a `next.config.*` is treated as
+  unresolved (`unresolved-route-prefix:`). An analysis that
   still exceeds the call stack exits `2`, with one message shared by `schema`, `routes`,
   `graph`/`reach`/`impact`, and `navigation` that names the cause and asks to exclude or split such
   files; no partial document is written.
@@ -382,7 +384,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 
 | Situation | Result |
 |---|---|
-| Config exports a function, a non-object, nothing, or has syntax errors | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| Config exports a function, a non-object, nothing, or has syntax errors, or nests syntax more than 400 levels deep (or overflows the parser's call stack) | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | `basePath` is not a string literal, or is a value Next.js rejects | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | Config passes through wrapper calls (`withX(config)`) | values read from the wrapped literal, `root`, plus `unresolved-route-prefix:` (a wrapper may change them or add routes) |
 | `pageExtensions` is not a literal string array | default extensions + `route-coverage:` |
@@ -394,7 +396,7 @@ reassigned, mutated, or passed to `Object.assign` are not followed.
 | `next.config.*` is a symbolic link | not read, `pathAnchor: "base"` + `unresolved-route-prefix:`; a dangling link is treated as absent, like Next's `existsSync` |
 | `package.json` is a symbolic link | not read, `route-framework-version-unknown:` |
 | `public/` or a proxy/middleware file is a symbolic link | not read; still reported under `framework-provided-routes:` |
-| Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
+| Segment names Next.js rejects, syntax errors, unreadable/oversized/non-UTF-8 files, route files that nest syntax more than 400 levels deep or overflow the parser's call stack (skipped), non-JavaScript extensions, symlinks (not followed), names with forbidden characters, scan caps (200,000 entries, depth 64) | `route-coverage:` |
 | `package.json` does not declare `next`, or its range is not limited to major 16 | `route-framework-version-unknown:` |
 | No `app/` or `pages/` directory | zero facts + `route-coverage:` |
 | Handler exported through CommonJS (`module.exports = …`) | fact without `symbol.usr` + `missing-route-usrs:` |

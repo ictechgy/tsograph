@@ -3,12 +3,14 @@ import { test } from 'node:test';
 
 import ts from 'typescript';
 
+import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { collectModuleExports } from './module-exports.ts';
 import { parseSource, scriptKindOf } from './source-file.ts';
 
 /** 텍스트를 파싱해 내보낸 이름과 위치를 돌려준다. */
 function exportsOf(text: string, fileName = 'route.ts') {
   const parsed = parseSource(fileName, text, scriptKindOf(fileName)!);
+  if (parsed === TOO_DEEP) throw new Error('test source unexpectedly exceeded the syntax depth limit');
   const collected = collectModuleExports(parsed.sourceFile);
   return {
     ...collected,

@@ -7,6 +7,7 @@
  */
 
 import type { CommandFileSystem } from '../cli/file-system.ts';
+import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { DEFAULT_NEXT_ROUTE_CONFIG, NEXT_CONFIG_FILE_NAMES, type NextRouteConfig, readNextRouteConfig, unresolvedConfig } from './next-config.ts';
 import { lookupEntry } from './project-scan.ts';
 import { parseSource, scriptKindOf } from './source-file.ts';
@@ -43,6 +44,7 @@ export async function loadNextRouteConfig(fileSystem: CommandFileSystem, project
     const read = await readTextFile(fileSystem, `${project}/${fileName}`, MAX_CONFIG_FILE_BYTES);
     if (read.kind === 'failure') return unresolvedConfig(fileName, 'unreadable', 0);
     const parsed = parseSource(fileName, read.text, scriptKindOf(fileName)!);
+    if (parsed === TOO_DEEP) return unresolvedConfig(fileName, 'too-deep', 0);
     return readNextRouteConfig(fileName, parsed.sourceFile, parsed.hasSyntaxErrors);
   }
   return DEFAULT_NEXT_ROUTE_CONFIG;

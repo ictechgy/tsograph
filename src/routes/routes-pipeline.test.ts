@@ -10,6 +10,8 @@ import { test } from 'node:test';
 
 import { type CommandFileSystem, createNodeFileSystem, type DirectoryEntry } from '../cli/file-system.ts';
 import { runRoutesCommand } from '../cli/routes-command.ts';
+import { buildCallGraph } from '../graph/build-graph.ts';
+import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { MAX_SCANNED_ENTRIES } from './project-scan.ts';
 
 /** 문서에서 테스트가 보는 부분이다. */
@@ -310,6 +312,40 @@ test('설정 파일을 읽을 수 없으면 unreadable 이유로 base 앵커다'
     assert.deepEqual(lines(document), ['GET base / -']);
     assert.match(document.limitations.join('\n'), /could not be read as UTF-8 text within the size limit/);
   });
+});
+
+test('구문 깊이 상한을 넘는 route 파일은 그 파일만 빼고 원인을 알리며 나머지 route와 graph를 그대로 낸다', async () => {
+  // 괄호는 고치기 전 route 파싱에서 파서가 넘쳤다. `||` 사슬은 route 파싱은 견디지만 graph Program에서 빠지므로 route도 빼야
+  // 사실의 usr가 없는 그래프 노드를 가리키지 않는다.
+  const parens = `export const p = ${'('.repeat(3_000)}1${')'.repeat(3_000)};\n${getRoute}`;
+  const logical = `declare const a: boolean;\nexport const o = ${Array.from({ length: 3_000 }, () => 'a').join(' || ')};\n${getRoute}`;
+  await withProject({
+    'package.json': nextPackage, 'app/api/ok/route.ts': getRoute, 'app/api/parens/route.ts': parens, 'app/api/logical/route.ts': logical,
+  }, async (project) => {
+    const document = await scan(project);
+    assert.deepEqual(lines(document), ['GET root /api/ok strict']);
+    assert.deepEqual(limitationsWith(document, 'route-coverage:'), [`route-coverage: 2 route file(s) ${SYNTAX_DEPTH_CAUSE} and were skipped`]);
+    const graph = await buildCallGraph(project, createNodeFileSystem());
+    assert.ok(graph.nodes.some((node) => node.id === 'app/api/ok/route.ts#GET' && (node.entries ?? []).includes('route-handler')));
+    assert.ok(graph.limitations.some((line) => line.startsWith(`parse-errors: 2 source file(s) ${SYNTAX_DEPTH_CAUSE}`)), graph.limitations.join('\n'));
+  });
+});
+
+test('구문 깊이 상한을 넘는 next.config는 읽지 못한 설정으로 base 앵커와 원인을 낸다', async () => {
+  const configs = {
+    // 파서가 스택을 넘기는 모양과, 파싱은 되지만 정적 값 방문기가 넘치던 모양이다.
+    parens: `module.exports = { basePath: ${'('.repeat(3_000)}"/x"${')'.repeat(3_000)} };\n`,
+    concatenation: `module.exports = { basePath: ${Array.from({ length: 3_000 }, () => '"x"').join(' + ')} };\n`,
+  };
+  for (const [label, config] of Object.entries(configs)) {
+    await withProject({ 'package.json': nextPackage, 'next.config.js': config, 'app/api/ok/route.ts': getRoute }, async (project) => {
+      const document = await scan(project);
+      assert.deepEqual(lines(document), ['GET base /api/ok -'], label);
+      assert.ok(document.limitations.includes('unresolved-route-prefix: next.config.js could not be resolved statically (it nests syntax more '
+        + "than 400 levels deep or overflows the parser's call stack); basePath, trailingSlash, and pageExtensions are unknown, so facts use "
+        + 'pathAnchor base and the default page extensions'), `${label}: ${document.limitations.join('\n')}`);
+    });
+  }
 });
 
 test('App Router: test 폴더는 실제 세그먼트이고 route.test.ts는 route 파일이 아니다', async () => {

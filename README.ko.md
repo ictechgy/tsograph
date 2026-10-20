@@ -213,8 +213,9 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
   넘는 출력(사실 100,000개 초과, 16 Mi 문자 초과), `64` 사용법 오류. route 파일 하나를 읽지 못하는 것은
   실패가 아니라 limitation이다. 여러 경로에 붙인 Node 라우터는 같은 사실로 합쳐지거나 사실을 내지 않는(조건부)
   등록까지 세어 200,000개까지만 펼친다. 넘으면 사실 수가 아니라 펼친 등록 수를 원인으로 든 문구로 `2`다.
-  구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만 Node 백엔드 Program에서 빼고
-  `route-coverage:`로 센다. 그래도 분석이 호출 스택을 넘기면 `2`이며,
+  구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스는 그 파일만 뺀다. Next.js route 파일은 건너뛰고 Node 백엔드
+  소스는 Program에서 빼며 둘 다 `route-coverage:`로 센다. 그런 `next.config.*`는 읽지 못한 설정
+  (`unresolved-route-prefix:`)으로 본다. 그래도 분석이 호출 스택을 넘기면 `2`이며,
   `schema`·`routes`·`graph`/`reach`/`impact`·`navigation`이 원인과 함께 그런 파일을 빼거나 나누라는 같은 문구를 쓰고
   부분 문서는 내지 않는다.
 
@@ -283,7 +284,7 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
 
 | 상황 | 결과 |
 |---|---|
-| 설정이 함수·비객체를 내보내거나, 내보내기가 없거나, 구문 오류 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
+| 설정이 함수·비객체를 내보내거나, 내보내기가 없거나, 구문 오류이거나, 구문 중첩이 400단을 넘음(또는 파싱이 호출 스택을 넘김) | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | `basePath`가 문자열 리터럴이 아니거나 Next.js가 거부하는 값 | `pathAnchor: "base"` + `unresolved-route-prefix:` |
 | 설정을 감싼 호출(`withX(config)`) | 안쪽 리터럴 값을 쓰고 `root`, 그리고 `unresolved-route-prefix:`(감싼 함수가 값을 바꾸거나 라우트를 더할 수 있다) |
 | `pageExtensions`가 리터럴 문자열 배열이 아님 | 기본 확장자 + `route-coverage:` |
@@ -295,7 +296,7 @@ Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는
 | `next.config.*`가 symlink | 읽지 않고 `pathAnchor: "base"` + `unresolved-route-prefix:`. 끊어진 symlink는 Next의 `existsSync`처럼 없는 파일로 본다 |
 | `package.json`이 symlink | 읽지 않고 `route-framework-version-unknown:` |
 | `public/`이나 proxy/middleware 파일이 symlink | 읽지 않되 `framework-provided-routes:` 근거로는 남긴다 |
-| Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
+| Next가 거부하는 세그먼트 이름, 구문 오류, 읽을 수 없거나 크거나 UTF-8이 아닌 파일, 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 route 파일(건너뜀), 비JavaScript 확장자, symlink(따라가지 않음), 금지 문자가 든 이름, 스캔 상한(항목 200,000개, 깊이 64) | `route-coverage:` |
 | `package.json`에 `next`가 없거나 범위가 주 버전 16에 한정되지 않음 | `route-framework-version-unknown:` |
 | `app/`·`pages/` 디렉터리가 없음 | 사실 0건 + `route-coverage:` |
 | 핸들러를 CommonJS(`module.exports = …`)로 내보냄 | `symbol.usr` 없는 사실 + `missing-route-usrs:` |

@@ -9,6 +9,7 @@
 import ts from 'typescript';
 
 import { ByteColumnIndex } from '../openapi/byte-columns.ts';
+import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 
 /** 파서가 읽을 수 있는 확장자(마지막 `.` 뒤)와 스크립트 종류다. */
 const scriptKinds: ReadonlyMap<string, ts.ScriptKind> = new Map([
@@ -54,13 +55,17 @@ export function scriptKindOf(fileName: string): ts.ScriptKind | undefined {
  * 텍스트의 BOM은 호출자가 남겨 둔다(TypeScript 스캐너는 BOM을 공백으로 본다). 그래야
  * 첫 줄의 열이 파일 원문 바이트와 맞는다.
  *
+ * 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘긴 파일은 트리를 돌려주지 않는다. 내보내기·설정 방문기가 그 트리를
+ * 재귀로 걸으면 명령 전체가 스택 초과로 끝나기 때문이다(`schema/syntax-depth.ts`).
+ *
  * @param fileName 진단용 파일 이름(확장자로 JSX 허용 여부가 갈린다)
  * @param text 파일 전체 텍스트
  * @param scriptKind 스크립트 종류
- * @returns 파싱 결과
+ * @returns 파싱 결과, 상한을 넘었으면 {@link TOO_DEEP}
  */
-export function parseSource(fileName: string, text: string, scriptKind: ts.ScriptKind): ParsedSource {
-  const sourceFile = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind);
+export function parseSource(fileName: string, text: string, scriptKind: ts.ScriptKind): ParsedSource | typeof TOO_DEEP {
+  const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind));
+  if (sourceFile === TOO_DEEP) return TOO_DEEP;
   const columns = new ByteColumnIndex(text);
   const lineStarts = sourceFile.getLineStarts();
   return {

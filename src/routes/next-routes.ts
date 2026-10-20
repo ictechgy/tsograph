@@ -29,6 +29,7 @@ import {
   type ScanGaps,
   walkFiles,
 } from './project-scan.ts';
+import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { parseSource, scriptKindOf, type SourcePosition } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
 import { exportBindingId } from '../graph/symbol-ids.ts';
@@ -64,6 +65,8 @@ export interface RouteGaps extends ScanGaps {
   unreadableFiles: number;
   unparsedFiles: number;
   syntaxErrorFiles: number;
+  /** 구문 중첩이 상한을 넘거나 파싱이 호출 스택을 넘겨 건너뛴 route 파일 수다. */
+  deeplyNestedFiles: number;
   unresolvedExportFiles: number;
   pagesWithoutDefaultExport: number;
 }
@@ -155,6 +158,7 @@ function createRouteGaps(): RouteGaps {
     unreadableFiles: 0,
     unparsedFiles: 0,
     syntaxErrorFiles: 0,
+    deeplyNestedFiles: 0,
     unresolvedExportFiles: 0,
     pagesWithoutDefaultExport: 0,
   };
@@ -290,6 +294,10 @@ async function readModuleExports(context: RouteFileContext, file: string): Promi
     return undefined;
   }
   const parsed = parseSource(file, read.text, scriptKind);
+  if (parsed === TOO_DEEP) {
+    context.gaps.deeplyNestedFiles += 1;
+    return undefined;
+  }
   if (parsed.hasSyntaxErrors) context.gaps.syntaxErrorFiles += 1;
   return { module: collectModuleExports(parsed.sourceFile), positionOf: parsed.positionOf };
 }
