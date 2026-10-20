@@ -1,20 +1,32 @@
 /**
  * 프로젝트 하나에서 persistence `relation-use` 사실과 limitation을 뽑는다.
  *
- * 단계: Prisma 입력 수집 → 스키마 사실 → 소스 파싱 → ORM·드라이버 표면(`orm/`) → 파일 사이 클라이언트 출처
- * 고정점 → 파일별 사용 스캔 → TypedSQL 파일 → 지원 표면 밖 패키지 계수 → limitation 조립.
- * 사실로 만들지 못한 근거는 모두 계수로 남긴다 — 빈 결과를 완전성의 증거로 읽지 않게 한다.
+ * 단계: Prisma 입력 수집 → 스키마 사실 → 소스 읽기 → 파일별 파싱(노드 없는 요약·출처 첫 라운드·사용 스캔 기록 뒤 트리를
+ * 놓는다) → ORM·드라이버 표면(`orm/`, 게이트가 열리면 모든 트리로 Program) → 파일 사이 클라이언트 출처 고정점(읽은 칸이
+ * 바뀐 모듈만 다시) → 파일별 사용 스캔 확정(그 파일의 트리를 놓는다) → TypedSQL 파일 → 지원 표면 밖 패키지 계수 →
+ * limitation 조립. 사실로 만들지 못한 근거는 모두 계수로 남긴다 — 빈 결과를 완전성의 증거로 읽지 않게 한다.
+ *
+ * 파싱 트리는 소스 문자당 약 40 B라, 프로젝트의 모든 트리를 끝까지 붙잡으면 대형 저장소에서 V8 힙 한도를 넘는다(종료
+ * 코드 134). 그래서 파일 하나의 일이 끝나면 트리를 놓고, 다시 필요한 파일만 텍스트에서 다시 파싱한다. 결과는 모든 트리를
+ * 붙잡았을 때와 같다 — 파싱은 결정적이고, 파일 사이 단계에 넘기는 것은 노드 없는 표뿐이며, ORM 단계가 소비한 노드는 그
+ * 단계가 붙잡은 같은 트리로만 사용 스캔에 넘긴다. ORM 게이트가 열리면 이름 해석기 Program이 모든 트리를 담으므로 그
+ * 단계가 끝날 때까지는 트리를 모두 붙잡는다(그 단계의 최대 메모리는 그대로다).
  */
 
 import { basename, extname, isAbsolute } from 'node:path';
 
+import type ts from 'typescript';
+
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
-import { ClientProvenance, PrismaModuleMatcher } from './client-provenance.ts';
-import { ClientUsageScanner, type UsageCounts } from './client-usage.ts';
-import { formatBreakdown, observeDbPackages, type PackageObservations } from './db-packages.ts';
+import { ClientProvenance, type ModuleHandle, PrismaModuleMatcher } from './client-provenance.ts';
+import { commitUsage, recordUsage, type UsageCounts, type UsageRecord } from './client-usage.ts';
+import { formatBreakdown, modulePackages, observeDbPackages, type PackageObservations } from './db-packages.ts';
 import { ModuleResolver, isWithinDirectory } from './module-resolver.ts';
 import type { PrismaCatalog } from './prisma-catalog.ts';
-import { extractOrmFacts, type OrmExtraction } from './orm/orm-extract.ts';
+import {
+  extractOrmFacts, likelyOrmText, type OrmExtractionInput, ormModulePackages, type OrmModulePackages, projectPackages,
+} from './orm/orm-extract.ts';
+import type { OrmCounts } from './orm/orm-facts.ts';
 import { ormLimitations } from './orm/orm-limitations.ts';
 import { isDeclarationFileName, loadPrismaProject, type PrismaProject } from './prisma-project.ts';
 import { ProjectReader } from './project-reader.ts';
@@ -57,23 +69,244 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   };
   const relational = isRelational(project.catalog);
   if (relational && project.catalog !== undefined) emitSchemaFacts(project.catalog, sink);
-  const modules = parseModules(root, project, reader, counts);
-  const resolver = new ModuleResolver(root, new Set(modules.map((module) => module.absolutePath)));
-  const orm = extractOrmFacts({ modules, resolver, sink, declarationFiles: () => declarationFiles(root, project, reader) });
+  const sources = readSources(root, project, reader);
+  const resolver = new ModuleResolver(root, new Set(sources.map((source) => source.absolutePath)));
+  const provenance = new ClientProvenance(resolver, new PrismaModuleMatcher(project.outputDirectories, resolver));
+  const usage: UsageStage = { provenance, catalog: relational ? project.catalog : 'non-relational' };
+  const entries = parseSources(sources, usage, counts);
+  const orm = ormStage(entries, { resolver, sink, declarationFiles: () => declarationFiles(root, project, reader) });
   counts.dynamicRelations += orm.counts.dynamicRelations;
-  const provenance = new ClientProvenance(modules, resolver, new PrismaModuleMatcher(project.outputDirectories, resolver));
-  provenance.run();
-  for (const module of modules) {
-    const catalog = relational ? project.catalog : 'non-relational';
-    new ClientUsageScanner(module, provenance.analyze(module), catalog, sink, counts, orm.consumed).scan();
-  }
+  provenance.run(entries);
+  scanEntries(entries, usage, orm.consumed, { sink, counts });
   emitTypedSql(root, project.typedSqlFiles, reader, sink, counts);
   const facts = sink.sorted();
   const limitations = buildLimitations({
-    project, counts, facts, sink, reader, packages: observeDbPackages(modules),
-    unreadableConfigs: resolver.unreadableConfigs, provenanceTruncated: provenance.truncated, relational, orm,
+    project, counts, facts, sink, reader, packages: observeDbPackages(entries.map((entry) => entry.packages)),
+    unreadableConfigs: resolver.unreadableConfigs, provenanceTruncated: provenance.truncated, relational, ormCounts: orm.counts,
   });
   return { facts, limitations, sourceModifiedAt: reader.newestModifiedAt };
+}
+
+/** 읽은 소스 파일 하나다. */
+interface SourceInput {
+  /** 프로젝트 루트 기준 POSIX 경로다. */
+  readonly path: string;
+  /** 절대 경로다. */
+  readonly absolutePath: string;
+  /** 파일 텍스트(BOM 제거 뒤)다. */
+  readonly text: string;
+}
+
+/** 파일별 사용 스캔의 문맥이다. */
+interface UsageStage {
+  readonly provenance: ClientProvenance;
+  /** 스키마 이름 표. `'non-relational'`이면 delegate 접근을 사실로 내지 않는다. */
+  readonly catalog: PrismaCatalog | undefined | 'non-relational';
+}
+
+/** 사용 스캔 결과를 넣는 곳이다. */
+interface UsageOutput {
+  readonly sink: RelationFactSink;
+  readonly counts: UsageCounts;
+}
+
+/**
+ * 파싱한 소스 하나의 노드 없는 요약과 트리 수명이다.
+ *
+ * 파일 하나의 일이 끝나면 트리를 놓고 텍스트와 요약만 남긴다. 트리를 다시 얻을 때는 같은 텍스트를 같은 옵션으로 다시
+ * 파싱하므로 같은 트리다. 트리를 붙잡는 때는 ORM 게이트가 열려 이름 해석기가 모든 모듈로 Program을 만들 때뿐이다.
+ */
+class SourceEntry implements ModuleHandle {
+  /** 프로젝트 루트 기준 POSIX 경로다. */
+  readonly path: string;
+  /** 절대 경로다. */
+  readonly absolutePath: string;
+  /** 지원 표면 밖 DB 패키지 계수의 재료다(`modulePackages`). */
+  readonly packages: ReadonlySet<string>;
+  /** ORM 단계 게이트의 재료다. */
+  readonly orm: OrmModulePackages;
+  /** 다시 파싱할 텍스트다. */
+  private readonly text: string;
+  /** 파싱 직후 출처 추정 표로 해 둔 사용 스캔 기록이다(ORM 게이트가 열리기 전에 파싱한 모듈만 있다). */
+  usage: UsageRecord | undefined;
+  /** 붙잡은 트리다. */
+  private module: SourceModule | undefined;
+
+  /**
+   * @param source 읽은 소스
+   * @param module 방금 파싱한 트리(요약만 뽑고 붙잡지 않는다)
+   */
+  constructor(source: SourceInput, module: SourceModule) {
+    this.path = source.path;
+    this.absolutePath = source.absolutePath;
+    this.text = source.text;
+    this.packages = modulePackages(module);
+    this.orm = ormModulePackages(module);
+  }
+
+  /**
+   * 트리를 돌려준다. 붙잡은 트리가 없으면 다시 파싱하고, 그 트리는 붙잡지 않는다.
+   *
+   * @returns 소스 모듈
+   */
+  load(): SourceModule {
+    return this.module ?? parseSourceModule(this.path, this.absolutePath, this.text);
+  }
+
+  /**
+   * 트리를 붙잡는다. 붙잡은 트리가 없으면 주어진 트리를, 그것도 없으면 다시 파싱한 트리를 붙잡는다.
+   *
+   * @param module 방금 파싱한 트리
+   * @returns 붙잡은 트리
+   */
+  retain(module?: SourceModule): SourceModule {
+    this.module ??= module ?? this.load();
+    return this.module;
+  }
+
+  /** 이 파일의 일이 끝났으므로 트리와 사용 스캔 기록을 놓는다. */
+  release(): void {
+    this.module = undefined;
+    this.usage = undefined;
+  }
+}
+
+/**
+ * 소스 파일을 읽는다. generator 출력 디렉터리(생성된 클라이언트)는 분석 대상 코드가 아니다.
+ *
+ * @param root 프로젝트 realpath
+ * @param project Prisma 입력
+ * @param reader 파일 읽기 도우미
+ * @returns 읽은 소스(경로 순)
+ */
+function readSources(root: string, project: PrismaProject, reader: ProjectReader): SourceInput[] {
+  const sources: SourceInput[] = [];
+  for (const [path, absolutePath] of project.walk.files) {
+    if (!isSourceFileName(basename(path))) continue;
+    if (project.outputDirectories.some((directory) => isWithinDirectory(absolutePath, directory))) continue;
+    const text = reader.read(absolutePath)?.text;
+    if (text !== undefined) sources.push({ path: toPosixRelative(root, absolutePath), absolutePath, text });
+  }
+  return sources;
+}
+
+/**
+ * 소스를 파싱해 요약과 출처 첫 라운드를 남긴다. 트리는 ORM 게이트를 연 모듈부터 붙잡는다.
+ *
+ * 게이트가 닫혀 있는 동안은 사용 스캔도 그 자리에서 출처 추정 표로 기록하고 트리를 놓는다. 게이트가 끝내 닫혀 있으면
+ * 기록이 읽은 칸이 고정점 뒤의 표와 같은 파일은 그 기록을 그대로 확정해 다시 파싱하지 않는다. 파싱 순서는 결과에 영향이
+ * 없다 — 첫 라운드는 빈 출처 표로 모듈마다 따로 계산하고, 추정 표로 한 기록은 읽은 칸으로 따로 확인하며, 모듈 목록은
+ * 경로 순으로 돌려준다.
+ *
+ * @param sources 읽은 소스(경로 순)
+ * @param usage 사용 스캔 문맥
+ * @param counts 계수(parse-error 파일이 더해진다)
+ * @returns 소스 요약(경로 순)
+ */
+function parseSources(sources: readonly SourceInput[], usage: UsageStage, counts: ExtractionCounts): SourceEntry[] {
+  const entries: SourceEntry[] = [];
+  let gated = false;
+  for (const index of parseOrder(sources)) {
+    const source = sources[index]!;
+    const module = parseSourceModule(source.path, source.absolutePath, source.text);
+    if (module.hasParseErrors) counts.parseErrorFiles.push(module.path);
+    const entry = new SourceEntry(source, module);
+    gated ||= entry.orm.isOrmModule;
+    usage.provenance.observe(module);
+    if (gated) entry.retain(module);
+    else entry.usage = recordUsage(module, usage.provenance, usage.catalog, { knowledge: usage.provenance.guesses });
+    entries[index] = entry;
+  }
+  return entries;
+}
+
+/** Prisma 클라이언트를 만들 법한 소스의 글자다(클래스 이름 또는 Prisma 모듈 지정자). */
+const likelyClientSourcePattern = /PrismaClient|@prisma\/client|\.prisma\/client/u;
+
+/** 다른 모듈의 값을 옮겨 내보낼 법한 소스의 글자다(`export *`·`export {`·CommonJS export). */
+const likelyReexportPattern = /\bexport\s*[*{]|\bmodule\.exports\b/u;
+
+/**
+ * 파싱 순서다(같은 무리 안에서는 경로 순). ORM 게이트를 열 법한 소스, Prisma 클라이언트를 만들 법한 소스, 다른 모듈의
+ * 값을 내보낼 법한 소스, 나머지 순이다.
+ *
+ * 첫 무리는 게이트를 먼저 열어, 게이트가 열리는 프로젝트에서 앞서 놓은 트리를 ORM 단계용으로 다시 파싱하는 양을 줄인다.
+ * 다음 두 무리는 클라이언트를 쓰는 파일보다 클라이언트를 만들거나 옮기는 파일의 추정을 먼저 채워, 사용 스캔 기록이 고정점
+ * 뒤의 표와 맞아 다시 파싱하지 않게 한다. 판정은 글자 검사라 틀릴 수 있지만(주석·이스케이프) 틀려도 결과는 같고 다시
+ * 파싱만 는다. 패턴은 반복이 겹치지 않는 고정 문자열·공백 반복이라 큰 입력에서도 선형 시간이다.
+ *
+ * @param sources 읽은 소스(경로 순)
+ * @returns 소스 번호 순서
+ */
+function parseOrder(sources: readonly SourceInput[]): number[] {
+  const groups: number[][] = [[], [], [], []];
+  sources.forEach((source, index) => groups[parsePriority(source.text)]!.push(index));
+  return groups.flat();
+}
+
+/**
+ * 소스 하나의 파싱 순서 무리다.
+ *
+ * @param text 소스 텍스트
+ * @returns 무리 번호(작을수록 먼저)
+ */
+function parsePriority(text: string): number {
+  if (likelyOrmText(text)) return 0;
+  if (likelyClientSourcePattern.test(text)) return 1;
+  return likelyReexportPattern.test(text) ? 2 : 3;
+}
+
+/** ORM 단계 결과다. */
+interface OrmStage {
+  readonly counts: OrmCounts;
+  /** 모듈 절대 경로 → 게이트가 소비한 노드다(소비한 노드가 있는 파일만). 파일마다 지워 그 트리를 놓는다. */
+  readonly consumed: Map<string, Set<ts.Node>>;
+}
+
+/**
+ * ORM·드라이버 단계를 돌린다. 게이트가 열리면 놓았던 트리까지 다시 파싱해 모든 모듈의 트리를 붙잡는다.
+ *
+ * @param entries 소스 요약(경로 순)
+ * @param input 해석기·수집기·선언 파일 입력
+ * @returns 계수와 파일별 소비 노드
+ */
+function ormStage(entries: readonly SourceEntry[], input: Pick<OrmExtractionInput, 'resolver' | 'sink' | 'declarationFiles'>): OrmStage {
+  const orm = extractOrmFacts({
+    ...input,
+    packages: projectPackages(entries.map((entry) => entry.orm)),
+    modules: () => entries.map((entry) => entry.retain()),
+  });
+  const consumed = new Map<string, Set<ts.Node>>();
+  for (const node of orm.consumed) {
+    const path = node.getSourceFile().fileName;
+    const nodes = consumed.get(path) ?? new Set<ts.Node>();
+    consumed.set(path, nodes.add(node));
+  }
+  return { counts: orm.counts, consumed };
+}
+
+/**
+ * 파일마다 사용 스캔을 확정하고 그 파일의 트리를 놓는다.
+ *
+ * 파싱 직후의 기록은 게이트가 소비한 노드가 없고, 읽은 출처 칸이 고정점 뒤의 표에서도 같은 값일 때만 그대로 쓴다(그때
+ * 다시 스캔해도 같다). 아니면 지금 표와 소비 노드로 다시 스캔한다.
+ *
+ * @param entries 소스 요약(경로 순)
+ * @param usage 사용 스캔 문맥
+ * @param consumed 파일별 소비 노드(확정한 파일은 지워진다)
+ * @param output 사실 수집기와 계수
+ */
+function scanEntries(entries: readonly SourceEntry[], usage: UsageStage, consumed: Map<string, Set<ts.Node>>, output: UsageOutput): void {
+  for (const entry of entries) {
+    const nodes = consumed.get(entry.absolutePath);
+    const recorded = entry.usage;
+    const record = recorded !== undefined && nodes === undefined && usage.provenance.knowledge.unchanged(recorded.reads)
+      ? recorded
+      : recordUsage(entry.load(), usage.provenance, usage.catalog, { preconsumed: nodes });
+    commitUsage(record, output.sink, output.counts);
+    consumed.delete(entry.absolutePath);
+    entry.release();
+  }
 }
 
 /**
@@ -121,29 +354,6 @@ function emitSchemaFacts(catalog: PrismaCatalog, sink: RelationFactSink): void {
  */
 function declarationSymbol(path: string, symbol: string): { symbol: string; usr: string } {
   return { symbol, usr: `${path}#model:${symbol}` };
-}
-
-/**
- * 소스 파일을 읽고 파싱한다. generator 출력 디렉터리(생성된 클라이언트)는 분석 대상 코드가 아니다.
- *
- * @param root 프로젝트 realpath
- * @param project Prisma 입력
- * @param reader 파일 읽기 도우미
- * @param counts 계수(갱신된다)
- * @returns 소스 모듈(경로 순)
- */
-function parseModules(root: string, project: PrismaProject, reader: ProjectReader, counts: ExtractionCounts): SourceModule[] {
-  const modules: SourceModule[] = [];
-  for (const [path, absolutePath] of project.walk.files) {
-    if (!isSourceFileName(basename(path))) continue;
-    if (project.outputDirectories.some((directory) => isWithinDirectory(absolutePath, directory))) continue;
-    const text = reader.read(absolutePath)?.text;
-    if (text === undefined) continue;
-    const module = parseSourceModule(toPosixRelative(root, absolutePath), absolutePath, text);
-    if (module.hasParseErrors) counts.parseErrorFiles.push(module.path);
-    modules.push(module);
-  }
-  return modules;
 }
 
 /**
@@ -204,7 +414,7 @@ interface LimitationInput {
   readonly unreadableConfigs: number;
   readonly provenanceTruncated: boolean;
   readonly relational: boolean;
-  readonly orm: OrmExtraction;
+  readonly ormCounts: OrmCounts;
 }
 
 /**
@@ -288,8 +498,8 @@ function catalogLimitations(catalog: PrismaCatalog): string[] {
  * @param input 조립 입력
  * @returns limitation 목록
  */
-function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated, orm }: LimitationInput): string[] {
-  const result: string[] = [...ormLimitations(orm.counts)];
+function sourceLimitations({ counts, facts, sink, packages, provenanceTruncated, ormCounts }: LimitationInput): string[] {
+  const result: string[] = [...ormLimitations(ormCounts)];
   if (packages.nonRelationalFiles > 0) {
     result.push(`non-relational-stores: ${packages.nonRelationalFiles} source file(s) import non-SQL persistence packages outside the relation join: ${formatBreakdown(packages.nonRelational)}`);
   }

@@ -425,6 +425,13 @@ SQL 텍스트를 읽어 bridge-facts v1 문서를 표준 출력에 쓴다. `plat
 - 탐색에서 건너뛰는 것: `node_modules`, `dist`, `build`, `out`, `coverage`, 점 디렉터리, Prisma
   generator 출력 디렉터리(프로젝트 루트나 그 조상으로 풀리는 output은 이 제외에도 클라이언트 출처 판정에도 쓰지 않고 `unresolved-generator-outputs:`로 알린다), 4 MiB 넘는 파일(개수로 센다). 모을 파일이나 내려갈 디렉터리의 이름에 교환 형식이 금지하는 문자(C0·C1 제어 문자, DEL, U+2028/U+2029, 짝 없는 서러게이트)가 있으면 건너뛰고 `unsafe-names:`로 센다(`graph`도 같은 접두사를 쓰고, 이 걷기를 함께 쓰는 Node 백엔드·client·navigation 스캔은 `route-coverage:`·`route-call-coverage:`·`navigation-project-coverage:`로 알린다). 경로에 그런 문자가 든 Prisma 스키마·TypedSQL 사실도 내지 않고 `unsafe-names:`로 센다. 소스는 열린 일반 파일 핸들에서 바이트 상한을 지키므로 메타데이터 확인 뒤 파일이 커져도 우회하지 못한다. FIFO는 기다리지 않고 거부한다. `O_NOFOLLOW` 지원 플랫폼에서는 마지막 파일 링크도 거부하지만 모든 부모 디렉터리의 원자적 검사를 보장하지 않는다. Prisma 설정·스키마·TypedSQL 위치는 탐색 밖에서 조립하므로 `--project` 아래 경로 요소마다 먼저 `lstat`으로 확인한다. 중간에 링크 디렉터리(`prisma/`, `.config/`, `prisma/sql/`)가 있으면 읽지 않고 `skipped-symlinks:`에 한 번만 센다. `*.d.ts`는 소스로 파싱하지 않고 Cloudflare D1 바인딩
   선언을 찾을 때만 읽는다.
+- 메모리: 소스 파일 하나의 스캔이 끝나면 그 파일의 구문 트리를 바로 놓는다. 파일 사이 단계는 노드가 없는 파일별
+  요약(import·export 표, 패키지 이름)과 소스 텍스트만 들고 있다가, 뒤 단계가 트리를 다시 필요로 하면 텍스트에서 다시
+  파싱한다. 그래서 최대 메모리는 모든 구문 트리의 합이 아니라 소스 텍스트 크기를 따라 는다. 예외는 ORM·SQL 드라이버
+  단계([Node ORM과 SQL 드라이버](#node-orm과-sql-드라이버))다. 지원 패키지를 가져오거나 `D1Database`를 언급하는 소스가
+  하나라도 있으면 그 이름 해석기가 모든 소스로 TypeScript Program 하나를 만든다. 그래서 그 단계가 끝날 때까지 모든
+  트리를 붙잡고, 그 뒤에야 파일마다 놓는다. 그런 대형 저장소는 여전히 V8 기본 힙을 넘길 수 있고, 그때 프로세스는 종료
+  코드 계약 밖에서 중단된다. 더 좁은 `--project`를 주거나 `NODE_OPTIONS=--max-old-space-size=<MiB>`로 힙을 늘린다.
 
 ### 사실
 

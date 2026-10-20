@@ -17,7 +17,9 @@ Prisma 규칙은 [README](../README.ko.md#tsograph-schema)에 있다. 출력은 
   프로젝트 인터페이스와 상속, 교차·합 타입, 구조 분해 매개변수), 데코레이터, 알려진 호출의 콜백 매개변수
   (`db.transaction(async (tx) => …)`), 파일 사이 import·재수출·CommonJS `require`·`module.exports`다.
 - **이름 해석 단계는 관련 패키지가 있을 때만 돈다.** 소스가 아래 패키지 중 하나를 import·require하거나
-  `D1Database`를 언급하지 않으면 건너뛴다(Prisma만 쓰는 프로젝트의 비용·결과는 그대로다).
+  `D1Database`를 언급하지 않으면 건너뛴다(Prisma만 쓰는 프로젝트의 비용·결과는 그대로다). 이 단계가 돌면 Program이
+  모든 소스의 구문 트리를 담으므로 단계가 끝날 때까지 트리를 모두 붙잡는다. 다른 단계는 파일 하나의 스캔을 마치면 그
+  트리를 놓는다([README 메모리 항목](../README.ko.md#tsograph-schema)).
 
 | 표면 | 패키지 |
 |---|---|

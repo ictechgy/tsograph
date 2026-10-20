@@ -548,6 +548,16 @@ persistence rules of `docs/GRAPH-EXCHANGE.md`.
 - Skipped while walking: `node_modules`, `dist`, `build`, `out`, `coverage`, dot-directories,
   Prisma generator output directories (an output that resolves to the project root or one of its ancestors is used neither for this exclusion nor for client provenance, and is reported under `unresolved-generator-outputs:`), and files over 4 MiB (counted). A collected file or an entered directory whose name contains a character the exchange format forbids (C0/C1 controls, DEL, U+2028/U+2029, unpaired surrogates) is skipped and counted under `unsafe-names:` (`graph` uses the same prefix; the Node backend, client, and navigation scans share this walk and report it under `route-coverage:`, `route-call-coverage:`, and `navigation-project-coverage:`). Prisma schema and TypedSQL facts whose paths contain such a character are dropped and counted under `unsafe-names:` as well. Source reads enforce that byte cap on the opened regular-file handle, so growth after metadata inspection cannot bypass it. FIFOs are rejected without waiting. Where `O_NOFOLLOW` is supported, the reader also rejects final-component symlinks; this is not an atomic check of every ancestor directory. Prisma config, schema, and TypedSQL locations are built outside the walk, so each path component below `--project` is checked with `lstat` first: a symlinked directory on the way (`prisma/`, `.config/`, `prisma/sql/`) is not read and is counted once under `skipped-symlinks:`. `*.d.ts` files are not
   parsed as sources; they are read only for Cloudflare D1 binding declarations.
+- Memory: a source file's syntax tree is released as soon as that file's own scans finish. The
+  cross-file steps keep only node-free per-file summaries (import and export tables, package names)
+  and the source text, and re-parse a file from its text when a later step needs its tree again, so
+  peak memory grows with the source text rather than with every syntax tree at once. The exception
+  is the ORM and SQL driver phase ([Node ORMs and SQL drivers](#node-orms-and-sql-drivers)): when a
+  source imports a supported package or mentions `D1Database`, its name resolver builds one
+  TypeScript Program over all sources, so every tree is held until that phase ends and only then
+  released file by file. Very large repositories of that kind can still exhaust the default V8
+  heap, and the process then aborts outside the exit-code contract; narrow `--project` or raise the
+  heap with `NODE_OPTIONS=--max-old-space-size=<MiB>`.
 
 ### Facts
 
