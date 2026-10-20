@@ -155,8 +155,10 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0 || deeplyNestedInputs > 0;
-  // 경계 밖이라 쓰지 않았거나 상한 뒤라 열거하지 못한 설정 루트는 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
-  const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || status.configRootsTruncated === true;
+  // 경계 밖이거나, 이름으로 적었지만 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않았거나, 상한 뒤라 열거하지 못한 설정 루트는
+  // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
+  const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
+    || status.configRootsTruncated === true;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;

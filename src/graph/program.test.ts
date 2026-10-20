@@ -1007,7 +1007,14 @@ function outsideRootsGap(count: number, affected: string): string {
     + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`;
 }
 
-test('설정 루트는 걷기가 건너뛰는 디렉터리·symlink 아래를 열거하지 않고 루트 안 선언은 남긴다', {
+/** `graph-config:`·coverage 한계가 함께 쓰는 '걷기 정책에 막힌 이름 설정 루트' 원인 문장이다. */
+function excludedRootsGap(count: number, affected: string): string {
+  return `${count} files entr(ies) or wildcard-free include path(s) of tsconfig.json name paths in directories the scan skips `
+    + `or through symbolic links and were not used as root files; type resolution and ${affected} may be incomplete `
+    + '(import or reference them from a project source instead)';
+}
+
+test('설정 루트는 걷기가 건너뛰는 디렉터리·symlink 아래를 열거하지 않고 루트 안 선언은 남기며 이름으로 적은 항목만 센다', {
   skip: process.platform === 'win32',
 }, async () => {
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-graph-link-')));
@@ -1035,12 +1042,72 @@ test('설정 루트는 걷기가 건너뛰는 디렉터리·symlink 아래를 �
       const boundary = { root, excludedDirectories: new Set([join(root, 'generated')]) };
       const { program, status } = createGraphProgram(root, [join(root, 'src/main.ts')], ts.createProgram, undefined, boundary);
       assert.deepEqual(rootFiles(program, root), ['src/main.ts', 'src/types/global.d.ts', 'src/types/listed.d.ts']);
-      // 제외 디렉터리·symlink 아래는 걷기와 같은 정책이라 따로 세지 않는다(걷기가 symlink를 이미 센다).
-      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false });
+      // 글롭(`dist/**/*`·`src/vendor/**/*`)이 고를 파일은 걷기와 같은 정책이라 세지 않는다. 이름으로 적은 include 디렉터리
+      // `build`·`out`·`coverage`·`generated`와 `files`의 `build/listed.d.ts`·`src/vendor/linked.d.ts`(symlink 디렉터리 아래)는
+      // 사용자가 콕 집어 고른 경로라 센다. 점이 든 `.storybook`은 TypeScript가 파일 이름으로 읽어 디렉터리를 고르지 않고,
+      // 없는 `src/missing`·`src/missing.d.ts`는 TypeScript도 아무것도 얻지 못하므로 세지 않는다.
+      assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 6 });
     });
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+test('이름으로 적은 files가 걷기가 건너뛰는 디렉터리 아래면 graph-config로 알리고, 프로젝트 소스가 참조하면 공백 없이 쓴다', async () => {
+  const files = {
+    'package.json': '{"private":true}',
+    'src/main.ts': 'export function run() { return makeStore() + makeStore(); }\n',
+    'node_modules/globals-pkg/index.d.ts': 'declare function makeStore(): number;\n',
+  };
+  await withProject({
+    ...files,
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'], files: ['node_modules/globals-pkg/index.d.ts'] }),
+  }, async (root) => {
+    const { program, status } = createGraphProgram(root, [join(root, 'src/main.ts')]);
+    assert.deepEqual(rootFiles(program, root), ['src/main.ts']);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 1 });
+    // 예전에는 원인 없이 `unresolved-calls:`만 남고 coverage 완전성을 그대로 주장했다.
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(graph.limitations.includes(`graph-config: ${excludedRootsGap(1, 'calls')}`), graph.limitations.join('\n'));
+    assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')), graph.limitations.join('\n'));
+  });
+  // 안내한 해결 방향: 프로젝트 소스가 참조하면 compiler host가 그 선언을 읽어 공백이 없다.
+  await withProject({
+    ...files,
+    'src/main.ts': `/// <reference path="../node_modules/globals-pkg/index.d.ts" />\n${files['src/main.ts']}`,
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, include: ['src'] }),
+  }, async (root) => {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.deepEqual(graph.limitations.filter((line) => /^(graph-config|unresolved-calls|effect-inventory):/u.test(line)), []);
+  });
+});
+
+test('정책에 막힌 설정 루트는 TypeScript가 실제로 고를 이름 항목만 세고 글롭 일치·없는 항목·특수 파일은 세지 않는다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  await withProject({
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: { types: [] },
+      // `.next/types/**/*.ts`는 Next가 생성 설정에 넣는 글롭이라 조용히 둔다. 점 디렉터리 아래 파일 `.types/global.d.ts`와
+      // symlink 디렉터리 `types-link`는 센다. `src`·`next-env.d.ts`는 정책을 통과한다.
+      include: ['src', 'next-env.d.ts', '.next/types/**/*.ts', '.types/global.d.ts', 'types-link'],
+      // 디렉터리·FIFO·없는 파일은 TypeScript도 소스로 읽지 못해 세지 않는다. 일반 파일로 가는 symlink는 센다.
+      files: ['src', 'src/pipe.d.ts', 'src/gone.d.ts', 'src/link.d.ts'],
+    }),
+    'src/main.ts': 'export const main = 1;\n',
+    'next-env.d.ts': 'declare const nextEnv: number;\n',
+    '.next/types/app/page.ts': 'export const page = 1;\n',
+    '.types/global.d.ts': 'declare const dotted: number;\n',
+    'real-types/linked.d.ts': 'declare const linked: number;\n',
+  }, (root) => {
+    makeFifo(join(root, 'src/pipe.d.ts'));
+    symlinkSync(join(root, 'real-types'), join(root, 'types-link'));
+    symlinkSync(join(root, 'real-types/linked.d.ts'), join(root, 'src/link.d.ts'));
+    const { program, status } = createGraphProgram(root, []);
+    assert.deepEqual(rootFiles(program, root), ['next-env.d.ts', 'src/main.ts']);
+    assert.deepEqual(status, { configName: 'tsconfig.json', configUnreadable: false, excludedConfigRoots: 3 });
+    assert.deepEqual(compilerConfigGaps(status, 'route registrations'), [excludedRootsGap(3, 'route registrations')]);
+  });
 });
 
 test('include 없는 jsconfig도 build/·dist/ 산출물을 루트로 넣지 않아 그래프가 산출물 없는 프로젝트와 같다', async () => {

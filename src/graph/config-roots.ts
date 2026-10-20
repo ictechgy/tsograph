@@ -13,7 +13,9 @@
  * 않아 설정이 유일한 공급원이기 때문이다.
  *
  * 경계 밖을 가리켜 쓰지 않은 include 패턴·`files` 항목 수와 항목 상한에 걸린 사실은 호출자가 limitation으로 알린다.
- * 제외 디렉터리·symlink 아래라 뺀 것은 걷기와 같은 정책이라 따로 알리지 않는다(걷기가 symlink 수를 이미 센다).
+ * 글롭이 제외 디렉터리·symlink 아래에서 고를 파일을 뺀 것은 걷기와 같은 정책이라 따로 알리지 않는다. 반면 이름으로
+ * 적은 `files` 항목과 와일드카드 없는 include 경로가 그 정책에 막히면 센다 — 걷기는 사용자가 콕 집어 고른 경로를 다룬
+ * 적이 없어 "걷기와 같다"는 근거가 맞지 않고, 막은 사실을 조용히 넘기지 않기 위해서다.
  */
 
 import { type Dirent, lstatSync, readdirSync } from 'node:fs';
@@ -37,6 +39,11 @@ export interface ScanBoundary {
 export interface ConfigRootGaps {
   /** 경계 밖을 가리켜 열거하지 않은 include 패턴과 버린 `files` 항목 수 */
   readonly outsideConfigRoots?: number;
+  /**
+   * 경계 안이지만 걷기가 건너뛰는 디렉터리 아래이거나 symlink를 거쳐 쓰지 않은, 이름으로 적은 `files` 항목과 와일드카드
+   * 없는 include 경로 수
+   */
+  readonly excludedConfigRoots?: number;
   /** include 열거가 항목 상한에 걸려 멈췄으면 true */
   readonly configRootsTruncated?: true;
 }
@@ -80,6 +87,8 @@ export class ConfigRootBoundary {
   readonly #enumerated = new Set<string>();
   #visited = 0;
   #outside = 0;
+  /** 걷기 정책에 막힌, 이름으로 적은 `files` 항목·와일드카드 없는 include 경로 수 */
+  #namedExcluded = 0;
   #truncated = false;
 
   /**
@@ -133,11 +142,12 @@ export class ConfigRootBoundary {
   /**
    * 호출자가 알릴 공백이다.
    *
-   * @returns 경계 밖 항목 수·상한 도달 여부(없으면 빈 객체)
+   * @returns 경계 밖 항목 수·정책에 막힌 이름 항목 수·상한 도달 여부(없으면 빈 객체)
    */
   gaps(): ConfigRootGaps {
     return {
       ...(this.#outside > 0 ? { outsideConfigRoots: this.#outside } : {}),
+      ...(this.#namedExcluded > 0 ? { excludedConfigRoots: this.#namedExcluded } : {}),
       ...(this.#truncated ? { configRootsTruncated: true } : {}),
     };
   }
@@ -151,14 +161,39 @@ export class ConfigRootBoundary {
    * 아니다. TypeScript는 그 문자도 와일드카드로 읽어 그 조상부터 열거하려 하지만, 그 디렉터리는 {@link #entries}가 경계
    * 밖이라 열지 않고, 패턴이 뜻한 경계 안 파일은 설정 디렉터리 열거로 그대로 찾는다.
    *
+   * 경계 안이고 경계 아래 부분에 와일드카드가 없으면 이름으로 적은 경로라 {@link #noteNamedInclude}로 정책을 본다.
+   *
    * @param base 설정 디렉터리
    * @param include include 패턴(상대·절대)
    * @returns 열거하면 true
    */
   #keepsInclude(base: string, include: string): boolean {
-    if (isInside(this.#root, resolve(base, include.replaceAll('\\', '/')))) return true;
-    this.#outside++;
-    return false;
+    const pattern = resolve(base, include.replaceAll('\\', '/'));
+    if (!isInside(this.#root, pattern)) {
+      this.#outside++;
+      return false;
+    }
+    if (!/[*?]/u.test(relative(this.#root, pattern))) this.#noteNamedInclude(pattern);
+    return true;
+  }
+
+  /**
+   * 와일드카드 없이 경로를 적은 include가 걷기 정책에 막히면 센다. 열거는 그대로 맡긴다({@link #entries}가 막힌
+   * 디렉터리를 열지 않는다).
+   *
+   * TypeScript는 마지막 성분에 점이 있으면 그 경로의 파일 하나를, 없으면 그 디렉터리 아래 전체를 고른다
+   * (`isImplicitGlob`). 그래서 파일 모양이면 부모 디렉터리를, 디렉터리 모양이면 그 디렉터리 자신을 정책으로 판정한다.
+   * 없는 경로나 모양과 종류가 다른 항목(점이 든 디렉터리 이름 등)은 TypeScript도 아무것도 고르지 못하므로 세지 않는다.
+   * symlink는 따라가지 않고 센다.
+   *
+   * @param path 정규화한 절대 include 경로(경계 안)
+   */
+  #noteNamedInclude(path: string): void {
+    const kind = entryKind(path);
+    const blocked = kind === 'link' || (basename(path).includes('.')
+      ? kind === 'file' && !this.#admitsDirectory(dirname(path))
+      : kind === 'directory' && !this.#admitsDirectory(path));
+    if (blocked) this.#namedExcluded++;
   }
 
   /**
@@ -228,7 +263,9 @@ export class ConfigRootBoundary {
   }
 
   /**
-   * `files` 항목을 판정한다. 경계 밖이면 세고, 경계 안이면 부모 디렉터리가 정책을 통과한 일반 파일만 남긴다.
+   * `files` 항목을 판정한다. 경계 밖이면 세고, 경계 안이면 부모 디렉터리가 정책을 통과한 일반 파일만 남긴다. 정책에
+   * 막힌 일반 파일(제외 디렉터리·symlink 디렉터리 아래)과 symlink 항목도 센다. 없거나 디렉터리·특수 파일인 항목은
+   * TypeScript도 소스로 읽지 못해 예전에도 루트가 되지 못했으므로 세지 않는다.
    *
    * @param fileName TypeScript가 절대 경로로 바꾼 항목
    * @returns 남기면 true
@@ -239,7 +276,10 @@ export class ConfigRootBoundary {
       this.#outside++;
       return false;
     }
-    return this.#admitsDirectory(dirname(path)) && entryKind(path) === 'file';
+    const kind = entryKind(path);
+    if (kind === 'file' && this.#admitsDirectory(dirname(path))) return true;
+    if (kind === 'file' || kind === 'link') this.#namedExcluded++;
+    return false;
   }
 }
 
@@ -271,12 +311,13 @@ function listDirectory(directory: string): Dirent[] {
 }
 
 /**
- * 링크를 따라가지 않은 경로 종류다.
+ * 링크를 따라가지 않은 경로 종류다. 마지막 성분만 따라가지 않으므로 symlink 디렉터리 아래 항목은 대상의 종류다(그런
+ * 조상은 {@link ConfigRootBoundary}의 디렉터리 판정이 거른다).
  *
  * @param path 경로
- * @returns 일반 파일·디렉터리, symlink·특수 파일·없는 경로면 undefined
+ * @returns 일반 파일·디렉터리·symlink·그 밖의 특수 파일, 없거나 확인할 수 없는 경로면 undefined
  */
-function entryKind(path: string): 'file' | 'directory' | undefined {
+function entryKind(path: string): 'file' | 'directory' | 'link' | 'other' | undefined {
   let stats;
   try {
     stats = lstatSync(path);
@@ -284,7 +325,9 @@ function entryKind(path: string): 'file' | 'directory' | undefined {
     // 없거나 확인할 수 없는 경로는 루트로 쓰지도 열지도 않는다. TypeScript도 그런 경로에서 파일을 얻지 못한다.
     return undefined;
   }
-  return stats.isFile() ? 'file' : stats.isDirectory() ? 'directory' : undefined;
+  if (stats.isFile()) return 'file';
+  if (stats.isDirectory()) return 'directory';
+  return stats.isSymbolicLink() ? 'link' : 'other';
 }
 
 /**

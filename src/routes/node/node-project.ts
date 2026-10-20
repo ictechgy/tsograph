@@ -110,7 +110,8 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
  *
  * 원인 문구는 graph의 `graph-config:`·`oversized-compiler-inputs:`·`parse-errors:`(깊이로 뺀 입력)와 같다 — 같은
  * Program에서 같은 공백을 본 문서들이 같은 말로 알려야 사용자가 한 가지 고칠 방향(설정·extends 대상 설치, 큰 입력·
- * 깊이 중첩된 생성 파일 정리, 설정 루트를 담는 루트로 분석)을 찾는다. 설정 루트 경계의 문장은 {@link configRootGaps}다.
+ * 깊이 중첩된 생성 파일 정리, 설정 루트를 담는 루트로 분석, 건너뛰는 디렉터리 안 설정 루트는 소스에서 참조)을 찾는다.
+ * 설정 루트 경계의 문장은 {@link configRootGaps}다.
  *
  * @param status Program 설정 상태
  * @param affected 불완전할 수 있는 결과(예: `route registrations`)

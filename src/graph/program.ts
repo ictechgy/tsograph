@@ -51,7 +51,7 @@ const defaultOptions: ts.CompilerOptions = {
 
 /**
  * Program을 만들면서 센 설정 공백이다. 설정 루트 경계의 공백({@link ConfigRootGaps}: 경계 밖이라 쓰지 않은 include·`files`
- * 항목 수, include 열거의 항목 상한 도달)도 싣는다.
+ * 항목 수, 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않은 이름 항목 수, include 열거의 항목 상한 도달)도 싣는다.
  */
 export interface ProgramConfigStatus extends ConfigRootGaps {
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
@@ -262,6 +262,12 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   if (outside > 0) {
     gaps.push(`${outside} include pattern(s) or files entr(ies) of ${status.configName} point outside the scanned root and were not used as root files; `
       + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`);
+  }
+  const excluded = status.excludedConfigRoots ?? 0;
+  if (excluded > 0) {
+    gaps.push(`${excluded} files entr(ies) or wildcard-free include path(s) of ${status.configName} name paths in directories the scan skips `
+      + `or through symbolic links and were not used as root files; type resolution and ${affected} may be incomplete `
+      + '(import or reference them from a project source instead)');
   }
   if (status.configRootsTruncated === true) {
     gaps.push(`include patterns of ${status.configName} reached the directory entry limit; later matches were not used as root files; `

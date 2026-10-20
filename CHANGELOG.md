@@ -91,12 +91,13 @@
   compiler 루트 파일을 소스 걷기와 같은 정책으로 거른다. 프로젝트 안(graph는 `--workspace`를 주면 workspace
   안)만 쓰고, `node_modules`·`dist`·`build`·`out`·`coverage`·점 디렉터리 아래(graph는 Prisma 생성 출력 아래도)와
   symlink 경유는 빼며, 디렉터리 항목은 500,000개까지만 열거한다. 시작 디렉터리가 그 밖인 include 패턴과 밖의
-  `files` 항목은 열거하지도 루트 파일로 쓰지도 않는다. 그 수와 열거 상한 도달은 `graph-config:`(server
-  `route-coverage:`, client `route-call-coverage:`, navigation `navigation-project-coverage:`)로 알리며, graph는
-  그때 coverage 완전성을 주장하지 않는다. 그런 파일도 프로젝트 소스가 import하면 지금처럼 읽는다. 로컬 빌드
-  산출물이 Program에 들어가 수 배 느려지거나(합성 build/ 3×3 MB: 1.34초 → 0.47초), 4 MiB를 넘는 번들 하나가
-  `oversized-compiler-inputs:`로 bound 디스패치를 끄거나, 상위 글롭(`../../**/*`)이 프로젝트 밖 트리를
-  열거·로드하던 문제다.
+  `files` 항목은 열거하지도 루트 파일로 쓰지도 않는다. 이름으로 적은 `files` 항목과 와일드카드 없는 include 경로가
+  그 제외 디렉터리 안이거나 symlink를 거치는 경우도 쓰지 않는다(그 디렉터리에서 글롭이 고를 파일은 걷기처럼 세지
+  않는다). 그 수와 열거 상한 도달은 `graph-config:`(server `route-coverage:`, client `route-call-coverage:`,
+  navigation `navigation-project-coverage:`)로 알리며, graph는 그때 coverage 완전성을 주장하지 않는다. 그런 파일도
+  프로젝트 소스가 import하거나 참조하면 지금처럼 읽는다. 로컬 빌드 산출물이 Program에 들어가 수 배 느려지거나(합성
+  build/ 3×3 MB: 1.34초 → 0.47초), 4 MiB를 넘는 번들 하나가 `oversized-compiler-inputs:`로 bound 디스패치를
+  끄거나, 상위 글롭(`../../**/*`)이 프로젝트 밖 트리를 열거·로드하던 문제다.
 
 - graph·reach·impact·routes(Node 백엔드·client)·navigation: tsconfig/jsconfig가 없거나 읽지 못해 기본 옵션을 쓸
   때 자동 타입 루트(`node_modules/@types`)를 실행 위치가 아니라 프로젝트 루트와 그 상위에서 찾는다(설정이 루트에
