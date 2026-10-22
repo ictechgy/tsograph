@@ -15,6 +15,10 @@
 
 ### Added
 
+- `change-impact --project <git-root> --base <commit> [--head <commit>]`: 실제 커밋/작업 트리 변경을 독립 before/after
+  그래프에 연결한다. 삭제·rename caller, 내용 해시, seed 이유, 미매핑 파일, 준비 비용과 기존 순회 한계를 보존한다.
+- `openapi --data-contracts`: 호환 소비자를 위한 opt-in bounded primitive 데이터 계약 근거다. 기존 출력은 유지한다.
+
 - 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
 
 ### Changed

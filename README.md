@@ -1548,6 +1548,15 @@ vector `conformance/http-template.json` when one is available (`TSOGRAPH_CONFORM
 `./conformance/`, or a sibling `../isthmus/conformance/`). If none is found, it is skipped
 with a message.
 
+## Analyze an actual change
+
+Use `tsograph change-impact --project . --base HEAD~1 --head HEAD`, or omit `--head` to compare
+the base with working-tree edits. Frozen before/after graphs retain deleted callers without mixing
+revision edges, and report content digests, file-level seed reasons, witnesses, unmapped files and limits.
+Results are incomplete review candidates, never predicted failures or permission to skip tests.
+The existing `impact <id>` mode is unchanged. See [change analysis](docs/CHANGE-IMPACT.md).
+OpenAPI consumers supporting data-contract v1 may opt in with `openapi ... --data-contracts`.
+
 ## License
 
 MIT. Free forever, no telemetry.

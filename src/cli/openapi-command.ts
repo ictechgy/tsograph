@@ -44,6 +44,7 @@ Options:
   --service <name>   Service identity recorded on the document and every fact (required)
   --project <root>   Join root; locations are relative to it (default: the spec's directory)
   --format json      Output format (json is the only format)
+  --data-contracts   Opt in to bounded primitive dataContract v1 evidence (requires a compatible consumer)
 
 Exit codes: 0 success, 2 unreadable or invalid spec, 64 usage error.
 `;
@@ -57,6 +58,7 @@ export interface OpenApiEnvironment {
 
 /** 검증을 통과한 인자다. */
 interface OpenApiArguments {
+  readonly dataContracts: boolean;
   readonly specArgument: string;
   readonly service: string;
   readonly projectArgument: string | undefined;
@@ -86,7 +88,7 @@ export async function runOpenApiCommand(
   if (typeof parsed === 'string') return usageFailure(`tsograph: ${parsed}\n${openApiUsage}`);
   const loaded = await loadSpec(parsed, environment.fileSystem);
   if ('exitCode' in loaded) return loaded;
-  return convertSpec(loaded, parsed.service, environment);
+  return convertSpec(loaded, parsed.service, environment, parsed.dataContracts);
 }
 
 /**
@@ -96,7 +98,7 @@ export async function runOpenApiCommand(
  * @returns 검증한 인자, 'help', 또는 사용법 오류 이유
  */
 function parseOpenApiArguments(arguments_: readonly string[]): OpenApiArguments | 'help' | string {
-  const parsed = parseArguments(arguments_, ['--service', '--project', '--format'], ['--help']);
+  const parsed = parseArguments(arguments_, ['--service', '--project', '--format'], ['--help', '--data-contracts']);
   if (parsed === undefined) return 'unknown, repeated, or empty option.';
   if (parsed.booleanFlags.has('--help')) return 'help';
   const [specArgument, ...extra] = parsed.positionals;
@@ -108,7 +110,7 @@ function parseOpenApiArguments(arguments_: readonly string[]): OpenApiArguments 
   if (!isSafeIdentifier(service) || service.length > MAX_SERVICE_LENGTH) {
     return `--service must be 1-${MAX_SERVICE_LENGTH} characters without control characters.`;
   }
-  return { specArgument, service, projectArgument: parsed.valueFlags.get('--project') };
+  return { specArgument, service, projectArgument: parsed.valueFlags.get('--project'), dataContracts: parsed.booleanFlags.has('--data-contracts') };
 }
 
 /**
@@ -189,9 +191,10 @@ async function readSpecText(fileSystem: CommandFileSystem, specReal: string): Pr
  * @param environment 실행 환경
  * @returns 성공 또는 실패 결과
  */
-function convertSpec(loaded: LoadedSpec, service: string, environment: OpenApiEnvironment): CommandResult {
+function convertSpec(loaded: LoadedSpec, service: string, environment: OpenApiEnvironment, dataContracts: boolean): CommandResult {
   try {
     const document = createContractDocument({
+      dataContracts,
       tree: parseSpecTree(loaded.text),
       specPath: loaded.specPath,
       project: loaded.project,

@@ -27,6 +27,8 @@ export interface BridgeLocation {
 
 /** 스펙 operation 하나를 나타내는 `route-contract` 사실이다. */
 export interface RouteContractFact {
+  /** 선택적 데이터 근거. 구 소비자 호환을 위해 CLI opt-in으로만 낸다. */
+  readonly dataContract?: import('../openapi/data-contract.ts').DataContract;
   readonly kind: 'route-contract';
   readonly method: HttpMethod;
   /** 정규 경로 템플릿. dynamic이면 안전하게 인코딩한 원문(길이 상한)이다. */

@@ -1262,6 +1262,14 @@ NestJS 옛 경로 변환기)를 패키지 출처와 함께 고정하고, `src/ro
 `conformance/http-template.json`의 문법 사례로 검사하고, 확인한 Next.js 변환표(`next/dist` 출처 포함)를
 isthmus 벡터 모양으로 두어 `producer:nextjs` 사례로 올릴 수 있게 한다.
 
+## 실제 변경 분석
+
+`tsograph change-impact --project . --base HEAD~1 --head HEAD`로 두 커밋을 비교한다. `--head`를 생략하면
+작업 트리 변경을 쓴다. 각 시점의 내용을 고정해 삭제 caller·파일 단위 seed·전파 경로·신선도 해시·미매핑 파일과
+한계를 보존한다. 결과는 불완전한 검토 후보이며 실패 예측이나 테스트 생략 허가가 아니다. 기존 `impact <id>`는
+유지한다. [변경 분석](docs/CHANGE-IMPACT.md)에 범위와 예산이 있다. 호환 소비자는 `openapi ... --data-contracts`로
+제한된 primitive HTTP 데이터 계약 근거를 명시적으로 요청할 수 있다.
+
 ## 라이선스
 
 MIT. 영구 무료, 텔레메트리 없음.
