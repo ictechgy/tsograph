@@ -39,6 +39,18 @@ test('field budget and UTF-16 path budget are explicit, no unbounded recursive s
   assert.ok(result.limitations.some((line) => line.startsWith('field-path:')));
   assert.ok(result.limitations.some((line) => line.startsWith('required:')));
 });
+
+test('referenced bodies/responses ignore content siblings and duplicate identities are omitted', () => {
+  const body = { $ref: '#/components/requestBodies/X', content: { json: { schema: { properties: { ignored: { type: 'integer' } } } } } };
+  const result = extract({ requestBody: body, responses: { '200': body }, parameters: [
+    { in: 'query', name: 'id', type: 'string' }, { in: 'query', name: 'id', type: 'integer' },
+    { in: 'query', name: 'id', type: 'string' }, { in: 'header', name: 'id', type: 'string' },
+  ] });
+  assert.deepEqual(result.fields, [{ in: 'header', path: 'id', type: 'string' }]);
+  assert.ok(result.limitations.some((line) => line.startsWith('request-body:')));
+  assert.ok(result.limitations.some((line) => line.includes('referenced response')));
+  assert.ok(result.limitations.some((line) => line.startsWith('duplicate-fields:')));
+});
 test('non-string keys and unsupported body schemas are recorded', () => {
   const tree = parseSpecTree('requestBody:\n  content:\n    1: {}\n    json:\n      schema:\n        properties:\n          1: {type: string}\nresponses:\n  200: {}\n');
   const result = extractDataContract(tree, tree.root!);

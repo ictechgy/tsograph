@@ -1,4 +1,4 @@
-/** 既存 심볼 기반 impact와 구별되는 실제 Git 변경 명령이다. */
+/** 기존 심볼 기반 impact와 구별되는 실제 Git 변경 명령이다. */
 import { analyzeChange } from '../change/impact.ts';
 import { DISPATCH_MODES, type DispatchMode } from '../graph/graph-model.ts';
 import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from '../graph/build-graph.ts';
 import { computeGraphRevision } from '../graph/graph-document.ts';
+import { withFrozenInputs } from '../graph/frozen-inputs.ts';
 import type { DispatchMode } from '../graph/graph-model.ts';
 import { resolveRoots } from '../graph/root-resolution.ts';
 import { createTraversalDocument } from '../graph/traversal-document.ts';
@@ -35,10 +36,9 @@ function provenance(input: Capture) {
 }
 
 /** 한 시점만으로 seed와 witness를 계산한다. */
-async function analyze(input: Capture, directory: string, paths: readonly string[], options: ChangeOptions) {
+async function analyze(input: Capture, directory: string, paths: readonly string[], configuration: boolean, options: ChangeOptions) {
   materialize(input, directory);
-  const graph = await buildCallGraph(directory, createNodeFileSystem());
-  const configuration = paths.some((path) => /(?:^|\/)(?:[tj]sconfig[^/]*\.json|package(?:-lock)?\.json)$/u.test(path));
+  const graph = await withFrozenInputs(directory, () => buildCallGraph(directory, createNodeFileSystem()));
   const changed = new Set(paths);
   const selected = graph.nodes.filter((node) => configuration || changed.has(node.location.path));
   const nodes = selected.slice(0, 10_000);
@@ -68,16 +68,17 @@ export async function analyzeChange(options: ChangeOptions) {
   const after = capture(root, options.head);
   if (options.head === undefined && capture(root).digest !== after.digest) throw new CaptureError('working tree changed during capture; retry on stable input');
   const changes = changedFiles(before, after);
+  const configuration = changes.some(({ path }) => /(?:^|\/)(?:[tj]sconfig[^/]*\.json|package(?:-lock)?\.json)$/u.test(path));
   const preparationMilliseconds = performance.now() - start;
   const directory = mkdtempSync(join(tmpdir(), 'tsograph-change-'));
   try {
-    const old = await analyze(before, join(directory, 'before'), changes.filter((file) => file.status !== 'added').map((file) => file.path), options);
-    const current = await analyze(after, join(directory, 'after'), changes.filter((file) => file.status !== 'deleted').map((file) => file.path), options);
+    const old = await analyze(before, join(directory, 'before'), changes.filter((file) => file.status !== 'added').map((file) => file.path), configuration, options);
+    const current = await analyze(after, join(directory, 'after'), changes.filter((file) => file.status !== 'deleted').map((file) => file.path), configuration, options);
     return {
       format: 'tsograph-change-impact', version: 1, mode: 'before-after', status: 'incomplete',
       tool: { name: 'tsograph', version: options.toolVersion }, generatedAt: options.generatedAt.toISOString(),
       changes, before: old, after: current,
-      scope: { files: 'tracked-and-nonignored-untracked', sourceExecution: false, dependenciesInstalled: false },
+      scope: { files: 'tracked-and-nonignored-untracked', sourceExecution: false, dependenciesInstalled: false, compilerInputs: 'capture-and-bundled-typescript-sdk' },
       limits: { ...CAPTURE_LIMITS, maxSeeds: 10_000, maxDepth: options.maxDepth, maxReached: options.maxReached, outputCharacters: 16 * 1024 * 1024 },
       cost: { preparationMilliseconds, totalMilliseconds: performance.now() - start },
       limitations: [

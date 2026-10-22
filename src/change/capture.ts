@@ -1,7 +1,7 @@
 /** Git 객체와 작업 트리를 따로 고정한다. 분석 대상 명령·필터·hook은 실행하지 않는다. */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /** 캡처 예산이다. 초과하면 부분 캡처를 분석하지 않는다. */
@@ -60,6 +60,23 @@ export function contentDigest(files: ReadonlyMap<string, Buffer>): string {
   return `sha256:${hash.digest('hex')}`;
 }
 
+/** stat 뒤 파일이 커져도 예산+1 byte만 읽고 실제 바이트만 보관한다. */
+function readWorkingFile(path: string): Buffer {
+  const fd = openSync(path, 'r');
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total <= CAPTURE_LIMITS.fileBytes) {
+      const chunk = Buffer.alloc(Math.min(64 * 1024, CAPTURE_LIMITS.fileBytes + 1 - total));
+      const count = readSync(fd, chunk, 0, chunk.length, null);
+      if (count === 0) break;
+      total += count;
+      chunks.push(chunk.subarray(0, count));
+    }
+    return Buffer.concat(chunks, total);
+  } finally { closeSync(fd); }
+}
+
 /** Git 커밋 또는 현재 작업 트리(추적·비무시 미추적 파일)를 메모리에 고정한다. */
 export function capture(root: string, revision?: string): Capture {
   if (!existsSync(join(root, '.git'))) throw new CaptureError('--project must be a Git repository root');
@@ -83,7 +100,7 @@ export function capture(root: string, revision?: string): Capture {
     if (spellings.has(spelling)) throw new CaptureError('capture contains colliding file paths');
     spellings.add(spelling);
     if (commit === undefined && statSync(join(root, path)).size > CAPTURE_LIMITS.fileBytes) throw new CaptureError('capture per-file byte budget exceeded');
-    const bytes = commit === undefined ? readFileSync(join(root, path)) : git(root, ['cat-file', 'blob', metadata[2]!], CAPTURE_LIMITS.fileBytes);
+    const bytes = commit === undefined ? readWorkingFile(join(root, path)) : git(root, ['cat-file', 'blob', metadata[2]!], CAPTURE_LIMITS.fileBytes);
     if (bytes.length > CAPTURE_LIMITS.fileBytes || (total += bytes.length) > CAPTURE_LIMITS.totalBytes) throw new CaptureError('capture byte budget exceeded');
     files.set(path, bytes);
   }

@@ -1,7 +1,7 @@
 /** 실제 Git patch로 삭제·rename·본문 신선도와 시점 분리를 재현한다. */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -98,4 +98,39 @@ test('CLI preserves ID impact and rejects invalid change requests', async () => 
     const report = await analyzeChange({ ...common, project: f.root, base: 'HEAD' });
     assert.ok(report.after.seeds.every((row) => row.reason === 'configuration-wide'));
   } finally { f.close(); }
+});
+
+test('configuration-only addition and deletion select both snapshot graphs', async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'tsconfig.json'), '{"compilerOptions":{}}');
+    const added = await analyzeChange({ ...common, project: f.root, base: 'HEAD' });
+    assert.ok(added.before.seeds.length > 0 && added.after.seeds.length > 0);
+    f.git('add', '.'); f.git('commit', '-qm', 'config');
+    rmSync(join(f.root, 'tsconfig.json'));
+    const removed = await analyzeChange({ ...common, project: f.root, base: 'HEAD' });
+    assert.ok(removed.before.seeds.length > 0 && removed.after.seeds.length > 0);
+    assert.ok(removed.after.seeds.every((row) => row.reason === 'configuration-wide'));
+  } finally { f.close(); }
+});
+
+test('uncaptured compiler configuration and source inputs refuse freshness claims', async () => {
+  const f = fixture();
+  const external = mkdtempSync(join(tmpdir(), 'tsograph-external-test-'));
+  try {
+    writeFileSync(join(external, 'shared.json'), '{"compilerOptions":{"strict":true}}');
+    writeFileSync(join(external, 'outside.ts'), 'export function value() { return 7; }');
+    mkdirSync(join(external, 'types')); mkdirSync(join(external, 'types', 'custom'));
+    writeFileSync(join(external, 'types', 'custom', 'index.d.ts'), 'declare function external(): string;');
+    const configurations = [
+      { extends: join(external, 'shared.json') },
+      { compilerOptions: { baseUrl: external, paths: { '@value': ['outside.ts'] } } },
+      { compilerOptions: { typeRoots: [join(external, 'types')] } },
+    ];
+    writeFileSync(join(f.root, 'caller.ts'), "import { value } from '@value'; export function caller() { return value(); }");
+    for (const config of configurations) {
+      writeFileSync(join(f.root, 'tsconfig.json'), JSON.stringify(config));
+      await assert.rejects(analyzeChange({ ...common, project: f.root, base: 'HEAD' }), /outside the captured root/u);
+    }
+  } finally { f.close(); rmSync(external, { recursive: true, force: true }); }
 });

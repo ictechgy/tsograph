@@ -21,12 +21,21 @@ function segment(value: string): string { return value.replaceAll('~', '~0').rep
 /** operation 수준의 inline primitive field만 추출한다. 나머지는 명시적 unknown이다. */
 export function extractDataContract(tree: SpecTree, operation: ParsedNode): DataContract {
   const fields: DataField[] = [];
+  const ambiguous = new Set<string>();
   const limitations = new Set<string>([
     'bounded-contract: only inline top-level primitive properties and operation-level query/header parameters are observed; compatibility is not established',
     'not-assessed: path-level parameters, cookies, path parameters, serialization, defaults, examples, formats, enums and validation constraints',
   ]);
   const add = (field: DataField) => {
     if (!isSafeIdentifier(field.path) || field.path.length > 1024) { limitations.add('field-path: unsupported or oversized field path'); return; }
+    const key = `${field.in}:${field.path}`;
+    const previous = fields.findIndex((value) => value.in === field.in && value.path === field.path);
+    if (ambiguous.has(key) || previous !== -1) {
+      if (previous !== -1) fields.splice(previous, 1);
+      ambiguous.add(key);
+      limitations.add('duplicate-fields: ambiguous repeated field identities omitted; no definition is selected');
+      return;
+    }
     if (fields.length === MAX_DATA_FIELDS) { limitations.add('field-budget: more than 512 supported fields; remaining fields not assessed'); return; }
     fields.push(field);
   };
@@ -62,11 +71,14 @@ export function extractDataContract(tree: SpecTree, operation: ParsedNode): Data
       schema(tree.get(item.value, 'schema'), scope, `${prefix}/${segment(item.key)}`);
     }
   };
-  content(tree.get(tree.get(operation, 'requestBody'), 'content'), 'request-body', '');
+  const requestBody = tree.get(operation, 'requestBody');
+  if (tree.get(requestBody, '$ref') !== undefined) limitations.add('request-body: referenced body and its siblings not assessed');
+  else content(tree.get(requestBody, 'content'), 'request-body', '');
   const responses = tree.entries(tree.get(operation, 'responses'));
   if (responses === undefined) limitations.add('responses: missing or unsupported response declarations');
   for (const response of responses ?? []) {
     if (response.key === undefined) { limitations.add('responses: non-string status not assessed'); continue; }
+    if (tree.get(response.value, '$ref') !== undefined) { limitations.add('responses: referenced response and its siblings not assessed'); continue; }
     content(tree.get(response.value, 'content'), 'response-body', `/${segment(response.key)}`);
   }
   const parameters = tree.get(operation, 'parameters');

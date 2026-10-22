@@ -5,8 +5,8 @@
 Git 2.45 이상과 이미 로컬에 있는 객체가 필요하다. fetch·checkout·패키지 설치·대상 코드 실행은 하지 않는다.
 
 ```sh
-tsograph change-impact --project . --base HEAD~1 --head HEAD > change.json
-tsograph change-impact --project . --base HEAD --max-depth 8 --max-reached 500 > working-change.json
+tsograph change-impact --project . --base HEAD~1 --head HEAD > ../change.json
+tsograph change-impact --project . --base HEAD --max-depth 8 --max-reached 500 > ../working-change.json
 ```
 
 출력 `tsograph-change-impact` v1은 `before`와 `after`에 각각 입력 출처, 실제 파일 바이트의 SHA-256,
@@ -22,8 +22,9 @@ tsograph change-impact --project . --base HEAD --max-depth 8 --max-reached 500 >
 상한이며 초과 시 부분 문서를 내지 않고 종료 코드 2다. 보고서 상한은 16 Mi 문자다. `cost`는 캡처 준비와 전체 분석 시간을
 포함한다. 이 비용과 fixture의 누락/과잉 후보를 실제 앱 전체의 정확도로 일반화하지 않는다.
 
-무시된 파일·symlink·submodule은 캡처하지 않는다. 이전 시점의 외부 의존성을 설치하지 않으므로 compiler의 외부 타입
-입력은 이전 빌드를 재현한 증거가 아니다. 각 snapshot의 `limitations`를 읽어야 한다. 선언 없는 설정/API/DB 계약 변경은
+무시된 파일·symlink·submodule은 캡처하지 않는다. compiler가 캡처 밖의 실제 설정·소스·타입 선언을 읽어야 하면
+내용 신원을 보장할 수 없어 종료 코드 2로 거부한다. 도구와 함께 설치된 TypeScript SDK는 도구 환경으로 허용한다.
+이전 시점의 외부 의존성은 설치하지 않으므로 각 snapshot의 `limitations`를 읽어야 한다. 선언 없는 설정/API/DB 계약 변경은
 `unmappedFiles`에 남을 수 있고 그 런타임 영향은 알 수 없다. 작업 트리는 두 번 읽어 내용이 같을 때만 분석하지만
 파일 시스템의 원자적 snapshot은 아니다. 분석 뒤 새 편집은 새로 분석해야 한다.
 
@@ -40,3 +41,4 @@ inline body의 최상위 primitive 속성과 operation 수준 query/header의 �
 body 경로는 `/[상태코드/]media-type/property` 형식의 JSON Pointer escaping을 쓴다. 필드는 최대 512개,
 경로는 UTF-16 1,024자로 제한한다. `$ref`, 중첩 object, array, 조합/union 타입, path-level parameter, 직렬화 및
 validation 조건은 limitation에 남긴다. 미지원 부분을 호환이라고 판정하지 않는다.
+같은 위치·경로의 중복 정의는 모두 빼고 모호성 한계를 남기며, 참조된 requestBody/response의 sibling content도 추측하지 않는다.
