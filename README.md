@@ -84,6 +84,8 @@ Primitive-valued unrelated class stores do not taint HTTP clients. Known receive
 remain scoped to the affected symbols; an unbound object source or exhausted provenance budget still
 keeps the whole analysis incomplete. Mutation limitations carry a cause count and bounded relative
 positions, and syntax limitations identify affected files. These are static, type-based observations.
+Class field mutation is tracked per declaration, so changing one instance can conservatively make calls through
+another instance of the same class field dynamic; this does not prove that the other instance changed.
 
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather

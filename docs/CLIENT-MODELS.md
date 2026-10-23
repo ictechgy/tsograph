@@ -30,6 +30,11 @@ tsograph routes --role client --project . --tsconfig apps/web/tsconfig.json --cl
 HTTP를 수행하거나 같은 경로로 전송한다는 보장이 아니다. 무관한 primitive 반환값의 저장은 클라이언트 전체를 오염시키지
 않지만, 출처를 모르는 객체 변경은 전체 미완으로 남긴다.
 
+클래스 필드 변경은 개별 인스턴스가 아니라 필드 선언 identity로 전파한다. 따라서 같은 `Wrapper.http` 선언을
+공유하는 `one`·`two`에서 `one.http.get`을 교체하면 `two.http`의 호출도 보수적으로 dynamic이 될 수 있다.
+이는 `two`가 실제로 변경됐다는 증거가 아니라 인스턴스를 구분하지 못한 검토 후보다. 이름만 같은 다른 클래스의
+필드 선언을 합치지는 않는다.
+
 workspace를 `--project`로 쓰면 모든 소유 소스와 id가 그 기준이다. `--tsconfig` 파일도
 그 루트에서 해석해 경로 별칭을 적용한다. graph에서 같은 workspace와 compiler 설정을
 선택하면 client 호출의 USR과 그래프 id가 같은 기준을 사용한다.
