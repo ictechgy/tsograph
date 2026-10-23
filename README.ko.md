@@ -95,9 +95,11 @@ JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 �
 부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
-graph·Next/Node/client routes·navigation의 `files`·`include`·`exclude`는 compiler 진입 파일을 고른다. import 의존성은
-진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 project reference 설정이 충돌하면 다른 앱의 `baseUrl`로
-정적 간선을 확정하지 않고 limitation과 미해결 import로 남긴다. 정밀한 범위가 필요하면 패키지 자체 project/config를 쓴다.
+graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclude`는 진입 파일을 고른다. import 의존성은
+진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 명시 project reference의 소유 설정을 사용하므로 두 앱이
+각각 `baseUrl: "./src"`를 써도 각 앱 내부 별칭과 import한 패키지 내부 별칭을 올바른 위치에서 해석한다.
+같은 타입 의미는 하나의 Program을 쓰고 다른 의미는 독립 Program으로 분석한다. 문맥 간 import와 모호하거나 누락된
+소유권은 미해결로 남긴다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
 PnP loader는 제외하며 실행하지 않는다. 정적 PnP metadata와 zip 안 타입 읽기는 구현하지 않았고 해당 의존성은 미해결로 남는다.
 `.gitignore` 적용을 의미하지 않는다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
 
@@ -712,8 +714,8 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 직접이든 symlink로든 `--project` 밖 설정은 분석 전에 사용법 오류(`64`)다(안의 설정이 밖의 공용 설정을 `extends`하는 것은
 된다). 없거나 읽지 못하는 설정·1 MiB를 넘는 설정은 `2`다. `routes --role client`·`navigation`의 `--tsconfig`도 같다.
 `--workspace`는 프로젝트를 포함하는
-소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
-적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
+소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 파일별 nearest/reference 설정을 사용하고 호환되지 않는
+타입 문맥 간 import는 미해결로 남긴다. 서버 프레임워크 발견은 여전히 workspace 루트 manifest를 사용한다. 의존성·빌드 디렉터리와
 symlink는 제외하며, `tsconfig.json`/`jsconfig.json`의 `include`·`files`가 고르는 루트 파일에도 같은 걷기 정책을 적용한다
 (`--project` 안, `--workspace`를 주면 그 안; `node_modules`·`dist`·`build`·`out`·`coverage`·점·Prisma 생성 출력 디렉터리 제외;
 symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열거). 시작 디렉터리가 그 루트 밖인 include 패턴과 루트 밖

@@ -38,16 +38,16 @@ const apps = {
   'app-b/src/page.ts': 'import {Button} from "components/Button"; export function PageB(){ return Button(); }',
 };
 
-test('서로 다른 앱 baseUrl은 다른 앱으로 직접 연결하지 않고 충돌을 남긴다', async () => {
+test('서로 다른 앱 baseUrl은 소유 앱으로만 직접 연결한다', async () => {
   await fixture(apps, async (root) => {
     for (const selected of [root, join(root, 'app-b')]) {
       const graph = await buildCallGraph(selected, createNodeFileSystem(), selected === root ? {} : { workspace: root });
       const matching = selected === root ? 'app-a' : 'app-b';
       const other = matching === 'app-a' ? 'app-b' : 'app-a';
       assert.ok(graph.edges.some((edge) => edge.from.startsWith(matching + '/src/page.ts#') && edge.to === matching + '/src/components/Button.ts#Button'));
-      assert.ok(!graph.edges.some((edge) => edge.from.startsWith(other + '/src/page.ts#') && edge.to.includes('/components/Button.ts#')));
-      for (const mode of ['direct', 'bound', 'candidates'] as const) assert.ok(graph.limitationsByMode[mode].some((line) => line.includes('config-conflict:')));
-      assert.ok(graph.limitations.some((line) => line.includes('unresolved-calls:')));
+      assert.ok(graph.edges.some((edge) => edge.from.startsWith(other + '/src/page.ts#') && edge.to === other + '/src/components/Button.ts#Button'));
+      assert.ok(!graph.edges.some((edge) => edge.from.startsWith(other + '/src/page.ts#') && edge.to === matching + '/src/components/Button.ts#Button'));
+      for (const mode of ['direct', 'bound', 'candidates'] as const) assert.ok(!graph.limitationsByMode[mode].some((line) => line.includes('config-conflict:')));
     }
   });
 });
@@ -60,7 +60,7 @@ test('동일 extends 설정은 충돌로 만들지 않고 보조 module resolver
     writeFileSync(join(root, 'app-b/tsconfig.json'), config('./src'));
     const project = loadNodeProject(root);
     const resolver = createModuleResolver(project.program, project.checker);
-    assert.equal(resolver('components/Button', project.files.get('app-b/src/page.ts')!), undefined);
+    assert.equal(project.pathOf(resolver('components/Button', project.files.get('app-b/src/page.ts')!)!.valueDeclaration!.getSourceFile()), 'app-b/src/components/Button.ts');
   });
 });
 

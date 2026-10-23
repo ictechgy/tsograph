@@ -13,7 +13,7 @@ import ts from 'typescript';
 
 import type { BridgeLocation } from '../../exchange/bridge-facts.ts';
 import { ByteColumnIndex } from '../../openapi/byte-columns.ts';
-import { configRootGaps, createGraphProgram, type ProgramConfigStatus } from '../../graph/program.ts';
+import { configRootGaps, createGraphPrograms, type ProgramConfigStatus } from '../../graph/program.ts';
 import { collectProjectFiles } from '../../schema/project-files.ts';
 import { isSourceFileName } from '../../schema/source-module.ts';
 import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
@@ -69,13 +69,19 @@ export interface NodeProject {
  * @returns 준비한 프로젝트
  */
 export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
+  return loadNodeProjects(root, tsconfig).next().value!;
+}
+
+/** 각 문맥은 독립 checker와 SourceFile 신원을 가진다. 소비자는 결과 문자열만 합친다. */
+export function* loadNodeProjects(root: string, tsconfig?: string): Generator<NodeProject> {
   const walk = collectProjectFiles(root, { includeFile: isSourceFileName, excludedDirectories: new Set() });
   const candidates = [...walk.files].filter(([, absolute]) => !isOversized(absolute));
-  const { program, checker, status, deeplyNestedSources, excludedSources } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
+  for (const { program, checker, status, deeplyNestedSources, excludedSources, ownedSources } of createGraphPrograms(root, candidates.map(([, absolute]) => absolute), tsconfig)) {
   const files = new Map<string, ts.SourceFile>();
   const pathBySourceFile = new Map<ts.SourceFile, string>();
   const deeplyNestedFiles: string[] = [];
   for (const [path, absolute] of candidates) {
+    if (ownedSources !== undefined && !ownedSources.has(resolve(absolute))) continue;
     const sourceFile = program.getSourceFile(resolve(absolute));
     if (sourceFile === undefined) {
       if (deeplyNestedSources.has(resolve(absolute))) deeplyNestedFiles.push(path);
@@ -85,7 +91,7 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
     pathBySourceFile.set(sourceFile, path);
   }
   const columns = new Map<ts.SourceFile, ByteColumnIndex>();
-  return {
+  yield {
     root,
     program,
     checker,
@@ -96,13 +102,15 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       truncated: walk.truncated,
       oversizedFiles: walk.files.size - candidates.length,
       unsafeNames: walk.unsafeNames,
-      unreadableFiles: candidates.length - files.size - deeplyNestedFiles.length - excludedSources.size,
+      unreadableFiles: candidates.filter(([, absolute]) => (ownedSources === undefined || ownedSources.has(resolve(absolute)))
+        && !excludedSources.has(resolve(absolute))).length - files.size - deeplyNestedFiles.length,
     },
     configStatus: { ...status, ...((walk.skippedLoaders ?? 0) > 0 ? { skippedLoaderEntries: walk.skippedLoaders } : {}) },
     deeplyNestedFiles,
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),
   };
+  }
 }
 
 /**

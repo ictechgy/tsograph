@@ -1,16 +1,17 @@
 /** fetch·axios·ky 호출을 JS route-call 문서로 만든다. 분석 대상 코드는 실행하지 않는다. */
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { formatBridgeTimestamp, type BridgeLocation, type HttpMethod } from '../../exchange/bridge-facts.ts';
 import { readBoundedFileBytes } from '../../graph/bounded-config-reader.ts';
 import { scopeIdOf } from '../../graph/symbol-ids.ts';
+import { configImportIsBlocked, unresolvedProgramModuleTarget } from '../../graph/program.ts';
 import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
-import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProject } from '../node/node-project.ts';
+import { compilerConfigGaps, hasParseErrors, isNodeTestPath, loadNodeProjects, type NodeProject } from '../node/node-project.ts';
 import { declarationOf, packageBindingOf, symbolAt, unwrap } from '../node/symbols.ts';
 import { MAX_ROUTE_FACTS, RouteFactLimitError } from '../route-document.ts';
 import { ClientValues, configValue, DEFAULT_CLIENT_MUTATION_BUDGET, type ClientConfig, type ClientMutationBudget } from './client-values.ts';
 import { ClientWrappers } from './client-wrappers.ts';
-import { typedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
+import { typedClientMethodOf, unresolvedTypedClientMethodOf, type TypedClientModels } from './typed-client-model.ts';
 import { composeUrl, type ComposedUrl, type UrlJoin } from './url-compose.ts';
 
 /** 호출 사실의 위치와 impact id다. */
@@ -50,7 +51,8 @@ function clientOf(expression: ts.Expression, values: ClientValues, depth = 0): C
   if (depth > 16) return undefined;
   const node = unwrap(expression);
   const root = values.rootSymbol(node);
-  const unsafe = values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root);
+  const unsafe = configImportIsBlocked(values.project.program, node.getSourceFile().fileName)
+    || (values.project.configStatus.compilerContexts ?? 1) > 1 || values.mutationAnalysisIncomplete || root !== undefined && values.mutated.has(root);
   const binding = packageBindingOf(values.project.checker, node);
   if (binding !== undefined && ['default', '*'].includes(binding.name) && (binding.module === 'axios' || binding.module === 'ky')) {
     return { library: binding.module, configs: [], unsafe };
@@ -107,14 +109,19 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
     const url = objectCall ? configValue(configs, 'url') : call.arguments[0] === undefined ? undefined : substitute(call.arguments[0]);
     return { library: client.library, configs, ...(url == null ? {} : { path: url }), ...(fixed === undefined ? {} : { forcedMethod: fixed }), unsafe: client.unsafe };
   }
-  const typed = typedClientMethodOf(call, models, values.project.checker, values.project.pathOf);
+  const typed = typedClientMethodOf(call, models, values.project.checker, values.project.pathOf)
+    ?? unresolvedTypedClientMethodOf(call, models, values.project.checker, (specifier, source) => {
+      const target = unresolvedProgramModuleTarget(values.project.program, specifier, source.fileName);
+      return target === undefined ? undefined : relative(values.project.root, target).replaceAll('\\', '/');
+    });
   if (typed !== undefined) {
     const pathArgument = call.arguments[typed.method.pathArgument];
     // 모델은 후보 근거다. escape·재대입·method 변경 뒤에도 호출 위치를 보존하되
     // 모델의 URL·동사가 실행 시점에도 유지된다는 보장은 하지 않는다.
     return { library: 'typed', configs: [], ...(pathArgument === undefined ? {} : { path: substitute(pathArgument) }),
       forcedMethod: typed.method.method, typedBase: typed.method.base, ...(typed.method.service === undefined ? {} : { typedService: typed.method.service }),
-      unsafe: values.mutationAnalysisIncomplete || values.receiverIsMutated(typed.receiver) };
+      unsafe: typed.uncertain === true || configImportIsBlocked(values.project.program, call.getSourceFile().fileName)
+        || (values.project.configStatus.compilerContexts ?? 1) > 1 || values.mutationAnalysisIncomplete || values.receiverIsMutated(typed.receiver) };
   }
   if (call.questionDotToken !== undefined) return undefined;
   const forwarded = wrappers?.target(callee);
@@ -199,7 +206,17 @@ function composition(sink: Sink, values: ClientValues, major: number | undefined
  */
 export function extractClientRoutes(root: string, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date,
   typedModels?: TypedClientModels, tsconfig?: string, mutationBudget?: ClientMutationBudget): ClientRouteDocument {
-  const project = loadNodeProject(root, tsconfig);
+  const documents: ClientRouteDocument[] = [];
+  for (const project of loadNodeProjects(root, tsconfig)) documents.push(extractClientContext(project, service, includeTests, toolVersion, generatedAt, typedModels, mutationBudget));
+  const facts = documents.flatMap(document => document.facts);
+  if (facts.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+  return { ...documents[0]!, facts, limitations: [...new Set(documents.flatMap(document => document.limitations))].sort() };
+}
+
+/** checker 객체는 이 문맥 안에서만 사용한다. */
+function extractClientContext(project: NodeProject, service: string | undefined, includeTests: boolean, toolVersion: string, generatedAt: Date,
+  typedModels?: TypedClientModels, mutationBudget?: ClientMutationBudget): ClientRouteDocument {
+  const root = project.root;
   const values = new ClientValues(project, includeTests, mutationBudget);
   const preliminaryWrappers = new ClientWrappers(values, includeTests);
   const deferredWrapperCalls: ts.CallExpression[] = [];

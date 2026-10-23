@@ -1240,6 +1240,7 @@ test('설정 include 열거는 걷기와 같은 항목 상한에서 멈추고 �
     assert.deepEqual(rootFiles(capped.program, root), ['src/a.d.ts', 'src/b.d.ts']);
     assert.equal(capped.status.configRootsTruncated, true);
     assert.deepEqual(compilerConfigGaps(capped.status, 'route registrations'), [
+      'config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; route registrations may be incomplete',
       'include patterns of tsconfig.json reached the directory entry limit; later matches were not used as root files; '
         + 'type resolution and route registrations may be incomplete',
     ]);
