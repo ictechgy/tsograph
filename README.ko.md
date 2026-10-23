@@ -95,11 +95,20 @@ JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 �
 부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
 
-graph·Node/client routes·navigation의 `files`·`include`·`exclude`는 compiler 진입 파일을 고른다. import 의존성은
+graph·Next/Node/client routes·navigation의 `files`·`include`·`exclude`는 compiler 진입 파일을 고른다. import 의존성은
 진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 project reference 설정이 충돌하면 다른 앱의 `baseUrl`로
 정적 간선을 확정하지 않고 limitation과 미해결 import로 남긴다. 정밀한 범위가 필요하면 패키지 자체 project/config를 쓴다.
 PnP loader는 제외하며 실행하지 않는다. 정적 PnP metadata와 zip 안 타입 읽기는 구현하지 않았고 해당 의존성은 미해결로 남는다.
 `.gitignore` 적용을 의미하지 않는다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
+
+Next convention 선언과 graph의 convention 진입점도 이 범위를 쓴다. 제외된 page/route를 import하면 그래프 의존성은
+남아도 convention 진입점으로 올리지 않는다. 제외 수를 limitation으로 남기며 런타임에 해당 경로가 없다는 보장이 아니다.
+navigation은 owned import·재내보내기·const 별칭을 거친 공유 route 배열의 경로·화면 후보를 복원하되, 생략된 소스나
+외부 소비자의 변경 가능성 때문에 dynamic으로 유지한다. 관찰한 쓰기·unknown escape는 미상 dynamic 사실로 남긴다.
+무인자 owned factory가 단일 fresh literal 배열을 호출·효과 없이 반환하는 경우만 정적 생성 근거로 읽는다.
+공유 배열 반환·효과/재귀가 있는 factory·`Object.freeze`는 불변 증명이 아니다. factory·PnP·lazy loader를 실행하지
+않으며 교환 필드·버전은 바꾸지 않는다. factory children은 중첩 literal 배열만 받으며, 공유 별칭은 이전 반환값을
+통해 변경될 수 있어 미상으로 남긴다. 진입 파일 비교는 파일시스템의 대소문자 구분을 따르고 별개 파일은 합치지 않는다.
 
 ## 요구 사항
 

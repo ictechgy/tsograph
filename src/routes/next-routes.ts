@@ -13,6 +13,7 @@
  */
 
 import type ts from 'typescript';
+import { resolve } from 'node:path';
 
 import type { CommandFileSystem } from '../cli/file-system.ts';
 import type { RouteDeclMethod } from '../exchange/bridge-facts.ts';
@@ -33,6 +34,8 @@ import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { parseSource, scriptKindOf, type SourcePosition } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
 import { exportBindingId } from '../graph/symbol-ids.ts';
+import { selectSourceEntryFiles, sourceEntryKey } from '../graph/program.ts';
+import { compilerConfigGaps } from './node/node-project.ts';
 
 /** App Router route handler가 받을 수 있는 method다(`next/dist/server/web/http.js`). */
 export const APP_ROUTE_METHODS: readonly RouteDeclMethod[] = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'DELETE', 'PATCH'];
@@ -78,6 +81,8 @@ export interface NextRoutesResult {
   readonly routerDirectories: RouterDirectories;
   /** framework가 만드는 경로의 근거(메타데이터 파일 수, proxy/middleware 파일, public·static 존재) */
   readonly frameworkSources: FrameworkSources;
+  /** 설정에서 제외한 convention도 런타임 부재로 인증하지 않는 부분 범위 근거다. */
+  readonly scopeLimitations?: readonly string[];
 }
 
 /** 파일 라우트 밖에서 framework가 응답하는 경로의 근거다. */
@@ -96,6 +101,8 @@ export interface NextRoutesInput {
   readonly project: string;
   readonly config: NextRouteConfig;
   readonly includeTests: boolean;
+  /** graph의 workspace 소유 경계와 선택 compiler 설정을 같이 쓴다. */
+  readonly compilerScope?: { readonly root: string; readonly tsconfig?: string };
 }
 
 /** 라우트 파일 하나의 처리 문맥이다. */
@@ -120,14 +127,25 @@ export async function extractNextRoutes(input: NextRoutesInput): Promise<NextRou
     ? []
     : await walkFiles(input.fileSystem, input.project, routerDirectories.appDirectory, gaps, { skipName: (name) => name.startsWith('_') });
   const routes: DeclaredRoute[] = [];
-  for (const file of appFiles.filter((path) => isAppRouteFile(path, pageExtensions))) {
+  const appRoutes = appFiles.filter((path) => isAppRouteFile(path, pageExtensions));
+  const pagesRoutes = await pagesApiFiles(context, routerDirectories.pagesDirectory);
+  const candidates = [...appRoutes, ...pagesRoutes];
+  const scope = selectSourceEntryFiles(input.compilerScope?.root ?? input.project,
+    candidates.map(file => resolve(input.project, file)), input.compilerScope?.tsconfig,
+    { root: input.project, excludedDirectories: new Set() });
+  const included = (file: string): boolean => scope.files.has(sourceEntryKey(resolve(input.project, file)));
+  const omitted = candidates.filter(file => !included(file)).length;
+  const scopeLimitations = candidates.length === 0 ? []
+    : compilerConfigGaps(scope.status, 'Next convention discovery').map(line => `route-coverage: ${line}`);
+  if (omitted > 0) scopeLimitations.push(`route-coverage: source-scope: ${omitted} Next convention file(s) excluded by compiler entry scope or TypeScript sibling precedence; imported dependencies may remain graph nodes but do not become convention entries; excluded runtime routes are not assessed`);
+  for (const file of appRoutes.filter(included)) {
     routes.push(...await appRouteDeclarations(context, routerDirectories.appDirectory!, file));
   }
-  for (const file of await pagesApiFiles(context, routerDirectories.pagesDirectory)) {
+  for (const file of pagesRoutes.filter(included)) {
     routes.push(...await pagesApiDeclarations(context, routerDirectories.pagesDirectory!, file));
   }
   const frameworkSources = await collectFrameworkSources(context, routerDirectories, appFiles);
-  return { routes, gaps, routerDirectories, frameworkSources };
+  return { routes, gaps, routerDirectories, frameworkSources, ...(scopeLimitations.length > 0 ? { scopeLimitations } : {}) };
 }
 
 /**

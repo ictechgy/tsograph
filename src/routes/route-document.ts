@@ -330,6 +330,7 @@ function buildLimitations(input: NextDocumentPart, decision: BasePathDecision): 
     ...[
       ...configLimitations(input.config, decision),
       ...gapLimitations(input.extraction.gaps),
+      ...(input.extraction.scopeLimitations ?? []),
       ...directoryLimitations(input.extraction),
       ...versionLimitations(input.versionStatus),
       ...usrLimitations(input.extraction.routes),

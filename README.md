@@ -109,13 +109,26 @@ document. An analysis that still exceeds the call stack after deeply nested file
 reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
 
-For graph, Node/client routes and navigation, `files`/`include`/`exclude` select compiler entry files.
+For graph, Next/Node/client routes and navigation, `files`/`include`/`exclude` select compiler entry files.
 Imported dependencies can still enter the analyzed closure even when excluded as entries. Conflicting
 nearest or referenced compiler configurations produce limitations and unresolved imports instead of
 silently using another app's `baseUrl`. Use a package's own project/config for the most precise scope.
 PnP loader files are excluded and never executed. Reading static PnP metadata and zip-contained types
 is not implemented; unresolved dependencies remain unknown. No `.gitignore` interpretation is implied.
 See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
+
+Next convention declarations and graph convention entries use this same entry scope. An imported
+excluded page/route can remain a graph dependency without becoming a convention entry. Omitted
+conventions are counted in limitations; this does not establish that those routes are absent at runtime.
+Navigation recovers path/screen candidates through owned imports, re-exports and const aliases of
+shared route arrays, but keeps them dynamic because omitted sources and external consumers may mutate
+them. Observed writes or unknown escapes retain unknown dynamic facts. Only a zero-argument owned
+factory with a single fresh literal array return and no evaluated calls/effects can supply static
+construction evidence. Shared returns, effectful/recursive factories and `Object.freeze` are not proof
+of immutability. Factory children must be nested literal arrays: shared child aliases remain unknown
+because earlier factory results may expose them to mutation. Entry identity respects filesystem casing;
+distinct files on case-sensitive systems remain distinct. No factory, PnP loader or lazy loader is executed;
+exchange fields and versions stay unchanged.
 
 ## Requirements
 

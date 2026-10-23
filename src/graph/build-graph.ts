@@ -45,7 +45,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -139,7 +139,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
       project = workspace;
     } catch { throw new GraphProjectInputError('workspace'); }
   }
-  const routes = await loadRouteInputs(project, fileSystem);
+  const routes = await loadRouteInputs(project, fileSystem, { root: selectedProject, ...(config === undefined ? {} : { tsconfig: config }) });
   const inputs = collectGraphInputs(project, routes.extraction);
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
@@ -172,6 +172,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     appDirectory: routes.extraction.routerDirectories.appDirectory,
     pagesDirectory: routes.extraction.routerDirectories.pagesDirectory,
     pageExtensions: routes.pageExtensions,
+    sourceEntries: new Set(program.getRootFileNames().map(path => sourceEntryKey(relative(project, path).replaceAll('\\', '/')))),
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
@@ -185,9 +186,9 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     cronConfigUnreadable: crons.unreadable,
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
-  const environmentLimits: string[] = [];
+  const environmentLimits: string[] = [...(routes.extraction.scopeLimitations ?? [])];
   if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loader execution and PnP zip dependency resolution are not performed`);
-  if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
+  if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker and Next convention entry scope use the selected project config while Node backend route discovery uses workspace-root configuration; separate package options are not merged');
   if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
   const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
   const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
@@ -336,8 +337,8 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
  * @param fileSystem 파일 시스템
  * @returns 추출 결과·route-decl 사실·페이지 확장자·테스트 소스 규칙
  */
-async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): Promise<RouteInputs> {
-  const routes = await extractProjectRoutes(fileSystem, project, false);
+async function loadRouteInputs(project: string, fileSystem: CommandFileSystem, compilerScope: { root: string; tsconfig?: string }): Promise<RouteInputs> {
+  const routes = await extractProjectRoutes(fileSystem, project, false, compilerScope);
   const extraction = routes.next?.extraction ?? emptyNextRoutesResult();
   const config = routes.next?.config;
   const pageExtensions = config?.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
