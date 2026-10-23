@@ -213,7 +213,9 @@ test('pnpm 저장소가 --project 위에 있으면 밖의 extends만 건너뛰�
       readonly limitations: readonly string[];
     };
     assert.ok(document.facts.some((fact) => fact.location.path === 'src/use.ts'));
-    assert.deepEqual(document.limitations.filter((line) => /^(?:unreadable-module-configs|unresolved-client-receivers):/u.test(line)), []);
+    assert.deepEqual(document.limitations.filter((line) => /^unresolved-client-receivers:/u.test(line)), []);
+    assert.ok(document.limitations.some((line) => line.startsWith('unreadable-module-configs: 1')));
+    assert.ok(document.limitations.some((line) => line.includes('compiler config could not be read')));
     // 실제 경로가 프로젝트 밖인 저장소 파일은 여전히 열지 않는다.
     assert.deepEqual([...log.counts.keys()].filter((path) => path.includes('@tsconfig')), []);
   });

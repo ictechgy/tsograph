@@ -149,11 +149,19 @@ export function createGraphProgram(
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   const choices = new Map<string, Map<string, ts.ResolvedModuleFull | undefined>>();
-  const resolveModule = (name: string, containingFile: string, mode?: ts.ResolutionMode): ts.ResolvedModuleFull | undefined => {
+  const choiceModes = new Map<string, ts.ResolutionMode>();
+  const resolveModule = (name: string, containingFile: string, mode?: ts.ResolutionMode, resolutionHost: ts.ModuleResolutionHost = host): ts.ResolvedModuleFull | undefined => {
     const absolute = resolve(containingFile);
     if (blocked.has(absolute) && context?.exceeded !== true) return undefined;
     const sourceOptions = context === undefined ? options : analysisOptions(ownership.owners.get(absolute)?.options ?? config.options);
-    const resolved = ts.resolveModuleName(name, containingFile, sourceOptions, host, undefined, undefined, mode).resolvedModule;
+    let refused = false;
+    const boundedHost: ts.ModuleResolutionHost = { ...resolutionHost, readFile: file => {
+      const text = resolutionHost.readFile(file);
+      if (text === undefined && resolutionHost.fileExists(file)) refused = true;
+      return text;
+    } };
+    const resolved = ts.resolveModuleName(name, containingFile, sourceOptions, boundedHost, undefined, undefined, mode).resolvedModule;
+    if (refused) return undefined;
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
     if (context !== undefined && resolved !== undefined && (context.exceeded || ownership.ambiguous.has(resolve(resolved.resolvedFileName))
       || (target !== undefined && context.keys.get(target) !== contextKey))) {
@@ -168,6 +176,7 @@ export function createGraphProgram(
     const mode = ts.getModeForUsageLocation(source, literal, sourceOptions);
     const resolvedModule = resolveModule(literal.text, file, mode);
     const key = resolve(file) + '\u0000' + literal.text;
+    choiceModes.set(key, mode);
     const targets = choices.get(key) ?? new Map<string, ts.ResolvedModuleFull | undefined>();
     targets.set(resolvedModule?.resolvedFileName ?? '', resolvedModule);
     choices.set(key, targets);
@@ -194,10 +203,12 @@ export function createGraphProgram(
   try {
     const program = createProgram({ rootNames, options, host });
     blockedConfigImports.set(program, blocked);
-    if (context !== undefined) programResolvers.set(program, (specifier, file) => {
-      const targets = choices.get(resolve(file) + '\u0000' + specifier);
+    if (context !== undefined) programResolvers.set(program, (specifier, file, resolutionHost) => {
+      const key = resolve(file) + '\u0000' + specifier;
+      const targets = choices.get(key);
       // require/import 조건이 같은 파일에서 갈리면 보조 해석은 임의 조건을 선택하지 않는다.
-      return targets === undefined ? resolveModule(specifier, file) : targets.size === 1 ? [...targets.values()][0] : undefined;
+      // 호출자의 bounded host를 그대로 사용해 거부 계수와 package.json 상한을 우회하지 않는다.
+      return targets !== undefined && targets.size > 1 ? undefined : resolveModule(specifier, file, choiceModes.get(key), resolutionHost);
     });
     unresolvedModuleTargets.set(program, boundaryTargets);
     const checker = program.getTypeChecker();
@@ -431,8 +442,9 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
   const readFile = (fileName: string): string | undefined => {
     // persistence의 기존 입력 경계는 standalone 분석에서도 실제 루트 밖 설정을 읽지 않는다.
     if (confined) {
-      const inside = (path: string) => { const offset = relative(boundary.root, path); return !isAbsolute(offset) && offset !== '..' && !offset.startsWith('../') && !offset.startsWith('..\\'); };
-      try { if (!inside(resolve(fileName)) || !inside(realpathSync.native(fileName))) { boundedReadFailed = true; return undefined; } }
+      const inside = (root: string, path: string) => { const offset = relative(root, path); return !isAbsolute(offset) && offset !== '..' && !offset.startsWith('../') && !offset.startsWith('..\\'); };
+      // Windows short/long 경로도 양쪽을 같은 OS 함수로 비교한다. 경계 자체를 완화하지 않는다.
+      try { if (!inside(boundary.root, resolve(fileName)) || !inside(realpathSync.native(boundary.root), realpathSync.native(fileName))) { boundedReadFailed = true; return undefined; } }
       catch { boundedReadFailed = true; return undefined; }
     }
     const result = readBoundedConfigText(fileName);
@@ -461,7 +473,7 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
   const parseErrors = parsed.errors.filter(error => error.code !== 18003 && error.code !== 18002 && error.category === ts.DiagnosticCategory.Error);
   // persistence는 루트 밖 extends를 읽지 않고 로컬 명시 alias만 보존하던 동작을 유지한다.
   // 부분 설정임을 알리며 frozen capture의 거부 기록은 이 fallback으로 지워지지 않는다.
-  const partialConfined = confined && boundedReadFailed && parseErrors.every(error => error.code === 6053);
+  const partialConfined = confined && boundedReadFailed && parseErrors.every(error => error.code === 6053 || error.code === 5083);
   if (parseErrors.length > 0 && !partialConfined) {
     if (explicitConfig !== undefined) {
       throw new GraphProjectInputError(boundedReadFailed ? 'config-file' : 'config-parse');
@@ -549,7 +561,7 @@ function hasTypeScriptSibling(path: string, sources: ReadonlySet<string>): boole
 
 /** Program 밖의 보조 module resolver도 동일한 소유권 보류를 지킨다. */
 const blockedConfigImports = new WeakMap<ts.Program, ReadonlySet<string>>();
-const programResolvers = new WeakMap<ts.Program, (specifier: string, fileName: string) => ts.ResolvedModule | undefined>();
+const programResolvers = new WeakMap<ts.Program, (specifier: string, fileName: string, host: ts.ModuleResolutionHost) => ts.ResolvedModule | undefined>();
 const unresolvedModuleTargets = new WeakMap<ts.Program, ReadonlyMap<string, string>>();
 
 /** 이미 해석했으나 문맥 경계 때문에 거부한 경로만 후보 근거로 내준다. checker 신원은 노출하지 않는다. */
@@ -563,7 +575,7 @@ export function resolveProgramModule(program: ts.Program, specifier: string, fil
   if (configImportIsBlocked(program, fileName)) return undefined;
   const resolver = programResolvers.get(program);
   return resolver === undefined ? ts.resolveModuleName(specifier, fileName, program.getCompilerOptions(), host).resolvedModule
-    : resolver(specifier, fileName);
+    : resolver(specifier, fileName, host);
 }
 export function configImportIsBlocked(program: ts.Program, fileName: string): boolean {
   return blockedConfigImports.get(program)?.has(resolve(fileName)) === true;

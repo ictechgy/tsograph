@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
-import { createGraphPrograms } from './program.ts';
+import { createGraphPrograms, sourceConfigPlan } from './program.ts';
 import { extractClientRoutes } from '../routes/client/client-routes.ts';
 import { parseTypedClientModels } from '../routes/client/typed-client-model.ts';
 import { extractNavigationRoutes, parseRouterModels } from '../routes/navigation-routes.ts';
@@ -313,5 +313,37 @@ test('review: SDK lib 및 no-default-lib pragma는 다른 설정의 ambient 범�
     assert.equal(contexts.length,2);
     const b=contexts.find(context=>context.files.has('b/main.ts'))!;
     assert.equal(b.program.getSemanticDiagnostics().some(diagnostic=>diagnostic.code===2584 || diagnostic.code===2304),pragma.startsWith('lib='));
+    if (pragma.startsWith('no-default-lib')) assert.deepEqual(b.program.getSemanticDiagnostics(),[]);
+  });
+});
+
+test('persistence 설정 경계는 OS native realpath의 루트와 파일 표기를 함께 비교한다', async t => {
+  await fixture({'tsconfig.json':config({baseUrl:'.'},{files:['main.ts']}), 'main.ts':'export const value=1;', 'unused.ts':'export const unused=1;'}, async root=>{
+    const original=realpathSync.native;
+    t.mock.method(realpathSync,'native',(path:Parameters<typeof realpathSync.native>[0])=>{
+      const actual=String(original(path));
+      return actual.replace(root,root+'-native-alias');
+    });
+    const plan=sourceConfigPlan(root,[join(root,'main.ts'),join(root,'unused.ts')]);
+    assert.deepEqual([...plan.entries],[join(root,'main.ts')]);
+    assert.equal(plan.status.configUnreadable,false);
+    t.mock.restoreAll();
+  });
+});
+
+test('persistence 외부 extends를 읽지 않아도 로컬 명시 alias는 부분 설정 근거로 남는다', async () => {
+  await fixture({
+    'base.json':config({baseUrl:'./wrong'}),
+    'app/tsconfig.json':JSON.stringify({extends:'../base.json',compilerOptions:{paths:{'@/*':['./src/*']}}}),
+    'app/src/db.ts':'import {Pool} from "pg"; export const db=new Pool();',
+    'app/src/use.ts':'import {db} from "@/db"; db.query("select * from users");',
+  },async root=>{
+    const app=join(root,'app');
+    const plan=sourceConfigPlan(app,[join(app,'src/db.ts'),join(app,'src/use.ts')]);
+    assert.deepEqual(plan.optionsFor(join(app,'src/use.ts')).paths,{'@/*':['./src/*']});
+    assert.equal(plan.status.configUnreadable,true);
+    const result=extractPersistenceFacts(app);
+    assert.ok(result.facts.some(fact=>fact.channel==='users'));
+    assert.ok(result.limitations.some(line=>line.includes('config could not be read')));
   });
 });
