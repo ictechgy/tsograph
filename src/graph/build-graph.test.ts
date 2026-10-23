@@ -411,15 +411,16 @@ test('parse-error limitation은 안전한 상대 파일 10개와 생략 수만 �
     for (let index = 0; index < 12; index++) {
       writeFileSync(join(project, `src/bad${String(index).padStart(2, '0')}.ts`), 'export const = ;\n');
     }
-    // 금지 문자 이름은 걷기에서 빠지므로 parse-error 계수에도 목록에도 들어가지 않고 unsafe-names:로 센다.
-    writeFileSync(join(project, 'src/bad\nunsafe.ts'), 'export const = ;\n');
+    // Windows가 생성 자체를 금지하는 LF 대신 같은 교환 금지 문자 U+2028로 native 걷기를 검증한다.
+    const unsafeName = process.platform === 'win32' ? 'bad\u2028unsafe.ts' : 'bad\nunsafe.ts';
+    writeFileSync(join(project, 'src', unsafeName), 'export const = ;\n');
     const target = await buildCallGraph(project, fileSystem);
     const limitation = target.limitations.find((line) => line.startsWith('parse-errors:'));
     assert.equal(limitation,
       'parse-errors: 12 source file(s) have syntax errors; their calls may be incomplete; '
       + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
       + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
-    assert.ok(!limitation?.includes('\nunsafe'));
+    assert.ok(!limitation?.includes(unsafeName));
     assert.ok(!limitation?.includes(project));
     assert.ok(target.limitations.includes(unsafeWalkNames(1)));
   } finally {

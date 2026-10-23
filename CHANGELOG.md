@@ -23,6 +23,9 @@
 
 ### Changed
 
+- schema: Windows의 네이티브 경로와 TypeScript가 정규화한 경로를 같은 스캔 입력으로 조회한다. ORM·드라이버
+  import가 전역 이름으로 잘못 분류되어 관계 사실이 누락되던 문제와 이미 분석한 SQL을 미분석으로 다시 세던
+  문제를 고친다. 잘못된 tsconfig도 내부 예외 대신 기존 unreadable 한계로 남긴다. 입력 집합 밖 파일은 계속 읽지 않는다.
 - Next convention 선언·graph 진입점에 compiler entry 범위를 적용한다. 제외된 파일의 import 의존성은 보존하되
   convention 진입점으로 승격하지 않으며 제외 수와 런타임 미평가 한계를 남긴다.
 - navigation: owned import·default export·재내보내기·const 별칭의 공유 route 배열에서 경로/화면 후보를 복원하되
