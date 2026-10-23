@@ -45,7 +45,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -143,7 +143,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
-  const { program, checker, status, deeplyNestedSources } = createGraphProgram(
+  const { program, checker, status, deeplyNestedSources, excludedSources } = createGraphProgram(
     selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config, boundary,
   );
   const files = nodeFiles(program, inputs.sources);
@@ -152,13 +152,15 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   // 걷기가 고른 소스 중 Program에 없는 것은 compiler host가 읽지 못했다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
   // 읽는 백슬래시 이름). host의 'unreadable' 전체를 세면 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조한다.
   // 구문 깊이 상한으로 뺀 소스는 원인이 달라 따로 센다.
-  const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length;
+  const excludedSourceCount = [...inputs.sources.values()].filter((path) => excludedSources.has(resolve(path))).length;
+  const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length - excludedSourceCount;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0 || deeplyNestedInputs > 0;
   // 경계 밖이거나, 이름으로 적었지만 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않았거나, 상한 뒤라 열거하지 못한 설정 루트는
   // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
-    || status.configRootsTruncated === true;
+    || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
+    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
@@ -173,7 +175,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete ? 'incomplete-scan'
+  const openProgram = compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
@@ -184,6 +186,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
   const environmentLimits: string[] = [];
+  if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loader execution and PnP zip dependency resolution are not performed`);
   if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
   if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
   const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
@@ -284,11 +287,14 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const productionFlowIndex = separateTests
     ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
     : flowIndex;
+  const matchesProject = projectSpecifierMatcher(program.getCompilerOptions());
+  const projectSpecifier = (specifier: string, sourceFile?: ts.SourceFile) =>
+    (sourceFile !== undefined && configImportIsBlocked(program, sourceFile.fileName)) || matchesProject(specifier);
   const resolver = new TargetResolver(
     checker,
     store,
     (sourceFile) => pathByFile.get(sourceFile),
-    projectSpecifierMatcher(program.getCompilerOptions()),
+    projectSpecifier,
     flowIndex,
     (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
   );
@@ -297,7 +303,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
       checker,
       store,
       (sourceFile) => pathByFile.get(sourceFile),
-      projectSpecifierMatcher(program.getCompilerOptions()),
+      projectSpecifier,
       productionFlowIndex,
       (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
     )

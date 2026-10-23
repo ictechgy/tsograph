@@ -29,7 +29,7 @@ import {
   type NodeProject,
   type NodeProjectGaps,
 } from './node/node-project.ts';
-import { resolveAlias, symbolAt } from './node/symbols.ts';
+import { packageBindingOf, resolveAlias, symbolAt } from './node/symbols.ts';
 
 /** router model JSON의 UTF-8 byte 상한이다. */
 export const MAX_ROUTER_MODEL_BYTES = 1024 * 1024;
@@ -72,6 +72,8 @@ export interface RouterModel {
   readonly screenProperty: string;
   readonly childrenProperty?: string;
   readonly pathSyntax: 'colon' | 'template';
+  /** 실행하지 않을 lazy wrapper와 import export를 사용자가 명시한다. */
+  readonly lazyScreen?: { readonly module: string; readonly name: string; readonly loaderArgument: number; readonly exportName: string };
 }
 
 /** 명시적 router model machine contract다. */
@@ -199,6 +201,10 @@ export function extractNavigationRoutes(
   };
   for (const match of matches) {
     matchedModels.add(match.modelIndex);
+    if (isRecursiveChildrenCall(match, project, bindings)) {
+      tally.recursiveChildren += 1;
+      continue;
+    }
     const argument = match.call.arguments[match.model.routesArgument];
     if (argument === undefined || ts.isSpreadElement(argument)) {
       tally.routeContainer += 1;
@@ -249,6 +255,8 @@ interface ExtractionTally {
   screen: number;
   children: number;
   nestingDepth: number;
+  recursiveChildren: number;
+  lazyScreen: number;
 }
 
 type CompositeSafety = 'stable' | 'mutated' | 'unproven';
@@ -274,6 +282,8 @@ function createTally(): ExtractionTally {
     screen: 0,
     children: 0,
     nestingDepth: 0,
+    recursiveChildren: 0,
+    lazyScreen: 0,
   };
 }
 
@@ -339,6 +349,27 @@ function collectFactoryCalls(
   };
   for (const sourceFile of files) visit(sourceFile);
   return matches;
+}
+
+/** 모델 factory의 parameter/for-of child 재귀는 외부 등록 하나의 children 확장으로만 센다. */
+function isRecursiveChildrenCall(match: FactoryCallMatch, project: NodeProject, bindings: BindingIndex): boolean {
+  const argument = match.call.arguments[match.model.routesArgument];
+  if (argument === undefined || !ts.isPropertyAccessExpression(argument)
+    || argument.name.text !== match.model.childrenProperty || !ts.isIdentifier(argument.expression)) return false;
+  let owner: ts.Node | undefined = match.call.parent;
+  while (owner !== undefined && !ts.isFunctionLike(owner)) owner = owner.parent;
+  if (owner === undefined || !ts.isFunctionDeclaration(owner) || owner.name === undefined) return false;
+  const symbol = symbolAt(project.checker, owner.name);
+  const identity = symbol === undefined ? undefined : factoryIdentity(owner, symbol, project, bindings);
+  if (identity?.path !== match.model.factory.path || identity.name !== match.model.factory.name) return false;
+  const root = symbolAt(project.checker, argument.expression);
+  const declaration = root?.valueDeclaration;
+  if (declaration === undefined || !ts.isVariableDeclaration(declaration)
+    || !ts.isVariableDeclarationList(declaration.parent) || !ts.isForOfStatement(declaration.parent.parent)) return false;
+  const iterable = skipWrappers(declaration.parent.parent.expression);
+  if (!ts.isIdentifier(iterable)) return false;
+  const iterableSymbol = symbolAt(project.checker, iterable);
+  return iterableSymbol?.valueDeclaration === owner.parameters[match.model.routesArgument];
 }
 
 function factoryModelIndex(
@@ -487,12 +518,13 @@ function extractEntry(
   const template = rawPath === undefined ? undefined : joinNavigationPath(parentTemplate, rawPath, model.pathSyntax);
   if (template === undefined) context.tally.path += 1;
   const screenExpression = properties.get(model.screenProperty);
-  const screen = screenExpression === undefined ? undefined : screenIdentity(screenExpression, context, 0, new Set());
+  const lazyBefore = context.tally.lazyScreen;
+  const screen = screenExpression === undefined ? undefined : screenIdentity(screenExpression, context, 0, new Set(), model.lazyScreen);
   if (screen === undefined) context.tally.screen += 1;
   addFact(context, {
     kind: 'screen-route',
     urlTemplate: template ?? null,
-    dynamic: template === undefined || screen === undefined,
+    dynamic: template === undefined || screen === undefined || context.tally.lazyScreen !== lazyBefore,
     location: context.project.locationOf(inner),
     ...(screen === undefined ? {} : { screen }),
   });
@@ -626,8 +658,11 @@ function screenIdentity(
   context: ExtractionContext,
   depth: number,
   seen: Set<ts.Declaration>,
+  lazyModel?: RouterModel['lazyScreen'],
 ): NavigationScreenIdentity | undefined {
   if (depth > MAX_ALIAS_DEPTH || !context.bindings.complete) return undefined;
+  const inner = skipWrappers(expression);
+  if (ts.isCallExpression(inner)) return lazyScreenIdentity(inner, lazyModel, context);
   const reference = screenReference(expression);
   if (reference === undefined) return undefined;
   const local = symbolAt(context.project.checker, reference);
@@ -645,7 +680,35 @@ function screenIdentity(
   if (direct !== undefined) return direct;
   if (!ts.isVariableDeclaration(declaration) || declaration.initializer === undefined
     || !isStableConstDeclaration(declaration, symbol, context.bindings)) return undefined;
-  return screenIdentity(declaration.initializer, context, depth + 1, seen);
+  return screenIdentity(declaration.initializer, context, depth + 1, seen, lazyModel);
+}
+
+/** 명시 wrapper의 단일 import 리터럴만 읽는다. loader/module은 실행하지 않는다. */
+function lazyScreenIdentity(call: ts.CallExpression, model: RouterModel['lazyScreen'], context: ExtractionContext): NavigationScreenIdentity | undefined {
+  if (model === undefined || call.questionDotToken !== undefined) return undefined;
+  const binding = packageBindingOf(context.project.checker, call.expression);
+  if (binding?.module !== model.module || binding.name !== model.name) return undefined;
+  const factorySymbol = symbolAt(context.project.checker, call.expression);
+  if (factorySymbol === undefined || context.bindings.written.has(resolveAlias(context.project.checker, factorySymbol))) return undefined;
+  const loader = call.arguments[model.loaderArgument];
+  if (loader === undefined || !ts.isArrowFunction(loader) || loader.parameters.length !== 0
+    || loader.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)) return undefined;
+  if (ts.isBlock(loader.body)) return undefined;
+  const body = skipWrappers(loader.body);
+  if (!ts.isCallExpression(body) || body.expression.kind !== ts.SyntaxKind.ImportKeyword || body.arguments.length !== 1) return undefined;
+  const specifier = body.arguments[0];
+  if (specifier === undefined || !ts.isStringLiteralLike(specifier) || !specifier.text.startsWith('.')) return undefined;
+  const module = symbolAt(context.project.checker, specifier);
+  if (module === undefined) return undefined;
+  const exported = context.project.checker.getExportsOfModule(module).find((candidate) => candidate.name === model.exportName);
+  if (exported === undefined) return undefined;
+  const symbol = resolveAlias(context.project.checker, exported);
+  if (context.bindings.written.has(symbol)) return undefined;
+  const declarations = screenDeclarations(symbol);
+  if (declarations.length !== 1) return undefined;
+  const identity = screenDeclarationIdentity(declarations[0]!, context.project);
+  if (identity !== undefined) context.tally.lazyScreen++;
+  return identity;
 }
 
 function screenReference(expression: ts.Expression): ts.Node | undefined {
@@ -716,6 +779,8 @@ function joinNavigationPath(
 }
 
 function normalizePathSegment(segment: string, syntax: RouterModel['pathSyntax']): string | undefined {
+  // splat의 자식 결합 의미는 router마다 다르므로 literal 별표로 확정하지 않는다.
+  if (segment.includes('*')) return undefined;
   if (syntax === 'colon') {
     if (/^:[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*$/u.test(segment)) return '{}';
     if (segment.includes(':') || /[{}]/u.test(segment)) return undefined;
@@ -776,6 +841,9 @@ function buildLimitations(
         + `(${details})`,
     );
   }
+  if (tally.path > 0) limitations.push('navigation-path-coverage: dynamic paths, splats and their relative children require router-specific semantics; no literal wildcard path is asserted');
+  if (tally.recursiveChildren > 0) limitations.push(`navigation-model-coverage: ${tally.recursiveChildren} internal recursive children call(s) represented only by the configured outer registration expansion`);
+  if (tally.lazyScreen > 0) limitations.push(`navigation-lazy-evidence: ${tally.lazyScreen} screen candidate(s) resolved from an explicit lazy model and literal import; loader execution, module side effects and runtime selection are not assessed; facts remain dynamic`);
   if (unmatchedModels > 0) {
     limitations.push(
       `navigation-model-coverage: ${unmatchedModels} configured router model(s) matched no exact project factory call`,
@@ -890,6 +958,7 @@ function validateRouterModel(value: unknown): RouterModel {
     'screenProperty',
     'childrenProperty',
     'pathSyntax',
+    'lazyScreen',
   ]);
   assertKeys(value.factory, ['path', 'name']);
   const factoryPath = value.factory.path;
@@ -899,6 +968,7 @@ function validateRouterModel(value: unknown): RouterModel {
   const screenProperty = value.screenProperty;
   const childrenProperty = value.childrenProperty;
   const pathSyntax = value.pathSyntax;
+  const lazyScreen = value.lazyScreen === undefined ? undefined : validateLazyScreen(value.lazyScreen);
   if (!isSafeSourcePath(factoryPath) || !isIdentifierName(factoryName)
     || typeof routesArgument !== 'number' || !Number.isSafeInteger(routesArgument)
     || routesArgument < 0 || routesArgument > 64
@@ -916,7 +986,18 @@ function validateRouterModel(value: unknown): RouterModel {
     screenProperty,
     ...(childrenProperty === undefined ? {} : { childrenProperty }),
     pathSyntax,
+    ...(lazyScreen === undefined ? {} : { lazyScreen }),
   };
+}
+
+function validateLazyScreen(value: unknown): NonNullable<RouterModel['lazyScreen']> {
+  if (!isRecord(value)) throw new RouterModelError('invalid-shape');
+  assertKeys(value, ['module', 'name', 'loaderArgument', 'exportName']);
+  if (typeof value.module !== 'string' || value.module.length > MAX_MODEL_STRING_LENGTH || !isSafeIdentifier(value.module)
+    || !isIdentifierName(value.name) || !isIdentifierName(value.exportName)
+    || typeof value.loaderArgument !== 'number' || !Number.isSafeInteger(value.loaderArgument)
+    || value.loaderArgument < 0 || value.loaderArgument > 64) throw new RouterModelError('unsafe-value');
+  return { module: value.module, name: value.name, loaderArgument: value.loaderArgument, exportName: value.exportName };
 }
 
 function assertKeys(value: Record<string, unknown>, allowed: readonly string[]): void {

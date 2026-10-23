@@ -23,7 +23,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import ts from 'typescript';
 
-import { isSkippedDirectory, MAX_VISITED_ENTRIES } from '../schema/project-files.ts';
+import { isPnpLoader, isSkippedDirectory, MAX_VISITED_ENTRIES } from '../schema/project-files.ts';
 
 /** 설정 루트 열거와 `files` 항목이 머물러야 하는 걷기 경계다. */
 export interface ScanBoundary {
@@ -215,7 +215,7 @@ export class ConfigRootBoundary {
     const files: string[] = [];
     const directories: string[] = [];
     for (const entry of listed) {
-      if (entry.isFile()) files.push(entry.name);
+      if (entry.isFile() && !isPnpLoader(entry.name)) files.push(entry.name);
       else if (entry.isDirectory() && this.#admitsChild(directory, entry.name)) directories.push(entry.name);
     }
     return { files, directories };
@@ -277,7 +277,7 @@ export class ConfigRootBoundary {
       return false;
     }
     const kind = entryKind(path);
-    if (kind === 'file' && this.#admitsDirectory(dirname(path))) return true;
+    if (kind === 'file' && !isPnpLoader(basename(path)) && this.#admitsDirectory(dirname(path))) return true;
     if (kind === 'file' || kind === 'link') this.#namedExcluded++;
     return false;
   }

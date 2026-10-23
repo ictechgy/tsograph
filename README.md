@@ -80,11 +80,19 @@ character, and a wrapper call is rechecked for at most 200 rounds, so unrelated 
 result. A site over its budget cannot be narrowed to what it might change, so `route-call-coverage:`
 reports the mutation analysis as incomplete and every axios/ky client and request configuration stays dynamic.
 
+Primitive-valued unrelated class stores do not taint HTTP clients. Known receiver/configuration aliases
+remain scoped to the affected symbols; an unbound object source or exhausted provenance budget still
+keeps the whole analysis incomplete. Mutation limitations carry a cause count and bounded relative
+positions, and syntax limitations identify affected files. These are static, type-based observations.
+
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
 than a global name or method shape. Unknown leading URL values and `{{NAME}}` build placeholders keep
 recovered paths dynamic. When the mutation analysis is incomplete, model calls stay as dynamic facts
 (`channel: null`, `pathAnchor: "base"`) with the model's method and `service` instead of disappearing.
+Escaped or modified modeled receivers also retain their known call locations as dynamic candidates;
+the model's method is declared evidence, not proof that a replacement method performs HTTP.
+Only an omitted model `base` defaults to `""`; invalid values retain input errors with JSON pointers.
 See [typed client models](docs/CLIENT-MODELS.md).
 
 `--client-model` and `--tsconfig` (the compiler config of the client program) take regular files whose real path is
@@ -98,6 +106,14 @@ data limits stay unchanged; a compact document that still exceeds the limit fail
 document. An analysis that still exceeds the call stack after deeply nested files are left out is
 reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
+
+For graph, Node/client routes and navigation, `files`/`include`/`exclude` select compiler entry files.
+Imported dependencies can still enter the analyzed closure even when excluded as entries. Conflicting
+nearest or referenced compiler configurations produce limitations and unresolved imports instead of
+silently using another app's `baseUrl`. Use a package's own project/config for the most precise scope.
+PnP loader files are excluded and never executed. Reading static PnP metadata and zip-contained types
+is not implemented; unresolved dependencies remain unknown. No `.gitignore` interpretation is implied.
+See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
 
 ## Requirements
 
@@ -293,8 +309,8 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
 (the same setup as `tsograph graph`) so routers can be followed across files. See
 [Node backends](#node-backends) below.
 
-- `--role server` (required): only the declaration side is implemented. `client` is a usage
-  error until route-call extraction exists.
+- `--role server` (required for this section): extracts declarations. `--role client` extracts
+  HTTP call sites as documented above.
 - `--project` (required): the project root (where `package.json`, `next.config.*`, or `app/`/
   `pages/` live). `project` is its POSIX realpath and `location.path` is relative to it. Node
   frameworks are detected from the dependencies of the root `package.json`; Next.js is scanned

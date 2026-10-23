@@ -86,6 +86,55 @@ registerScreens([{ path: '/unrelated', screen: Catalog }]);
   });
 });
 
+test('recursive child dispatch is represented by outer routes and splat semantics stay unknown', async () => {
+  await fixture({
+    'src/router-api.ts': 'export function registerScreens(routes: any[]) { for (const r of routes) { if (r.children) registerScreens(r.children); } }',
+    'src/router.tsx': `import {registerScreens} from './router-api'; import {Catalog,Detail} from './screens';
+      registerScreens([{path:'/files/*',screen:Catalog,children:[{path:'view/:id',screen:Detail}]}]);`,
+  }, (root) => {
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.equal(doc.facts.length, 2);
+    assert.ok(doc.facts.every((fact) => fact.dynamic && fact.urlTemplate === null && fact.screen !== undefined));
+    assert.ok(doc.limitations.some((value) => value.includes('1 internal recursive children')));
+    assert.ok(doc.limitations.some((value) => value.includes('splats')));
+  });
+});
+
+test('exported const route arrays remain unproven and push mutation never promotes static facts', async () => {
+  for (const mutation of ['', "routes.push({path:'/extra',screen:Catalog});"]) {
+    await fixture({
+      'src/table.ts': `import {Catalog} from './screens'; export const routes=[{path:'/files',screen:Catalog}]; ${mutation}`,
+      'src/router.ts': "import {registerScreens} from './router-api'; import {routes} from './table'; registerScreens(routes);",
+    }, (root) => {
+      const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+      assert.deepEqual(doc.facts.map((fact) => [fact.dynamic, fact.urlTemplate]), [[true, null]]);
+      assert.ok(doc.limitations.some((value) => value.includes('unproven route container')));
+    });
+  }
+});
+
+test('explicit lazy model retains a screen candidate without executing loaders or claiming runtime certainty', async () => {
+  const lazyScreen = { module: '@loadable/component', name: 'default', loaderArgument: 0, exportName: 'default' };
+  const modeled = parseRouterModels(JSON.stringify({ ...model, models: [{ ...baseModel, lazyScreen }] }));
+  for (const loader of ["()=>import('./lazy-screen')", "()=>{throw new Error('must not execute')}", "(name: string)=>import(name)"]) {
+    await fixture({
+      'src/lazy-screen.ts': "throw new Error('must not execute imported module'); export default function LazyScreen(){return null;}",
+      'src/router.ts': `import {registerScreens} from './router-api'; import loadable from '@loadable/component';
+        const Lazy=loadable(${loader}); registerScreens([{path:'/lazy',screen:Lazy}]);`,
+    }, (root) => {
+      const unmodeled = extractNavigationRoutes(root, model, 'test', new Date(0));
+      assert.equal(unmodeled.facts[0]?.screen, undefined);
+      const doc = extractNavigationRoutes(root, modeled, 'test', new Date(0));
+      assert.equal(doc.facts[0]?.dynamic, true);
+      assert.equal(doc.facts[0]?.screen?.usr, loader.startsWith('()=>import') ? 'src/lazy-screen.ts#LazyScreen' : undefined);
+      if (doc.facts[0]?.screen !== undefined) assert.ok(doc.limitations.some((value) => value.includes('navigation-lazy-evidence')));
+    });
+  }
+  for (const lazyScreen of [null, {}, { module: 'x', name: 'default', loaderArgument: -1, exportName: 'default' }, { module: 'x', name: 'default', loaderArgument: 0, exportName: 'default', extra: true }]) {
+    assert.throws(() => parseRouterModels(JSON.stringify({ ...model, models: [{ ...baseModel, lazyScreen }] })));
+  }
+});
+
 test('router model parser enforces closed bounded JSON and safe unique factories', () => {
   assert.deepEqual(parseRouterModels(JSON.stringify(model)), model);
   const bad = [

@@ -72,11 +72,17 @@ tagged template)과 색인 지점은 하나마다 20,000단계를 쓰고, 이미
 무엇을 바꿀 수 있었는지 좁히지 못하므로 `route-call-coverage:`로 변경 분석 미완을 알리고 axios·ky 클라이언트와
 요청 설정을 모두 dynamic으로 둔다.
 
+무관한 클래스 필드에 primitive 결과를 저장하는 것은 HTTP 클라이언트를 오염시키지 않는다. 알려진 수신자·설정 별칭의
+변경은 해당 심볼에 한정하고, 출처를 모르는 객체나 provenance 예산 중단은 전체 미완으로 유지한다. 변경 limitation에는
+원인 수와 제한된 상대 위치를, 구문 오류에는 해당 파일 위치를 싣는다. 이는 정적 타입을 이용한 관찰이다.
+
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
 HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로
 매칭한다. 미상 URL 선행 값과 `{{NAME}}` 빌드 토큰에서 복원한 경로는 dynamic으로 유지한다.
 변경 분석이 미완이면 모델 호출은 사라지지 않고 모델의 동사·`service`와 `channel: null`·`pathAnchor: "base"`의
-dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
+dynamic 사실로 남는다. escape·변경된 modeled 수신자도 알려진 호출 위치를 dynamic 후보로 보존한다. 모델 동사는 선언된
+근거이며 교체된 메서드가 실제 HTTP를 수행한다는 증거가 아니다. `base` 생략만 빈 문자열로 기본 처리하고 잘못된 값은
+정확한 JSON pointer를 가진 입력 오류로 남긴다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
 
 `--client-model`과 `--tsconfig`(client Program의 compiler 설정)는 realpath가 `--project` 안인 일반 파일만 받는다. 상대 경로는
 `--project` 기준이고 절대 경로도 안이면 받는다. 직접이든 symlink로든 `--project` 밖이면 `openapi`·`navigation`·
@@ -86,6 +92,12 @@ JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 �
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
 부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
+
+graph·Node/client routes·navigation의 `files`·`include`·`exclude`는 compiler 진입 파일을 고른다. import 의존성은
+진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 project reference 설정이 충돌하면 다른 앱의 `baseUrl`로
+정적 간선을 확정하지 않고 limitation과 미해결 import로 남긴다. 정밀한 범위가 필요하면 패키지 자체 project/config를 쓴다.
+PnP loader는 제외하며 실행하지 않는다. 정적 PnP metadata와 zip 안 타입 읽기는 구현하지 않았고 해당 의존성은 미해결로 남는다.
+`.gitignore` 적용을 의미하지 않는다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
 
 ## 요구 사항
 
@@ -204,7 +216,7 @@ Next.js 프로젝트나 Node 백엔드(Hono·Express·Fastify·Koa + @koa/router
 Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는 라우터를 파일 사이로 따라가려고 `tsograph graph`와
 같은 방식의 TypeScript `Program`으로 읽는다. 아래 [Node 백엔드](#node-백엔드)를 본다.
 
-- `--role server`(필수): 선언 측만 구현했다. `client`는 route-call 추출이 생기기 전까지 사용법 오류다.
+- `--role server`(이 절의 필수 옵션): 선언을 추출한다. `--role client`는 위에 설명한 HTTP 호출 위치를 추출한다.
 - `--project`(필수): 프로젝트 루트(`package.json`, `next.config.*`, `app/`·`pages/`가 있는 곳). `project`는
   그 POSIX realpath이고 `location.path`는 그 기준 상대 경로다. Node 프레임워크는 루트 `package.json` 의존성으로
   감지하고, Next.js는 `next`가 선언됐거나 `next.config.*`가 있거나 Node 백엔드 프레임워크를 하나도 감지하지 못했을 때

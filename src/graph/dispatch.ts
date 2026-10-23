@@ -32,7 +32,7 @@ import type { EdgeGaps, PendingDispatch } from './edge-collector.ts';
 import { climbWrappers, type FlowIndex, type ModuleResolver, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
 import { delegateCallbackExpression, isNextCacheWrapperExpression } from './next-cache-model.ts';
-import { createBoundedResolutionHost } from './program.ts';
+import { configImportIsBlocked, createBoundedResolutionHost } from './program.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
 import { type CallableValue, type FlowPolicy, ValueFlow } from './value-flow.ts';
@@ -202,6 +202,7 @@ export function createModuleResolver(program: ts.Program, checker: ts.TypeChecke
   const host = createBoundedResolutionHost(() => undefined);
   const memo = new Map<string, ts.Symbol | undefined>();
   return (specifier, from) => {
+    if (configImportIsBlocked(program, from.fileName)) return undefined;
     const key = `${from.fileName}\u0000${specifier}`;
     if (memo.has(key)) return memo.get(key);
     const resolved = ts.resolveModuleName(specifier, from.fileName, program.getCompilerOptions(), host, cache).resolvedModule;
