@@ -23,6 +23,11 @@
 
 ### Changed
 
+- Next convention 선언·graph 진입점에 compiler entry 범위를 적용한다. 제외된 파일의 import 의존성은 보존하되
+  convention 진입점으로 승격하지 않으며 제외 수와 런타임 미평가 한계를 남긴다.
+- navigation: owned import·default export·재내보내기·const 별칭의 공유 route 배열에서 경로/화면 후보를 복원하되
+  외부 변경이 미평가이므로 dynamic으로 유지한다. 무인자·단일 fresh literal 반환 factory만 실행 없이 읽는다.
+  쓰기·unknown escape·효과/재귀·공유 반환·shallow freeze는 정적 증명으로 쓰지 않는다. 교환 필드·버전은 유지한다.
 - routes client: primitive 반환값을 저장하는 무관한 클래스 필드 변경이 전체 mutation 분석을 미완으로 만들지 않는다.
   실제 receiver·baseURL·method·alias 변경과 unknown escape는 계속 dynamic으로 남긴다. 알려진 typed sink는 변경·escape
   뒤에도 위치를 보존하며 모델 동사는 runtime 보장이 아닌 선언 근거다. 미완 원인 수와 상대 위치, 구문 오류 위치를 알린다.

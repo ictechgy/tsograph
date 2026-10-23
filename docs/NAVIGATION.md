@@ -31,11 +31,22 @@ tsograph reach --graph-file graph.json src/screens.tsx#Catalog > screen-reach.js
 children 확장에만 귀속하고 별도 dynamic 등록으로 중복하지 않는다. 생략한 내부 호출 수는 limitation에 남긴다.
 
 route 배열 binding에 직접 대입이나 표준 mutator 호출을 관찰하면 `mutated route container`로
-센다. export·다른 호출로의 escape·여러 children 자리 재사용처럼 변경되지 않았음을 끝까지
+센다. 다른 호출로의 escape·여러 children 자리 재사용처럼 변경되지 않았음을 끝까지
 증명할 수 없는 값은 `unproven route container`로 구분한다. 두 경우 모두 배열 내용을 추측하지
 않고 dynamic 사실을 낸다. binding AST 분석이 1,000,000 node 상한을 넘으면 alias·mutation
 완전성을 주장할 수 없으므로 부분 navigation 문서를 내지 않고 명령이 코드 2로 실패한다.
 `export const routes = [...]`는 배열·내부 객체가 불변이라는 증거가 아니다. default import도 이 검사를 우회하지 않는다.
+owned import·default export·재내보내기·const 별칭을 따라 공유 배열의 초기 경로와 화면 후보는 복원하지만
+항상 dynamic으로 남긴다. `navigation-binding-coverage:`는 선택된 Program 안의 쓰기·escape만 검사했고
+외부 소비자와 생략된 소스는 보지 못했음을 밝힌다. 관찰한 push·요소 쓰기·미상 호출로의 탈출이 있으면 초기값을
+경로 후보로 단정하지 않고 null 경로의 dynamic 사실을 유지한다. `Object.freeze`(얕은 freeze 포함), shadowed Object,
+교체된 freeze는 불변 증명으로 쓰지 않는다. 속성 접근·외부 dependency의 배열은 아직 펼치지 않는다.
+
+`registerRoutes(make())`의 `make`가 owned 선언이고 인자가 없으며, 함수 본문이 literal 배열 하나를 반환하는 경우는
+실행 없이 그 fresh 생성식을 읽는다. const 함수 별칭·import·재내보내기를 최대 64단까지 따른다. 추가 문장·매개변수·
+async/generator·호출·재귀·전개·getter/속성 읽기·공유 배열 반환은 지원하지 않는다. 생성식 안의 경로·화면·children은
+기존 binding/mutation 검사를 따르며, 반환값을 별도로 공유하거나 escape시키면 static으로 확정하지 않는다.
+`navigation-factory-evidence:`는 생성식만 읽었으며 함수 실행과 런타임 등록 동작을 검증하지 않았음을 남긴다.
 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(생성·압축 코드 등)는 그 파일만 Program에서 빼고
 `navigation-source-coverage:`로 센다(production 소스만). 그래도 분석이 호출 스택을 넘기면 부분 문서 없이 코드 2이며,
 `schema`·`routes`·`graph`와 같은 원인 문구를 낸다.

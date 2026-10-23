@@ -46,6 +46,8 @@ export interface EntryInput {
   readonly pagesDirectory: string | undefined;
   /** 페이지 확장자 */
   readonly pageExtensions: readonly string[];
+  /** compiler 진입 범위 밖 import 의존성은 노드를 유지하되 파일 convention 진입점으로 승격하지 않는다. */
+  readonly sourceEntries?: ReadonlySet<string>;
 }
 
 /**
@@ -137,6 +139,7 @@ function markFileEntries(store: GraphStore, path: string, sourceFile: ts.SourceF
   const exports = exportIds(path, sourceFile);
   if (hasDirective(sourceFile.statements, 'use server')) exports.forEach((id) => store.markEntry(id, 'server-action'));
   if (sourceFile.text.includes('use server')) markInlineServerActions(store, path, sourceFile);
+  if (input.sourceEntries !== undefined && !input.sourceEntries.has(path)) return;
   const role = fileRole(path, input);
   if (role === undefined) return;
   for (const [name, id] of exports) {

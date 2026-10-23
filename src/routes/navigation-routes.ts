@@ -190,7 +190,7 @@ export function extractNavigationRoutes(
   const facts: ScreenRouteFact[] = [];
   const tally = createTally();
   const matchedModels = new Set<number>();
-  const calls = new Set(matches.map((match) => match.call));
+  const calls = new Map(matches.map((match) => [match.call, match.model.routesArgument]));
   const context: ExtractionContext = {
     project,
     bindings,
@@ -257,14 +257,16 @@ interface ExtractionTally {
   nestingDepth: number;
   recursiveChildren: number;
   lazyScreen: number;
+  exportedCandidates: number;
+  freshFactories: number;
 }
 
-type CompositeSafety = 'stable' | 'mutated' | 'unproven';
+type CompositeSafety = 'stable' | 'exported' | 'mutated' | 'unproven';
 
 interface ExtractionContext {
   readonly project: NodeProject;
   readonly bindings: BindingIndex;
-  readonly calls: ReadonlySet<ts.CallExpression>;
+  readonly calls: ReadonlyMap<ts.CallExpression, number>;
   readonly facts: ScreenRouteFact[];
   readonly tally: ExtractionTally;
   readonly compositeSafety: Map<ts.Symbol, CompositeSafety>;
@@ -284,6 +286,8 @@ function createTally(): ExtractionTally {
     nestingDepth: 0,
     recursiveChildren: 0,
     lazyScreen: 0,
+    exportedCandidates: 0,
+    freshFactories: 0,
   };
 }
 
@@ -446,6 +450,7 @@ function extractArray(
   model: RouterModel,
   context: ExtractionContext,
   allowedReference: ts.Expression,
+  inheritedUncertainty = false,
 ): boolean {
   if (depth >= MAX_NAVIGATION_DEPTH) {
     context.tally.nestingDepth += 1;
@@ -460,6 +465,7 @@ function extractArray(
     addDynamicFact(context, expression);
     return false;
   }
+  if (resolved.exported) context.tally.exportedCandidates++;
   for (const element of resolved.value.elements) {
     if (ts.isSpreadElement(element)) {
       context.tally.arraySpread += 1;
@@ -468,30 +474,106 @@ function extractArray(
       context.tally.routeEntry += 1;
       addDynamicFact(context, element);
     } else {
-      extractEntry(element, parentTemplate, depth, model, context);
+      extractEntry(element, parentTemplate, depth, model, context, inheritedUncertainty || resolved.exported);
     }
   }
   return true;
 }
 
 type ArrayResolution =
-  | { readonly kind: 'array'; readonly value: ts.ArrayLiteralExpression }
+  | { readonly kind: 'array'; readonly value: ts.ArrayLiteralExpression; readonly exported: boolean }
   | { readonly kind: 'mutated' | 'unproven' | 'unknown' };
 
 function routeArray(
   expression: ts.Expression,
   context: ExtractionContext,
   allowedReference: ts.Expression,
+  depth = 0,
+  seen = new Set<ts.Node>(),
 ): ArrayResolution {
+  if (depth > MAX_ALIAS_DEPTH || seen.has(expression)) return { kind: 'unproven' };
+  seen.add(expression);
   const inner = skipWrappers(expression);
-  if (ts.isArrayLiteralExpression(inner)) return { kind: 'array', value: inner };
+  if (ts.isArrayLiteralExpression(inner)) return { kind: 'array', value: inner, exported: false };
+  if (ts.isCallExpression(inner)) {
+    const value = freshFactoryArray(inner, context);
+    if (value === undefined) return { kind: 'unknown' };
+    context.tally.freshFactories++;
+    return { kind: 'array', value, exported: false };
+  }
   if (!ts.isIdentifier(inner)) return { kind: 'unknown' };
+  const local = symbolAt(context.project.checker, inner);
+  const symbol = local === undefined ? undefined : resolveAlias(context.project.checker, local);
+  const exported = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
+  if (symbol !== undefined && exported !== undefined && ts.isExportAssignment(exported)) {
+    if (context.project.pathOf(exported.getSourceFile()) === undefined || exported.isExportEquals) return { kind: 'unknown' };
+    const safety = compositeSafety(symbol, exported, inner, allowedReference, context);
+    if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
+    const resolved = routeArray(exported.expression, context, exported.expression, depth + 1, seen);
+    return resolved.kind === 'array' ? { ...resolved, exported: true } : resolved;
+  }
   const binding = declaredConstBinding(inner, context);
-  if (binding === undefined) return { kind: 'unknown' };
-  const initializer = skipWrappers(binding.declaration.initializer!);
-  if (!ts.isArrayLiteralExpression(initializer)) return { kind: 'unknown' };
+  if (binding === undefined || context.project.pathOf(binding.declaration.getSourceFile()) === undefined) return { kind: 'unknown' };
   const safety = compositeSafety(binding.symbol, binding.declaration, inner, allowedReference, context);
-  return safety === 'stable' ? { kind: 'array', value: initializer } : { kind: safety };
+  if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
+  const resolved = routeArray(binding.declaration.initializer!, context, binding.declaration.initializer!, depth + 1, seen);
+  return resolved.kind === 'array' ? { ...resolved, exported: resolved.exported || safety === 'exported' } : resolved;
+}
+
+/** 무인자 project factory의 단일 fresh literal 반환만 읽는다. body·loader를 실행하거나 임의 호출을 평가하지 않는다. */
+function freshFactoryArray(call: ts.CallExpression, context: ExtractionContext): ts.ArrayLiteralExpression | undefined {
+  if (call.arguments.length !== 0 || call.questionDotToken !== undefined) return undefined;
+  let expression = skipWrappers(call.expression);
+  const seen = new Set<ts.Declaration>();
+  for (let depth = 0; depth <= MAX_ALIAS_DEPTH; depth++) {
+    if (!ts.isIdentifier(expression)) return undefined;
+    const local = symbolAt(context.project.checker, expression);
+    const symbol = local === undefined ? undefined : resolveAlias(context.project.checker, local);
+    if (symbol === undefined || context.bindings.written.has(symbol)) return undefined;
+    const declarations = runtimeFactoryDeclarations(symbol);
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    if (declaration === undefined || seen.has(declaration)
+      || context.project.pathOf(declaration.getSourceFile()) === undefined
+      || hasParseErrors(declaration.getSourceFile())) return undefined;
+    seen.add(declaration);
+    let factory: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+    if (ts.isFunctionDeclaration(declaration)) factory = declaration;
+    else if (ts.isVariableDeclaration(declaration) && isStableConstDeclaration(declaration, symbol, context.bindings)) {
+      const initializer = skipWrappers(declaration.initializer!);
+      if (ts.isIdentifier(initializer)) { expression = initializer; continue; }
+      if (!ts.isArrowFunction(initializer) && !ts.isFunctionExpression(initializer)) return undefined;
+      factory = initializer;
+    } else return undefined;
+    if (factory.parameters.length !== 0 || factory.body === undefined
+      || factory.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+      || (!ts.isArrowFunction(factory) && factory.asteriskToken !== undefined)) return undefined;
+    const body = factory.body;
+    const returned = ts.isBlock(body)
+      ? body.statements.length === 1 && ts.isReturnStatement(body.statements[0]!) ? body.statements[0]!.expression : undefined
+      : body;
+    if (returned === undefined) return undefined;
+    const value = skipWrappers(returned);
+    return ts.isArrayLiteralExpression(value) && freshLiteralConstruction(value) ? value : undefined;
+  }
+  return undefined;
+}
+
+/** fresh 배열 생성 과정에서 실행될 수 있는 호출·getter·전개·계산식은 지원하지 않는다. 함수 본문은 값으로도 받지 않는다. */
+function freshLiteralConstruction(node: ts.Node): boolean {
+  const pending = [node];
+  let count = 0;
+  while (pending.length > 0) {
+    const item = pending.pop()!;
+    if (++count > MAX_BINDING_NODES) return false;
+    if (ts.isCallExpression(item) || ts.isNewExpression(item) || ts.isTaggedTemplateExpression(item)
+      || ts.isSpreadElement(item) || ts.isSpreadAssignment(item) || ts.isComputedPropertyName(item)
+      || ts.isPropertyAccessExpression(item) || ts.isElementAccessExpression(item) || ts.isFunctionLike(item)
+      || ts.isBinaryExpression(item) || ts.isPrefixUnaryExpression(item) || ts.isPostfixUnaryExpression(item)
+      || ts.isAwaitExpression(item) || ts.isYieldExpression(item)) return false;
+    if (ts.isDeleteExpression(item) || ts.isJsxElement(item) || ts.isJsxSelfClosingElement(item)) return false;
+    ts.forEachChild(item, child => { pending.push(child); });
+  }
+  return true;
 }
 
 function extractEntry(
@@ -500,6 +582,7 @@ function extractEntry(
   depth: number,
   model: RouterModel,
   context: ExtractionContext,
+  uncertainContainer = false,
 ): void {
   const inner = skipWrappers(expression);
   if (!ts.isObjectLiteralExpression(inner)) {
@@ -524,14 +607,14 @@ function extractEntry(
   addFact(context, {
     kind: 'screen-route',
     urlTemplate: template ?? null,
-    dynamic: template === undefined || screen === undefined || context.tally.lazyScreen !== lazyBefore,
+    dynamic: uncertainContainer || template === undefined || screen === undefined || context.tally.lazyScreen !== lazyBefore,
     location: context.project.locationOf(inner),
     ...(screen === undefined ? {} : { screen }),
   });
   if (model.childrenProperty === undefined) return;
   const children = properties.get(model.childrenProperty);
   if (children === undefined) return;
-  if (!extractArray(children, template ?? null, depth + 1, model, context, children)) {
+  if (!extractArray(children, template ?? null, depth + 1, model, context, children, uncertainContainer)) {
     context.tally.children += 1;
   }
 }
@@ -615,27 +698,41 @@ function isStableConstDeclaration(
 
 function compositeSafety(
   symbol: ts.Symbol,
-  declaration: ts.VariableDeclaration,
+  declaration: ts.VariableDeclaration | ts.ExportAssignment,
   reference: ts.Identifier,
   allowedReference: ts.Expression,
   context: ExtractionContext,
+  depth = 0,
 ): CompositeSafety {
   const cached = context.compositeSafety.get(symbol);
   if (cached !== undefined) return cached;
-  if (!context.bindings.complete || isExportedVariable(declaration)) return 'unproven';
+  if (!context.bindings.complete || depth > MAX_ALIAS_DEPTH) return 'unproven';
   if (context.bindings.written.has(symbol)) return 'mutated';
+  // 순환 alias는 불변성 증명이 아니므로 순회 중 재진입은 unproven이다.
+  context.compositeSafety.set(symbol, 'unproven');
+  let safety: CompositeSafety = ts.isExportAssignment(declaration) || isExportedVariable(declaration) ? 'exported' : 'stable';
   for (const token of context.bindings.references.get(symbol) ?? []) {
-    if (token === declaration.name || token === reference || token === skipWrappers(allowedReference)) continue;
+    if ((ts.isVariableDeclaration(declaration) && token === declaration.name) || token === reference || token === skipWrappers(allowedReference)) continue;
     const outer = climbExpression(token);
     const parent = outer.parent;
+    if (ts.isImportSpecifier(parent) || ts.isImportClause(parent)) continue;
+    if (ts.isExportSpecifier(parent) || ts.isExportAssignment(parent)) { safety = 'exported'; continue; }
     if (ts.isCallExpression(parent) && context.calls.has(parent)
-      && parent.arguments.some((argument) => skipWrappers(argument) === outer)) continue;
+      && skipWrappers(parent.arguments[context.calls.get(parent)!]!) === outer) continue;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === outer && ts.isIdentifier(parent.name)) {
+      const alias = symbolAt(context.project.checker, parent.name);
+      if (alias !== undefined && isStableConstDeclaration(parent, alias, context.bindings)) {
+        const aliasSafety = compositeSafety(alias, parent, parent.name, parent.name, context, depth + 1);
+        if (aliasSafety === 'stable' || aliasSafety === 'exported') { if (aliasSafety === 'exported') safety = 'exported'; continue; }
+        context.compositeSafety.set(symbol, aliasSafety); return aliasSafety;
+      }
+    }
     const result = isArrayMutationReference(token) ? 'mutated' : 'unproven';
     context.compositeSafety.set(symbol, result);
     return result;
   }
-  context.compositeSafety.set(symbol, 'stable');
-  return 'stable';
+  context.compositeSafety.set(symbol, safety);
+  return safety;
 }
 
 /** array 내용을 바꾸는 표준 mutator의 receiver 참조인지 본다. 그 밖의 탈출은 unproven이다. */
@@ -844,6 +941,8 @@ function buildLimitations(
   if (tally.path > 0) limitations.push('navigation-path-coverage: dynamic paths, splats and their relative children require router-specific semantics; no literal wildcard path is asserted');
   if (tally.recursiveChildren > 0) limitations.push(`navigation-model-coverage: ${tally.recursiveChildren} internal recursive children call(s) represented only by the configured outer registration expansion`);
   if (tally.lazyScreen > 0) limitations.push(`navigation-lazy-evidence: ${tally.lazyScreen} screen candidate(s) resolved from an explicit lazy model and literal import; loader execution, module side effects and runtime selection are not assessed; facts remain dynamic`);
+  if (tally.exportedCandidates > 0) limitations.push(`navigation-binding-coverage: ${tally.exportedCandidates} exported route container initializer(s) recovered through owned import/export/const aliases; observed writes and escapes were checked within the selected source program, but external consumers and omitted sources are not assessed; path/screen evidence remains dynamic and is not an immutability proof`);
+  if (tally.freshFactories > 0) limitations.push(`navigation-factory-evidence: ${tally.freshFactories} zero-argument owned factory call(s) have a single fresh literal array return without evaluated calls or effects; only the returned construction was read, factory execution and runtime registration are not assessed`);
   if (unmatchedModels > 0) {
     limitations.push(
       `navigation-model-coverage: ${unmatchedModels} configured router model(s) matched no exact project factory call`,

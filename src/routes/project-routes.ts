@@ -7,7 +7,7 @@
  */
 
 import type { CommandFileSystem } from '../cli/file-system.ts';
-import { extractNextRoutes, isTestSourcePath } from './next-routes.ts';
+import { extractNextRoutes, isTestSourcePath, type NextRoutesInput } from './next-routes.ts';
 import { isNodeTestPath } from './node/node-project.ts';
 import { detectNodeFrameworks, extractNodeRoutes } from './node/node-routes.ts';
 import { hasNodeFramework } from './node/node-frameworks.ts';
@@ -40,12 +40,13 @@ export interface TestSourceRule {
  * @param includeTests 테스트 소스도 낼지
  * @returns 추출 결과
  */
-export async function extractProjectRoutes(fileSystem: CommandFileSystem, project: string, includeTests: boolean): Promise<ProjectRoutes> {
+export async function extractProjectRoutes(fileSystem: CommandFileSystem, project: string, includeTests: boolean,
+  compilerScope?: NextRoutesInput['compilerScope']): Promise<ProjectRoutes> {
   const detected = await detectNodeFrameworks(fileSystem, project);
   const config = await loadNextRouteConfig(fileSystem, project);
   const scanNext = detected.next || config.fileName !== undefined || !hasNodeFramework(detected);
   const next = scanNext
-    ? { extraction: await extractNextRoutes({ fileSystem, project, config, includeTests }), config, versionStatus: await readNextVersionStatus(fileSystem, project) }
+    ? { extraction: await extractNextRoutes({ fileSystem, project, config, includeTests, ...(compilerScope === undefined ? {} : { compilerScope }) }), config, versionStatus: await readNextVersionStatus(fileSystem, project) }
     : undefined;
   const node = await extractNodeRoutes({ fileSystem, project, includeTests }, detected);
   return { next, node };

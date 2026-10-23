@@ -100,15 +100,15 @@ test('recursive child dispatch is represented by outer routes and splat semantic
   });
 });
 
-test('exported const route arrays remain unproven and push mutation never promotes static facts', async () => {
+test('exported const route arrays remain dynamic candidates and push mutation never promotes static facts', async () => {
   for (const mutation of ['', "routes.push({path:'/extra',screen:Catalog});"]) {
     await fixture({
       'src/table.ts': `import {Catalog} from './screens'; export const routes=[{path:'/files',screen:Catalog}]; ${mutation}`,
       'src/router.ts': "import {registerScreens} from './router-api'; import {routes} from './table'; registerScreens(routes);",
     }, (root) => {
       const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
-      assert.deepEqual(doc.facts.map((fact) => [fact.dynamic, fact.urlTemplate]), [[true, null]]);
-      assert.ok(doc.limitations.some((value) => value.includes('unproven route container')));
+      assert.deepEqual(doc.facts.map((fact) => [fact.dynamic, fact.urlTemplate]), [[true, mutation === '' ? '/files' : null]]);
+      assert.ok(doc.limitations.some((value) => value.includes(mutation === '' ? 'not an immutability proof' : 'mutated route container')));
     });
   }
 });
@@ -236,15 +236,15 @@ declare function inspect(value: unknown): void;`,
   }, (root) => {
     const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
     assert.deepEqual(doc.facts.map((fact) => [fact.urlTemplate, fact.dynamic]), [
-      [null, true],
+      ['/exported', true],
       [null, true],
       ['/shared', false],
       ['/shared', false],
     ]);
-    assert.ok(doc.limitations.some((entry) => entry.includes('unproven route container: 2')),
+    assert.ok(doc.limitations.some((entry) => entry.includes('unproven route container: 1')),
       JSON.stringify(doc.limitations));
-    assert.ok(!doc.facts.some((fact) => fact.urlTemplate === '/exported'
-      || fact.urlTemplate === '/escaped'));
+    assert.ok(!doc.facts.some((fact) => fact.urlTemplate === '/escaped'));
+    assert.ok(doc.limitations.some((entry) => entry.includes('not an immutability proof')));
   });
 });
 

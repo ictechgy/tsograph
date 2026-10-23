@@ -5,8 +5,8 @@
  * `moduleResolution`·`jsx`·`lib`를 그대로 쓴다. 설정이 없으면 번들러 해석 기본값을 쓴다. 분석 대상
  * 코드는 실행하지 않고(emit 없음), 진단도 계산하지 않는다 — 심볼 해석만 필요하기 때문이다.
  *
- * 루트 파일은 tsconfig가 고른 파일과 호출자가 준 프로젝트 소스(설정이 빠뜨린 스크립트·라우트 포함)의
- * 합집합이다. tsconfig가 고르는 파일은 걷기 정책(경계 안, 제외 디렉터리·symlink 밖)을 통과한 것만 쓴다
+ * 명시 files/include/exclude가 있으면 그 설정의 진입 파일을 쓰고, 없으면 호출자가 준 프로젝트 소스를 보탠다.
+ * import 의존성은 진입 파일과 별개다. tsconfig가 고르는 파일은 걷기 정책(경계 안, 제외 디렉터리·symlink 밖)을 통과한 것만 쓴다
  * (`config-roots.ts`). `allowJs`를 켜서 JS 파일도 같은 checker로 해석한다.
  *
  * compiler host의 현재 디렉터리는 실행 위치가 아니라 프로젝트 루트다. 설정이 없으면 TypeScript가 자동 타입 루트
@@ -108,13 +108,9 @@ export function createGraphProgram(
   explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() },
 ): GraphProgram {
-  const config = readProjectConfig(root, boundary, explicitConfig);
+  const { config, candidates, ownership, rootNames } = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
   const options = analysisOptions(config.options);
-  const candidates = [...new Set(sourcePaths.map((path) => resolve(path)))];
-  const ownership = configOwnership(root, config, candidates, boundary, explicitConfig !== undefined);
   const candidateSet = new Set(candidates);
-  const rootNames = [...new Set([...config.fileNames, ...ownership.referenceRoots,
-    ...(config.scoped ? [] : candidates.filter((path) => !hasTypeScriptSibling(path, candidateSet)))].map((path) => resolve(path)))].sort();
   const roots = new Set(rootNames);
   const nonRoots = candidates.filter((path) => !roots.has(path));
   const host = ts.createCompilerHost(options, true);
@@ -176,6 +172,26 @@ export function createGraphProgram(
       cacheLease.release();
     }
   }
+}
+
+/** Program과 Next convention이 같은 설정 진입 목록을 쓴다. import 의존성 폐쇄는 이 목록과 별개다. */
+function prepareProgramEntries(root: string, sourcePaths: readonly string[], explicitConfig: string | undefined, boundary: ScanBoundary) {
+  const config = readProjectConfig(root, boundary, explicitConfig);
+  const candidates = [...new Set(sourcePaths.map((path) => resolve(path)))];
+  const ownership = configOwnership(root, config, candidates, boundary, explicitConfig !== undefined);
+  const candidateSet = new Set(candidates);
+  const rootNames = [...new Set([...config.fileNames, ...ownership.referenceRoots,
+    ...(config.scoped ? [] : candidates.filter((path) => !hasTypeScriptSibling(path, candidateSet)))].map((path) => resolve(path)))].sort();
+  return { config, candidates, ownership, rootNames };
+}
+
+/** compiler를 만들거나 소스를 실행하지 않고 Next convention에 허용할 진입 파일과 설정 공백을 돌려준다. */
+export function selectSourceEntryFiles(root: string, candidates: readonly string[], explicitConfig?: string,
+  boundary: ScanBoundary = { root, excludedDirectories: new Set() }): { files: ReadonlySet<string>; status: ProgramConfigStatus } {
+  const { config, ownership, rootNames } = prepareProgramEntries(root, candidates, explicitConfig, boundary);
+  return { files: new Set(rootNames), status: { ...config.status,
+    ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
+  } };
 }
 
 /**
