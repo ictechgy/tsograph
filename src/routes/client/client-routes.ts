@@ -110,12 +110,11 @@ function sinkOf(call: ts.CallExpression, values: ClientValues, wrappers: ClientW
   const typed = typedClientMethodOf(call, models, values.project.checker, values.project.pathOf);
   if (typed !== undefined) {
     const pathArgument = call.arguments[typed.method.pathArgument];
-    const root = values.rootSymbol(typed.receiver);
-    // 변경을 확인한 수신자는 모델 호출로 승격하지 않는다. 변경 분석이 미완이면 사실을 버리지 않고 모델 동사의 dynamic 사실로 남긴다.
-    if (root !== undefined && values.mutated.has(root)) return undefined;
+    // 모델은 후보 근거다. escape·재대입·method 변경 뒤에도 호출 위치를 보존하되
+    // 모델의 URL·동사가 실행 시점에도 유지된다는 보장은 하지 않는다.
     return { library: 'typed', configs: [], ...(pathArgument === undefined ? {} : { path: substitute(pathArgument) }),
       forcedMethod: typed.method.method, typedBase: typed.method.base, ...(typed.method.service === undefined ? {} : { typedService: typed.method.service }),
-      unsafe: values.mutationAnalysisIncomplete };
+      unsafe: values.mutationAnalysisIncomplete || values.receiverIsMutated(typed.receiver) };
   }
   if (call.questionDotToken !== undefined) return undefined;
   const forwarded = wrappers?.target(callee);
@@ -206,7 +205,7 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   const deferredWrapperCalls: ts.CallExpression[] = [];
   // 알 수 없는 호출 지점 하나(인자 전체와 수신자)가 변경 질의 하나이고, 질의마다 고정 예산을 새로 쓴다.
   const escapeCall = (call: ts.CallExpression): void => {
-    values.beginMutationQuery();
+    values.beginMutationQuery(call);
     for (const argument of call.arguments) values.markMutated(argument, true);
     const callee = unwrap(call.expression);
     if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
@@ -222,10 +221,10 @@ export function extractClientRoutes(root: string, service: string | undefined, i
         if (sinkOf(node, values, preliminaryWrappers, typedModels) === undefined) escapeCall(node);
         else deferredWrapperCalls.push(node);
       } else if (ts.isNewExpression(node)) {
-        values.beginMutationQuery();
+        values.beginMutationQuery(node);
         for (const argument of node.arguments ?? []) values.markMutated(argument, true);
       } else if (ts.isTaggedTemplateExpression(node)) {
-        values.beginMutationQuery();
+        values.beginMutationQuery(node);
         if (ts.isTemplateExpression(node.template)) {
           for (const span of node.template.templateSpans) values.markMutated(span.expression, true);
         }
@@ -260,13 +259,24 @@ export function extractClientRoutes(root: string, service: string | undefined, i
   const wrapperBodies = activeWrappers === undefined ? new Set<ts.CallExpression>() : forwardedBodies(values, activeWrappers, typedModels);
   const major = kyMajor(root);
   const facts: ClientRouteFact[] = [];
+  const uncertainReceivers: string[] = [];
+  let uncertainReceiverCount = 0;
+  const syntaxPositions: string[] = [];
+  let syntaxFileCount = 0;
   const limitations = new Set<string>([typedModels === undefined
     ? 'route-call-coverage: only global fetch and symbol-proven axios/ky calls are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests'
     : 'route-call-coverage: global fetch, symbol-proven axios/ky calls and explicit typed client model methods are modeled; computed/global aliases, URL/Request objects, wrappers, custom transports and runtime configuration may add requests']);
   for (const [path, source] of project.files) {
     const test = isNodeTestPath(path);
     if (test && !includeTests) continue;
-    if (hasParseErrors(source)) limitations.add('route-call-coverage: source syntax errors may hide requests');
+    if (hasParseErrors(source)) {
+      syntaxFileCount++;
+      if (syntaxPositions.length < 8) {
+        const diagnostics = (source as ts.SourceFile & { readonly parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics;
+        const position = source.getLineAndCharacterOfPosition(diagnostics?.[0]?.start ?? 0);
+        syntaxPositions.push(`${path}:${position.line + 1}:${position.character + 1}`);
+      }
+    }
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
         if (wrapperBodies.has(node)) return;
@@ -282,6 +292,13 @@ export function extractClientRoutes(root: string, service: string | undefined, i
           if (url.dynamic) limitations.add('dynamic-route-calls: request path or configuration cannot be proven without execution');
           if (url.pathAnchor === 'base') limitations.add('unresolved-route-prefix: request base or relative URL prefix is not statically known');
           if (method === undefined || !methods.has(method)) limitations.add('route-call-coverage: some request methods cannot be proven');
+          if (sink.unsafe) {
+            uncertainReceiverCount++;
+            if (uncertainReceivers.length < 8) {
+              const location = project.locationOf(node);
+              uncertainReceivers.push(`${location.path}:${location.line}:${location.column}`);
+            }
+          }
           const factService = sink.typedService ?? service;
           const id = scopeIdOf(node, path);
           facts.push({ kind: 'route-call', ...url,
@@ -295,7 +312,9 @@ export function extractClientRoutes(root: string, service: string | undefined, i
     visit(source);
   }
   if (wrappers.incomplete) limitations.add('route-call-coverage: wrapper alias or forwarding analysis exceeded fixed bounds; affected calls remain dynamic');
-  if (values.mutationAnalysisIncomplete) limitations.add('route-call-coverage: client configuration mutation analysis is incomplete because provenance was unsupported or fixed bounds were reached; affected configuration remains dynamic');
+  if (syntaxFileCount > 0) limitations.add(`route-call-coverage: source syntax errors may hide requests; fileCount=${syntaxFileCount}; positions=${syntaxPositions.join(',')}`);
+  if (values.mutationAnalysisIncomplete) limitations.add('route-call-coverage: client configuration mutation analysis is incomplete because provenance was unsupported or fixed bounds were reached; affected configuration remains dynamic; ' + values.mutationDiagnostic());
+  if (uncertainReceiverCount > 0) limitations.add(`client-receiver-uncertainty: ${uncertainReceiverCount} known call site(s) retained as dynamic because receiver/configuration mutation or escape is possible; modeled method is declared evidence, not a runtime guarantee; positions=${uncertainReceivers.join(',')}`);
   if (Object.values(project.gaps).some((gap) => Boolean(gap))) limitations.add('route-call-coverage: unreadable, symlinked, oversized or capped project sources were skipped');
   const deeplyNested = project.deeplyNestedFiles.filter((path) => includeTests || !isNodeTestPath(path)).length;
   if (deeplyNested > 0) limitations.add(`route-call-coverage: ${deeplyNested} source file(s) ${SYNTAX_DEPTH_CAUSE} and were not analyzed; requests in them are missing`);

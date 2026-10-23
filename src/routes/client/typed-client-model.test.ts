@@ -61,3 +61,19 @@ test('typed model lexical errors have consistent codes and nested duplicate keys
   assert.throws(() => parseTypedClientModels('[' + '0,'.repeat(99_999) + '0]'),
     (error: unknown) => error instanceof TypedClientModelError && error.code === 'too-many-nodes');
 });
+
+test('only omitted base defaults to empty and invalid fields expose exact JSON pointers', () => {
+  const document = (method: Record<string, unknown>) => JSON.stringify({ format: 'http-client-models', version: 1,
+    models: [{ receiver: { kind: 'class', path: 'src/http.ts', name: 'Http' }, methods: [method] }] });
+  const method = { name: 'get', method: 'GET', pathArgument: 0 };
+  assert.equal(parseTypedClientModels(document(method)).models[0]?.methods[0]?.base, '');
+  for (const base of [null, 1, false, 'javascript:alert(1)', 'https://user:pass@example.test', '\n']) {
+    assert.throws(() => parseTypedClientModels(document({ ...method, base })),
+      (error: unknown) => error instanceof TypedClientModelError && error.code === 'unsafe-value'
+        && error.pointer === '/models/0/methods/0/base' && error.message.includes(error.pointer));
+  }
+  for (const [key, value] of [['name', ''], ['method', 'BREW'], ['pathArgument', -1], ['service', 'bad value']]) {
+    assert.throws(() => parseTypedClientModels(document({ ...method, [String(key)]: value })),
+      (error: unknown) => error instanceof TypedClientModelError && error.pointer === `/models/0/methods/0/${key}`);
+  }
+});

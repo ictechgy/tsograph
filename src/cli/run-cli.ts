@@ -15,6 +15,7 @@ import type { CommandFileSystem } from './file-system.ts';
 import type { GraphOutputSink } from '../graph/graph-output.ts';
 import { graphUsage, impactUsage, reachUsage, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { navigationUsage, runNavigationCommand } from './navigation-command.ts';
+import { changeUsage, runChangeCommand } from './change-command.ts';
 import { openApiUsage, runOpenApiCommand } from './openapi-command.ts';
 import { routesUsage, runRoutesCommand } from './routes-command.ts';
 import { runSchemaCommand, schemaUsage } from './schema-command.ts';
@@ -40,6 +41,7 @@ const commandUsages: ReadonlyMap<string, string> = new Map([
   ['navigation', navigationUsage],
   ['reach', reachUsage],
   ['impact', impactUsage],
+  ['change-impact', changeUsage],
 ]);
 
 /** 최상위 도움말이다. 명령이 늘면 여기에 한 줄씩 추가한다. */
@@ -53,6 +55,7 @@ Commands:
   navigation   Extract configured screen URL mappings with project graph identities
   reach        Symbols reachable from ids (isthmus language-traversal, dependencies)
   impact       Symbols that reach ids (isthmus language-traversal, dependents)
+  change-impact Compare Git base/head or working-tree changes with isolated before/after paths
   help         Show command help
 
 Options:
@@ -83,6 +86,7 @@ export async function runCli(
   if (command === 'navigation') return runNavigationCommand(rest, environment);
   if (command === 'reach') return runReachCommand(rest, environment);
   if (command === 'impact') return runImpactCommand(rest, environment);
+  if (command === 'change-impact') return runChangeCommand(rest, environment);
   return usageFailure(`tsograph: unknown command; run 'tsograph --help' for the list.\n${rootHelp}`);
 }
 

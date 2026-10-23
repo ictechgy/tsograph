@@ -71,7 +71,7 @@ export interface NodeProject {
 export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
   const walk = collectProjectFiles(root, { includeFile: isSourceFileName, excludedDirectories: new Set() });
   const candidates = [...walk.files].filter(([, absolute]) => !isOversized(absolute));
-  const { program, checker, status, deeplyNestedSources } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
+  const { program, checker, status, deeplyNestedSources, excludedSources } = createGraphProgram(root, candidates.map(([, absolute]) => absolute), ts.createProgram, tsconfig);
   const files = new Map<string, ts.SourceFile>();
   const pathBySourceFile = new Map<ts.SourceFile, string>();
   const deeplyNestedFiles: string[] = [];
@@ -96,9 +96,9 @@ export function loadNodeProject(root: string, tsconfig?: string): NodeProject {
       truncated: walk.truncated,
       oversizedFiles: walk.files.size - candidates.length,
       unsafeNames: walk.unsafeNames,
-      unreadableFiles: candidates.length - files.size - deeplyNestedFiles.length,
+      unreadableFiles: candidates.length - files.size - deeplyNestedFiles.length - excludedSources.size,
     },
-    configStatus: status,
+    configStatus: { ...status, ...((walk.skippedLoaders ?? 0) > 0 ? { skippedLoaderEntries: walk.skippedLoaders } : {}) },
     deeplyNestedFiles,
     pathOf: (sourceFile) => pathBySourceFile.get(sourceFile),
     locationOf: (node) => locationOf(node, pathBySourceFile, columns),

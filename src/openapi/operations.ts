@@ -32,6 +32,8 @@ export interface ExtractedOperation {
   readonly method: HttpMethod;
   /** method 키 노드. 사실의 location이 이 위치를 가리킨다. */
   readonly keyNode: ParsedNode;
+  /** 데이터 계약을 명시적으로 요청했을 때 읽는 원문 operation 노드다. */
+  readonly valueNode: ParsedNode;
   readonly operationId: string | undefined;
   readonly prefixes: ServerPrefixes;
 }
@@ -268,6 +270,7 @@ function extractOperation(
     pathKey,
     method,
     keyNode: field.keyNode,
+    valueNode: field.value!,
     operationId: tree.string(tree.get(field.value, 'operationId')),
     prefixes: prefixesFor(context, [operationServers, pathServers], context.rootPrefixes),
   };
