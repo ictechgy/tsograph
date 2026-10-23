@@ -25,7 +25,7 @@ import {
   compilerConfigGaps,
   hasParseErrors,
   isNodeTestPath,
-  loadNodeProject,
+  loadNodeProjects,
   type NodeProject,
   type NodeProjectGaps,
 } from './node/node-project.ts';
@@ -180,7 +180,19 @@ export function extractNavigationRoutes(
   tsconfig?: string,
 ): NavigationFactsDocument {
   const projectRoot = realpathSync(resolve(root));
-  const project = loadNodeProject(projectRoot, tsconfig);
+  const matchedModels = new Set<number>();
+  const documents: NavigationFactsDocument[] = [];
+  for (const project of loadNodeProjects(projectRoot, tsconfig)) documents.push(extractNavigationContext(project, models, toolVersion, generatedAt, matchedModels));
+  const facts = documents.flatMap(document => document.facts);
+  if (facts.length > MAX_NAVIGATION_FACTS) throw new NavigationFactLimitError();
+  const limitations = [...new Set(documents.flatMap(document => document.limitations))];
+  if (matchedModels.size < models.models.length) limitations.push(`navigation-model-coverage: ${models.models.length - matchedModels.size} configured router model(s) matched no exact project factory call`);
+  return { ...documents[0]!, facts, limitations: limitations.sort() };
+}
+
+/** checker와 binding 신원을 한 설정 문맥 안에 둔다. */
+function extractNavigationContext(project: NodeProject, models: RouterModels, toolVersion: string, generatedAt: Date, matchedModels: Set<number>): NavigationFactsDocument {
+  const projectRoot = project.root;
   const productionEntries = [...project.files].filter(([path]) => !isNodeTestPath(path));
   const parseErrors = productionEntries.filter(([, sourceFile]) => hasParseErrors(sourceFile)).length;
   const productionFiles = new Map(productionEntries.filter(([, sourceFile]) => !hasParseErrors(sourceFile)));
@@ -189,7 +201,6 @@ export function extractNavigationRoutes(
   const matches = collectFactoryCalls(project, productionFiles.values(), models, bindings);
   const facts: ScreenRouteFact[] = [];
   const tally = createTally();
-  const matchedModels = new Set<number>();
   const calls = new Map(matches.map((match) => [match.call, match.model.routesArgument]));
   const context: ExtractionContext = {
     project,
@@ -216,7 +227,7 @@ export function extractNavigationRoutes(
   const limitations = buildLimitations(
     project,
     tally,
-    models.models.length - matchedModels.size,
+    0,
     parseErrors,
     project.deeplyNestedFiles.filter((path) => !isNodeTestPath(path)).length,
   );

@@ -16,7 +16,7 @@
 
 import ts from 'typescript';
 
-import { createBoundedResolutionHost } from '../../graph/program.ts';
+import { createBoundedResolutionHost, resolveProgramModule } from '../../graph/program.ts';
 import { resolveHandler } from './handler-ref.ts';
 import type { NodeProject } from './node-project.ts';
 import {
@@ -523,7 +523,7 @@ class RouterInterpreter implements InterpreterContext {
    */
   private resolveRequire(module: string, containingFile: string): ts.SourceFile | undefined {
     this.resolutionOversized = false;
-    const resolved = ts.resolveModuleName(module, containingFile, this.project.program.getCompilerOptions(), this.resolutionHost).resolvedModule;
+    const resolved = resolveProgramModule(this.project.program, module, containingFile, this.resolutionHost);
     if (this.resolutionOversized || resolved === undefined) return undefined;
     const sourceFile = this.project.program.getSourceFile(resolved.resolvedFileName);
     return sourceFile !== undefined && this.isProjectNode(sourceFile) ? sourceFile : undefined;

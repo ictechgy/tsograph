@@ -23,6 +23,11 @@
 
 ### Changed
 
+- graph·routes·navigation·schema·change-impact: 소유 파일의 nearest/reference 설정으로 별칭을 해석한다.
+  같은 타입 의미의 경로 옵션은 파일별로 적용하고 다른 타입 의미는 독립 Program에서 분석한다.
+  문맥 간 import와 중복 소유권은 미해결로 남기며 직접 명시 typed client sink는 dynamic 위치 후보를 보존한다.
+  schema도 같은 entry/import closure를 사용하며 범위 변화와 준비 예산은 `docs/CONFIG-SCOPE.md`에 기록한다.
+
 - schema: Windows의 네이티브 경로와 TypeScript가 정규화한 경로를 같은 스캔 입력으로 조회한다. ORM·드라이버
   import가 전역 이름으로 잘못 분류되어 관계 사실이 누락되던 문제와 이미 분석한 SQL을 미분석으로 다시 세던
   문제를 고친다. 잘못된 tsconfig도 내부 예외 대신 기존 unreadable 한계로 남긴다. 입력 집합 밖 파일은 계속 읽지 않는다.
@@ -39,8 +44,8 @@
   생성자 별칭의 prototype 변경과 외부 인스턴스의 필드 쓰기도 선언 심볼로 연결하며 다른 클래스는 오염시키지 않는다.
 - client model: `base` 생략만 빈 문자열을 기본값으로 사용한다. null·숫자·위험 값은 JSON pointer와 입력 오류를 유지한다.
 - graph·Node/client routes·navigation: tsconfig `files`·`include`·`exclude`로 진입 파일을 고르고 import 의존성 closure와 구분한다.
-  `.pnp.*` loader와 TypeScript 소스 옆 중복 JS 진입을 제외한다. 가까운 설정·project references가 충돌하면 다른 앱의 옵션으로
-  정적 간선을 확정하지 않고 미해결 import와 limitation을 낸다. 서로 다른 설정의 완전한 multi-Program 분석은 제공하지 않는다.
+  `.pnp.*` loader와 TypeScript 소스 옆 중복 JS 진입을 제외한다. 모호한 설정·project reference 소유권은 정적 간선을
+  확정하지 않고 미해결 import와 limitation을 낸다. 분리된 타입 문맥 사이의 타입 API 호환성은 아직 검증하지 않는다.
 - navigation: 입력 배열의 `for...of` children 재귀를 바깥 등록에만 귀속해 중복 dynamic 사실을 줄인다. splat 경로와 상대 자식은
   router 의미가 미확정인 dynamic 사실이다. 명시적 `lazyScreen` 모델의 literal import는 실행 없이 화면 후보를 붙이되 dynamic을
   유지한다. export const 배열은 불변으로 승격하지 않는다. README의 client 미구현 문구를 현재 동작에 맞게 고쳤다.

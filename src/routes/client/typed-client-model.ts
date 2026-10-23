@@ -57,6 +57,35 @@ export interface TypedClientModels {
 export interface TypedClientMatch {
   readonly receiver: ts.Expression;
   readonly method: TypedClientMethod;
+  readonly uncertain?: true;
+}
+
+/**
+ * 별도 타입 문맥 때문에 checker가 거부한 직접 import만 명시 모델 후보로 보존한다.
+ * 로컬 const new 또는 parameter의 명시 타입과 named import만 다루고 런타임 타입·메서드를 확정하지 않는다.
+ */
+export function unresolvedTypedClientMethodOf(call: ts.CallExpression, models: TypedClientModels | undefined,
+  checker: ts.TypeChecker, target: (specifier: string, source: ts.SourceFile) => string | undefined): TypedClientMatch | undefined {
+  const callee = unwrap(call.expression);
+  if (models === undefined || !ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return undefined;
+  const receiver = callee.expression;
+  const declaration = checker.getSymbolAtLocation(receiver)?.valueDeclaration;
+  let imported: ts.Node | undefined;
+  if (declaration !== undefined && ts.isParameter(declaration) && declaration.type !== undefined && ts.isTypeReferenceNode(declaration.type)) imported = declaration.type.typeName;
+  else if (declaration !== undefined && ts.isVariableDeclaration(declaration) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+    && declaration.initializer !== undefined && ts.isNewExpression(declaration.initializer)) imported = declaration.initializer.expression;
+  if (imported === undefined || !ts.isIdentifier(imported)) return undefined;
+  const binding = checker.getSymbolAtLocation(imported)?.declarations?.[0];
+  if (binding === undefined || !ts.isImportSpecifier(binding)) return undefined;
+  const statement = binding.parent.parent.parent;
+  if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) return undefined;
+  const path = target(statement.moduleSpecifier.text, statement.getSourceFile());
+  if (path === undefined) return undefined;
+  const name = binding.propertyName?.text ?? binding.name.text;
+  const matches = models.models.filter(model => model.receiver.path === path && model.receiver.name === name);
+  if (matches.length !== 1) return undefined;
+  const method = matches[0]!.methods.find(method => method.name === callee.name.text);
+  return method === undefined ? undefined : { receiver, method, uncertain: true };
 }
 
 /** 모델 파일 오류다. 원문·경로를 오류에 넣지 않는다. */

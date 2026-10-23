@@ -33,6 +33,8 @@ export interface ScanBoundary {
   readonly excludedDirectories: ReadonlySet<string>;
   /** 열거가 방문할 디렉터리 항목 수 상한이다. 생략하면 걷기와 같은 {@link MAX_VISITED_ENTRIES}다(테스트가 줄여 넣는다). */
   readonly maxVisitedEntries?: number;
+  /** 하나의 소유권 계획에서 모든 config 열거가 함께 쓰는 예산이다. */
+  readonly configVisits?: { visited: number };
 }
 
 /** 경계가 설정 루트에서 뺀 것 중 호출자가 알릴 공백이다. 공백이 없으면 속성을 두지 않는다. */
@@ -81,6 +83,7 @@ export class ConfigRootBoundary {
   readonly #root: string;
   readonly #excluded: ReadonlySet<string>;
   readonly #limit: number;
+  readonly #shared: { visited: number } | undefined;
   /** 디렉터리 절대 경로 → 걷기 정책상 열 수 있는지(메모, 경계 루트는 처음부터 참) */
   readonly #directories = new Map<string, boolean>();
   /** 열거가 돌려준 파일이다. 정책을 통과한 디렉터리의 일반 파일이라 `files` 항목처럼 다시 검사하지 않는다. */
@@ -98,6 +101,7 @@ export class ConfigRootBoundary {
     this.#root = resolve(boundary.root);
     this.#excluded = boundary.excludedDirectories;
     this.#limit = boundary.maxVisitedEntries ?? MAX_VISITED_ENTRIES;
+    this.#shared = boundary.configVisits;
     this.#directories.set(this.#root, true);
   }
 
@@ -206,9 +210,11 @@ export class ConfigRootBoundary {
   #entries(path: string): FileSystemEntries {
     const directory = resolve(this.#root, path);
     if (this.#truncated || !this.#admitsDirectory(directory)) return noEntries;
+    if (this.#shared !== undefined && this.#shared.visited >= this.#limit) { this.#truncated = true; return noEntries; }
     const listed = listDirectory(directory);
     this.#visited += listed.length;
-    if (this.#visited > this.#limit) {
+    if (this.#shared !== undefined) this.#shared.visited += listed.length;
+    if (this.#visited > this.#limit || (this.#shared?.visited ?? 0) > this.#limit) {
       this.#truncated = true;
       return noEntries;
     }

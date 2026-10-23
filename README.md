@@ -109,10 +109,12 @@ document. An analysis that still exceeds the call stack after deeply nested file
 reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
 
-For graph, Next/Node/client routes and navigation, `files`/`include`/`exclude` select compiler entry files.
-Imported dependencies can still enter the analyzed closure even when excluded as entries. Conflicting
-nearest or referenced compiler configurations produce limitations and unresolved imports instead of
-silently using another app's `baseUrl`. Use a package's own project/config for the most precise scope.
+For graph, Next/Node/client routes, navigation and persistence, `files`/`include`/`exclude` select entry files.
+Imported dependencies can still enter the analyzed closure even when excluded as entries. Imports use
+the nearest or explicitly referenced owner configuration: two apps with `baseUrl: "./src"` resolve their
+own aliases, including aliases inside an imported package. Compatible type-checking options share a
+Program; incompatible options use independent Programs and cross-context imports remain unresolved.
+Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 PnP loader files are excluded and never executed. Reading static PnP metadata and zip-contained types
 is not implemented; unresolved dependencies remain unknown. No `.gitignore` interpretation is implied.
 See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
@@ -890,9 +892,10 @@ an invalid explicit config fails rather than silently falling back. A config out
 symlink, is a usage error (`64`) before any analysis (a config inside may still reach a shared config outside through
 `extends`); a missing or unreadable config, or one over 1 MiB, exits `2`. `routes --role client` and `navigation` check `--tsconfig`
 the same way. `--workspace` selects an enclosing
-source boundary and workspace-relative ids for calls across packages. The selected project's compiler
-options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded,
+source boundary and workspace-relative ids for calls across packages. Each owned source uses its nearest
+or referenced configuration. Only compatible type-checking contexts connect; different contexts retain
+unresolved imports and limitations. Server framework discovery still uses the workspace-root manifest.
+Dependency/build directories and symlinks remain excluded,
 also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `files` select: those roots follow the same walk
 policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
 generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include

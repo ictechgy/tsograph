@@ -38,15 +38,18 @@ import {
   type CallGraph,
   type CallStatistics,
   DISPATCH_MODES,
+  EDGE_EVIDENCE_ORDER,
   type DispatchMode,
   type GraphNode,
+  type GraphEdge,
   GraphStore,
   UNRESOLVED_REASONS,
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
+import { scopeIdOf } from './symbol-ids.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
 const MAX_VERCEL_CONFIG_BYTES = 1024 * 1024;
@@ -143,9 +146,10 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const inputs = collectGraphInputs(project, routes.extraction);
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
-  const { program, checker, status, deeplyNestedSources, excludedSources } = createGraphProgram(
-    selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config, boundary,
-  );
+  const results: CallGraph[] = [];
+  for (const { program, checker, status, deeplyNestedSources, excludedSources, ownedSources } of createGraphPrograms(
+    selectedProject, [...inputs.sources.values(), ...inputs.declarations], config, boundary,
+  )) {
   const files = nodeFiles(program, inputs.sources);
   const deeplyNestedFiles = [...inputs.sources].filter(([, absolute]) => deeplyNestedSources.has(resolve(absolute))).map(([path]) => path);
   const deeplyNestedInputs = deeplyNestedSources.size - deeplyNestedFiles.length + (status.deeplyNestedCompilerInputs ?? 0);
@@ -160,7 +164,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
     || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
-    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true;
+    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true;
   const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
@@ -188,11 +192,41 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const environmentLimits: string[] = [...(routes.extraction.scopeLimitations ?? [])];
   if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loader execution and PnP zip dependency resolution are not performed`);
-  if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker and Next convention entry scope use the selected project config while Node backend route discovery uses workspace-root configuration; separate package options are not merged');
+  if (options.workspace !== undefined) environmentLimits.push('workspace-config: sources use their nearest or referenced compiler config; incompatible type-checking contexts are separate and cross-context imports remain unresolved');
   if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
   const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
   const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
-  return { nodes, edges: analysis.store.edges(), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } };
+  const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
+  const ownedIds = new Set(ownedNodes.map(node => node.id));
+  results.push({ nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } });
+  }
+  return mergeContextGraphs(results);
+}
+
+/** 서로 다른 checker의 객체를 버리고 각 소유 문맥의 문자열 결과만 합친다. */
+function mergeContextGraphs(graphs: readonly CallGraph[]): CallGraph {
+  if (graphs.length === 1) return graphs[0]!;
+  const nodes: GraphNode[] = [], edges: GraphEdge[] = [];
+  const calls = createCallStatistics();
+  for (const graph of graphs) {
+    for (const node of graph.nodes) nodes.push(node);
+    for (const edge of graph.edges) edges.push(edge);
+    calls.resolved += graph.statistics.calls.resolved;
+    calls.external += graph.statistics.calls.external;
+    calls.missingDependencies += graph.statistics.calls.missingDependencies;
+    for (const reason of UNRESOLVED_REASONS) calls.unresolved[reason] += graph.statistics.calls.unresolved[reason];
+    for (const key of ['bound', 'boundPartial', 'candidate', 'candidatePartial', 'overBudget'] as const) calls.dispatch[key] += graph.statistics.calls.dispatch[key];
+    for (const kind of ['identifier', 'property', 'element', 'other'] as const) {
+      const count = graph.statistics.calls.indirectSites?.[kind];
+      if (count !== undefined) { calls.indirectSites ??= {}; calls.indirectSites[kind] = (calls.indirectSites[kind] ?? 0) + count; }
+    }
+  }
+  const unique = (lines: readonly string[]) => [...new Set(lines)].sort(compareStrings);
+  return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
+    edges: edges.sort((a, b) => compareStrings(a.from, b.from) || compareStrings(a.to, b.to) || EDGE_EVIDENCE_ORDER.indexOf(a.evidence) - EDGE_EVIDENCE_ORDER.indexOf(b.evidence)),
+    limitations: unique(graphs.flatMap(graph => graph.limitations)),
+    limitationsByMode: Object.fromEntries(DISPATCH_MODES.map(mode => [mode, unique(graphs.flatMap(graph => graph.limitationsByMode[mode]))])) as Record<DispatchMode, string[]>,
+    statistics: { files: graphs.reduce((sum, graph) => sum + graph.statistics.files, 0), calls } };
 }
 
 /**
@@ -315,6 +349,18 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const gaps: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
   const pending: PendingDispatch[] = [];
   for (const [path, sourceFile] of files) {
+    if (configImportIsBlocked(program, sourceFile.fileName)) {
+      // 소유 설정이 모호하면 선언은 남기되 임의 checker의 호출·alias 간선을 확정하지 않는다.
+      const unresolved = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+          calls.unresolved['unresolved-import']++;
+          store.countUnresolved(scopeIdOf(node, path), undefined);
+        }
+        ts.forEachChild(node, unresolved);
+      };
+      unresolved(sourceFile);
+      continue;
+    }
     const edgeResolver = separateTests && !testPaths.has(path) ? productionResolver : resolver;
     collectFileEdges({ checker, store, resolver: edgeResolver, overrides, calls, gaps, pending }, path, sourceFile);
     classes.get(path)!.forEach((declaration) => addClassEdges(store, resolver, path, declaration));
@@ -325,7 +371,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
     unresolvedExports: linkExportNodes(store, checker, (sourceFile) => {
       const path = pathByFile.get(sourceFile);
       return separateTests && path !== undefined && !testPaths.has(path) ? productionResolver : resolver;
-    }, pendingExports),
+    }, pendingExports.filter(entry => !configImportIsBlocked(program, entry.name.getSourceFile().fileName))),
   };
 }
 

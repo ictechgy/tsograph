@@ -15,9 +15,10 @@
 
 import { basename, extname, isAbsolute, resolve } from 'node:path';
 
-import type ts from 'typescript';
+import ts from 'typescript';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
+import { configRootGaps, sourceConfigPlan } from '../graph/program.ts';
 import { ClientProvenance, type ModuleHandle, PrismaModuleMatcher } from './client-provenance.ts';
 import { commitUsage, recordUsage, type UsageCounts, type UsageRecord } from './client-usage.ts';
 import { formatBreakdown, modulePackages, observeDbPackages, type PackageObservations } from './db-packages.ts';
@@ -72,8 +73,10 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
   };
   const relational = isRelational(project.catalog);
   if (relational && project.catalog !== undefined) emitSchemaFacts(project.catalog, sink);
-  const sources = readSources(root, project, reader);
-  const resolver = new ModuleResolver(root, new Set(sources.map((source) => source.absolutePath)));
+  const candidates = readSources(root, project, reader);
+  const ownership = sourceConfigPlan(root, candidates.map(source => source.absolutePath));
+  const resolver = new ModuleResolver(root, new Set(candidates.map((source) => source.absolutePath)), ownership);
+  const sources = persistenceSourceClosure(candidates, ownership.entries, resolver);
   const provenance = new ClientProvenance(resolver, new PrismaModuleMatcher(project.outputDirectories, resolver));
   const usage: UsageStage = { provenance, catalog: relational ? project.catalog : 'non-relational' };
   const entries = parseSources(sources, usage, counts);
@@ -88,7 +91,30 @@ export function extractPersistenceFacts(root: string): ExtractionResult {
     project, counts, facts, sink, reader, packages: observeDbPackages(entries.map((entry) => entry.packages)),
     unreadableConfigs: resolver.unreadableConfigs, provenanceTruncated: provenance.truncated, relational, ormCounts: orm.counts,
   });
-  return { facts, limitations, sourceModifiedAt: reader.newestModifiedAt };
+  const scopeLimits = configRootGaps({ ...ownership.status,
+    contextBoundaryImports: resolver.contextBoundaryImports.size,
+    ...(sources.length < candidates.length ? { excludedSourceRoots: candidates.length - sources.length, importedOutsideRoots: sources.filter(source => !ownership.entries.has(source.absolutePath)).length } : {}) }, 'persistence uses');
+  if (ownership.status.configUnreadable) scopeLimits.push('compiler config could not be read; persistence aliases may be unresolved');
+  return { facts, limitations: [...limitations, ...scopeLimits.map(line => 'persistence-config: ' + line)], sourceModifiedAt: reader.newestModifiedAt };
+}
+
+/** 진입점과 정적 import/require 의존성만 고른다. 제외된 파일을 실행하거나 디스크에서 다시 읽지 않는다. */
+function persistenceSourceClosure(candidates: readonly SourceInput[], entries: ReadonlySet<string>, resolver: ModuleResolver): SourceInput[] {
+  const byPath = new Map(candidates.map(source => [source.absolutePath, source]));
+  const selected = new Set<string>();
+  const pending = [...entries];
+  while (pending.length > 0) {
+    const path = pending.pop()!;
+    if (selected.has(path)) continue;
+    const source = byPath.get(path);
+    if (source === undefined) continue;
+    selected.add(path);
+    for (const imported of ts.preProcessFile(source.text, true, true).importedFiles) {
+      const dependency = resolver.resolve(imported.fileName, path);
+      if (dependency !== undefined && !selected.has(dependency)) pending.push(dependency);
+    }
+  }
+  return candidates.filter(source => selected.has(source.absolutePath));
 }
 
 /** 읽은 소스 파일 하나다. */
