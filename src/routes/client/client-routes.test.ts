@@ -652,6 +652,28 @@ test('modeled class-field and prototype method changes retain dynamic sites with
   assert.deepEqual(prototype.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/other', false]]);
 });
 
+test('constructor aliases and external instance field writes keep known typed sinks dynamic', async () => {
+  const model = { format: 'http-client-models', version: 1, models: ['Http', 'Other'].map((name) => ({
+    receiver: { kind: 'class', path: 'src/client.ts', name }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  })) };
+  const prefix = 'class Http { get(path: string) { return path; } } class Other { get(path: string) { return path; } }';
+  for (const source of [
+    `${prefix} const C = Http; C.prototype.get = (path: string) => path;
+      const http = new Http(); http.get('/affected'); const other = new Other(); other.get('/control');`,
+    `${prefix} class Wrapper { http = new Http(); run() { return this.http.get('/affected'); } }
+      const w = new Wrapper(); w.http.get = (path: string) => path; w.run();
+      const other = new Other(); other.get('/control');`,
+  ]) {
+    const doc = await scanTyped(source, model);
+    assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/control', false]]);
+    assert.ok(doc.limitations.some((value) => value.includes('client-receiver-uncertainty: 1') && value.includes('src/client.ts:')));
+  }
+  const clean = await scanTyped(`${prefix} const C = Other; C.prototype.get = (path: string) => path;
+    class Wrapper { http = new Http(); run() { return this.http.get('/control'); } }
+    const w = new Wrapper(); w.run();`, model);
+  assert.deepEqual(clean.facts.map((fact) => [fact.channel, fact.dynamic]), [['/control', false]]);
+});
+
 test('inherited prototype changes and whole-this escape keep modeled fields dynamic', async () => {
   const model = { format: 'http-client-models', version: 1, models: ['Http', 'Child', 'Other'].map((name) => ({
     receiver: { kind: 'class', path: 'src/client.ts', name }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],

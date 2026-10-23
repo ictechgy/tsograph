@@ -26,6 +26,7 @@
 - routes client: primitive 반환값을 저장하는 무관한 클래스 필드 변경이 전체 mutation 분석을 미완으로 만들지 않는다.
   실제 receiver·baseURL·method·alias 변경과 unknown escape는 계속 dynamic으로 남긴다. 알려진 typed sink는 변경·escape
   뒤에도 위치를 보존하며 모델 동사는 runtime 보장이 아닌 선언 근거다. 미완 원인 수와 상대 위치, 구문 오류 위치를 알린다.
+  생성자 별칭의 prototype 변경과 외부 인스턴스의 필드 쓰기도 선언 심볼로 연결하며 다른 클래스는 오염시키지 않는다.
 - client model: `base` 생략만 빈 문자열을 기본값으로 사용한다. null·숫자·위험 값은 JSON pointer와 입력 오류를 유지한다.
 - graph·Node/client routes·navigation: tsconfig `files`·`include`·`exclude`로 진입 파일을 고르고 import 의존성 closure와 구분한다.
   `.pnp.*` loader와 TypeScript 소스 옆 중복 JS 진입을 제외한다. 가까운 설정·project references가 충돌하면 다른 앱의 옵션으로

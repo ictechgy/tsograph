@@ -1178,6 +1178,11 @@ export class ClientValues {
     if (root !== undefined && this.mutated.has(root)) return true;
     const member = symbolAt(this.project.checker, unwrap(expression));
     if (member !== undefined && this.#mutatedThisFields.has(resolveAlias(this.project.checker, member))) return true;
+    if (member?.declarations?.some((declaration) => {
+      if (!ts.isPropertyDeclaration(declaration)) return false;
+      const declared = symbolAt(this.project.checker, declaration.name);
+      return declared !== undefined && this.#mutatedThisFields.has(declared);
+    }) === true) return true;
     const pending = [this.project.checker.getTypeAtLocation(expression)];
     const visited = new Set<ts.Type>();
     while (pending.length > 0) {
@@ -1199,10 +1204,26 @@ export class ClientValues {
     const members: ts.Symbol[] = [];
     while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const symbol = symbolAt(this.project.checker, node);
-      if (symbol !== undefined) members.push(resolveAlias(this.project.checker, symbol));
+      if (symbol !== undefined) {
+        const member = resolveAlias(this.project.checker, symbol);
+        members.push(member);
+        // w.http의 쓰기와 메서드 안 this.http는 같은 class 필드 선언을 가리킨다.
+        // 인스턴스별 별칭 구분은 증명하지 않으므로 그 선언의 수신자를 보수적으로 표시한다.
+        for (const declaration of member.declarations ?? []) {
+          if (!ts.isPropertyDeclaration(declaration) || !ts.isClassLike(declaration.parent)) continue;
+          this.#mutatedThisFields.add(member);
+          // 인스턴스 접근의 transient 심볼과 this 접근은 선언은 같아도 심볼 객체가 다를 수 있다.
+          const declared = symbolAt(this.project.checker, declaration.name);
+          if (declared !== undefined) this.#mutatedThisFields.add(declared);
+        }
+      }
       if (accessKey(node) === 'prototype') {
         const owner = symbolAt(this.project.checker, node.expression);
         if (owner !== undefined) this.#mutatedPrototypes.add(resolveAlias(this.project.checker, owner));
+        // const C = Http의 C는 변수 심볼이지만 C.prototype의 타입은 Http 인스턴스다.
+        // 이름이나 initializer 경로를 추측하지 않고 컴파일러가 연결한 원형 타입도 기록한다.
+        const instance = this.project.checker.getTypeAtLocation(node).getSymbol();
+        if (instance !== undefined) this.#mutatedPrototypes.add(resolveAlias(this.project.checker, instance));
       }
       node = unwrap(node.expression);
     }
