@@ -196,7 +196,8 @@ export class ModuleResolver {
    */
   private parseConfig(path: string): ResolutionConfig | undefined {
     const refusedBefore = this.refusedReads;
-    const read = ts.readConfigFile(path, (file) => this.readFile(file));
+    // 구문 오류 diagnostic도 TypeScript 내부의 '/' 파일 이름과 일치해야 한다(Windows 포함).
+    const read = ts.readConfigFile(path.split(sep).join('/'), (file) => this.readFile(resolve(file)));
     const parsed = read.error === undefined ? ts.parseJsonConfigFileContent(read.config, this.configHost(), dirname(path)) : undefined;
     if (parsed === undefined || this.refusedReads !== refusedBefore) {
       this.unreadableConfigs++;

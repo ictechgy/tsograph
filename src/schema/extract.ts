@@ -13,7 +13,7 @@
  * 단계가 끝날 때까지는 트리를 모두 붙잡는다(그 단계의 최대 메모리는 그대로다).
  */
 
-import { basename, extname, isAbsolute } from 'node:path';
+import { basename, extname, isAbsolute, resolve } from 'node:path';
 
 import type ts from 'typescript';
 
@@ -290,7 +290,8 @@ function ormStage(entries: readonly SourceEntry[], input: Pick<OrmExtractionInpu
   });
   const consumed = new Map<string, Set<ts.Node>>();
   for (const node of orm.consumed) {
-    const path = node.getSourceFile().fileName;
+    // Program이 파일 이름을 '/'로 바꿔도 네이티브 경로인 SourceEntry와 같은 소비 기록을 쓴다.
+    const path = resolve(node.getSourceFile().fileName);
     const nodes = consumed.get(path) ?? new Set<ts.Node>();
     consumed.set(path, nodes.add(node));
   }
