@@ -46,6 +46,9 @@ owned import·default export·재내보내기·const 별칭을 따라 공유 배
 실행 없이 그 fresh 생성식을 읽는다. const 함수 별칭·import·재내보내기를 최대 64단까지 따른다. 추가 문장·매개변수·
 async/generator·호출·재귀·전개·getter/속성 읽기·공유 배열 반환은 지원하지 않는다. 생성식 안의 경로·화면·children은
 기존 binding/mutation 검사를 따르며, 반환값을 별도로 공유하거나 escape시키면 static으로 확정하지 않는다.
+fresh factory의 children 슬롯은 중첩 literal 배열만 받는다. 공유 children 별칭은 다른 호출의 반환값으로 탈출·변경될
+수 있으므로 무변이처럼 보여도 `navigation-factory-coverage:`와 null/dynamic 사실을 남긴다. 호출마다 독립 생성되는
+중첩 literal 배열은 이 공유 제한에 해당하지 않는다.
 `navigation-factory-evidence:`는 생성식만 읽었으며 함수 실행과 런타임 등록 동작을 검증하지 않았음을 남긴다.
 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스(생성·압축 코드 등)는 그 파일만 Program에서 빼고
 `navigation-source-coverage:`로 센다(production 소스만). 그래도 분석이 호출 스택을 넘기면 부분 문서 없이 코드 2이며,

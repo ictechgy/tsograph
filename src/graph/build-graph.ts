@@ -45,7 +45,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphProgram, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
@@ -172,7 +172,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     appDirectory: routes.extraction.routerDirectories.appDirectory,
     pagesDirectory: routes.extraction.routerDirectories.pagesDirectory,
     pageExtensions: routes.pageExtensions,
-    sourceEntries: new Set(program.getRootFileNames().map(path => relative(project, path).replaceAll('\\', '/'))),
+    sourceEntries: new Set(program.getRootFileNames().map(path => sourceEntryKey(relative(project, path).replaceAll('\\', '/')))),
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);

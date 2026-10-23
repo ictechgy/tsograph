@@ -125,3 +125,23 @@ test('factory 재대입·추가 인자·순환 alias·객체 접근·전개는 f
     'src/main.ts': `import {registerRoutes} from './register'; import {make} from './factory'; registerRoutes(${call});`,
   }, root => assert.deepEqual(extractNavigationRoutes(root, model, 'test', new Date(0)).facts.map(f => [f.urlTemplate, f.dynamic]), [[null, true]], factory));
 });
+
+test('fresh factory가 공유 children을 반환하면 다른 호출의 변경·escape를 정적으로 배제하지 않는다', () => {
+  for (const use of ['', "const earlier=make(); earlier[0].children[0].path='changed';", 'opaque(make());']) fixture({
+    'src/main.ts': `import {registerRoutes} from './register'; import {Screen} from './Screen';
+      const children=[{path:'child',screen:Screen}];
+      function make(){return [{path:'/parent',screen:Screen,children:children}];}
+      declare function opaque(x:unknown):void; ${use} registerRoutes(make());`,
+  }, root => {
+    const doc = extractNavigationRoutes(root, model, 'test', new Date(0));
+    assert.deepEqual(doc.facts.map(f => [f.urlTemplate, f.dynamic]), [[null, true]], use);
+    assert.ok(doc.limitations.some(l => l.includes('non-literal children') && l.includes('cross-call')));
+  });
+  fixture({
+    'src/main.ts': `import {registerRoutes} from './register'; import {Screen} from './Screen';
+      function make(){return [{path:'/parent',screen:Screen,children:[{path:'child',screen:Screen}]}];}
+      const earlier=make(); earlier[0].children[0].path='changed'; registerRoutes(make());`,
+  }, root => assert.deepEqual(extractNavigationRoutes(root, model, 'test', new Date(0)).facts.map(f => [f.urlTemplate, f.dynamic]), [
+    ['/parent', false], ['/parent/child', false],
+  ]));
+});

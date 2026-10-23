@@ -34,7 +34,7 @@ import { TOO_DEEP } from '../schema/syntax-depth.ts';
 import { parseSource, scriptKindOf, type SourcePosition } from './source-file.ts';
 import { readTextFile } from './text-file.ts';
 import { exportBindingId } from '../graph/symbol-ids.ts';
-import { selectSourceEntryFiles } from '../graph/program.ts';
+import { selectSourceEntryFiles, sourceEntryKey } from '../graph/program.ts';
 import { compilerConfigGaps } from './node/node-project.ts';
 
 /** App Router route handler가 받을 수 있는 method다(`next/dist/server/web/http.js`). */
@@ -133,7 +133,7 @@ export async function extractNextRoutes(input: NextRoutesInput): Promise<NextRou
   const scope = selectSourceEntryFiles(input.compilerScope?.root ?? input.project,
     candidates.map(file => resolve(input.project, file)), input.compilerScope?.tsconfig,
     { root: input.project, excludedDirectories: new Set() });
-  const included = (file: string): boolean => scope.files.has(resolve(input.project, file));
+  const included = (file: string): boolean => scope.files.has(sourceEntryKey(resolve(input.project, file)));
   const omitted = candidates.filter(file => !included(file)).length;
   const scopeLimitations = candidates.length === 0 ? []
     : compilerConfigGaps(scope.status, 'Next convention discovery').map(line => `route-coverage: ${line}`);

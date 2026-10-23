@@ -20,6 +20,7 @@ import type { RouteDeclFact } from '../exchange/bridge-facts.ts';
 import { collectModuleExports } from '../routes/module-exports.ts';
 import type { EntryKind, GraphStore } from './graph-model.ts';
 import { exportBindingId, scopeIdOf } from './symbol-ids.ts';
+import { sourceEntryKey } from './program.ts';
 
 /** App Router에서 페이지를 그리는 특수 파일 이름이다(Next.js 16 file conventions). */
 const APP_PAGE_FILES: ReadonlySet<string> = new Set([
@@ -139,7 +140,7 @@ function markFileEntries(store: GraphStore, path: string, sourceFile: ts.SourceF
   const exports = exportIds(path, sourceFile);
   if (hasDirective(sourceFile.statements, 'use server')) exports.forEach((id) => store.markEntry(id, 'server-action'));
   if (sourceFile.text.includes('use server')) markInlineServerActions(store, path, sourceFile);
-  if (input.sourceEntries !== undefined && !input.sourceEntries.has(path)) return;
+  if (input.sourceEntries !== undefined && !input.sourceEntries.has(sourceEntryKey(path))) return;
   const role = fileRole(path, input);
   if (role === undefined) return;
   for (const [name, id] of exports) {

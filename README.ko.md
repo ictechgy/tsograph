@@ -107,7 +107,8 @@ navigation은 owned import·재내보내기·const 별칭을 거친 공유 route
 외부 소비자의 변경 가능성 때문에 dynamic으로 유지한다. 관찰한 쓰기·unknown escape는 미상 dynamic 사실로 남긴다.
 무인자 owned factory가 단일 fresh literal 배열을 호출·효과 없이 반환하는 경우만 정적 생성 근거로 읽는다.
 공유 배열 반환·효과/재귀가 있는 factory·`Object.freeze`는 불변 증명이 아니다. factory·PnP·lazy loader를 실행하지
-않으며 교환 필드·버전은 바꾸지 않는다.
+않으며 교환 필드·버전은 바꾸지 않는다. factory children은 중첩 literal 배열만 받으며, 공유 별칭은 이전 반환값을
+통해 변경될 수 있어 미상으로 남긴다. 진입 파일 비교는 파일시스템의 대소문자 구분을 따르고 별개 파일은 합치지 않는다.
 
 ## 요구 사항
 

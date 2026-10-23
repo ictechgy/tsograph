@@ -259,6 +259,7 @@ interface ExtractionTally {
   lazyScreen: number;
   exportedCandidates: number;
   freshFactories: number;
+  sharedFactoryChildren: number;
 }
 
 type CompositeSafety = 'stable' | 'exported' | 'mutated' | 'unproven';
@@ -288,6 +289,7 @@ function createTally(): ExtractionTally {
     lazyScreen: 0,
     exportedCandidates: 0,
     freshFactories: 0,
+    sharedFactoryChildren: 0,
   };
 }
 
@@ -457,7 +459,7 @@ function extractArray(
     addDynamicFact(context, expression);
     return true;
   }
-  const resolved = routeArray(expression, context, allowedReference);
+  const resolved = routeArray(expression, context, allowedReference, model);
   if (resolved.kind !== 'array') {
     if (resolved.kind === 'mutated') context.tally.mutatedRouteContainer += 1;
     else if (resolved.kind === 'unproven') context.tally.unprovenRouteContainer += 1;
@@ -488,6 +490,7 @@ function routeArray(
   expression: ts.Expression,
   context: ExtractionContext,
   allowedReference: ts.Expression,
+  model: RouterModel,
   depth = 0,
   seen = new Set<ts.Node>(),
 ): ArrayResolution {
@@ -496,7 +499,7 @@ function routeArray(
   const inner = skipWrappers(expression);
   if (ts.isArrayLiteralExpression(inner)) return { kind: 'array', value: inner, exported: false };
   if (ts.isCallExpression(inner)) {
-    const value = freshFactoryArray(inner, context);
+    const value = freshFactoryArray(inner, model, context);
     if (value === undefined) return { kind: 'unknown' };
     context.tally.freshFactories++;
     return { kind: 'array', value, exported: false };
@@ -509,19 +512,19 @@ function routeArray(
     if (context.project.pathOf(exported.getSourceFile()) === undefined || exported.isExportEquals) return { kind: 'unknown' };
     const safety = compositeSafety(symbol, exported, inner, allowedReference, context);
     if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
-    const resolved = routeArray(exported.expression, context, exported.expression, depth + 1, seen);
+    const resolved = routeArray(exported.expression, context, exported.expression, model, depth + 1, seen);
     return resolved.kind === 'array' ? { ...resolved, exported: true } : resolved;
   }
   const binding = declaredConstBinding(inner, context);
   if (binding === undefined || context.project.pathOf(binding.declaration.getSourceFile()) === undefined) return { kind: 'unknown' };
   const safety = compositeSafety(binding.symbol, binding.declaration, inner, allowedReference, context);
   if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
-  const resolved = routeArray(binding.declaration.initializer!, context, binding.declaration.initializer!, depth + 1, seen);
+  const resolved = routeArray(binding.declaration.initializer!, context, binding.declaration.initializer!, model, depth + 1, seen);
   return resolved.kind === 'array' ? { ...resolved, exported: resolved.exported || safety === 'exported' } : resolved;
 }
 
 /** 무인자 project factory의 단일 fresh literal 반환만 읽는다. body·loader를 실행하거나 임의 호출을 평가하지 않는다. */
-function freshFactoryArray(call: ts.CallExpression, context: ExtractionContext): ts.ArrayLiteralExpression | undefined {
+function freshFactoryArray(call: ts.CallExpression, model: RouterModel, context: ExtractionContext): ts.ArrayLiteralExpression | undefined {
   if (call.arguments.length !== 0 || call.questionDotToken !== undefined) return undefined;
   let expression = skipWrappers(call.expression);
   const seen = new Set<ts.Declaration>();
@@ -553,18 +556,24 @@ function freshFactoryArray(call: ts.CallExpression, context: ExtractionContext):
       : body;
     if (returned === undefined) return undefined;
     const value = skipWrappers(returned);
-    return ts.isArrayLiteralExpression(value) && freshLiteralConstruction(value) ? value : undefined;
+    return ts.isArrayLiteralExpression(value) && freshLiteralConstruction(value, model, context) ? value : undefined;
   }
   return undefined;
 }
 
 /** fresh 배열 생성 과정에서 실행될 수 있는 호출·getter·전개·계산식은 지원하지 않는다. 함수 본문은 값으로도 받지 않는다. */
-function freshLiteralConstruction(node: ts.Node): boolean {
+function freshLiteralConstruction(node: ts.Node, model: RouterModel, context: ExtractionContext): boolean {
   const pending = [node];
   let count = 0;
   while (pending.length > 0) {
     const item = pending.pop()!;
     if (++count > MAX_BINDING_NODES) return false;
+    // 바깥 배열만 fresh여도 children 별칭은 여러 factory 호출의 반환값 사이에 공유될 수 있다.
+    if (model.childrenProperty !== undefined && (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item))
+      && propertyName(item.name) === model.childrenProperty) {
+      const children = ts.isPropertyAssignment(item) ? skipWrappers(item.initializer) : item.name;
+      if (!ts.isArrayLiteralExpression(children)) { context.tally.sharedFactoryChildren++; return false; }
+    }
     if (ts.isCallExpression(item) || ts.isNewExpression(item) || ts.isTaggedTemplateExpression(item)
       || ts.isSpreadElement(item) || ts.isSpreadAssignment(item) || ts.isComputedPropertyName(item)
       || ts.isPropertyAccessExpression(item) || ts.isElementAccessExpression(item) || ts.isFunctionLike(item)
@@ -943,6 +952,7 @@ function buildLimitations(
   if (tally.lazyScreen > 0) limitations.push(`navigation-lazy-evidence: ${tally.lazyScreen} screen candidate(s) resolved from an explicit lazy model and literal import; loader execution, module side effects and runtime selection are not assessed; facts remain dynamic`);
   if (tally.exportedCandidates > 0) limitations.push(`navigation-binding-coverage: ${tally.exportedCandidates} exported route container initializer(s) recovered through owned import/export/const aliases; observed writes and escapes were checked within the selected source program, but external consumers and omitted sources are not assessed; path/screen evidence remains dynamic and is not an immutability proof`);
   if (tally.freshFactories > 0) limitations.push(`navigation-factory-evidence: ${tally.freshFactories} zero-argument owned factory call(s) have a single fresh literal array return without evaluated calls or effects; only the returned construction was read, factory execution and runtime registration are not assessed`);
+  if (tally.sharedFactoryChildren > 0) limitations.push(`navigation-factory-coverage: ${tally.sharedFactoryChildren} factory construction(s) reference non-literal children containers; cross-call sharing, mutation and escape are not proven; no static factory expansion`);
   if (unmatchedModels > 0) {
     limitations.push(
       `navigation-model-coverage: ${unmatchedModels} configured router model(s) matched no exact project factory call`,

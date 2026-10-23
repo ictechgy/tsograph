@@ -125,7 +125,10 @@ shared route arrays, but keeps them dynamic because omitted sources and external
 them. Observed writes or unknown escapes retain unknown dynamic facts. Only a zero-argument owned
 factory with a single fresh literal array return and no evaluated calls/effects can supply static
 construction evidence. Shared returns, effectful/recursive factories and `Object.freeze` are not proof
-of immutability. No factory, PnP loader or lazy loader is executed; exchange fields and versions stay unchanged.
+of immutability. Factory children must be nested literal arrays: shared child aliases remain unknown
+because earlier factory results may expose them to mutation. Entry identity respects filesystem casing;
+distinct files on case-sensitive systems remain distinct. No factory, PnP loader or lazy loader is executed;
+exchange fields and versions stay unchanged.
 
 ## Requirements
 

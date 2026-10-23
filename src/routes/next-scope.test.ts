@@ -98,3 +98,32 @@ test('Next 범위 읽기도 캡처 밖 extends 입력을 동결된 것으로 취
     await assert.rejects(withFrozenInputs(capture, () => routes(capture)), /outside the captured root/u);
   });
 });
+
+test('Next entry identity follows filesystem casing without merging distinct case-sensitive files', async () => {
+  await fixture({
+    'tsconfig.json': '{"compilerOptions":{"types":[],"noLib":true},"files":["app/items/route.ts","app/page.tsx"]}',
+    'app/items/route.ts': 'export function GET(){}',
+    'app/page.tsx': 'export default function Page(){return null;}',
+    'app/other/route.ts': 'export function GET(){}',
+  }, async root => {
+    const check = async () => {
+      const doc = await routes(root);
+      assert.deepEqual(doc.facts.map(f => f.channel), ['/items']);
+      const graph = await buildCallGraph(root, createNodeFileSystem());
+      assert.ok(graph.nodes.find(n => n.id === 'app/items/route.ts#GET')?.entries?.includes('route-handler'));
+      assert.ok(graph.nodes.find(n => n.id === 'app/page.tsx#Page')?.entries?.includes('page'));
+    };
+    await check();
+    if (process.platform === 'win32') {
+      writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"types":[],"noLib":true},"files":["APP/items/route.ts","APP/page.tsx"]}');
+      await check();
+    } else if (!existsSync(join(root, 'APP/items/route.ts'))) {
+      mkdirSync(join(root, 'APP/items'), { recursive: true });
+      writeFileSync(join(root, 'APP/items/route.ts'), 'export function POST(){}');
+      writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"types":[],"noLib":true},"files":["APP/items/route.ts"]}');
+      assert.deepEqual((await routes(root)).facts, []);
+      const graph = await buildCallGraph(root, createNodeFileSystem());
+      assert.ok(!graph.nodes.some(n => n.entries?.includes('route-handler')));
+    }
+  });
+});

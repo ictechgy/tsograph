@@ -111,8 +111,8 @@ export function createGraphProgram(
   const { config, candidates, ownership, rootNames } = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
   const options = analysisOptions(config.options);
   const candidateSet = new Set(candidates);
-  const roots = new Set(rootNames);
-  const nonRoots = candidates.filter((path) => !roots.has(path));
+  const roots = new Set(rootNames.map(sourceEntryKey));
+  const nonRoots = candidates.filter((path) => !roots.has(sourceEntryKey(path)));
   const host = ts.createCompilerHost(options, true);
   // 설정이 없거나 읽지 못하면 TypeScript는 자동 타입 루트를 host의 현재 디렉터리와 그 조상의 `node_modules/@types`에서
   // 찾는다. 실행 위치 대신 프로젝트 루트를 주어 tsconfig가 루트에 있을 때와 같은 타입을 쓴다. 설정이 있으면 TypeScript가
@@ -189,9 +189,14 @@ function prepareProgramEntries(root: string, sourcePaths: readonly string[], exp
 export function selectSourceEntryFiles(root: string, candidates: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): { files: ReadonlySet<string>; status: ProgramConfigStatus } {
   const { config, ownership, rootNames } = prepareProgramEntries(root, candidates, explicitConfig, boundary);
-  return { files: new Set(rootNames), status: { ...config.status,
+  return { files: new Set(rootNames.map(sourceEntryKey)), status: { ...config.status,
     ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
   } };
+}
+
+/** TypeScript host가 대소문자를 구분하지 않는 파일시스템에서만 entry 비교 키를 정규화한다. 표시 경로는 바꾸지 않는다. */
+export function sourceEntryKey(path: string): string {
+  return ts.sys.useCaseSensitiveFileNames ? path : path.toLowerCase();
 }
 
 /**
