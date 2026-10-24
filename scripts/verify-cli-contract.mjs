@@ -297,11 +297,22 @@ function verifyStaticPnp() {
       verify(result.status === 0, `static PnP ${inline ? 'inline' : 'JSON'} CLI success`);
       const document = JSON.parse(result.stdout);
       verify(document.statistics.calls.external === 3 && document.statistics.calls.missingDependencies === 0 && document.statistics.calls.unresolved.untyped === 0, 'static PnP ZIP declarations actually resolve');
-      verify(!document.limitations.some(line => line.includes('pnp-dependencies:')), 'static PnP valid metadata is usable');
+      const pnpIssues = [...new Set(document.limitations.filter(line => line.startsWith('pnp-dependencies:'))
+        .flatMap(line => line.match(/\b(?:metadata-invalid|ignore-pattern-unsupported|ambiguous-owner|outside-boundary|archive-invalid|archive-budget|input-unreadable|missing-dependency|locator-mismatch)\b/gu) ?? []))].sort();
+      verify(!document.limitations.some(line => line.includes('pnp-dependencies:')), `static PnP valid metadata is usable (issue codes: ${pnpIssues.join(',') || 'none'})`);
       verify(!existsSync(join(root, 'PNP_EXECUTED')), 'PnP loader not executed');
       const metadata = JSON.parse(readFileSync(join(fixture, '.pnp.data.json'), 'utf8'));
       const client = metadata.packageRegistryData.find(([name]) => name === '@fixture/client')[1].find(([ref]) => ref.startsWith('virtual:'))[1];
       const archive = client.packageLocation.replace(/__virtual__\/[^/]+\/0\//u, '').split('.zip/')[0] + '.zip';
+      const originalSource = readFileSync(join(root, 'src/main.ts'));
+      mkdirSync(join(root, '.tsograph-pnp'));
+      cpSync(join(root, archive), join(root, '.tsograph-pnp/private.zip'));
+      writeFileSync(join(root, 'src/main.ts'), 'import {answer} from "../.tsograph-pnp/private.zip/node_modules/@fixture/client/index"; export const value = answer();');
+      const reserved = run(['graph', '--project', root]);
+      verify(reserved.status === 0, 'reserved PnP namespace remains partial analysis');
+      const reservedCalls = JSON.parse(reserved.stdout).statistics.calls;
+      verify(reservedCalls.external === 0 && reservedCalls.missingDependencies === 0 && reservedCalls.unresolved['unresolved-import'] === 1 && reservedCalls.unresolved.untyped === 0, 'unmapped reserved PnP ZIP is not a resolved dependency');
+      writeFileSync(join(root, 'src/main.ts'), originalSource);
       rmSync(join(root, archive));
       const missing = run(['graph', '--project', root]);
       verify(missing.status === 0 && JSON.parse(missing.stdout).limitations.some(line => line.includes('input-unreadable')), 'selected missing PnP ZIP retains explicit incomplete evidence');

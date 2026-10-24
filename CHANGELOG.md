@@ -6,6 +6,9 @@
 
 아직 npm에 발행하지 않은 릴리스 후보이다.
 
+- 정적 PnP host: Windows slash·상대·dot 경로 정규화를 실제 overlay 사상과 구분한다. 표기 차이로 도구 SDK lib를 거부하거나 예약 `.tsograph-pnp` 실제 파일을 채택하지 않으며 유효한 metadata의 CLI 회귀 실패에는 알려진 issue code만 남긴다.
+- 예약 `.tsograph-pnp` 이름의 ZIP·virtual 경로도 물리화 전에 차단한다. 네 가지 host 메서드가 미매핑 실제 파일을 공개하지 않으며 metadata로 실제 등록한 메모리 alias와 합성 directory는 유지한다.
+
 ### Breaking
 
 - graph·reach·impact·routes client: realpath가 `--project` 밖인 `--tsconfig`(`../shared/tsconfig.json`, 밖의

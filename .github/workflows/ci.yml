@@ -43,7 +43,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: node --test src/graph/package-configs.test.ts src/graph/config-scope.test.ts
+      - run: node --test src/graph/package-configs.test.ts src/graph/config-scope.test.ts src/graph/pnp-path-normalization.test.ts src/graph/pnp-reserved-namespace.test.ts
       - run: node --test src/schema/orm/*.test.ts src/schema/client-binding.test.ts src/schema/module-resolver.test.ts src/schema/extract.test.ts
       - run: node --test --test-name-pattern="parse-error limitation" src/graph/build-graph.test.ts
       - run: npm run verify:cli

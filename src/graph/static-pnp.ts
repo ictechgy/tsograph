@@ -137,32 +137,38 @@ export class StaticPnp {
     const original = { ...host };
     return { ...original,
       readFile: (path: string) => {
-        const logical = this.logical(path);
+        const absolute = resolve(path), logical = this.logical(path);
+        // 미매핑 예약 이름은 ZIP 열기·virtual 물리화 전에 막아 실제 파일을 overlay로 채택하지 않는다.
+        if (logical === absolute && this.reserved(absolute)) return undefined;
         const zip = this.zipPath(logical);
         if (zip !== undefined) {
           const bytes = this.archive(zip.archive)?.files.get(zip.entry);
           if (bytes === undefined) return undefined;
           try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { this.note('input-unreadable'); return undefined; }
         }
-        if (logical !== path || resolveVirtual(logical) !== logical) return this.readPhysical(logical);
-        if (this.reserved(path)) return undefined;
+        // TypeScript의 Windows slash·상대·dot 표기 정규화는 PnP overlay 사상이 아니다.
+        if (logical !== absolute || resolveVirtual(logical) !== logical) return this.readPhysical(logical);
         if (!this.normalAllowed(path)) return undefined;
         return original.readFile(path);
       },
       fileExists: (path: string) => {
-        const logical = this.logical(path), zip = this.zipPath(logical);
+        const absolute = resolve(path), logical = this.logical(path);
+        if (logical === absolute && this.reserved(absolute)) return false;
+        const zip = this.zipPath(logical);
         if (zip !== undefined) return this.archive(zip.archive)?.files.has(zip.entry) === true;
         const physical = resolveVirtual(logical);
-        if (physical === undefined || (logical === path && this.reserved(path))) return false;
-        return logical !== path || physical !== logical ? this.confined(physical) !== undefined && original.fileExists(physical) : this.normalAllowed(path) && original.fileExists(path);
+        if (physical === undefined) return false;
+        return logical !== absolute || physical !== logical ? this.confined(physical) !== undefined && original.fileExists(physical) : this.normalAllowed(path) && original.fileExists(path);
       },
       directoryExists: (path: string) => {
         if (this.aliasDirectories.has(resolve(path))) return true;
-        const logical = this.logical(path), zip = this.zipPath(logical);
+        const absolute = resolve(path), logical = this.logical(path);
+        if (logical === absolute && this.reserved(absolute)) return false;
+        const zip = this.zipPath(logical);
         if (zip !== undefined) return this.archive(zip.archive)?.directories.has(zip.entry.replace(/\/$/u, '')) === true;
         const physical = resolveVirtual(logical);
-        if (physical === undefined || (logical === path && this.reserved(path))) return false;
-        return logical !== path || physical !== logical ? this.confined(physical) !== undefined && original.directoryExists?.(physical) === true : this.normalAllowed(path, true) && original.directoryExists?.(path) === true;
+        if (physical === undefined) return false;
+        return logical !== absolute || physical !== logical ? this.confined(physical) !== undefined && original.directoryExists?.(physical) === true : this.normalAllowed(path, true) && original.directoryExists?.(path) === true;
       },
       realpath: (path: string) => {
         const logical = this.logical(path);
@@ -171,15 +177,16 @@ export class StaticPnp {
       getDirectories: (path: string) => {
         const absolute = resolve(path), prefix = absolute + sep;
         if (this.aliasDirectories.has(absolute) && !this.aliases.has(absolute)) return [...new Set([...this.aliasDirectories].filter(item => item.startsWith(prefix) && !item.slice(prefix.length).includes(sep)).map(item => item.slice(prefix.length)))];
-        const logical = this.logical(path), zip = this.zipPath(logical);
+        const logical = this.logical(path);
+        if (logical === absolute && this.reserved(absolute)) return [];
+        const zip = this.zipPath(logical);
         if (zip !== undefined) {
           const prefix = zip.entry === '' ? '' : zip.entry + '/';
           return [...(this.archive(zip.archive)?.directories ?? [])].filter(item => item.startsWith(prefix) && item !== zip.entry && !item.slice(prefix.length).includes('/')).map(item => item.slice(prefix.length));
         }
-        if (logical === path && this.reserved(path)) return [];
         const physical = resolveVirtual(logical);
         if (physical === undefined) return [];
-        if (physical !== logical || logical !== path) {
+        if (physical !== logical || logical !== absolute) {
           if (this.confined(physical) === undefined) return [];
         } else if (!this.normalAllowed(physical, true)) return [];
         return original.getDirectories?.(physical) ?? [];

@@ -28,7 +28,7 @@ descriptor를 포함한 byte 구간 중복, 중복 이름, 파일/디렉터리 �
 
 선택 프로젝트/workspace 밖의 global cache·package location·symlink 대상은 읽지 않는다.
 프로젝트 내부 cache를 쓰거나 cache까지 포함하는 workspace를 고른다. 도구에 포함된 TypeScript
-SDK lib만 경계 밖 예외다. Yarn 기본 SDK ignore 정규식의 확인된 형태는 `.yarn/sdks` 경로 비교로
+SDK lib만 경계 밖 예외다. Windows slash·상대·dot 경로는 OS 절대 경로로 정규화한 뒤 PnP mapping 여부를 판단한다. 표기만 다른 SDK에는 같은 예외를 적용하며 실제 `.tsograph-pnp` 파일은 overlay로 채택하지 않는다. 미매핑 예약 경로는 ZIP 열기와 `__virtual__` 물리화보다 먼저 차단한다. metadata를 해석해 메모리에 등록한 실제 alias와 합성 directory만 제공한다. Yarn 기본 SDK ignore 정규식의 확인된 형태는 `.yarn/sdks` 경로 비교로
 처리한다. 임의 `ignorePatternData`를 JavaScript 정규식으로 실행하지 않으며 지원 밖 형태는
 해당 정적 해석을 거부한다. 여러 독립 PnP 프로젝트를 한 compiler 문맥에 합치지는 않는다. PnP가 있는 경계에서는 ZIP의 global augmentation 부재를 증명하지 않았으므로 서로 다른 소유 설정의 global/type universe를 옵션이 같아도 나눈다. 문맥 사이 import는 기존 불완전성 한계와 함께 미해결일 수 있다.
 
