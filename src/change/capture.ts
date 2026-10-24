@@ -82,7 +82,11 @@ export function capture(root: string, revision?: string): Capture {
   if (!existsSync(join(root, '.git'))) throw new CaptureError('--project must be a Git repository root');
   const commit = revision === undefined ? undefined : git(root, ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`]).toString('ascii').trim();
   if (commit !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(commit)) throw new CaptureError('invalid Git commit');
-  const rows = git(root, commit === undefined ? ['ls-files', '--cached', '--others', '--exclude-standard', '-z'] : ['ls-tree', '-rz', commit]).toString('utf8').split('\0').filter(Boolean);
+  const listing = git(root, commit === undefined ? ['ls-files', '--cached', '--others', '--exclude-standard', '-z'] : ['ls-tree', '-rz', commit]);
+  let text: string;
+  try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(listing); }
+  catch { throw new CaptureError('capture contains non-UTF-8 file path bytes'); }
+  const rows = text.split('\0').filter(Boolean);
   if (rows.length > CAPTURE_LIMITS.files) throw new CaptureError('capture file-count budget exceeded');
   const files = new Map<string, Buffer>();
   const spellings = new Set<string>();

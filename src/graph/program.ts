@@ -23,6 +23,8 @@ import { ConfigRootBoundary, type ConfigRootGaps, type ScanBoundary } from './co
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 import { sdkSourceFileCache } from './sdk-source-file-cache.ts';
+import { StaticPnp, hasPnpScope, type PnpIssue } from './static-pnp.ts';
+import { gitignoreEntryFilter } from '../scan/gitignore.ts';
 
 /** 설정 파일 이름이다(tsconfig 우선). */
 const configNames = ['tsconfig.json', 'jsconfig.json'] as const;
@@ -54,6 +56,10 @@ const defaultOptions: ts.CompilerOptions = {
  * 항목 수, 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않은 이름 항목 수, include 열거의 항목 상한 도달)도 싣는다.
  */
 export interface ProgramConfigStatus extends ConfigRootGaps {
+  /** 정적 PnP 해석의 실제 거부 원인이다. loader-only는 정적 데이터가 없는 경우다. */
+  readonly pnpIssues?: readonly PnpIssue[];
+  readonly pnpLoaderOnly?: boolean;
+  readonly staticPnp?: boolean;
   /** 서로 다른 타입 의미의 설정을 분리한 Program 수와 검증하지 못한 경계 import 수다. */
   readonly compilerContexts?: number;
   readonly contextBoundaryImports?: number;
@@ -124,6 +130,8 @@ export function createGraphProgram(
     return owner === undefined || context.keys.get(owner) === contextKey;
   });
   const options = analysisOptions(config.options);
+  const pnp = new StaticPnp(root, boundary.root);
+  if (pnp.active && options.typeRoots === undefined) options.typeRoots = [...(pnp.typeRoots(join(dirname(config.path ?? join(root, 'tsconfig.json')), 'inferred.ts')) ?? [])];
   const candidateSet = new Set(candidates);
   const roots = new Set(rootNames.map(sourceEntryKey));
   const allNonRoots = candidates.filter((path) => !roots.has(sourceEntryKey(path)));
@@ -143,6 +151,12 @@ export function createGraphProgram(
     if (candidateSet.has(absolute)) requestedSources.add(absolute);
     return readInput(fileName);
   };
+  Object.assign(host, pnp.wrapHost(host));
+  if (pnp.active) host.resolveTypeReferenceDirectiveReferences = (references, file, _redirected, sourceOptions, source) => references.map(reference => {
+    const name = typeof reference === 'string' ? reference : reference.fileName;
+    const mode = typeof reference === 'string' ? source?.impliedNodeFormat : reference.resolutionMode ?? source?.impliedNodeFormat;
+    return pnp.resolveType(name, file, sourceOptions, host, mode);
+  });
   // 다른 설정 소유 소스에 선택한 한 설정의 alias를 적용하면 잘못된 직접 간선이 생긴다. 지원하지 않는
   // 소유권은 import를 미해결로 남긴다. 로더나 설정의 코드를 실행하지 않는다.
   const blocked = context === undefined ? ownership.blocked : ownership.ambiguous;
@@ -160,7 +174,7 @@ export function createGraphProgram(
       if (text === undefined && resolutionHost.fileExists(file)) refused = true;
       return text;
     } };
-    const resolved = ts.resolveModuleName(name, containingFile, sourceOptions, boundedHost, undefined, undefined, mode).resolvedModule;
+    const resolved = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
     if (refused) return undefined;
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
     if (context !== undefined && resolved !== undefined && (context.exceeded || ownership.ambiguous.has(resolve(resolved.resolvedFileName))
@@ -171,7 +185,7 @@ export function createGraphProgram(
     }
     return resolved;
   };
-  if (context !== undefined || blocked.size > 0) host.resolveModuleNameLiterals = (literals, file, _redirected, _options, source) => literals.map(literal => {
+  if (context !== undefined || blocked.size > 0 || pnp.active) host.resolveModuleNameLiterals = (literals, file, _redirected, _options, source) => literals.map(literal => {
     const sourceOptions = context === undefined ? options : analysisOptions(ownership.owners.get(resolve(file))?.options ?? config.options);
     const mode = ts.getModeForUsageLocation(source, literal, sourceOptions);
     const resolvedModule = resolveModule(literal.text, file, mode);
@@ -203,7 +217,7 @@ export function createGraphProgram(
   try {
     const program = createProgram({ rootNames, options, host });
     blockedConfigImports.set(program, blocked);
-    if (context !== undefined) programResolvers.set(program, (specifier, file, resolutionHost) => {
+    if (context !== undefined || pnp.active) programResolvers.set(program, (specifier, file, resolutionHost) => {
       const key = resolve(file) + '\u0000' + specifier;
       const targets = choices.get(key);
       // require/import 조건이 같은 파일에서 갈리면 보조 해석은 임의 조건을 선택하지 않는다.
@@ -228,6 +242,8 @@ export function createGraphProgram(
           ...(context.exceeded ? { contextBudgetExceeded: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
+        ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
+        ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
       },
     };
   } catch (error) {
@@ -248,7 +264,8 @@ export function createGraphProgram(
 
 /** Program과 Next convention이 같은 설정 진입 목록을 쓴다. import 의존성 폐쇄는 이 목록과 별개다. */
 function prepareProgramEntries(root: string, sourcePaths: readonly string[], explicitConfig: string | undefined, boundary: ScanBoundary, confinedConfigs = false) {
-  boundary = { ...boundary, configVisits: { visited: 0 } };
+  const acceptsEntry = boundary.acceptsEntry ?? gitignoreEntryFilter(boundary.root);
+  boundary = { ...boundary, configVisits: { visited: 0 }, ...(acceptsEntry === undefined ? {} : { acceptsEntry }) };
   const config = readProjectConfig(root, boundary, explicitConfig, confinedConfigs);
   const candidates = [...new Set(sourcePaths.map((path) => resolve(path)))];
   const ownership = configOwnership(root, config, candidates, boundary, explicitConfig !== undefined, confinedConfigs);
@@ -259,7 +276,7 @@ function prepareProgramEntries(root: string, sourcePaths: readonly string[], exp
     if (ownership.ambiguous.has(path) && ownership.referenceRoots.includes(path)) return true;
     const owner = ownership.owners.get(path) ?? config;
     return owner.scoped ? owner.fileNames.includes(path) : !hasTypeScriptSibling(path, candidateSet);
-  })))].sort();
+  })))].filter(path => boundary.acceptsEntry?.(path) !== false).sort();
   return { config, candidates, ownership, rootNames };
 }
 
@@ -277,7 +294,7 @@ interface CompilerContext {
 export function* createGraphPrograms(root: string, sourcePaths: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): Generator<GraphProgram> {
   const entries = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
-  const keys = compilerContextKeys(entries);
+  const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root));
   const groups = new Map<string, { config: ProjectConfig; sources: Set<string> }>();
   for (const path of entries.candidates) {
     const config = entries.ownership.owners.get(path) ?? entries.config;
@@ -301,12 +318,12 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.
  * 명시 types:[]와 전부 external-module인 유계 입력에서만 별칭이 다른 설정의 공유를 허용한다. */
-function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>): ReadonlyMap<ProjectConfig, string> {
+function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>, pnpScope = false): ReadonlyMap<ProjectConfig, string> {
   const configs = [...new Set([entries.config, ...entries.ownership.owners.values()])];
   const keys = new Map<ProjectConfig, string>();
   for (const [index, config] of configs.entries()) {
     const sources = [...entries.ownership.owners].filter(([, owner]) => owner === config).map(([path]) => path);
-    const isolated = configs.length > 1 && (config.options.types?.length !== 0
+    const isolated = configs.length > 1 && (pnpScope || config.options.types?.length !== 0
       || sources.some(path => !isModuleOnly(path, config.options, entries.ownership.owners)));
     keys.set(config, semanticOptionsKey(config.options) + (isolated ? `\u0000global-universe:${index}` : ''));
   }
@@ -328,10 +345,14 @@ function isModuleOnly(path: string, options: ts.CompilerOptions, owners: Readonl
   if (augmentation) return false;
   // 스캔 밖 의존성의 global augmentation도 공유 checker로 다른 앱에 유출하지 않는다.
   const host = createBoundedResolutionHost(() => {});
-  return ts.preProcessFile(read.text, true, true).importedFiles.every(imported => {
-    const target = ts.resolveModuleName(imported.fileName, path, analysisOptions(options), host).resolvedModule;
+  // 한 모드의 미해결은 실제 import/require 조건의 입력 부재를 증명하지 않는다.
+  // 가능한 세 모드를 모두 대조해 실제 모드를 빠뜨리지 않되, 전부 없는 의존성 때문에
+  // 검증된 프로젝트 내부 reference 연결까지 불필요하게 나누지 않는다.
+  const modes: readonly ts.ResolutionMode[] = [undefined, ts.ModuleKind.ESNext, ts.ModuleKind.CommonJS];
+  return ts.preProcessFile(read.text, true, true).importedFiles.every(imported => modes.every(mode => {
+    const target = ts.resolveModuleName(imported.fileName, path, analysisOptions(options), host, undefined, undefined, mode).resolvedModule;
     return target === undefined || owners.has(resolve(target.resolvedFileName));
-  });
+  }));
 }
 
 /** compiler를 만들거나 소스를 실행하지 않고 Next convention에 허용할 진입 파일과 설정 공백을 돌려준다. */
@@ -347,7 +368,7 @@ export function selectSourceEntryFiles(root: string, candidates: readonly string
 export function sourceConfigPlan(root: string, sources: readonly string[]) {
   const entries = prepareProgramEntries(root, sources, undefined, { root, excludedDirectories: new Set() }, true);
   const { config, ownership, rootNames } = entries;
-  const keys = compilerContextKeys(entries);
+  const keys = compilerContextKeys(entries, hasPnpScope(root));
   const optionsFor = (path: string) => analysisOptions(ownership.owners.get(resolve(path))?.options ?? config.options);
   const status: ProgramConfigStatus = { ...ownershipStatus(config, ownership),
     ...(ownership.ambiguous.size > 0 ? { conflictingConfigSourceCount: ownership.ambiguous.size } : {}),
@@ -496,9 +517,11 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
  */
 export function configRootGaps(status: ProgramConfigStatus, affected: string): string[] {
   const gaps: string[] = [];
-  if ((status.contextBoundaryImports ?? 0) > 0) gaps.push(`config-context-boundary: ${status.contextBoundaryImports} import(s) cross incompatible type-checking options and remain unresolved; ${affected} may be incomplete`);
+  if (status.pnpLoaderOnly === true) gaps.push(`pnp-dependencies: only an executable PnP loader is available; provide static metadata to resolve dependency declarations; loaders are never executed; ${affected} may be incomplete`);
+  if ((status.pnpIssues?.length ?? 0) > 0) gaps.push(`pnp-dependencies: static dependency inputs were refused (${status.pnpIssues!.join(', ')}); unresolved inputs may hide ${affected}; verify the static metadata, project boundary and ZIP budgets`);
+  if ((status.contextBoundaryImports ?? 0) > 0) gaps.push(`config-context-boundary: ${status.contextBoundaryImports} import(s) cross separated type-checking contexts and remain unresolved; ${affected} may be incomplete`);
   if (status.contextBudgetExceeded === true) gaps.push(`config-context-budget: more than 16 type-checking contexts or 200000 source-context entries; imports remain unresolved and ${affected} may be incomplete`);
-  if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loader execution and PnP zip dependency resolution are not performed`);
+  if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loaders are never executed`);
   if ((status.excludedSourceRoots ?? 0) > 0) {
     gaps.push(`source-scope: ${status.excludedSourceRoots} scanned candidate(s) were not entry files selected by files/include/exclude or TypeScript sibling precedence; `
       + `${status.importedOutsideRoots ?? 0} were retained as imported dependencies; excluded entry files may contain additional ${affected}`);

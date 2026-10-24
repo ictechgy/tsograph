@@ -13,6 +13,8 @@ import {
 } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
 import type { GraphOutputSink } from '../graph/graph-output.ts';
+import { encodeSortedJsonWithinLimit } from '../exchange/sorted-json.ts';
+import { GitignoreInputError, gitignoreSelectionLimitation, withGitignoreSelection } from '../scan/gitignore.ts';
 import { graphUsage, impactUsage, reachUsage, runGraphCommand, runImpactCommand, runReachCommand } from './graph-command.ts';
 import { navigationUsage, runNavigationCommand } from './navigation-command.ts';
 import { changeUsage, runChangeCommand } from './change-command.ts';
@@ -61,6 +63,8 @@ Commands:
 Options:
   --help       Show this help
   --version    Print the tsograph version
+  --respect-gitignore  Select live project entries with project-local .gitignore rules
+                       (graph/reach/impact/routes/schema/navigation/change-impact)
 `;
 
 /**
@@ -70,7 +74,38 @@ Options:
  * @param environment 도구 버전·파일 시스템·시계
  * @returns 프로세스 경계에 쓸 결과
  */
-export async function runCli(
+/** 선택적 소스 정책은 동시 CLI API 호출에서도 실행별로 격리한다. */
+export async function runCli(arguments_: readonly string[], environment: CliEnvironment): Promise<CommandResult> {
+  const separator = arguments_.indexOf('--');
+  const options = separator < 0 ? arguments_ : arguments_.slice(0, separator);
+  const valueOptions = new Set(['--project', '--role', '--service', '--client-model', '--router-model', '--tsconfig', '--workspace',
+    '--format', '--generated-at', '--graph-file', '--max-depth', '--max-reached', '--base', '--head', '--dispatch']);
+  const positions = options.flatMap((argument, index) => argument === '--respect-gitignore' && !valueOptions.has(options[index - 1] ?? '') ? [index] : []);
+  const count = positions.length;
+  if (count === 0) return dispatchCli(arguments_, environment);
+  const command = arguments_[0];
+  if (count !== 1 || !['graph', 'reach', 'impact', 'routes', 'schema', 'navigation', 'change-impact'].includes(command ?? '')
+    || options.includes('--graph-file')) return usageFailure('tsograph: --respect-gitignore is a single live-project option; it cannot select entries in saved graphs.\n' + rootHelp);
+  const stripped = arguments_.filter((_argument, index) => !positions.includes(index));
+  return withGitignoreSelection(async () => {
+    try { return describeGitignoreSelection(await dispatchCli(stripped, environment)); }
+    catch (error) { if (error instanceof GitignoreInputError) return inputFailure(error.message); throw error; }
+  });
+}
+
+/** 일반 JSON에 선택 계약을 남긴다. 스트리밍 graph는 생성기가 같은 문장을 미리 싣는다. */
+function describeGitignoreSelection(result: CommandResult): CommandResult {
+  if (!result.standardOutput.startsWith('{')) return result;
+  let document: Record<string, unknown>;
+  try { document = JSON.parse(result.standardOutput) as Record<string, unknown>; } catch { return result; }
+  if (!Array.isArray(document.limitations)) return result;
+  document.limitations = [...new Set([...document.limitations, gitignoreSelectionLimitation()!])].sort();
+  const text = encodeSortedJsonWithinLimit(document, 16 * 1024 * 1024);
+  return text === undefined ? inputFailure('the selected report exceeds its output budget; pass a narrower project.')
+    : { ...result, standardOutput: text };
+}
+
+async function dispatchCli(
   arguments_: readonly string[],
   environment: CliEnvironment,
 ): Promise<CommandResult> {

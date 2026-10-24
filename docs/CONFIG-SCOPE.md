@@ -12,8 +12,8 @@ schema와 change-impact가 같은 파일 소유권 계획을 사용한다. Next 
 
 `baseUrl`·`paths`와 설정 파일 신원만 다른 옵션은 공유가 확인된 범위에서 하나의 Program으로 파일별 module resolver를 쓴다.
 공유는 명시 `types: []`, 모두 external module인 소유 입력, global/namespace/module augmentation 및 triple-slash 없음,
-스캔 밖 의존성 타입 반입 없음으로 제한한다. 같은 옵션이어도 전역 선언·ambient 입력 범위를 공유한다는 증거가 없으면
-설정별로 문맥을 분리한다. 자동 types 탐색을 쓰는 패키지 간 연결도 보수적으로 미해결일 수 있다.
+스캔 밖 의존성 타입 반입 없음으로 제한한다. 사전 검사는 기본·import·require 모드를 모두 대조하며 어느 모드든 스캔 밖 선언이 읽히면 공유하지 않는다. 한 모드에서 미해결인 것을 global/ambient 입력 부재의 증거로 쓰지 않으며, NodeNext의 import-only exports도 포함한다. 같은 옵션이어도 전역 선언·ambient 입력 범위를 공유한다는 증거가 없으면
+설정별로 문맥을 분리한다. PnP 경계에서는 ZIP의 global augmentation 부재를 아직 증명하지 않았으므로 옵션이 같은 서로 다른 소유 설정도 문맥을 분리한다. 자동 types 탐색을 쓰는 패키지 간 연결도 보수적으로 미해결일 수 있다.
 나머지 분석 옵션(target, module/moduleResolution, strict 계열, JSX, lib/types, class field 의미 등)이 다르면
 Program을 분리한다. 서로 다른 checker의 AST/Symbol을 교환하지 않으며 소유 파일의 문자열 ID 결과만 합친다.
 module import뿐 아니라 triple-slash로 다른 문맥 소스를 읽는 경로도 host에서 거부하고 공백을 남긴다.

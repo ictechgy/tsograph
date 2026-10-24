@@ -58,6 +58,7 @@ call counts, edges (call, new, callback, reference, jsx, alias, initializer) wit
 (direct, bound, candidate), statistics, and graphRevision (content hash).
 
 Options:
+  --respect-gitignore         Select entries with project-local .gitignore rules (default off)
   --project <root>            Project root; node ids are relative to it (required)
   --tsconfig <file>           Config file inside --project (relative to it, or absolute); its options
                               use the config directory
@@ -72,6 +73,7 @@ Stream failures may leave partial graph output; discard it whenever the exit cod
 
 /** reach·impact 공통 옵션 설명이다. */
 const traversalOptions = `Options:
+  --respect-gitignore         Select entries with project-local .gitignore rules (default off)
   --project <root>            Build and traverse the project call graph (one input mode is required)
   --tsconfig <file>           Explicit compiler config inside --project (live --project input only)
   --workspace <root>         Enclosing workspace source boundary (live --project input only)

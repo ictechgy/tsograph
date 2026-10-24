@@ -50,6 +50,7 @@ import { collectFileNodes } from './node-collector.ts';
 import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 import { scopeIdOf } from './symbol-ids.ts';
+import { gitignoreSelectionLimitation } from '../scan/gitignore.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
 const MAX_VERCEL_CONFIG_BYTES = 1024 * 1024;
@@ -144,6 +145,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   }
   const routes = await loadRouteInputs(project, fileSystem, { root: selectedProject, ...(config === undefined ? {} : { tsconfig: config }) });
   const inputs = collectGraphInputs(project, routes.extraction);
+  const gitignoreLimitation = gitignoreSelectionLimitation();
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
   const results: CallGraph[] = [];
@@ -164,8 +166,9 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
     || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
-    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true;
-  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
+    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true
+    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0;
+  const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete, routes.testSources);
@@ -180,7 +183,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
+  const openProgram = gitignoreLimitation !== undefined || compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
@@ -191,9 +194,9 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
   const environmentLimits: string[] = [...(routes.extraction.scopeLimitations ?? [])];
-  if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loader execution and PnP zip dependency resolution are not performed`);
+  if (gitignoreLimitation !== undefined) environmentLimits.push(gitignoreLimitation);
+  if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loaders are never executed`);
   if (options.workspace !== undefined) environmentLimits.push('workspace-config: sources use their nearest or referenced compiler config; incompatible type-checking contexts are separate and cross-context imports remain unresolved');
-  if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
   const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
   const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
   const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
@@ -660,7 +663,7 @@ function inputLimitations(counts: GraphCounts): string[] {
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
-  result.push(...configRootGaps(config, 'calls').map((gap) => `graph-config: ${gap}`));
+  result.push(...configRootGaps(config, 'calls').map((gap) => gap.startsWith('pnp-dependencies:') ? gap : `graph-config: ${gap}`));
   if ((config.oversizedCompilerInputs ?? 0) > 0) {
     result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
   }

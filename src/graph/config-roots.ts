@@ -22,6 +22,7 @@ import { type Dirent, lstatSync, readdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import ts from 'typescript';
+import { gitignoreEntryFilter } from '../scan/gitignore.ts';
 
 import { isPnpLoader, isSkippedDirectory, MAX_VISITED_ENTRIES } from '../schema/project-files.ts';
 
@@ -29,6 +30,8 @@ import { isPnpLoader, isSkippedDirectory, MAX_VISITED_ENTRIES } from '../schema/
 export interface ScanBoundary {
   /** 경계 realpath다. `--workspace`면 workspace, 아니면 프로젝트다. */
   readonly root: string;
+  /** 선택적 소스 진입 정책이다. import 의존성 읽기는 별개다. */
+  readonly acceptsEntry?: (absolute: string) => boolean;
   /** 호출자의 걷기가 따로 건너뛴 디렉터리 절대 경로다(Prisma 생성 클라이언트 출력 등). */
   readonly excludedDirectories: ReadonlySet<string>;
   /** 열거가 방문할 디렉터리 항목 수 상한이다. 생략하면 걷기와 같은 {@link MAX_VISITED_ENTRIES}다(테스트가 줄여 넣는다). */
@@ -81,6 +84,7 @@ const MISSING_MATCH_FILES = 'the installed TypeScript does not expose matchFiles
  */
 export class ConfigRootBoundary {
   readonly #root: string;
+  readonly #acceptsEntry: ((absolute: string) => boolean) | undefined;
   readonly #excluded: ReadonlySet<string>;
   readonly #limit: number;
   readonly #shared: { visited: number } | undefined;
@@ -99,6 +103,7 @@ export class ConfigRootBoundary {
    */
   constructor(boundary: ScanBoundary) {
     this.#root = resolve(boundary.root);
+    this.#acceptsEntry = boundary.acceptsEntry ?? gitignoreEntryFilter(this.#root);
     this.#excluded = boundary.excludedDirectories;
     this.#limit = boundary.maxVisitedEntries ?? MAX_VISITED_ENTRIES;
     this.#shared = boundary.configVisits;
@@ -140,7 +145,8 @@ export class ConfigRootBoundary {
    * @returns 남긴 루트 파일(순서 유지)
    */
   admit(fileNames: readonly string[]): string[] {
-    return fileNames.filter((fileName) => this.#enumerated.has(fileName) || this.#admitsListedFile(fileName));
+    return fileNames.filter((fileName) => (this.#enumerated.has(fileName) || this.#admitsListedFile(fileName))
+      && this.#acceptsEntry?.(fileName) !== false);
   }
 
   /**
@@ -221,7 +227,7 @@ export class ConfigRootBoundary {
     const files: string[] = [];
     const directories: string[] = [];
     for (const entry of listed) {
-      if (entry.isFile() && !isPnpLoader(entry.name)) files.push(entry.name);
+      if (entry.isFile() && !isPnpLoader(entry.name) && this.#acceptsEntry?.(join(directory, entry.name)) !== false) files.push(entry.name);
       else if (entry.isDirectory() && this.#admitsChild(directory, entry.name)) directories.push(entry.name);
     }
     return { files, directories };
@@ -265,7 +271,7 @@ export class ConfigRootBoundary {
    * @returns 열 수 있으면 true
    */
   #admitsName(path: string, name: string): boolean {
-    return !isSkippedDirectory(name) && !this.#excluded.has(path);
+    return !isSkippedDirectory(name) && !this.#excluded.has(path) && this.#acceptsEntry?.(path) !== false;
   }
 
   /**

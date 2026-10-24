@@ -41,6 +41,8 @@
     "README.ko.md",
     "docs/CLIENT-MODELS.md",
     "docs/CONFIG-SCOPE.md",
+    "docs/GITIGNORE.md",
+    "docs/STATIC-PNP.md",
     "docs/CHANGE-IMPACT.md",
     "docs/NAVIGATION.md",
     "docs/NODE-ROUTES.md",
@@ -62,6 +64,7 @@
     "ky-v1": "npm:ky@1.10.0"
   },
   "dependencies": {
+    "ignore": "7.0.14",
     "typescript": "5.9.3",
     "yaml": "2.9.1"
   }

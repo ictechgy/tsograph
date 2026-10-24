@@ -13,7 +13,8 @@ Compare frozen Git base/head sources, or base against tracked and nonignored unt
 files when --head is omitted. Analyze before/after independently; preserve deleted callers and
 content digests. Seeds cover whole changed files. Output is review evidence and always incomplete,
 never a safety verdict or permission to skip tests. Existing impact <id> remains one-snapshot traversal.
-Git >=2.45 and locally available objects are required. No target code or package install is run.
+Optional --respect-gitignore selects entries using each captured project-local .gitignore.
+Git >=2.45, locally available objects and UTF-8 file path names are required. No target code or package install is run.
 Exit codes: 0 report produced, 2 input/capture/output failure, 64 usage error.
 `;
 
@@ -36,5 +37,5 @@ export async function runChangeCommand(args: readonly string[], environment: Cli
     const report = await analyzeChange({ project, base, ...(head === undefined ? {} : { head }), maxDepth, maxReached, dispatch: dispatch as DispatchMode, toolVersion: environment.toolVersion, generatedAt: environment.now() });
     const encoded = encodeSortedJsonWithinLimit(report, 16 * 1024 * 1024);
     return encoded === undefined ? inputFailure('change report exceeds output budget; lower --max-reached') : success(encoded);
-  } catch { return inputFailure('change capture or analysis failed; check Git 2.45+, local revisions, repository root, stable sources and capture budgets'); }
+  } catch { return inputFailure('change capture or analysis failed; check Git 2.45+, local revisions, repository root, UTF-8 paths, stable sources and capture budgets'); }
 }

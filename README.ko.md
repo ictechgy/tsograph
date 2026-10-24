@@ -100,8 +100,8 @@ graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclu
 각각 `baseUrl: "./src"`를 써도 각 앱 내부 별칭과 import한 패키지 내부 별칭을 올바른 위치에서 해석한다.
 같은 타입 의미는 하나의 Program을 쓰고 다른 의미는 독립 Program으로 분석한다. 문맥 간 import와 모호하거나 누락된
 소유권은 미해결로 남긴다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
-PnP loader는 제외하며 실행하지 않는다. 정적 PnP metadata와 zip 안 타입 읽기는 구현하지 않았고 해당 의존성은 미해결로 남는다.
-`.gitignore` 적용을 의미하지 않는다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
+PnP loader는 소스 진입에서 제외하고 실행하지 않는다. compiler 기반 graph·Node/client routes·navigation은 유계 `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal과 ZIP 안 선언을 정적으로 읽는다. [정적 PnP 범위·한계](docs/STATIC-PNP.md)를 참고한다. 지원 밖 metadata는 명시적 미해결로 남는다. PnP 범위의 서로 다른 소유 설정은 compiler 옵션이 같아도 global/type universe를 분리한다.
+프로젝트 내부 `.gitignore` 진입 선택은 `--respect-gitignore`로 켠다(기본 off). [선택 범위·예산](docs/GITIGNORE.md)을 참고한다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
 
 Next convention 선언과 graph의 convention 진입점도 이 범위를 쓴다. 제외된 page/route를 import하면 그래프 의존성은
 남아도 convention 진입점으로 올리지 않는다. 제외 수를 limitation으로 남기며 런타임에 해당 경로가 없다는 보장이 아니다.
@@ -723,7 +723,7 @@ symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열�
 include 경로가 그 제외 디렉터리 안이거나 symlink를 거치면 역시 쓰지 않고 같은 곳에 센다. 그 디렉터리에서 글롭이 고를
 파일은 걷기처럼 세지 않는다. 두 곳의 파일 모두 프로젝트 소스가 import하거나 참조하면 읽는다.
 루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
-실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
+실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). 지원 밖이거나 불완전한 정적 PnP 의존성 입력을 명시하고 `.pnp.cjs`는 실행하지 않는다.
 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
 `tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler

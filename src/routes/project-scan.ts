@@ -15,6 +15,7 @@
 import type { CommandFileSystem } from '../cli/file-system.ts';
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
+import { acceptsGitignoreEntry } from '../scan/gitignore.ts';
 
 /** 스캔하는 디렉터리 항목 총수 상한이다. */
 export const MAX_SCANNED_ENTRIES = 200_000;
@@ -130,6 +131,7 @@ export async function lookupEntry(fileSystem: CommandFileSystem, project: string
     const parent = [project, ...parts.slice(0, index)].join('/');
     const kind = await childKind(fileSystem, parent, parts[index]!);
     const path = parts.slice(0, index + 1).join('/');
+    if ((kind === 'file' || kind === 'directory') && !acceptsGitignoreEntry(project, `${project}/${path}`, kind === 'directory')) return { kind: 'absent' };
     if (kind === 'symlink') return await isResolvable(fileSystem, `${project}/${path}`) ? { kind: 'symlink', symlinkPath: path } : { kind: 'dangling' };
     if (kind === undefined || (index < parts.length - 1 && kind !== 'directory')) return { kind: 'absent' };
     if (index === parts.length - 1) return { kind };
@@ -227,6 +229,7 @@ async function walkDirectory(
     gaps.scannedEntries += 1;
     if (options.skipName?.(entry.name) === true) continue;
     const path = `${directory}/${entry.name}`;
+    if ((entry.kind === 'file' || entry.kind === 'directory') && !acceptsGitignoreEntry(project, `${project}/${path}`, entry.kind === 'directory')) continue;
     if (entry.kind === 'symlink') gaps.symlinks += 1;
     if (entry.kind === 'file') files.push(path);
     if (entry.kind === 'directory') await walkDirectory(fileSystem, project, path, depth + 1, gaps, options, files);

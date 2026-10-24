@@ -56,5 +56,34 @@ URL 결합은 base-URL 규칙을 사용하며 절대 HTTP 인자는 base를 대�
 
 axios를 감싼 클래스의 arrow field나 DI 포트는 자동 wrapper 추론과 다른 모델이다. 소유 클래스 또는 주입 포트의 정확한
 선언을 지정하고 실제 호출에 맞게 method·인자·base를 기록한다. 모델은 mutation 안전성을 선언하지 않는다.
-PnP loader는 실행하지 않는다. `.pnp.data.json` 정적 읽기와 zip 타입 조회에는 크기·압축 해제 예산, 경로 검증,
-TypeScript compiler host 통합이 필요하며 이번 릴리스 범위 밖이다. 이 비용은 아직 실측하지 않았고 PnP 전체 해석을 주장하지 않는다.
+
+예를 들어 class field가 arrow 함수인 다음 입력은 `kind: class`로 모델링할 수 있다.
+모델의 `name`은 arrow 함수 이름이 아니라 소유 클래스이며 `methods[].name`이 field 이름이다.
+
+```ts
+// src/client.ts
+import axios from 'axios';
+export class CatalogClient {
+  private http = axios.create({ baseURL: '/v1' });
+  getItem = (path: string) => this.http.get(path);
+}
+export function load() { return new CatalogClient().getItem('/items'); }
+```
+
+```json
+{
+  "format": "http-client-models",
+  "version": 1,
+  "models": [{
+    "receiver": { "kind": "class", "path": "src/client.ts", "name": "CatalogClient" },
+    "methods": [{ "name": "getItem", "method": "GET", "pathArgument": 0, "base": "/v1", "service": "catalog" }]
+  }]
+}
+```
+
+위 source/model로 빌드된 CLI의 `routes --role client --project . --client-model client-model.json`을
+실행하면 `src/client.ts#load`에 `GET /v1/items`, `service: catalog`인 선언 근거 사실이 나온다.
+모든 class arrow wrapper를 자동으로 찾거나 구현 내부의 transport 동작을 증명한 것은 아니다.
+receiver가 변경·escape되거나 준비가 불완전하면 기존 dynamic/limitation 계약을 유지한다.
+
+PnP loader는 실행하지 않는다. `.pnp.data.json`과 상수 `RAW_RUNTIME_STATE` literal의 정적 metadata·ZIP 타입 조회는 compiler host에 연결했다. [정적 PnP 범위·예산](STATIC-PNP.md)을 참고한다. 이는 모든 Yarn 설정이나 transport wrapper의 런타임 동작을 추론한다는 뜻이 아니며 class arrow field·DI 포트는 위 명시 모델로 연결한다.

@@ -115,8 +115,7 @@ the nearest or explicitly referenced owner configuration: two apps with `baseUrl
 own aliases, including aliases inside an imported package. Compatible type-checking options share a
 Program; incompatible options use independent Programs and cross-context imports remain unresolved.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
-PnP loader files are excluded and never executed. Reading static PnP metadata and zip-contained types
-is not implemented; unresolved dependencies remain unknown. No `.gitignore` interpretation is implied.
+PnP loaders are excluded from source entries and never executed. Compiler-backed graph, Node/client routes and navigation can read bounded static `.pnp.data.json` or a constant `RAW_RUNTIME_STATE` literal and ZIP-contained declarations. See [static PnP scope and limits](docs/STATIC-PNP.md); unsupported metadata remains explicitly unresolved. In a PnP scope, different owner configs retain separate global/type universes even when their compiler options match. Project-local `.gitignore` entry selection is available with `--respect-gitignore` (default off); see [selection semantics and budgets](docs/GITIGNORE.md).
 See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
 
 Next convention declarations and graph convention entries use this same entry scope. An imported
@@ -904,8 +903,7 @@ counted under `graph-config:`. A `files` entry or wildcard-free include path tha
 directories or through a symlink is not used either and is counted there too; glob matches in them stay silent, as in
 the walk. Files in both places still load when project sources import or reference them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
-failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
-explicitly; the CLI never executes `.pnp.cjs`.
+failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). Unsupported or incomplete static PnP dependency inputs are reported explicitly; the CLI never executes `.pnp.cjs`.
 
 The CLI streams graph JSON without a whole-document string; `--format ndjson` emits a
 `tsograph-graph-ndjson` v1 header followed by one `node` or `edge` record per line. The graph and

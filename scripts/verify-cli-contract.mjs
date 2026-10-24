@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,8 @@ verifySchema();
 verifyGraph();
 verifyNavigation();
 verifyProjectInputFiles();
+verifyGitignoreSelection();
+verifyStaticPnp();
 process.stdout.write('CLI contract verified: 0/2/64 (1 reserved)\n');
 
 /** 도움말이 성공으로 나오는지 확인한다. */
@@ -254,5 +256,67 @@ function verifyProjectInputFiles() {
     verify(run(['graph', '--project', project, '--tsconfig', join(project, 'tsconfig.json')]).status === 0, 'graph absolute tsconfig inside --project');
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** 빌드된 공개 CLI에서 기본/선택 진입·JSON/NDJSON 한계·오류 코드를 검증한다. */
+function verifyGitignoreSelection() {
+  const root = mkdtempSync(join(tmpdir(), 'tsograph-cli-gitignore-'));
+  try {
+    writeFileSync(join(root, 'package.json'), '{"private":true}');
+    writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"types":[],"lib":[]},"files":["kept.ts","ignored.ts"]}');
+    writeFileSync(join(root, '.gitignore'), 'ignored.ts\n');
+    writeFileSync(join(root, 'kept.ts'), 'export function kept() { return 1; }');
+    writeFileSync(join(root, 'ignored.ts'), 'export function ignored() { return 2; }');
+    const base = run(['graph', '--project', root]);
+    verify(base.status === 0 && JSON.parse(base.stdout).nodes.some(node => node.id === 'ignored.ts#ignored'), 'gitignore default unchanged');
+    for (const format of ['json', 'ndjson']) {
+      const selected = run(['graph', '--project', root, '--respect-gitignore', '--format', format]);
+      verify(selected.status === 0, `gitignore ${format} exit`);
+      const records = format === 'json' ? [JSON.parse(selected.stdout)] : selected.stdout.trim().split('\n').map(line => JSON.parse(line));
+      verify(!selected.stdout.includes('ignored.ts#ignored') && selected.stdout.includes('kept.ts#kept'), `gitignore ${format} selected entries`);
+      verify(records.some(record => JSON.stringify(record.limitations ?? record.document?.limitations ?? []).includes('gitignore-selection:')), `gitignore ${format} selection contract`);
+    }
+    verify(run(['reach', '--graph-file', 'missing.json', '--respect-gitignore', 'root']).status === 64, 'gitignore saved graph misuse');
+    writeFileSync(join(root, '.gitignore'), Buffer.from([0xff]));
+    const refused = run(['graph', '--project', root, '--respect-gitignore']);
+    verify(refused.status === 2 && refused.stdout === '' && refused.stderr.includes('.gitignore could not be read'), 'gitignore invalid metadata exit 2');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+/** 실제 Yarn이 만든 JSON/inline state와 ZIP을 빌드 CLI로 해석하며 loader를 실행하지 않는다. */
+function verifyStaticPnp() {
+  const fixture = fileURLToPath(new URL('../fixtures/pnp/yarn-generated/', import.meta.url));
+  for (const inline of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), 'tsograph-cli-pnp-'));
+    try {
+      cpSync(fixture, root, { recursive: true });
+      writeFileSync(join(root, '.pnp.cjs'), inline ? readFileSync(join(root, 'inline-state.txt')) : 'require("node:fs").writeFileSync("PNP_EXECUTED", "bad"); throw Error("must not run");');
+      if (inline) rmSync(join(root, '.pnp.data.json'));
+      const result = run(['graph', '--project', root]);
+      verify(result.status === 0, `static PnP ${inline ? 'inline' : 'JSON'} CLI success`);
+      const document = JSON.parse(result.stdout);
+      verify(document.statistics.calls.external === 3 && document.statistics.calls.missingDependencies === 0 && document.statistics.calls.unresolved.untyped === 0, 'static PnP ZIP declarations actually resolve');
+      verify(!document.limitations.some(line => line.includes('pnp-dependencies:')), 'static PnP valid metadata is usable');
+      verify(!existsSync(join(root, 'PNP_EXECUTED')), 'PnP loader not executed');
+      const metadata = JSON.parse(readFileSync(join(fixture, '.pnp.data.json'), 'utf8'));
+      const client = metadata.packageRegistryData.find(([name]) => name === '@fixture/client')[1].find(([ref]) => ref.startsWith('virtual:'))[1];
+      const archive = client.packageLocation.replace(/__virtual__\/[^/]+\/0\//u, '').split('.zip/')[0] + '.zip';
+      rmSync(join(root, archive));
+      const missing = run(['graph', '--project', root]);
+      verify(missing.status === 0 && JSON.parse(missing.stdout).limitations.some(line => line.includes('input-unreadable')), 'selected missing PnP ZIP retains explicit incomplete evidence');
+      writeFileSync(join(root, '.pnp.data.json'), '{"packageRegistryData": [], "packageRegistryData": []}');
+      const refused = run(['graph', '--project', root]);
+      verify(refused.status === 0, 'invalid automatic PnP remains explicit partial analysis');
+      const partial = JSON.parse(refused.stdout);
+      verify(partial.limitations.some(line => line.includes('metadata-invalid')) && partial.statistics.calls.missingDependencies > 0 && partial.statistics.calls.unresolved.untyped > 0, 'invalid PnP metadata retains unresolved dependency evidence');
+      writeFileSync(join(root, 'src/local.ts'), 'export function kept() { return 1; }');
+      writeFileSync(join(root, 'tsconfig.json'), '{"compilerOptions":{"types":[],"lib":[],"baseUrl":".","paths":{"alias/*":["src/*"],"@/*":["src/*"],"~/*":["src/*"],"$lib/*":["src/*"]}},"include":["src"]}');
+      for (const alias of ['alias/local', '@/local', '~/local', '$lib/local']) {
+        writeFileSync(join(root, 'src/main.ts'), `import {kept} from "${alias}"; export function caller() { return kept(); }`);
+        const local = run(['graph', '--project', root]);
+        verify(local.status === 0 && JSON.parse(local.stdout).edges.some(edge => edge.from === 'src/main.ts#caller' && edge.to === 'src/local.ts#kept'), `local alias ${alias} survives incomplete PnP metadata`);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   }
 }

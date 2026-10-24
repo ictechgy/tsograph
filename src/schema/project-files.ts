@@ -13,6 +13,7 @@ import { join, relative, sep } from 'node:path';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
+import { acceptsGitignoreEntry } from '../scan/gitignore.ts';
 
 /** 방문할 디렉터리 항목 수 상한이다. 거대한 트리에서 끝없이 돌지 않게 한다. */
 export const MAX_VISITED_ENTRIES = 500_000;
@@ -72,7 +73,7 @@ export function collectProjectFiles(root: string, options: CollectOptions): Proj
         state.truncated = true;
         break;
       }
-      classifyEntry(join(directory, entry), entry, options, state, pending, found);
+      classifyEntry(root, join(directory, entry), entry, options, state, pending, found);
     }
   }
   found.forEach((pair) => { pair[0] = toPosixRelative(root, pair[1]); });
@@ -128,6 +129,7 @@ function readDirectory(directory: string, state: WalkState): string[] {
  * @param found 모은 파일
  */
 function classifyEntry(
+  root: string,
   path: string,
   name: string,
   options: CollectOptions,
@@ -146,10 +148,11 @@ function classifyEntry(
   if (stats.isSymbolicLink()) {
     state.skippedSymlinkPaths.add(path);
   } else if (stats.isDirectory()) {
-    if (!isSkippedDirectory(name) && !options.excludedDirectories.has(path) && admitsName(name, state)) pending.push(path);
+    if (!isSkippedDirectory(name) && !options.excludedDirectories.has(path) && admitsName(name, state)
+      && acceptsGitignoreEntry(root, path, true)) pending.push(path);
   } else if (stats.isFile() && isPnpLoader(name)) {
     state.skippedLoaders++;
-  } else if (stats.isFile() && options.includeFile(name) && admitsName(name, state)) {
+  } else if (stats.isFile() && options.includeFile(name) && admitsName(name, state) && acceptsGitignoreEntry(root, path)) {
     found.push([name, path]);
   }
 }

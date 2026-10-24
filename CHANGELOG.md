@@ -15,6 +15,10 @@
 
 ### Added
 
+- 정적 PnP: `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal을 실행 없이 읽고, Yarn ZIP/virtual peer location을 compiler host에 연결한다. TypeScript의 exports/import·require 조건과 명시 local typeRoots를 유지하며 잘못된 archive·locator 대체·경계 밖 읽기를 거부한다. 실제 Yarn4.18.1 생성물과 정상/부정 회귀를 추가했다. 전체 Yarn 런타임/임의 loader 표현식·사용자 정규식·경계 밖 global cache 지원을 주장하지 않는다.
+
+- `--respect-gitignore`: graph/reach/impact/routes/schema/navigation/change-impact의 진입 선택에 프로젝트 내부 `.gitignore`를 선택적으로 적용한다. 기본 동작·import 의존성 읽기는 유지하며 중첩·negation·escape 규칙, 명시 files 범위, 선택 limitation과 실패 예산을 문서화했다. 전역 Git 설정·추적 신원은 사용하지 않는다.
+
 - `change-impact --project <git-root> --base <commit> [--head <commit>]`: 실제 커밋/작업 트리 변경을 독립 before/after
   그래프에 연결한다. 삭제·rename caller, 내용 해시, seed 이유, 미매핑 파일, 준비 비용과 기존 순회 한계를 보존한다.
 - `openapi --data-contracts`: 호환 소비자를 위한 opt-in bounded primitive 데이터 계약 근거다. 기존 출력은 유지한다.
@@ -22,6 +26,10 @@
 - 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
 
 ### Changed
+
+- PnP의 `@/*`·`~/*`·`$lib/*` 로컬 별칭을 npm 이름 문법과 구분한다. 공유 Program 사전 검사는 기본·import·require 모드를 모두 대조해 한 모드의 미해결을 global 입력 부재로 취급하지 않으며, Git 변경 캡처는 invalid UTF-8 파일명 충돌을 거부하고 유효한 BOM·U+FFFD 이름 신원을 보존한다.
+
+- 정적 PnP의 선택 ZIP 누락은 입력 한계로 남기고, top-level null peer를 fallback pool로 대체하지 않는다. metadata 실패와 독립된 로컬 별칭을 유지하며, 여러 소유 설정의 PnP global universe를 보수적으로 분리한다. ZIP 이름의 BOM·원시 byte 신원을 보존한다.
 
 - graph·routes·navigation·schema·change-impact: 소유 파일의 nearest/reference 설정으로 별칭을 해석한다.
   같은 타입 의미의 경로 옵션은 파일별로 적용하고 다른 타입 의미는 독립 Program에서 분석한다.

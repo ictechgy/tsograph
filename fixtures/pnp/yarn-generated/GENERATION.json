@@ -1,0 +1,17 @@
+{
+  "generator": "@yarnpkg/cli-dist@4.18.1",
+  "command": "yarn install --mode=skip-build",
+  "settings": {
+    "nodeLinker": "pnp",
+    "pnpEnableInlining": false,
+    "enableGlobalCache": false,
+    "enableNetwork": false,
+    "enableScripts": false
+  },
+  "input": "synthetic local @fixture/client and @fixture/provider packages; client peer dependency creates __virtual__ identity",
+  "inline": "second actual Yarn generation with pnpEnableInlining:true; only unchanged RAW_RUNTIME_STATE header retained, executable runtime omitted",
+  "archives": {
+    "@fixture-provider-file-6bd0691812-5a27844299.zip": "05cd44e9b88bda6153d186761b6138f5aa778c7f5afa1c44f71defb1cd1f5fba",
+    "@fixture-client-file-d96415233b-25abc30717.zip": "40aa1767e5782d47ab25a290abab70630a342b858ce32518ad4c69631f9003bb"
+  }
+}
