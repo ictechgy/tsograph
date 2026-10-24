@@ -1,4 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { frozenInputAllowed } from './frozen-inputs.ts';
 
 /** TypeScript compiler config 하나와 extends 파일 하나에 허용하는 최대 byte 수다. */
 export const MAX_GRAPH_CONFIG_BYTES = 1024 * 1024;
@@ -53,6 +54,7 @@ export function readBoundedFileBytes(path: string, maximumBytes: number, options
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes >= Number.MAX_SAFE_INTEGER) {
     throw new RangeError('maximumBytes must be a nonnegative safe integer with room for one sentinel byte');
   }
+  if (!frozenInputAllowed(path)) return { ok: false, reason: 'missing' };
   let descriptor: number | undefined;
   let result: BoundedFileBytes = { ok: false, reason: 'unreadable' };
   try {

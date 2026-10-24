@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs, { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { type TestContext, test } from 'node:test';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
@@ -88,7 +88,10 @@ async function withProjectAsync<T>(files: Record<string, string>, run: (root: st
 async function countReads<T>(t: TestContext, body: () => T | Promise<T>): Promise<{ readonly value: T; readonly log: ReadLog }> {
   const log: ReadLog = { counts: new Map(), unbounded: [] };
   const note = (path: unknown): void => {
-    if (typeof path === 'string') log.counts.set(path, (log.counts.get(path) ?? 0) + 1);
+    if (typeof path === 'string') {
+      const nativePath = resolve(path);
+      log.counts.set(nativePath, (log.counts.get(nativePath) ?? 0) + 1);
+    }
   };
   const originalOpen = fs.openSync;
   const originalReadFile = fs.readFileSync;
@@ -98,7 +101,7 @@ async function countReads<T>(t: TestContext, body: () => T | Promise<T>): Promis
   });
   t.mock.method(fs, 'readFileSync', function readFileSync(this: unknown, ...arguments_: Parameters<typeof fs.readFileSync>) {
     note(arguments_[0]);
-    if (typeof arguments_[0] === 'string') log.unbounded.push(arguments_[0]);
+    if (typeof arguments_[0] === 'string') log.unbounded.push(resolve(arguments_[0]));
     return originalReadFile.apply(this, arguments_);
   });
   syncBuiltinESMExports();
@@ -210,7 +213,9 @@ test('pnpm 저장소가 --project 위에 있으면 밖의 extends만 건너뛰�
       readonly limitations: readonly string[];
     };
     assert.ok(document.facts.some((fact) => fact.location.path === 'src/use.ts'));
-    assert.deepEqual(document.limitations.filter((line) => /^(?:unreadable-module-configs|unresolved-client-receivers):/u.test(line)), []);
+    assert.deepEqual(document.limitations.filter((line) => /^unresolved-client-receivers:/u.test(line)), []);
+    assert.ok(document.limitations.some((line) => line.startsWith('unreadable-module-configs: 1')));
+    assert.ok(document.limitations.some((line) => line.includes('compiler config could not be read')));
     // 실제 경로가 프로젝트 밖인 저장소 파일은 여전히 열지 않는다.
     assert.deepEqual([...log.counts.keys()].filter((path) => path.includes('@tsconfig')), []);
   });

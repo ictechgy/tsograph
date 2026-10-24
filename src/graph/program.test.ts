@@ -72,7 +72,7 @@ test('explicit compiler config resolves aliases from its own directory for a sel
     const result = createGraphProgram(join(root, 'app'), [join(root, 'app/main.ts')], ts.createProgram, join(root, 'config/build.json'));
     assert.equal(result.status.configUnreadable, false);
     assert.ok(result.program.getSourceFile(join(root, 'lib/api.ts')));
-    assert.equal(result.program.getCompilerOptions().baseUrl, root);
+    assert.equal(resolve(result.program.getCompilerOptions().baseUrl!), root);
   });
 });
 
@@ -935,7 +935,7 @@ function deepLogicalSource(name: string): string {
 
 test('compiler host는 구문 깊이 상한을 넘는 입력을 Program에서 빼고 호출자 소스와 나머지 입력을 나눠 센다', async () => {
   await withProject({
-    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, files: ['entry.ts', 'selected.ts'] }),
+    'tsconfig.json': JSON.stringify({ compilerOptions: { types: [] }, files: ['entry.ts', 'selected.ts', 'walked.ts', 'parens.ts'] }),
     'entry.ts': 'import { hidden } from "./hidden"; import { walked } from "./walked"; export function entry() { return hidden || walked; }',
     'selected.ts': deepLogicalSource('selected'),
     'hidden.ts': deepLogicalSource('hidden'),
@@ -982,7 +982,7 @@ const mainPath = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
  * @returns 상대 경로 목록
  */
 function rootFiles(program: ts.Program, root: string): string[] {
-  return program.getRootFileNames().map((name) => relative(root, name)).sort();
+  return program.getRootFileNames().map((name) => relative(root, name).replaceAll('\\', '/')).sort();
 }
 
 /**
@@ -1240,6 +1240,7 @@ test('설정 include 열거는 걷기와 같은 항목 상한에서 멈추고 �
     assert.deepEqual(rootFiles(capped.program, root), ['src/a.d.ts', 'src/b.d.ts']);
     assert.equal(capped.status.configRootsTruncated, true);
     assert.deepEqual(compilerConfigGaps(capped.status, 'route registrations'), [
+      'config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; route registrations may be incomplete',
       'include patterns of tsconfig.json reached the directory entry limit; later matches were not used as root files; '
         + 'type resolution and route registrations may be incomplete',
     ]);
@@ -1286,7 +1287,7 @@ test('tsconfig가 없거나 읽지 못하면 자동 타입 루트를 실행 위�
     const typeFiles = (project: string): string[] => {
       const directory = join(root, project);
       return createGraphProgram(directory, [join(directory, 'src/a.ts')]).program.getSourceFiles()
-        .map((file) => relative(root, file.fileName))
+        .map((file) => relative(root, file.fileName).replaceAll('\\', '/'))
         .filter((path) => !path.startsWith('..') && path.includes('node_modules/@types/'))
         .sort();
     };

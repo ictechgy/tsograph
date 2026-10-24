@@ -72,11 +72,19 @@ tagged template)과 색인 지점은 하나마다 20,000단계를 쓰고, 이미
 무엇을 바꿀 수 있었는지 좁히지 못하므로 `route-call-coverage:`로 변경 분석 미완을 알리고 axios·ky 클라이언트와
 요청 설정을 모두 dynamic으로 둔다.
 
+무관한 클래스 필드에 primitive 결과를 저장하는 것은 HTTP 클라이언트를 오염시키지 않는다. 알려진 수신자·설정 별칭의
+변경은 해당 심볼에 한정하고, 출처를 모르는 객체나 provenance 예산 중단은 전체 미완으로 유지한다. 변경 limitation에는
+원인 수와 제한된 상대 위치를, 구문 오류에는 해당 파일 위치를 싣는다. 이는 정적 타입을 이용한 관찰이다.
+클래스 필드 변경은 선언별로 추적하므로 한 인스턴스의 변경이 같은 필드 선언을 쓰는 다른 인스턴스의 호출도 보수적으로
+dynamic으로 만들 수 있다. 다른 인스턴스가 실제로 변경됐다는 증거는 아니다.
+
 주입형 transport는 `--client-model client-model.json`으로 정확한 소스 type/class, 메서드,
 HTTP 동사, 경로 인자, base 접두사를 선언할 수 있다. 전역 이름·메서드 모양 대신 선언 identity로
 매칭한다. 미상 URL 선행 값과 `{{NAME}}` 빌드 토큰에서 복원한 경로는 dynamic으로 유지한다.
 변경 분석이 미완이면 모델 호출은 사라지지 않고 모델의 동사·`service`와 `channel: null`·`pathAnchor: "base"`의
-dynamic 사실로 남는다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
+dynamic 사실로 남는다. escape·변경된 modeled 수신자도 알려진 호출 위치를 dynamic 후보로 보존한다. 모델 동사는 선언된
+근거이며 교체된 메서드가 실제 HTTP를 수행한다는 증거가 아니다. `base` 생략만 빈 문자열로 기본 처리하고 잘못된 값은
+정확한 JSON pointer를 가진 입력 오류로 남긴다. [명시적 client 모델](docs/CLIENT-MODELS.md)을 참고한다.
 
 `--client-model`과 `--tsconfig`(client Program의 compiler 설정)는 realpath가 `--project` 안인 일반 파일만 받는다. 상대 경로는
 `--project` 기준이고 절대 경로도 안이면 받는다. 직접이든 symlink로든 `--project` 밖이면 `openapi`·`navigation`·
@@ -86,6 +94,23 @@ JSON은 키 정렬과 읽기 쉬운 들여쓰기를 유지한다. 들여쓰기 �
 넘으면 같은 문서 전체를 압축 JSON으로 낸다. 사실·데이터 상한은 유지하며 압축 후에도 넘으면
 부분 문서 없이 실패한다. 깊이 중첩된 파일을 뺀 뒤에도 분석이 호출 스택을 넘기면 출력 초과가 아니라
 그 원인으로 알린다. 큰 순회는 `--max-depth`·`--max-reached`로 명시적인 잘림을 요청할 수 있다.
+
+graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclude`는 진입 파일을 고른다. import 의존성은
+진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 명시 project reference의 소유 설정을 사용하므로 두 앱이
+각각 `baseUrl: "./src"`를 써도 각 앱 내부 별칭과 import한 패키지 내부 별칭을 올바른 위치에서 해석한다.
+같은 타입 의미는 하나의 Program을 쓰고 다른 의미는 독립 Program으로 분석한다. 문맥 간 import와 모호하거나 누락된
+소유권은 미해결로 남긴다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
+PnP loader는 소스 진입에서 제외하고 실행하지 않는다. compiler 기반 graph·Node/client routes·navigation은 유계 `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal과 ZIP 안 선언을 정적으로 읽는다. [정적 PnP 범위·한계](docs/STATIC-PNP.md)를 참고한다. 지원 밖 metadata는 명시적 미해결로 남는다. PnP 범위의 서로 다른 소유 설정은 compiler 옵션이 같아도 global/type universe를 분리한다.
+프로젝트 내부 `.gitignore` 진입 선택은 `--respect-gitignore`로 켠다(기본 off). [선택 범위·예산](docs/GITIGNORE.md)을 참고한다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
+
+Next convention 선언과 graph의 convention 진입점도 이 범위를 쓴다. 제외된 page/route를 import하면 그래프 의존성은
+남아도 convention 진입점으로 올리지 않는다. 제외 수를 limitation으로 남기며 런타임에 해당 경로가 없다는 보장이 아니다.
+navigation은 owned import·재내보내기·const 별칭을 거친 공유 route 배열의 경로·화면 후보를 복원하되, 생략된 소스나
+외부 소비자의 변경 가능성 때문에 dynamic으로 유지한다. 관찰한 쓰기·unknown escape는 미상 dynamic 사실로 남긴다.
+무인자 owned factory가 단일 fresh literal 배열을 호출·효과 없이 반환하는 경우만 정적 생성 근거로 읽는다.
+공유 배열 반환·효과/재귀가 있는 factory·`Object.freeze`는 불변 증명이 아니다. factory·PnP·lazy loader를 실행하지
+않으며 교환 필드·버전은 바꾸지 않는다. factory children은 중첩 literal 배열만 받으며, 공유 별칭은 이전 반환값을
+통해 변경될 수 있어 미상으로 남긴다. 진입 파일 비교는 파일시스템의 대소문자 구분을 따르고 별개 파일은 합치지 않는다.
 
 ## 요구 사항
 
@@ -204,7 +229,7 @@ Next.js 프로젝트나 Node 백엔드(Hono·Express·Fastify·Koa + @koa/router
 Next.js route 파일은 TypeScript 파서로 읽기만 하고, Node 백엔드는 라우터를 파일 사이로 따라가려고 `tsograph graph`와
 같은 방식의 TypeScript `Program`으로 읽는다. 아래 [Node 백엔드](#node-백엔드)를 본다.
 
-- `--role server`(필수): 선언 측만 구현했다. `client`는 route-call 추출이 생기기 전까지 사용법 오류다.
+- `--role server`(이 절의 필수 옵션): 선언을 추출한다. `--role client`는 위에 설명한 HTTP 호출 위치를 추출한다.
 - `--project`(필수): 프로젝트 루트(`package.json`, `next.config.*`, `app/`·`pages/`가 있는 곳). `project`는
   그 POSIX realpath이고 `location.path`는 그 기준 상대 경로다. Node 프레임워크는 루트 `package.json` 의존성으로
   감지하고, Next.js는 `next`가 선언됐거나 `next.config.*`가 있거나 Node 백엔드 프레임워크를 하나도 감지하지 못했을 때
@@ -689,8 +714,8 @@ TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그�
 직접이든 symlink로든 `--project` 밖 설정은 분석 전에 사용법 오류(`64`)다(안의 설정이 밖의 공용 설정을 `extends`하는 것은
 된다). 없거나 읽지 못하는 설정·1 MiB를 넘는 설정은 `2`다. `routes --role client`·`navigation`의 `--tsconfig`도 같다.
 `--workspace`는 프로젝트를 포함하는
-소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 선택한 프로젝트 설정을 모든 소스에
-적용하며 패키지별 설정은 병합하지 않는다는 limitation을 남긴다. 서버 라우트 발견에는 workspace 루트 설정을 쓴다. 의존성·빌드 디렉터리와
+소스 경계와 그 기준 id를 선택해 패키지 간 호출을 연결한다. 파일별 nearest/reference 설정을 사용하고 호환되지 않는
+타입 문맥 간 import는 미해결로 남긴다. 서버 프레임워크 발견은 여전히 workspace 루트 manifest를 사용한다. 의존성·빌드 디렉터리와
 symlink는 제외하며, `tsconfig.json`/`jsconfig.json`의 `include`·`files`가 고르는 루트 파일에도 같은 걷기 정책을 적용한다
 (`--project` 안, `--workspace`를 주면 그 안; `node_modules`·`dist`·`build`·`out`·`coverage`·점·Prisma 생성 출력 디렉터리 제외;
 symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열거). 시작 디렉터리가 그 루트 밖인 include 패턴과 루트 밖
@@ -698,7 +723,7 @@ symlink는 따라가지 않음; 디렉터리 항목은 500,000개까지만 열�
 include 경로가 그 제외 디렉터리 안이거나 symlink를 거치면 역시 쓰지 않고 같은 곳에 센다. 그 디렉터리에서 글롭이 고를
 파일은 걷기처럼 세지 않는다. 두 곳의 파일 모두 프로젝트 소스가 import하거나 참조하면 읽는다.
 루트 `package.json`·`vercel.json`은 1 MiB 안의 symlink가 아닌 일반 파일일 때만 읽는다. symlink·FIFO·장치·권한
-실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). PnP 전용 환경을 별도로 알리며 `.pnp.cjs`는 실행하지 않는다.
+실패는 따라가거나 기다리지 않고 읽지 못한 것으로 알린다(`bound-dispatch:`, `entry-points:`). 지원 밖이거나 불완전한 정적 PnP 의존성 입력을 명시하고 `.pnp.cjs`는 실행하지 않는다.
 
 CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--format ndjson`은
 `tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler
@@ -1261,6 +1286,14 @@ NestJS 옛 경로 변환기)를 패키지 출처와 함께 고정하고, `src/ro
 `src/routes/conformance.test.ts`는 Next fixture가 내는 모든 정적 channel을 벤더링한
 `conformance/http-template.json`의 문법 사례로 검사하고, 확인한 Next.js 변환표(`next/dist` 출처 포함)를
 isthmus 벡터 모양으로 두어 `producer:nextjs` 사례로 올릴 수 있게 한다.
+
+## 실제 변경 분석
+
+`tsograph change-impact --project . --base HEAD~1 --head HEAD`로 두 커밋을 비교한다. `--head`를 생략하면
+작업 트리 변경을 쓴다. 각 시점의 내용을 고정해 삭제 caller·파일 단위 seed·전파 경로·신선도 해시·미매핑 파일과
+한계를 보존한다. 결과는 불완전한 검토 후보이며 실패 예측이나 테스트 생략 허가가 아니다. 기존 `impact <id>`는
+유지한다. [변경 분석](docs/CHANGE-IMPACT.md)에 범위와 예산이 있다. 호환 소비자는 `openapi ... --data-contracts`로
+제한된 primitive HTTP 데이터 계약 근거를 명시적으로 요청할 수 있다.
 
 ## 라이선스
 

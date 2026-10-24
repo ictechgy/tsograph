@@ -1,0 +1,10 @@
+{
+  "name": "pnp-positive-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "yarn@4.18.1",
+  "dependencies": {
+    "@fixture/client": "file:../packages/client",
+    "@fixture/provider": "file:../packages/provider"
+  }
+}

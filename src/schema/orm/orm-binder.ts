@@ -8,7 +8,7 @@
  * 값은 import 문의 지정자와 이름으로만 식별한다(`import { pgTable } from 'drizzle-orm/pg-core'`).
  */
 
-import { extname } from 'node:path';
+import { extname, resolve } from 'node:path';
 
 import ts from 'typescript';
 
@@ -92,7 +92,7 @@ export class OrmBinder {
    * @param resolver 프로젝트 안 모듈 해석기
    */
   constructor(modules: readonly SourceModule[], resolver: ModuleResolver) {
-    this.modulesByPath = new Map(modules.map((module) => [module.absolutePath, module]));
+    this.modulesByPath = new Map(modules.map((module) => [resolve(module.absolutePath), module]));
     this.resolver = resolver;
     const program = ts.createProgram({
       rootNames: modules.map((module) => module.absolutePath),
@@ -196,7 +196,7 @@ export class OrmBinder {
    * @returns 값 식 또는 undefined
    */
   commonJsDefault(sourceFile: ts.SourceFile): ts.Expression | undefined {
-    const target = this.modulesByPath.get(sourceFile.fileName)?.exports.get('default');
+    const target = this.modulesByPath.get(resolve(sourceFile.fileName))?.exports.get('default');
     return target?.kind === 'expression' ? target.expression : undefined;
   }
 
@@ -209,7 +209,7 @@ export class OrmBinder {
    */
   moduleOrigin(specifier: string, importer: ts.SourceFile): BindingOrigin {
     const target = this.resolver.resolve(specifier, importer.fileName);
-    const module = target === undefined ? undefined : this.modulesByPath.get(target);
+    const module = target === undefined ? undefined : this.modulesByPath.get(resolve(target));
     if (module !== undefined) return { kind: 'module', sourceFile: module.sourceFile };
     return isPackageSpecifier(specifier) ? { kind: 'external', module: specifier, name: '*' } : UNKNOWN_ORIGIN;
   }
@@ -307,16 +307,17 @@ export class OrmBinder {
    */
   private compilerHost(): ts.CompilerHost {
     const modules = this.modulesByPath;
+    // TypeScript는 Windows 입력도 '/'로 요청한다. OS 경로로만 정규화하고 입력 집합 밖은 읽지 않는다.
     return {
-      getSourceFile: (fileName) => modules.get(fileName)?.sourceFile,
+      getSourceFile: (fileName) => modules.get(resolve(fileName))?.sourceFile,
       getDefaultLibFileName: () => 'lib.d.ts',
       writeFile: () => undefined,
       getCurrentDirectory: () => '/',
       getCanonicalFileName: (fileName) => fileName,
       useCaseSensitiveFileNames: () => true,
       getNewLine: () => '\n',
-      fileExists: (fileName) => modules.has(fileName),
-      readFile: (fileName) => modules.get(fileName)?.text.text,
+      fileExists: (fileName) => modules.has(resolve(fileName)),
+      readFile: (fileName) => modules.get(resolve(fileName))?.text.text,
       resolveModuleNameLiterals: (literals, containingFile) => literals.map((literal) => this.resolveLiteral(literal.text, containingFile)),
     };
   }

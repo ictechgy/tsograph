@@ -38,15 +38,19 @@ import {
   type CallGraph,
   type CallStatistics,
   DISPATCH_MODES,
+  EDGE_EVIDENCE_ORDER,
   type DispatchMode,
   type GraphNode,
+  type GraphEdge,
   GraphStore,
   UNRESOLVED_REASONS,
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configRootGaps, createGraphProgram, GraphProjectInputError, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
+import { scopeIdOf } from './symbol-ids.ts';
+import { gitignoreSelectionLimitation } from '../scan/gitignore.ts';
 
 /** `vercel.json` 최대 크기(바이트)다. */
 const MAX_VERCEL_CONFIG_BYTES = 1024 * 1024;
@@ -139,27 +143,32 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
       project = workspace;
     } catch { throw new GraphProjectInputError('workspace'); }
   }
-  const routes = await loadRouteInputs(project, fileSystem);
+  const routes = await loadRouteInputs(project, fileSystem, { root: selectedProject, ...(config === undefined ? {} : { tsconfig: config }) });
   const inputs = collectGraphInputs(project, routes.extraction);
+  const gitignoreLimitation = gitignoreSelectionLimitation();
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
-  const { program, checker, status, deeplyNestedSources } = createGraphProgram(
-    selectedProject, [...inputs.sources.values(), ...inputs.declarations], ts.createProgram, config, boundary,
-  );
+  const results: CallGraph[] = [];
+  for (const { program, checker, status, deeplyNestedSources, excludedSources, ownedSources } of createGraphPrograms(
+    selectedProject, [...inputs.sources.values(), ...inputs.declarations], config, boundary,
+  )) {
   const files = nodeFiles(program, inputs.sources);
   const deeplyNestedFiles = [...inputs.sources].filter(([, absolute]) => deeplyNestedSources.has(resolve(absolute))).map(([path]) => path);
   const deeplyNestedInputs = deeplyNestedSources.size - deeplyNestedFiles.length + (status.deeplyNestedCompilerInputs ?? 0);
   // 걷기가 고른 소스 중 Program에 없는 것은 compiler host가 읽지 못했다(권한·걷기 뒤 삭제·TypeScript가 다른 경로로
   // 읽는 백슬래시 이름). host의 'unreadable' 전체를 세면 TypeScript의 존재 탐침(ENOENT)까지 섞이므로 기대 소스와 대조한다.
   // 구문 깊이 상한으로 뺀 소스는 원인이 달라 따로 센다.
-  const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length;
+  const excludedSourceCount = [...inputs.sources.values()].filter((path) => excludedSources.has(resolve(path))).length;
+  const unreadableSources = inputs.sources.size - files.size - deeplyNestedFiles.length - excludedSourceCount;
   const walk = inputs.walk;
   const compilerInputsIncomplete = (status.oversizedCompilerInputs ?? 0) > 0 || deeplyNestedInputs > 0;
   // 경계 밖이거나, 이름으로 적었지만 걷기가 건너뛰는 디렉터리·symlink라 쓰지 않았거나, 상한 뒤라 열거하지 못한 설정 루트는
   // 설정을 다 반영하지 못한 것이라 읽지 못한 설정처럼 본다.
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
-    || status.configRootsTruncated === true;
-  const coverageComplete = !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
+    || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
+    || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true
+    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0;
+  const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
   const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete, routes.testSources);
@@ -170,10 +179,11 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     appDirectory: routes.extraction.routerDirectories.appDirectory,
     pagesDirectory: routes.extraction.routerDirectories.pagesDirectory,
     pageExtensions: routes.pageExtensions,
+    sourceEntries: new Set(program.getRootFileNames().map(path => sourceEntryKey(relative(project, path).replaceAll('\\', '/')))),
   };
   const unmatchedCrons = markEntryPoints(analysis.store, files, entryInput);
   const parseErrorFiles = collectParseErrorFiles(files);
-  const openProgram = compilerInputsIncomplete ? 'incomplete-scan'
+  const openProgram = gitignoreLimitation !== undefined || compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
   resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
@@ -183,12 +193,43 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     cronConfigUnreadable: crons.unreadable,
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
-  const environmentLimits: string[] = [];
-  if (options.workspace !== undefined) environmentLimits.push('workspace-config: owned sources and routes are scanned across the workspace; the graph checker uses the selected project config while server route discovery uses workspace-root configuration; separate package options are not merged');
-  if (existsSync(join(project, '.pnp.cjs')) && !existsSync(join(project, 'node_modules'))) environmentLimits.push('pnp-dependencies: a PnP loader exists without node_modules; loaders are not executed and PnP-only dependency declarations may not resolve');
+  const environmentLimits: string[] = [...(routes.extraction.scopeLimitations ?? [])];
+  if (gitignoreLimitation !== undefined) environmentLimits.push(gitignoreLimitation);
+  if ((walk.skippedLoaders ?? 0) > 0) environmentLimits.push(`source-scope: ${walk.skippedLoaders} PnP loader file(s) were excluded from source entries; loaders are never executed`);
+  if (options.workspace !== undefined) environmentLimits.push('workspace-config: sources use their nearest or referenced compiler config; incompatible type-checking contexts are separate and cross-context imports remain unresolved');
   const limitationsByMode = Object.fromEntries(DISPATCH_MODES.map((mode) => [mode, [...buildLimitations(nodes, counts, mode), ...environmentLimits]])) as Record<DispatchMode, string[]>;
   const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
-  return { nodes, edges: analysis.store.edges(), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } };
+  const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
+  const ownedIds = new Set(ownedNodes.map(node => node.id));
+  results.push({ nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } });
+  }
+  return mergeContextGraphs(results);
+}
+
+/** 서로 다른 checker의 객체를 버리고 각 소유 문맥의 문자열 결과만 합친다. */
+function mergeContextGraphs(graphs: readonly CallGraph[]): CallGraph {
+  if (graphs.length === 1) return graphs[0]!;
+  const nodes: GraphNode[] = [], edges: GraphEdge[] = [];
+  const calls = createCallStatistics();
+  for (const graph of graphs) {
+    for (const node of graph.nodes) nodes.push(node);
+    for (const edge of graph.edges) edges.push(edge);
+    calls.resolved += graph.statistics.calls.resolved;
+    calls.external += graph.statistics.calls.external;
+    calls.missingDependencies += graph.statistics.calls.missingDependencies;
+    for (const reason of UNRESOLVED_REASONS) calls.unresolved[reason] += graph.statistics.calls.unresolved[reason];
+    for (const key of ['bound', 'boundPartial', 'candidate', 'candidatePartial', 'overBudget'] as const) calls.dispatch[key] += graph.statistics.calls.dispatch[key];
+    for (const kind of ['identifier', 'property', 'element', 'other'] as const) {
+      const count = graph.statistics.calls.indirectSites?.[kind];
+      if (count !== undefined) { calls.indirectSites ??= {}; calls.indirectSites[kind] = (calls.indirectSites[kind] ?? 0) + count; }
+    }
+  }
+  const unique = (lines: readonly string[]) => [...new Set(lines)].sort(compareStrings);
+  return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
+    edges: edges.sort((a, b) => compareStrings(a.from, b.from) || compareStrings(a.to, b.to) || EDGE_EVIDENCE_ORDER.indexOf(a.evidence) - EDGE_EVIDENCE_ORDER.indexOf(b.evidence)),
+    limitations: unique(graphs.flatMap(graph => graph.limitations)),
+    limitationsByMode: Object.fromEntries(DISPATCH_MODES.map(mode => [mode, unique(graphs.flatMap(graph => graph.limitationsByMode[mode]))])) as Record<DispatchMode, string[]>,
+    statistics: { files: graphs.reduce((sum, graph) => sum + graph.statistics.files, 0), calls } };
 }
 
 /**
@@ -284,11 +325,14 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const productionFlowIndex = separateTests
     ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
     : flowIndex;
+  const matchesProject = projectSpecifierMatcher(program.getCompilerOptions());
+  const projectSpecifier = (specifier: string, sourceFile?: ts.SourceFile) =>
+    (sourceFile !== undefined && configImportIsBlocked(program, sourceFile.fileName)) || matchesProject(specifier);
   const resolver = new TargetResolver(
     checker,
     store,
     (sourceFile) => pathByFile.get(sourceFile),
-    projectSpecifierMatcher(program.getCompilerOptions()),
+    projectSpecifier,
     flowIndex,
     (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
   );
@@ -297,7 +341,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
       checker,
       store,
       (sourceFile) => pathByFile.get(sourceFile),
-      projectSpecifierMatcher(program.getCompilerOptions()),
+      projectSpecifier,
       productionFlowIndex,
       (sourceFile) => program.isSourceFileDefaultLibrary(sourceFile),
     )
@@ -308,6 +352,18 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const gaps: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
   const pending: PendingDispatch[] = [];
   for (const [path, sourceFile] of files) {
+    if (configImportIsBlocked(program, sourceFile.fileName)) {
+      // 소유 설정이 모호하면 선언은 남기되 임의 checker의 호출·alias 간선을 확정하지 않는다.
+      const unresolved = (node: ts.Node): void => {
+        if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+          calls.unresolved['unresolved-import']++;
+          store.countUnresolved(scopeIdOf(node, path), undefined);
+        }
+        ts.forEachChild(node, unresolved);
+      };
+      unresolved(sourceFile);
+      continue;
+    }
     const edgeResolver = separateTests && !testPaths.has(path) ? productionResolver : resolver;
     collectFileEdges({ checker, store, resolver: edgeResolver, overrides, calls, gaps, pending }, path, sourceFile);
     classes.get(path)!.forEach((declaration) => addClassEdges(store, resolver, path, declaration));
@@ -318,7 +374,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
     unresolvedExports: linkExportNodes(store, checker, (sourceFile) => {
       const path = pathByFile.get(sourceFile);
       return separateTests && path !== undefined && !testPaths.has(path) ? productionResolver : resolver;
-    }, pendingExports),
+    }, pendingExports.filter(entry => !configImportIsBlocked(program, entry.name.getSourceFile().fileName))),
   };
 }
 
@@ -330,8 +386,8 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
  * @param fileSystem 파일 시스템
  * @returns 추출 결과·route-decl 사실·페이지 확장자·테스트 소스 규칙
  */
-async function loadRouteInputs(project: string, fileSystem: CommandFileSystem): Promise<RouteInputs> {
-  const routes = await extractProjectRoutes(fileSystem, project, false);
+async function loadRouteInputs(project: string, fileSystem: CommandFileSystem, compilerScope: { root: string; tsconfig?: string }): Promise<RouteInputs> {
+  const routes = await extractProjectRoutes(fileSystem, project, false, compilerScope);
   const extraction = routes.next?.extraction ?? emptyNextRoutesResult();
   const config = routes.next?.config;
   const pageExtensions = config?.pageExtensions.kind === 'known' ? config.pageExtensions.value : DEFAULT_PAGE_EXTENSIONS;
@@ -607,7 +663,7 @@ function inputLimitations(counts: GraphCounts): string[] {
   if (config.configUnreadable) {
     result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
-  result.push(...configRootGaps(config, 'calls').map((gap) => `graph-config: ${gap}`));
+  result.push(...configRootGaps(config, 'calls').map((gap) => gap.startsWith('pnp-dependencies:') ? gap : `graph-config: ${gap}`));
   if ((config.oversizedCompilerInputs ?? 0) > 0) {
     result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
   }

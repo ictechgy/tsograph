@@ -71,7 +71,7 @@ export class TargetResolver {
   private readonly checker: ts.TypeChecker;
   private readonly store: GraphStore;
   private readonly pathOf: (sourceFile: ts.SourceFile) => string | undefined;
-  private readonly isProjectSpecifier: (specifier: string) => boolean;
+  private readonly isProjectSpecifier: (specifier: string, sourceFile?: ts.SourceFile) => boolean;
   private readonly writes: Pick<FlowIndex, 'identifierWrites' | 'propertyWrites' | 'reflectiveTargets'> & Partial<Pick<FlowIndex, 'hasOpaqueMutation'>>;
   /** carrier-role direct method를 shared Stage 0 proof로 defer하는 분석기(전체 index가 있을 때만) */
   private readonly constructorCarrier: ConstructorCarrierAnalyzer | undefined;
@@ -97,7 +97,7 @@ export class TargetResolver {
     checker: ts.TypeChecker,
     store: GraphStore,
     pathOf: (sourceFile: ts.SourceFile) => string | undefined,
-    isProjectSpecifier: (specifier: string) => boolean,
+    isProjectSpecifier: (specifier: string, sourceFile?: ts.SourceFile) => boolean,
     index?: FlowIndex,
     isDefaultLibraryFile?: (sourceFile: ts.SourceFile) => boolean,
   ) {
@@ -581,8 +581,9 @@ export class TargetResolver {
    * @returns 패키지 import면 true
    */
   private isMissingPackageImport(symbol: ts.Symbol): boolean {
-    const specifier = importSpecifierOf(symbol.declarations?.[0]);
-    return specifier !== undefined && !this.isProjectSpecifier(specifier);
+    const declaration = symbol.declarations?.[0];
+    const specifier = importSpecifierOf(declaration);
+    return specifier !== undefined && !this.isProjectSpecifier(specifier, declaration?.getSourceFile());
   }
 
   /**

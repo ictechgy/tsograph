@@ -17,7 +17,7 @@ import { flattenKoa, koaAdapter } from './koa-adapter.ts';
 import { extractNestRoutes } from './nest-routes.ts';
 import { NodeFactBudget } from './node-facts.ts';
 import { type DetectedFrameworks, detectFrameworks, hasNodeFramework } from './node-frameworks.ts';
-import { hasParseErrors, isNodeTestPath, loadNodeProject, type NodeProject } from './node-project.ts';
+import { hasParseErrors, isNodeTestPath, loadNodeProjects, type NodeProject } from './node-project.ts';
 import { type FrameworkAdapter, interpretProject } from './router-interpreter.ts';
 
 /** 추출 입력이다. */
@@ -30,6 +30,8 @@ export interface NodeRoutesInput {
 /** 추출 결과다. */
 export interface NodeRoutesResult {
   readonly detected: DetectedFrameworks;
+  /** 여러 compiler 문맥의 AST는 각 분석과 함께 유지하고 문서화한 문자열 사실만 합친다. */
+  readonly contexts?: readonly NodeRoutesResult[];
   /** 프레임워크를 감지해 분석했으면 있다 */
   readonly analysis?: {
     readonly project: NodeProject;
@@ -69,7 +71,13 @@ export async function detectNodeFrameworks(fileSystem: CommandFileSystem, projec
 export async function extractNodeRoutes(input: NodeRoutesInput, detected?: DetectedFrameworks): Promise<NodeRoutesResult> {
   const frameworks = detected ?? await detectNodeFrameworks(input.fileSystem, input.project);
   if (!hasNodeFramework(frameworks)) return { detected: frameworks };
-  const project = loadNodeProject(input.project);
+  const contexts: NodeRoutesResult[] = [];
+  for (const project of loadNodeProjects(input.project)) contexts.push(extractNodeContext(input, frameworks, project));
+  return contexts.length === 1 ? contexts[0]! : { detected: frameworks, contexts };
+}
+
+/** 독립 Program 안에서만 라우터 상태와 checker 신원을 사용한다. */
+function extractNodeContext(input: NodeRoutesInput, frameworks: DetectedFrameworks, project: NodeProject): NodeRoutesResult {
   const adapters = adaptersFor(frameworks);
   const includeFile = (path: string): boolean => input.includeTests || !isNodeTestPath(path);
   const interpretation = interpretProject(project, adapters, includeFile);

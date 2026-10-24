@@ -1,11 +1,45 @@
 import assert from 'node:assert/strict';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 
-import type ts from 'typescript';
+import ts from 'typescript';
 
+import { ModuleResolver } from '../module-resolver.ts';
+import { parseSourceModule } from '../source-module.ts';
+import { withProject } from '../testing.test.ts';
 import { OrmBinder } from './orm-binder.ts';
 import { ormLines } from './testing.test.ts';
+
+test('컴파일러의 경로 구분자 정규화 뒤에도 스캔한 import·require 신원을 보존한다', () => {
+  const files = {
+    'src/schema.ts': "export { sqliteTable as table } from 'drizzle-orm/sqlite-core';\n",
+    'src/common.cjs': "module.exports = require('pg');\n",
+    'src/use.ts': "import { table } from './schema';\nexport const t = table('t', {});\n",
+    'src/unscanned.ts': 'export const value = 1;\n',
+  };
+  withProject(files, (root) => {
+    const scanned = Object.entries(files).filter(([path]) => !path.endsWith('/unscanned.ts'));
+    for (const compilerSlashes of [false, true]) {
+      const modules = scanned.map(([path, text]) => {
+        const nativePath = join(root, path);
+        return parseSourceModule(path, compilerSlashes ? nativePath.replaceAll('\\', '/') : nativePath, text);
+      });
+      const resolver = new ModuleResolver(root, new Set(scanned.map(([path]) => join(root, path))));
+      const binder = new OrmBinder(modules, resolver);
+      const [schema, common, use] = modules;
+      assert.ok(schema !== undefined && common !== undefined && use !== undefined);
+      const statement = use.sourceFile.statements[1];
+      assert.ok(statement !== undefined && ts.isVariableStatement(statement));
+      const call = statement.declarationList.declarations[0]?.initializer;
+      assert.ok(call !== undefined && ts.isCallExpression(call));
+      assert.deepEqual(binder.originOf(call.expression), { kind: 'external', module: 'drizzle-orm/sqlite-core', name: 'sqliteTable' });
+      assert.deepEqual(binder.moduleOrigin('./schema', use.sourceFile), { kind: 'module', sourceFile: schema.sourceFile });
+      assert.equal(binder.commonJsDefault(common.sourceFile)?.getText(), "require('pg')");
+      // 파일이 존재해도 입력 집합 밖이면 컴파일러 호스트가 새로 읽거나 바인딩하지 않는다.
+      assert.deepEqual(binder.moduleOrigin('./unscanned', use.sourceFile), { kind: 'unknown' });
+    }
+  });
+});
 
 /**
  * 콜백을 실행하는 동안 `OrmBinder.exportsOf`가 파일마다 돌려준 서로 다른 표의 수를 센다. 표를 다시 계산하면 호출마다

@@ -197,6 +197,14 @@ function nextFacts(part: NextDocumentPart, service: string | undefined): { facts
  */
 function nodeFacts(input: RouteDocumentInput, registrationOrder: boolean): { facts: RouteDeclFact[]; limitations: NodeLimitationEntry[] } {
   if (input.node === undefined) return { facts: [], limitations: [] };
+  if (input.node.contexts !== undefined) {
+    const parts = input.node.contexts.map(node => nodeFacts({ ...input, node }, registrationOrder));
+    const facts = parts.flatMap(part => part.facts);
+    if (facts.length > MAX_ROUTE_FACTS) throw new RouteFactLimitError();
+    // 서로 다른 Program의 등록 순서는 증명하지 못한다.
+    return { facts: facts.map(({ order: _order, ...fact }) => fact),
+      limitations: [...parts.flatMap(part => part.limitations), { text: 'route-dispatch-order-unknown: registrations in separate compiler contexts have no proven shared execution order' }] };
+  }
   const projectLimitations = nodeProjectLimitations(input.node);
   const analysis = input.node.analysis;
   if (analysis === undefined) return { facts: [], limitations: projectLimitations };
@@ -330,6 +338,7 @@ function buildLimitations(input: NextDocumentPart, decision: BasePathDecision): 
     ...[
       ...configLimitations(input.config, decision),
       ...gapLimitations(input.extraction.gaps),
+      ...(input.extraction.scopeLimitations ?? []),
       ...directoryLimitations(input.extraction),
       ...versionLimitations(input.versionStatus),
       ...usrLimitations(input.extraction.routes),

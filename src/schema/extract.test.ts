@@ -59,15 +59,16 @@ test('schema parse-error limitation은 안전한 상대 파일 10개와 생략 �
   for (let index = 0; index < 12; index++) {
     files[`src/bad${String(index).padStart(2, '0')}.ts`] = 'export const = ;\n';
   }
-  // 금지 문자 이름은 걷기에서 빠지므로 parse-error 계수에도 목록에도 들어가지 않고 unsafe-names:로 센다.
-  files['src/bad\nunsafe.ts'] = 'export const = ;\n';
+  // Windows에서도 생성할 수 있는 교환 금지 문자 U+2028로 같은 계수·출력 거부를 검증한다.
+  const unsafeName = process.platform === 'win32' ? 'bad\u2028unsafe.ts' : 'bad\nunsafe.ts';
+  files[`src/${unsafeName}`] = 'export const = ;\n';
   const result = extractProject(files);
   const limitation = result.limitations.find((line) => line.startsWith('parse-errors:'));
   assert.equal(limitation,
     'parse-errors: 12 source file(s) could not be parsed completely; '
     + 'files: ["src/bad00.ts","src/bad01.ts","src/bad02.ts","src/bad03.ts","src/bad04.ts",'
     + '"src/bad05.ts","src/bad06.ts","src/bad07.ts","src/bad08.ts","src/bad09.ts"]; omitted: 2');
-  assert.ok(!limitation?.includes('\nunsafe'));
+  assert.ok(!limitation?.includes(unsafeName));
   assert.ok(result.limitations.includes(unsafeWalkNames(1)));
 });
 

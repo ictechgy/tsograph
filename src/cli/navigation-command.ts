@@ -39,6 +39,7 @@ screen-route records. Factory and screen identities must resolve to exact projec
 unresolved routes remain dynamic facts with measured limitations.
 
 Options:
+  --respect-gitignore         Select entries with project-local .gitignore rules (default off)
   --project <root>            Project root; locations and graph ids are relative to it (required)
   --router-model <file>       Bounded router-models v1 JSON file inside --project (required)
   --tsconfig <file>           Compiler config file inside --project (relative to it, or absolute)

@@ -15,9 +15,48 @@
 
 ### Added
 
+- 정적 PnP: `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal을 실행 없이 읽고, Yarn ZIP/virtual peer location을 compiler host에 연결한다. TypeScript의 exports/import·require 조건과 명시 local typeRoots를 유지하며 잘못된 archive·locator 대체·경계 밖 읽기를 거부한다. 실제 Yarn4.18.1 생성물과 정상/부정 회귀를 추가했다. 전체 Yarn 런타임/임의 loader 표현식·사용자 정규식·경계 밖 global cache 지원을 주장하지 않는다.
+
+- `--respect-gitignore`: graph/reach/impact/routes/schema/navigation/change-impact의 진입 선택에 프로젝트 내부 `.gitignore`를 선택적으로 적용한다. 기본 동작·import 의존성 읽기는 유지하며 중첩·negation·escape 규칙, 명시 files 범위, 선택 limitation과 실패 예산을 문서화했다. 전역 Git 설정·추적 신원은 사용하지 않는다.
+
+- `change-impact --project <git-root> --base <commit> [--head <commit>]`: 실제 커밋/작업 트리 변경을 독립 before/after
+  그래프에 연결한다. 삭제·rename caller, 내용 해시, seed 이유, 미매핑 파일, 준비 비용과 기존 순회 한계를 보존한다.
+- `openapi --data-contracts`: 호환 소비자를 위한 opt-in bounded primitive 데이터 계약 근거다. 기존 출력은 유지한다.
+
 - 자체 NDJSON 그래프를 소스 접근 없이 reach·impact로 다시 읽는다. 행 개수·순서·중복 키·참조·해시를 검증해 잘린 저장물을 정상 그래프로 취급하지 않는다.
 
 ### Changed
+
+- PnP의 `@/*`·`~/*`·`$lib/*` 로컬 별칭을 npm 이름 문법과 구분한다. 공유 Program 사전 검사는 기본·import·require 모드를 모두 대조해 한 모드의 미해결을 global 입력 부재로 취급하지 않으며, Git 변경 캡처는 invalid UTF-8 파일명 충돌을 거부하고 유효한 BOM·U+FFFD 이름 신원을 보존한다.
+
+- 정적 PnP의 선택 ZIP 누락은 입력 한계로 남기고, top-level null peer를 fallback pool로 대체하지 않는다. metadata 실패와 독립된 로컬 별칭을 유지하며, 여러 소유 설정의 PnP global universe를 보수적으로 분리한다. ZIP 이름의 BOM·원시 byte 신원을 보존한다.
+
+- graph·routes·navigation·schema·change-impact: 소유 파일의 nearest/reference 설정으로 별칭을 해석한다.
+  같은 타입 의미의 경로 옵션은 파일별로 적용하고 다른 타입 의미는 독립 Program에서 분석한다.
+  문맥 간 import와 중복 소유권은 미해결로 남기며 직접 명시 typed client sink는 dynamic 위치 후보를 보존한다.
+  schema도 같은 entry/import closure를 사용하며 범위 변화와 준비 예산은 `docs/CONFIG-SCOPE.md`에 기록한다.
+
+- schema: Windows의 네이티브 경로와 TypeScript가 정규화한 경로를 같은 스캔 입력으로 조회한다. ORM·드라이버
+  import가 전역 이름으로 잘못 분류되어 관계 사실이 누락되던 문제와 이미 분석한 SQL을 미분석으로 다시 세던
+  문제를 고친다. 잘못된 tsconfig도 내부 예외 대신 기존 unreadable 한계로 남긴다. 입력 집합 밖 파일은 계속 읽지 않는다.
+- Next convention 선언·graph 진입점에 compiler entry 범위를 적용한다. 제외된 파일의 import 의존성은 보존하되
+  convention 진입점으로 승격하지 않으며 제외 수와 런타임 미평가 한계를 남긴다.
+- navigation: owned import·default export·재내보내기·const 별칭의 공유 route 배열에서 경로/화면 후보를 복원하되
+  외부 변경이 미평가이므로 dynamic으로 유지한다. 무인자·단일 fresh literal 반환 factory만 실행 없이 읽는다.
+  쓰기·unknown escape·효과/재귀·공유 반환·shallow freeze는 정적 증명으로 쓰지 않는다. 교환 필드·버전은 유지한다.
+  factory가 공유 children 별칭을 반환하면 호출 간 변경을 배제하지 않고 null/dynamic으로 남긴다. Next 진입 비교는
+  TypeScript host의 파일시스템 대소문자 규칙을 따르며 case-sensitive 시스템의 별개 파일을 합치지 않는다.
+- routes client: primitive 반환값을 저장하는 무관한 클래스 필드 변경이 전체 mutation 분석을 미완으로 만들지 않는다.
+  실제 receiver·baseURL·method·alias 변경과 unknown escape는 계속 dynamic으로 남긴다. 알려진 typed sink는 변경·escape
+  뒤에도 위치를 보존하며 모델 동사는 runtime 보장이 아닌 선언 근거다. 미완 원인 수와 상대 위치, 구문 오류 위치를 알린다.
+  생성자 별칭의 prototype 변경과 외부 인스턴스의 필드 쓰기도 선언 심볼로 연결하며 다른 클래스는 오염시키지 않는다.
+- client model: `base` 생략만 빈 문자열을 기본값으로 사용한다. null·숫자·위험 값은 JSON pointer와 입력 오류를 유지한다.
+- graph·Node/client routes·navigation: tsconfig `files`·`include`·`exclude`로 진입 파일을 고르고 import 의존성 closure와 구분한다.
+  `.pnp.*` loader와 TypeScript 소스 옆 중복 JS 진입을 제외한다. 모호한 설정·project reference 소유권은 정적 간선을
+  확정하지 않고 미해결 import와 limitation을 낸다. 분리된 타입 문맥 사이의 타입 API 호환성은 아직 검증하지 않는다.
+- navigation: 입력 배열의 `for...of` children 재귀를 바깥 등록에만 귀속해 중복 dynamic 사실을 줄인다. splat 경로와 상대 자식은
+  router 의미가 미확정인 dynamic 사실이다. 명시적 `lazyScreen` 모델의 literal import는 실행 없이 화면 후보를 붙이되 dynamic을
+  유지한다. export const 배열은 불변으로 승격하지 않는다. README의 client 미구현 문구를 현재 동작에 맞게 고쳤다.
 
 - `schema`의 SQL 관계 스캔이 앞선 단어와 괄호 짝을 한 번만 계산해, 세미콜론 없이 `INTO`·`ON`이 반복되거나 괄호가 닫히지
   않은 대형 SQL 리터럴·파일도 어휘 수에 비례한 시간에 끝난다(출력 같음).
@@ -67,7 +106,7 @@
 
 - routes client: 변경 분석이 미완이어도 `--client-model` typed 호출을 버리지 않고 모델의 동사·`service`와
   `channel: null`·`pathAnchor: "base"`의 dynamic 사실로 남긴다. 예전에는 그 호출이 문서에서 사라졌다. 변경을
-  확인한 수신자는 지금처럼 승격하지 않는다.
+  확인한 수신자도 위치를 보존하는 dynamic 후보로 남긴다.
 
 - schema: 파일 하나의 스캔을 마치면 그 파일의 구문 트리를 놓고, 파일 사이 단계에는 노드 없는 요약과 소스
   텍스트만 남긴다(트리가 다시 필요한 파일만 다시 파싱한다). 출력은 같다. ORM·SQL 드라이버 이름 해석 단계가 돌지

@@ -25,6 +25,7 @@ Read the project's Prisma schema, Prisma Client usage, and SQL text, and write a
 bridge-facts v1 document (platform "js", target "persistence", relation-use facts).
 
 Options:
+  --respect-gitignore         Select entries with project-local .gitignore rules (default off)
   --project <root>   Join root to scan; locations are relative to it (required)
   --format json      Output format (json is the only format)
 

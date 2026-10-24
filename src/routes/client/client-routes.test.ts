@@ -181,7 +181,7 @@ test('typed model preserves the declared local alias identity before expanded ty
   assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel]), [['GET', '/typed/declared-alias']]);
 });
 
-test('typed model rejects reassigned receivers, replaced methods and nested same-name declarations', async () => {
+test('typed model retains changed receivers dynamically and rejects nested same-name declarations', async () => {
   const doc = await scanTyped(`
     type GatewayPort = { read(path: string): unknown };
     declare const replacement: GatewayPort;
@@ -199,12 +199,12 @@ test('typed model rejects reassigned receivers, replaced methods and nested same
       { name: 'read', method: 'GET', pathArgument: 0, base: '/typed' },
     ] }],
   });
-  assert.deepEqual(doc.facts, []);
+  assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true]]);
 });
 
 test('typed model calls stay as dynamic facts when mutation analysis is incomplete', async () => {
   // 예전에는 변경 분석이 미완(여기서는 증명하지 못한 변경 수신자)이면 typed 호출 사실이 문서에서 사라졌다. 지금은 모델
-  // 동사·service의 dynamic 사실로 남긴다. 변경을 확인한 수신자(`replaced`)는 그때도 승격하지 않는다.
+  // 동사·service의 dynamic 사실로 남긴다. 변경을 확인한 수신자도 위치를 잃지 않는다.
   const doc = await scanTyped(`
     type CatalogPort = { read(path: string): unknown };
     declare const port: CatalogPort;
@@ -220,6 +220,7 @@ test('typed model calls stay as dynamic facts when mutation analysis is incomple
     ] }],
   });
   assert.deepEqual(doc.facts.map((fact) => [fact.method, fact.channel, fact.dynamic, fact.pathAnchor, fact.service]), [
+    ['GET', null, true, 'base', 'catalog'],
     ['GET', null, true, 'base', 'catalog'],
   ]);
   assert.ok(doc.limitations.some((limitation) => limitation.includes('configuration mutation analysis is incomplete')));
@@ -592,6 +593,101 @@ const budgetFactShape = (fact: Fact) => [fact.method, fact.channel, fact.dynamic
 /** 변경 분석 미완 limitation이 있는지다. */
 const mutationIncomplete = (limitations: readonly string[]) =>
   limitations.some((limitation) => limitation.includes('configuration mutation analysis is incomplete'));
+
+test('unrelated primitive class stores leave axios and typed call sites unchanged', async () => {
+  const source = `import axios from 'axios';
+    class Http { get(path: string) { return path; } }
+    const http = new Http(), api = axios.create({ baseURL: '/api' });
+    export function run() { http.get('/typed'); api.get('/axios'); }`;
+  const model = { format: 'http-client-models', version: 1, models: [{
+    receiver: { kind: 'class', path: 'src/client.ts', name: 'Http' },
+    methods: [{ name: 'get', method: 'GET', pathArgument: 0, base: '' }],
+  }] };
+  const baseline = await scanTyped(source, model);
+  for (const value of ['compute()', 'local(1)', '1', 'zero()']) {
+    const doc = await scanTyped(source, model, [], { 'src/cache.ts': `declare function compute(): number;
+      function local(value: number) { return value; } function zero() { return 1; }
+      export class Cache { slots: Record<string, number> = {}; put(key: string) { this.slots[key] = ${value}; } }` });
+    assert.deepEqual(doc.facts, baseline.facts, value);
+    assert.equal(mutationIncomplete(doc.limitations), false, value);
+  }
+});
+
+test('modeled receiver escape and method mutation preserve the known sink while unrelated clients stay static', async () => {
+  const model = { format: 'http-client-models', version: 1, models: [{
+    receiver: { kind: 'class', path: 'src/client.ts', name: 'Http' },
+    methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  }] };
+  for (const mutation of ['repo(http);', 'http.get = (path: string) => path;', 'const alias = http; alias.get = (path: string) => path;']) {
+    const doc = await scanTyped(`class Http { get(path: string) { return path; } }
+      declare function repo(value: Http): unknown;
+      const http = new Http(), stable = new Http(); ${mutation}
+      http.get('/affected'); stable.get('/stable');`, model);
+    assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/stable', false]], mutation);
+    assert.ok(doc.facts.every((fact) => fact.location.path === 'src/client.ts' && fact.location.line > 0));
+    assert.ok(doc.limitations.some((value) => value.includes('client-receiver-uncertainty: 1') && value.includes('src/client.ts:')));
+  }
+});
+
+test('a genuinely unbound object mutation remains globally incomplete with a relative cause position', async () => {
+  const doc = await scan(`declare function opaque(): any; opaque().defaults.baseURL = '/changed';
+    const options = { method: 'GET' }; fetch('/unproven', options);`);
+  assert.equal(doc.facts[0]?.dynamic, true);
+  assert.ok(doc.limitations.some((value) => value.includes('causeCount=1') && value.includes('positions=src/client.ts:1:')));
+});
+
+test('modeled class-field and prototype method changes retain dynamic sites without tainting another class', async () => {
+  const model = { format: 'http-client-models', version: 1, models: ['Http', 'Other'].map((name) => ({
+    receiver: { kind: 'class', path: 'src/client.ts', name }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  })) };
+  const prefix = 'class Http { get(path: string) { return path; } } class Other { get(path: string) { return path; } }';
+  for (const mutation of ['', 'this.http.get = (path: string) => path;', 'const alias = this.http; alias.get = (path: string) => path;', 'unknown(this.http);']) {
+    const doc = await scanTyped(`${prefix} declare function unknown(value: Http): void;
+      class Wrapper { http = new Http(); run() { ${mutation} return this.http.get('/field'); } }
+      const other = new Other(); other.get('/other');`, model);
+    assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[mutation === '' ? '/field' : null, mutation !== ''], ['/other', false]], mutation);
+  }
+  const prototype = await scanTyped(`${prefix} Http.prototype.get = (path: string) => path;
+    const http = new Http(), other = new Other(); http.get('/prototype'); other.get('/other');`, model);
+  assert.deepEqual(prototype.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/other', false]]);
+});
+
+test('constructor aliases and external instance field writes keep known typed sinks dynamic', async () => {
+  const model = { format: 'http-client-models', version: 1, models: ['Http', 'Other'].map((name) => ({
+    receiver: { kind: 'class', path: 'src/client.ts', name }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  })) };
+  const prefix = 'class Http { get(path: string) { return path; } } class Other { get(path: string) { return path; } }';
+  for (const source of [
+    `${prefix} const C = Http; C.prototype.get = (path: string) => path;
+      const http = new Http(); http.get('/affected'); const other = new Other(); other.get('/control');`,
+    `${prefix} class Wrapper { http = new Http(); run() { return this.http.get('/affected'); } }
+      const w = new Wrapper(); w.http.get = (path: string) => path; w.run();
+      const other = new Other(); other.get('/control');`,
+  ]) {
+    const doc = await scanTyped(source, model);
+    assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/control', false]]);
+    assert.ok(doc.limitations.some((value) => value.includes('client-receiver-uncertainty: 1') && value.includes('src/client.ts:')));
+  }
+  const clean = await scanTyped(`${prefix} const C = Other; C.prototype.get = (path: string) => path;
+    class Wrapper { http = new Http(); run() { return this.http.get('/control'); } }
+    const w = new Wrapper(); w.run();`, model);
+  assert.deepEqual(clean.facts.map((fact) => [fact.channel, fact.dynamic]), [['/control', false]]);
+});
+
+test('inherited prototype changes and whole-this escape keep modeled fields dynamic', async () => {
+  const model = { format: 'http-client-models', version: 1, models: ['Http', 'Child', 'Other'].map((name) => ({
+    receiver: { kind: 'class', path: 'src/client.ts', name }, methods: [{ name: 'get', method: 'GET', pathArgument: 0 }],
+  })) };
+  const prefix = 'class Http { get(path: string) { return path; } } class Child extends Http {} class Other { get(path: string) { return path; } }';
+  for (const source of [
+    `${prefix} Http.prototype.get = (path: string) => path; const child = new Child(); child.get('/affected'); const other = new Other(); other.get('/control');`,
+    `${prefix} declare function opaque(value: unknown): void; class Wrapper { http = new Http(); run() { opaque(this); return this.http.get('/affected'); } } const other = new Other(); other.get('/control');`,
+  ]) {
+    const doc = await scanTyped(source, model);
+    assert.deepEqual(doc.facts.map((fact) => [fact.channel, fact.dynamic]), [[null, true], ['/control', false]]);
+    assert.ok(doc.limitations.some((value) => value.includes('client-receiver-uncertainty: 1')));
+  }
+});
 
 /**
  * HTTP와 무관한 모듈들이다. 지점마다 알 수 없는 함수로 콜백을 넘기는 탈출 질의 하나와, 배열 대입의 색인·변경 표시 질의를

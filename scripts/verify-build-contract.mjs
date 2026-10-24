@@ -11,7 +11,8 @@ const stalePath = join(distDirectory, '__stale-build-contract.js');
 await mkdir(distDirectory, { recursive: true });
 await writeFile(stalePath, 'stale build output\n', { flag: 'w' });
 try {
-  const build = runChild('npm', ['run', 'build'], {
+  // npm.cmd를 shell 없이 실행할 수 없는 Windows에서도 같은 빌드 진입점을 검증한다.
+  const build = runChild(process.execPath, [join(repositoryRoot, 'scripts/build.mjs')], {
     cwd: repositoryRoot,
     timeout: 6 * 60_000,
     maxBuffer: 16 * 1024 * 1024,
