@@ -41,6 +41,7 @@ bridge-facts v1 document (platform "js", target "http", route-decl facts).
 Client role extracts web/React Native fetch, axios and ky route-call facts.
 
 Options:
+  --respect-gitignore         Select entries with project-local .gitignore rules (default off)
   --role <role>      server declarations or client HTTP calls
   --project <root>   Project root (the directory with package.json, next.config.*, app/ or pages/)
   --service <name>   Service identity recorded on the document and every fact

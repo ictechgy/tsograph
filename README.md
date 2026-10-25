@@ -80,11 +80,21 @@ character, and a wrapper call is rechecked for at most 200 rounds, so unrelated 
 result. A site over its budget cannot be narrowed to what it might change, so `route-call-coverage:`
 reports the mutation analysis as incomplete and every axios/ky client and request configuration stays dynamic.
 
+Primitive-valued unrelated class stores do not taint HTTP clients. Known receiver/configuration aliases
+remain scoped to the affected symbols; an unbound object source or exhausted provenance budget still
+keeps the whole analysis incomplete. Mutation limitations carry a cause count and bounded relative
+positions, and syntax limitations identify affected files. These are static, type-based observations.
+Class field mutation is tracked per declaration, so changing one instance can conservatively make calls through
+another instance of the same class field dynamic; this does not prove that the other instance changed.
+
 Opaque injected transports can use `--client-model client-model.json` to declare an exact source
 type/class, method, HTTP verb, path argument and base prefix. This matches declaration identity rather
 than a global name or method shape. Unknown leading URL values and `{{NAME}}` build placeholders keep
 recovered paths dynamic. When the mutation analysis is incomplete, model calls stay as dynamic facts
 (`channel: null`, `pathAnchor: "base"`) with the model's method and `service` instead of disappearing.
+Escaped or modified modeled receivers also retain their known call locations as dynamic candidates;
+the model's method is declared evidence, not proof that a replacement method performs HTTP.
+Only an omitted model `base` defaults to `""`; invalid values retain input errors with JSON pointers.
 See [typed client models](docs/CLIENT-MODELS.md).
 
 `--client-model` and `--tsconfig` (the compiler config of the client program) take regular files whose real path is
@@ -98,6 +108,28 @@ data limits stay unchanged; a compact document that still exceeds the limit fail
 document. An analysis that still exceeds the call stack after deeply nested files are left out is
 reported with that cause, not as oversized output. Large traversals can use `--max-depth`
 and `--max-reached` to return explicit truncation.
+
+For graph, Next/Node/client routes, navigation and persistence, `files`/`include`/`exclude` select entry files.
+Imported dependencies can still enter the analyzed closure even when excluded as entries. Imports use
+the nearest or explicitly referenced owner configuration: two apps with `baseUrl: "./src"` resolve their
+own aliases, including aliases inside an imported package. Compatible type-checking options share a
+Program; incompatible options use independent Programs and cross-context imports remain unresolved.
+Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
+PnP loaders are excluded from source entries and never executed. Compiler-backed graph, Node/client routes and navigation can read bounded static `.pnp.data.json` or a constant `RAW_RUNTIME_STATE` literal and ZIP-contained declarations. See [static PnP scope and limits](docs/STATIC-PNP.md); unsupported metadata remains explicitly unresolved. In a PnP scope, different owner configs retain separate global/type universes even when their compiler options match. Project-local `.gitignore` entry selection is available with `--respect-gitignore` (default off); see [selection semantics and budgets](docs/GITIGNORE.md).
+See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
+
+Next convention declarations and graph convention entries use this same entry scope. An imported
+excluded page/route can remain a graph dependency without becoming a convention entry. Omitted
+conventions are counted in limitations; this does not establish that those routes are absent at runtime.
+Navigation recovers path/screen candidates through owned imports, re-exports and const aliases of
+shared route arrays, but keeps them dynamic because omitted sources and external consumers may mutate
+them. Observed writes or unknown escapes retain unknown dynamic facts. Only a zero-argument owned
+factory with a single fresh literal array return and no evaluated calls/effects can supply static
+construction evidence. Shared returns, effectful/recursive factories and `Object.freeze` are not proof
+of immutability. Factory children must be nested literal arrays: shared child aliases remain unknown
+because earlier factory results may expose them to mutation. Entry identity respects filesystem casing;
+distinct files on case-sensitive systems remain distinct. No factory, PnP loader or lazy loader is executed;
+exchange fields and versions stay unchanged.
 
 ## Requirements
 
@@ -293,8 +325,8 @@ are read with the TypeScript parser only; Node backends are read through a TypeS
 (the same setup as `tsograph graph`) so routers can be followed across files. See
 [Node backends](#node-backends) below.
 
-- `--role server` (required): only the declaration side is implemented. `client` is a usage
-  error until route-call extraction exists.
+- `--role server` (required for this section): extracts declarations. `--role client` extracts
+  HTTP call sites as documented above.
 - `--project` (required): the project root (where `package.json`, `next.config.*`, or `app/`/
   `pages/` live). `project` is its POSIX realpath and `location.path` is relative to it. Node
   frameworks are detected from the dependencies of the root `package.json`; Next.js is scanned
@@ -859,9 +891,10 @@ an invalid explicit config fails rather than silently falling back. A config out
 symlink, is a usage error (`64`) before any analysis (a config inside may still reach a shared config outside through
 `extends`); a missing or unreadable config, or one over 1 MiB, exits `2`. `routes --role client` and `navigation` check `--tsconfig`
 the same way. `--workspace` selects an enclosing
-source boundary and workspace-relative ids for calls across packages. The selected project's compiler
-options apply to all owned sources; separate package configurations are not merged, and a limitation
-records this; server route discovery uses workspace-root configuration. Dependency/build directories and symlinks remain excluded,
+source boundary and workspace-relative ids for calls across packages. Each owned source uses its nearest
+or referenced configuration. Only compatible type-checking contexts connect; different contexts retain
+unresolved imports and limitations. Server framework discovery still uses the workspace-root manifest.
+Dependency/build directories and symlinks remain excluded,
 also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `files` select: those roots follow the same walk
 policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
 generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include
@@ -870,8 +903,7 @@ counted under `graph-config:`. A `files` entry or wildcard-free include path tha
 directories or through a symlink is not used either and is counted there too; glob matches in them stay silent, as in
 the walk. Files in both places still load when project sources import or reference them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
-failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). A PnP-only project is reported
-explicitly; the CLI never executes `.pnp.cjs`.
+failure there is never followed or waited on and counts as unreadable (`bound-dispatch:`, `entry-points:`). Unsupported or incomplete static PnP dependency inputs are reported explicitly; the CLI never executes `.pnp.cjs`.
 
 The CLI streams graph JSON without a whole-document string; `--format ndjson` emits a
 `tsograph-graph-ndjson` v1 header followed by one `node` or `edge` record per line. The graph and
@@ -1547,6 +1579,15 @@ expectations as cartograph `SqlRelationsTests` and dartograph `sql_relations_tes
 vector `conformance/http-template.json` when one is available (`TSOGRAPH_CONFORMANCE_DIR`,
 `./conformance/`, or a sibling `../isthmus/conformance/`). If none is found, it is skipped
 with a message.
+
+## Analyze an actual change
+
+Use `tsograph change-impact --project . --base HEAD~1 --head HEAD`, or omit `--head` to compare
+the base with working-tree edits. Frozen before/after graphs retain deleted callers without mixing
+revision edges, and report content digests, file-level seed reasons, witnesses, unmapped files and limits.
+Results are incomplete review candidates, never predicted failures or permission to skip tests.
+The existing `impact <id>` mode is unchanged. See [change analysis](docs/CHANGE-IMPACT.md).
+OpenAPI consumers supporting data-contract v1 may opt in with `openapi ... --data-contracts`.
 
 ## License
 

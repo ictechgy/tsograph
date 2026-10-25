@@ -25,6 +25,7 @@ import {
 } from './path-template.ts';
 import type { IgnoredDuplicateKeys, SpecTree } from './spec-tree.ts';
 import { readSpecShape } from './spec-version.ts';
+import { extractDataContract } from './data-contract.ts';
 
 /** 문서 하나에 담는 최대 사실 수다. isthmus 입력 상한과 같다. */
 export const MAX_FACTS = 100_000;
@@ -47,6 +48,8 @@ export class FactLimitError extends Error {
 
 /** 조립 입력이다. */
 export interface ContractDocumentInput {
+  /** 호환 소비자에게만 선택적 데이터 계약 근거를 보낸다. */
+  readonly dataContracts?: boolean;
   readonly tree: SpecTree;
   /** 프로젝트 루트 기준 스펙 파일 상대 경로(POSIX 구분자) */
   readonly specPath: string;
@@ -134,7 +137,9 @@ function operationFacts(
     ...operation.prefixes.roots.map((prefix): [string, PathAnchor] => [prefix, 'root']),
     ...operation.prefixes.baseTails.map((tail): [string, PathAnchor] => [tail, 'base']),
   ];
+  const dataContract = input.dataContracts === true ? extractDataContract(input.tree, operation.valueNode) : undefined;
   const facts = anchored.map(([prefix, pathAnchor]): RouteContractFact => ({
+    ...(dataContract === undefined ? {} : { dataContract }),
     kind: 'route-contract',
     method: operation.method,
     ...composeChannel(prefix, template),

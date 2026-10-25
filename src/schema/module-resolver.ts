@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 
 import { MAX_GRAPH_CONFIG_BYTES, readBoundedConfigText } from '../graph/bounded-config-reader.ts';
+import type { sourceConfigPlan } from '../graph/program.ts';
 
 /** tsconfig 하나에서 읽은 해석 설정이다. */
 interface ResolutionConfig {
@@ -49,6 +50,8 @@ const keepFileName = (fileName: string): string => fileName;
 
 /** 프로젝트 안 모듈 해석기다. */
 export class ModuleResolver {
+  private readonly ownership: ReturnType<typeof sourceConfigPlan> | undefined;
+  readonly contextBoundaryImports = new Set<string>();
   /** 프로젝트 realpath다. */
   private readonly root: string;
   /**
@@ -88,10 +91,12 @@ export class ModuleResolver {
    * @param root 프로젝트 realpath
    * @param sourceFiles 스캔한 소스 파일 절대 경로 집합
    */
-  constructor(root: string, sourceFiles: ReadonlySet<string>) {
+  constructor(root: string, sourceFiles: ReadonlySet<string>, ownership?: ReturnType<typeof sourceConfigPlan>) {
     this.root = root;
     this.realRoot = realPathOf(root);
     this.sourceFiles = sourceFiles;
+    this.ownership = ownership;
+    this.unreadableConfigs = ownership?.unreadableConfigs ?? 0;
     this.packageJsonCache = ts.createModuleResolutionCache(root, keepFileName).getPackageJsonInfoCache();
   }
 
@@ -104,7 +109,7 @@ export class ModuleResolver {
    */
   resolve(specifier: string, importer: string): string | undefined {
     const directory = dirname(importer);
-    const key = `${directory}\u0000${specifier}`;
+    const key = `${this.ownership === undefined ? directory : importer}\u0000${specifier}`;
     if (this.resolutionCache.has(key)) return this.resolutionCache.get(key);
     const resolved = this.resolveUncached(specifier, importer);
     this.resolutionCache.set(key, resolved);
@@ -122,10 +127,11 @@ export class ModuleResolver {
    * @returns 후보 절대 경로 목록
    */
   lexicalCandidates(specifier: string, importer: string): string[] {
+    if (this.ownership?.blocked(importer)) return [];
     if (specifier.startsWith('./') || specifier.startsWith('../') || specifier === '.' || specifier === '..') {
       return [resolve(dirname(importer), specifier)];
     }
-    const config = this.configFor(dirname(importer));
+    const config = this.importerConfig(importer);
     return pathsCandidates(specifier, config);
   }
 
@@ -141,13 +147,25 @@ export class ModuleResolver {
    * @returns 소스 파일 절대 경로 또는 undefined
    */
   private resolveUncached(specifier: string, importer: string): string | undefined {
-    const config = this.configFor(dirname(importer));
+    if (this.ownership?.blocked(importer)) return undefined;
+    const config = this.importerConfig(importer);
     const cache = ts.createModuleResolutionCache(this.root, keepFileName, config.options, this.packageJsonCache);
     const result = ts.resolveModuleName(specifier, importer, config.options, this.moduleHost, cache);
     const file = result.resolvedModule?.resolvedFileName;
     if (file === undefined) return undefined;
     const absolute = resolve(file);
+    if (this.ownership !== undefined && (this.ownership.blocked(absolute) || !this.ownership.compatible(importer, absolute))) {
+      this.contextBoundaryImports.add(importer + '\u0000' + specifier);
+      return undefined;
+    }
     return this.sourceFiles.has(absolute) ? absolute : undefined;
+  }
+
+  /** 공통 계획이 있으면 다른 기본 설정으로 재시도하지 않는다. */
+  private importerConfig(importer: string): ResolutionConfig {
+    if (this.ownership === undefined) return this.configFor(dirname(importer));
+    const options = this.ownership.optionsFor(importer);
+    return { options, pathsBase: options.baseUrl ?? (options as { pathsBasePath?: string }).pathsBasePath ?? dirname(importer) };
   }
 
   /**
@@ -196,7 +214,8 @@ export class ModuleResolver {
    */
   private parseConfig(path: string): ResolutionConfig | undefined {
     const refusedBefore = this.refusedReads;
-    const read = ts.readConfigFile(path, (file) => this.readFile(file));
+    // 구문 오류 diagnostic도 TypeScript 내부의 '/' 파일 이름과 일치해야 한다(Windows 포함).
+    const read = ts.readConfigFile(path.split(sep).join('/'), (file) => this.readFile(resolve(file)));
     const parsed = read.error === undefined ? ts.parseJsonConfigFileContent(read.config, this.configHost(), dirname(path)) : undefined;
     if (parsed === undefined || this.refusedReads !== refusedBefore) {
       this.unreadableConfigs++;

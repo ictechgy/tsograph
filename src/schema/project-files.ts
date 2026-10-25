@@ -13,6 +13,7 @@ import { join, relative, sep } from 'node:path';
 
 import { isSafeIdentifier } from '../exchange/bridge-facts.ts';
 import { compareStrings } from '../exchange/sorted-json.ts';
+import { acceptsGitignoreEntry } from '../scan/gitignore.ts';
 
 /** 방문할 디렉터리 항목 수 상한이다. 거대한 트리에서 끝없이 돌지 않게 한다. */
 export const MAX_VISITED_ENTRIES = 500_000;
@@ -42,6 +43,8 @@ export interface ProjectFiles {
   readonly unsafeNames: number;
   /** 항목 상한에 걸려 스캔을 멈췄는지 여부다. */
   readonly truncated: boolean;
+  /** 실행용 PnP 로더는 소스 진입 파일이 아니다. 건너뛴 수만 남긴다. */
+  readonly skippedLoaders?: number;
 }
 
 /** 파일 모으기 옵션이다. */
@@ -60,7 +63,7 @@ export interface CollectOptions {
  * @returns 정렬된 파일 목록과 계수
  */
 export function collectProjectFiles(root: string, options: CollectOptions): ProjectFiles {
-  const state = { visited: 0, skippedSymlinkPaths: new Set<string>(), unreadableDirectories: 0, unsafeNames: 0, truncated: false };
+  const state = { visited: 0, skippedSymlinkPaths: new Set<string>(), unreadableDirectories: 0, unsafeNames: 0, truncated: false, skippedLoaders: 0 };
   const found: [string, string][] = [];
   const pending = [root];
   while (pending.length > 0 && !state.truncated) {
@@ -70,7 +73,7 @@ export function collectProjectFiles(root: string, options: CollectOptions): Proj
         state.truncated = true;
         break;
       }
-      classifyEntry(join(directory, entry), entry, options, state, pending, found);
+      classifyEntry(root, join(directory, entry), entry, options, state, pending, found);
     }
   }
   found.forEach((pair) => { pair[0] = toPosixRelative(root, pair[1]); });
@@ -82,6 +85,7 @@ export function collectProjectFiles(root: string, options: CollectOptions): Proj
     unreadableDirectories: state.unreadableDirectories,
     unsafeNames: state.unsafeNames,
     truncated: state.truncated,
+    ...(state.skippedLoaders > 0 ? { skippedLoaders: state.skippedLoaders } : {}),
   };
 }
 
@@ -94,6 +98,7 @@ interface WalkState {
   /** 금지 문자가 든 이름이라 건너뛴 항목 수다. */
   unsafeNames: number;
   truncated: boolean;
+  skippedLoaders: number;
 }
 
 /**
@@ -124,6 +129,7 @@ function readDirectory(directory: string, state: WalkState): string[] {
  * @param found 모은 파일
  */
 function classifyEntry(
+  root: string,
   path: string,
   name: string,
   options: CollectOptions,
@@ -142,8 +148,11 @@ function classifyEntry(
   if (stats.isSymbolicLink()) {
     state.skippedSymlinkPaths.add(path);
   } else if (stats.isDirectory()) {
-    if (!isSkippedDirectory(name) && !options.excludedDirectories.has(path) && admitsName(name, state)) pending.push(path);
-  } else if (stats.isFile() && options.includeFile(name) && admitsName(name, state)) {
+    if (!isSkippedDirectory(name) && !options.excludedDirectories.has(path) && admitsName(name, state)
+      && acceptsGitignoreEntry(root, path, true)) pending.push(path);
+  } else if (stats.isFile() && isPnpLoader(name)) {
+    state.skippedLoaders++;
+  } else if (stats.isFile() && options.includeFile(name) && admitsName(name, state) && acceptsGitignoreEntry(root, path)) {
     found.push([name, path]);
   }
 }
@@ -174,6 +183,11 @@ function admitsName(name: string, state: WalkState): boolean {
  */
 export function isSkippedDirectory(name: string): boolean {
   return name.startsWith('.') || SKIPPED_DIRECTORY_NAMES.has(name);
+}
+
+/** PnP 실행 로더는 선언·앱 소스가 아니므로 진입 파일에서 제외한다. 실행하지 않는다. */
+export function isPnpLoader(name: string): boolean {
+  return /^\.pnp\.(?:[cm]?js|loader\.mjs)$/u.test(name);
 }
 
 /**

@@ -25,11 +25,11 @@ import {
   compilerConfigGaps,
   hasParseErrors,
   isNodeTestPath,
-  loadNodeProject,
+  loadNodeProjects,
   type NodeProject,
   type NodeProjectGaps,
 } from './node/node-project.ts';
-import { resolveAlias, symbolAt } from './node/symbols.ts';
+import { packageBindingOf, resolveAlias, symbolAt } from './node/symbols.ts';
 
 /** router model JSON의 UTF-8 byte 상한이다. */
 export const MAX_ROUTER_MODEL_BYTES = 1024 * 1024;
@@ -72,6 +72,8 @@ export interface RouterModel {
   readonly screenProperty: string;
   readonly childrenProperty?: string;
   readonly pathSyntax: 'colon' | 'template';
+  /** 실행하지 않을 lazy wrapper와 import export를 사용자가 명시한다. */
+  readonly lazyScreen?: { readonly module: string; readonly name: string; readonly loaderArgument: number; readonly exportName: string };
 }
 
 /** 명시적 router model machine contract다. */
@@ -178,7 +180,19 @@ export function extractNavigationRoutes(
   tsconfig?: string,
 ): NavigationFactsDocument {
   const projectRoot = realpathSync(resolve(root));
-  const project = loadNodeProject(projectRoot, tsconfig);
+  const matchedModels = new Set<number>();
+  const documents: NavigationFactsDocument[] = [];
+  for (const project of loadNodeProjects(projectRoot, tsconfig)) documents.push(extractNavigationContext(project, models, toolVersion, generatedAt, matchedModels));
+  const facts = documents.flatMap(document => document.facts);
+  if (facts.length > MAX_NAVIGATION_FACTS) throw new NavigationFactLimitError();
+  const limitations = [...new Set(documents.flatMap(document => document.limitations))];
+  if (matchedModels.size < models.models.length) limitations.push(`navigation-model-coverage: ${models.models.length - matchedModels.size} configured router model(s) matched no exact project factory call`);
+  return { ...documents[0]!, facts, limitations: limitations.sort() };
+}
+
+/** checker와 binding 신원을 한 설정 문맥 안에 둔다. */
+function extractNavigationContext(project: NodeProject, models: RouterModels, toolVersion: string, generatedAt: Date, matchedModels: Set<number>): NavigationFactsDocument {
+  const projectRoot = project.root;
   const productionEntries = [...project.files].filter(([path]) => !isNodeTestPath(path));
   const parseErrors = productionEntries.filter(([, sourceFile]) => hasParseErrors(sourceFile)).length;
   const productionFiles = new Map(productionEntries.filter(([, sourceFile]) => !hasParseErrors(sourceFile)));
@@ -187,8 +201,7 @@ export function extractNavigationRoutes(
   const matches = collectFactoryCalls(project, productionFiles.values(), models, bindings);
   const facts: ScreenRouteFact[] = [];
   const tally = createTally();
-  const matchedModels = new Set<number>();
-  const calls = new Set(matches.map((match) => match.call));
+  const calls = new Map(matches.map((match) => [match.call, match.model.routesArgument]));
   const context: ExtractionContext = {
     project,
     bindings,
@@ -199,6 +212,10 @@ export function extractNavigationRoutes(
   };
   for (const match of matches) {
     matchedModels.add(match.modelIndex);
+    if (isRecursiveChildrenCall(match, project, bindings)) {
+      tally.recursiveChildren += 1;
+      continue;
+    }
     const argument = match.call.arguments[match.model.routesArgument];
     if (argument === undefined || ts.isSpreadElement(argument)) {
       tally.routeContainer += 1;
@@ -210,7 +227,7 @@ export function extractNavigationRoutes(
   const limitations = buildLimitations(
     project,
     tally,
-    models.models.length - matchedModels.size,
+    0,
     parseErrors,
     project.deeplyNestedFiles.filter((path) => !isNodeTestPath(path)).length,
   );
@@ -249,14 +266,19 @@ interface ExtractionTally {
   screen: number;
   children: number;
   nestingDepth: number;
+  recursiveChildren: number;
+  lazyScreen: number;
+  exportedCandidates: number;
+  freshFactories: number;
+  sharedFactoryChildren: number;
 }
 
-type CompositeSafety = 'stable' | 'mutated' | 'unproven';
+type CompositeSafety = 'stable' | 'exported' | 'mutated' | 'unproven';
 
 interface ExtractionContext {
   readonly project: NodeProject;
   readonly bindings: BindingIndex;
-  readonly calls: ReadonlySet<ts.CallExpression>;
+  readonly calls: ReadonlyMap<ts.CallExpression, number>;
   readonly facts: ScreenRouteFact[];
   readonly tally: ExtractionTally;
   readonly compositeSafety: Map<ts.Symbol, CompositeSafety>;
@@ -274,6 +296,11 @@ function createTally(): ExtractionTally {
     screen: 0,
     children: 0,
     nestingDepth: 0,
+    recursiveChildren: 0,
+    lazyScreen: 0,
+    exportedCandidates: 0,
+    freshFactories: 0,
+    sharedFactoryChildren: 0,
   };
 }
 
@@ -339,6 +366,27 @@ function collectFactoryCalls(
   };
   for (const sourceFile of files) visit(sourceFile);
   return matches;
+}
+
+/** 모델 factory의 parameter/for-of child 재귀는 외부 등록 하나의 children 확장으로만 센다. */
+function isRecursiveChildrenCall(match: FactoryCallMatch, project: NodeProject, bindings: BindingIndex): boolean {
+  const argument = match.call.arguments[match.model.routesArgument];
+  if (argument === undefined || !ts.isPropertyAccessExpression(argument)
+    || argument.name.text !== match.model.childrenProperty || !ts.isIdentifier(argument.expression)) return false;
+  let owner: ts.Node | undefined = match.call.parent;
+  while (owner !== undefined && !ts.isFunctionLike(owner)) owner = owner.parent;
+  if (owner === undefined || !ts.isFunctionDeclaration(owner) || owner.name === undefined) return false;
+  const symbol = symbolAt(project.checker, owner.name);
+  const identity = symbol === undefined ? undefined : factoryIdentity(owner, symbol, project, bindings);
+  if (identity?.path !== match.model.factory.path || identity.name !== match.model.factory.name) return false;
+  const root = symbolAt(project.checker, argument.expression);
+  const declaration = root?.valueDeclaration;
+  if (declaration === undefined || !ts.isVariableDeclaration(declaration)
+    || !ts.isVariableDeclarationList(declaration.parent) || !ts.isForOfStatement(declaration.parent.parent)) return false;
+  const iterable = skipWrappers(declaration.parent.parent.expression);
+  if (!ts.isIdentifier(iterable)) return false;
+  const iterableSymbol = symbolAt(project.checker, iterable);
+  return iterableSymbol?.valueDeclaration === owner.parameters[match.model.routesArgument];
 }
 
 function factoryModelIndex(
@@ -415,13 +463,14 @@ function extractArray(
   model: RouterModel,
   context: ExtractionContext,
   allowedReference: ts.Expression,
+  inheritedUncertainty = false,
 ): boolean {
   if (depth >= MAX_NAVIGATION_DEPTH) {
     context.tally.nestingDepth += 1;
     addDynamicFact(context, expression);
     return true;
   }
-  const resolved = routeArray(expression, context, allowedReference);
+  const resolved = routeArray(expression, context, allowedReference, model);
   if (resolved.kind !== 'array') {
     if (resolved.kind === 'mutated') context.tally.mutatedRouteContainer += 1;
     else if (resolved.kind === 'unproven') context.tally.unprovenRouteContainer += 1;
@@ -429,6 +478,7 @@ function extractArray(
     addDynamicFact(context, expression);
     return false;
   }
+  if (resolved.exported) context.tally.exportedCandidates++;
   for (const element of resolved.value.elements) {
     if (ts.isSpreadElement(element)) {
       context.tally.arraySpread += 1;
@@ -437,30 +487,113 @@ function extractArray(
       context.tally.routeEntry += 1;
       addDynamicFact(context, element);
     } else {
-      extractEntry(element, parentTemplate, depth, model, context);
+      extractEntry(element, parentTemplate, depth, model, context, inheritedUncertainty || resolved.exported);
     }
   }
   return true;
 }
 
 type ArrayResolution =
-  | { readonly kind: 'array'; readonly value: ts.ArrayLiteralExpression }
+  | { readonly kind: 'array'; readonly value: ts.ArrayLiteralExpression; readonly exported: boolean }
   | { readonly kind: 'mutated' | 'unproven' | 'unknown' };
 
 function routeArray(
   expression: ts.Expression,
   context: ExtractionContext,
   allowedReference: ts.Expression,
+  model: RouterModel,
+  depth = 0,
+  seen = new Set<ts.Node>(),
 ): ArrayResolution {
+  if (depth > MAX_ALIAS_DEPTH || seen.has(expression)) return { kind: 'unproven' };
+  seen.add(expression);
   const inner = skipWrappers(expression);
-  if (ts.isArrayLiteralExpression(inner)) return { kind: 'array', value: inner };
+  if (ts.isArrayLiteralExpression(inner)) return { kind: 'array', value: inner, exported: false };
+  if (ts.isCallExpression(inner)) {
+    const value = freshFactoryArray(inner, model, context);
+    if (value === undefined) return { kind: 'unknown' };
+    context.tally.freshFactories++;
+    return { kind: 'array', value, exported: false };
+  }
   if (!ts.isIdentifier(inner)) return { kind: 'unknown' };
+  const local = symbolAt(context.project.checker, inner);
+  const symbol = local === undefined ? undefined : resolveAlias(context.project.checker, local);
+  const exported = symbol?.declarations?.length === 1 ? symbol.declarations[0] : undefined;
+  if (symbol !== undefined && exported !== undefined && ts.isExportAssignment(exported)) {
+    if (context.project.pathOf(exported.getSourceFile()) === undefined || exported.isExportEquals) return { kind: 'unknown' };
+    const safety = compositeSafety(symbol, exported, inner, allowedReference, context);
+    if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
+    const resolved = routeArray(exported.expression, context, exported.expression, model, depth + 1, seen);
+    return resolved.kind === 'array' ? { ...resolved, exported: true } : resolved;
+  }
   const binding = declaredConstBinding(inner, context);
-  if (binding === undefined) return { kind: 'unknown' };
-  const initializer = skipWrappers(binding.declaration.initializer!);
-  if (!ts.isArrayLiteralExpression(initializer)) return { kind: 'unknown' };
+  if (binding === undefined || context.project.pathOf(binding.declaration.getSourceFile()) === undefined) return { kind: 'unknown' };
   const safety = compositeSafety(binding.symbol, binding.declaration, inner, allowedReference, context);
-  return safety === 'stable' ? { kind: 'array', value: initializer } : { kind: safety };
+  if (safety === 'mutated' || safety === 'unproven') return { kind: safety };
+  const resolved = routeArray(binding.declaration.initializer!, context, binding.declaration.initializer!, model, depth + 1, seen);
+  return resolved.kind === 'array' ? { ...resolved, exported: resolved.exported || safety === 'exported' } : resolved;
+}
+
+/** 무인자 project factory의 단일 fresh literal 반환만 읽는다. body·loader를 실행하거나 임의 호출을 평가하지 않는다. */
+function freshFactoryArray(call: ts.CallExpression, model: RouterModel, context: ExtractionContext): ts.ArrayLiteralExpression | undefined {
+  if (call.arguments.length !== 0 || call.questionDotToken !== undefined) return undefined;
+  let expression = skipWrappers(call.expression);
+  const seen = new Set<ts.Declaration>();
+  for (let depth = 0; depth <= MAX_ALIAS_DEPTH; depth++) {
+    if (!ts.isIdentifier(expression)) return undefined;
+    const local = symbolAt(context.project.checker, expression);
+    const symbol = local === undefined ? undefined : resolveAlias(context.project.checker, local);
+    if (symbol === undefined || context.bindings.written.has(symbol)) return undefined;
+    const declarations = runtimeFactoryDeclarations(symbol);
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    if (declaration === undefined || seen.has(declaration)
+      || context.project.pathOf(declaration.getSourceFile()) === undefined
+      || hasParseErrors(declaration.getSourceFile())) return undefined;
+    seen.add(declaration);
+    let factory: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+    if (ts.isFunctionDeclaration(declaration)) factory = declaration;
+    else if (ts.isVariableDeclaration(declaration) && isStableConstDeclaration(declaration, symbol, context.bindings)) {
+      const initializer = skipWrappers(declaration.initializer!);
+      if (ts.isIdentifier(initializer)) { expression = initializer; continue; }
+      if (!ts.isArrowFunction(initializer) && !ts.isFunctionExpression(initializer)) return undefined;
+      factory = initializer;
+    } else return undefined;
+    if (factory.parameters.length !== 0 || factory.body === undefined
+      || factory.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+      || (!ts.isArrowFunction(factory) && factory.asteriskToken !== undefined)) return undefined;
+    const body = factory.body;
+    const returned = ts.isBlock(body)
+      ? body.statements.length === 1 && ts.isReturnStatement(body.statements[0]!) ? body.statements[0]!.expression : undefined
+      : body;
+    if (returned === undefined) return undefined;
+    const value = skipWrappers(returned);
+    return ts.isArrayLiteralExpression(value) && freshLiteralConstruction(value, model, context) ? value : undefined;
+  }
+  return undefined;
+}
+
+/** fresh 배열 생성 과정에서 실행될 수 있는 호출·getter·전개·계산식은 지원하지 않는다. 함수 본문은 값으로도 받지 않는다. */
+function freshLiteralConstruction(node: ts.Node, model: RouterModel, context: ExtractionContext): boolean {
+  const pending = [node];
+  let count = 0;
+  while (pending.length > 0) {
+    const item = pending.pop()!;
+    if (++count > MAX_BINDING_NODES) return false;
+    // 바깥 배열만 fresh여도 children 별칭은 여러 factory 호출의 반환값 사이에 공유될 수 있다.
+    if (model.childrenProperty !== undefined && (ts.isPropertyAssignment(item) || ts.isShorthandPropertyAssignment(item))
+      && propertyName(item.name) === model.childrenProperty) {
+      const children = ts.isPropertyAssignment(item) ? skipWrappers(item.initializer) : item.name;
+      if (!ts.isArrayLiteralExpression(children)) { context.tally.sharedFactoryChildren++; return false; }
+    }
+    if (ts.isCallExpression(item) || ts.isNewExpression(item) || ts.isTaggedTemplateExpression(item)
+      || ts.isSpreadElement(item) || ts.isSpreadAssignment(item) || ts.isComputedPropertyName(item)
+      || ts.isPropertyAccessExpression(item) || ts.isElementAccessExpression(item) || ts.isFunctionLike(item)
+      || ts.isBinaryExpression(item) || ts.isPrefixUnaryExpression(item) || ts.isPostfixUnaryExpression(item)
+      || ts.isAwaitExpression(item) || ts.isYieldExpression(item)) return false;
+    if (ts.isDeleteExpression(item) || ts.isJsxElement(item) || ts.isJsxSelfClosingElement(item)) return false;
+    ts.forEachChild(item, child => { pending.push(child); });
+  }
+  return true;
 }
 
 function extractEntry(
@@ -469,6 +602,7 @@ function extractEntry(
   depth: number,
   model: RouterModel,
   context: ExtractionContext,
+  uncertainContainer = false,
 ): void {
   const inner = skipWrappers(expression);
   if (!ts.isObjectLiteralExpression(inner)) {
@@ -487,19 +621,20 @@ function extractEntry(
   const template = rawPath === undefined ? undefined : joinNavigationPath(parentTemplate, rawPath, model.pathSyntax);
   if (template === undefined) context.tally.path += 1;
   const screenExpression = properties.get(model.screenProperty);
-  const screen = screenExpression === undefined ? undefined : screenIdentity(screenExpression, context, 0, new Set());
+  const lazyBefore = context.tally.lazyScreen;
+  const screen = screenExpression === undefined ? undefined : screenIdentity(screenExpression, context, 0, new Set(), model.lazyScreen);
   if (screen === undefined) context.tally.screen += 1;
   addFact(context, {
     kind: 'screen-route',
     urlTemplate: template ?? null,
-    dynamic: template === undefined || screen === undefined,
+    dynamic: uncertainContainer || template === undefined || screen === undefined || context.tally.lazyScreen !== lazyBefore,
     location: context.project.locationOf(inner),
     ...(screen === undefined ? {} : { screen }),
   });
   if (model.childrenProperty === undefined) return;
   const children = properties.get(model.childrenProperty);
   if (children === undefined) return;
-  if (!extractArray(children, template ?? null, depth + 1, model, context, children)) {
+  if (!extractArray(children, template ?? null, depth + 1, model, context, children, uncertainContainer)) {
     context.tally.children += 1;
   }
 }
@@ -583,27 +718,41 @@ function isStableConstDeclaration(
 
 function compositeSafety(
   symbol: ts.Symbol,
-  declaration: ts.VariableDeclaration,
+  declaration: ts.VariableDeclaration | ts.ExportAssignment,
   reference: ts.Identifier,
   allowedReference: ts.Expression,
   context: ExtractionContext,
+  depth = 0,
 ): CompositeSafety {
   const cached = context.compositeSafety.get(symbol);
   if (cached !== undefined) return cached;
-  if (!context.bindings.complete || isExportedVariable(declaration)) return 'unproven';
+  if (!context.bindings.complete || depth > MAX_ALIAS_DEPTH) return 'unproven';
   if (context.bindings.written.has(symbol)) return 'mutated';
+  // 순환 alias는 불변성 증명이 아니므로 순회 중 재진입은 unproven이다.
+  context.compositeSafety.set(symbol, 'unproven');
+  let safety: CompositeSafety = ts.isExportAssignment(declaration) || isExportedVariable(declaration) ? 'exported' : 'stable';
   for (const token of context.bindings.references.get(symbol) ?? []) {
-    if (token === declaration.name || token === reference || token === skipWrappers(allowedReference)) continue;
+    if ((ts.isVariableDeclaration(declaration) && token === declaration.name) || token === reference || token === skipWrappers(allowedReference)) continue;
     const outer = climbExpression(token);
     const parent = outer.parent;
+    if (ts.isImportSpecifier(parent) || ts.isImportClause(parent)) continue;
+    if (ts.isExportSpecifier(parent) || ts.isExportAssignment(parent)) { safety = 'exported'; continue; }
     if (ts.isCallExpression(parent) && context.calls.has(parent)
-      && parent.arguments.some((argument) => skipWrappers(argument) === outer)) continue;
+      && skipWrappers(parent.arguments[context.calls.get(parent)!]!) === outer) continue;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === outer && ts.isIdentifier(parent.name)) {
+      const alias = symbolAt(context.project.checker, parent.name);
+      if (alias !== undefined && isStableConstDeclaration(parent, alias, context.bindings)) {
+        const aliasSafety = compositeSafety(alias, parent, parent.name, parent.name, context, depth + 1);
+        if (aliasSafety === 'stable' || aliasSafety === 'exported') { if (aliasSafety === 'exported') safety = 'exported'; continue; }
+        context.compositeSafety.set(symbol, aliasSafety); return aliasSafety;
+      }
+    }
     const result = isArrayMutationReference(token) ? 'mutated' : 'unproven';
     context.compositeSafety.set(symbol, result);
     return result;
   }
-  context.compositeSafety.set(symbol, 'stable');
-  return 'stable';
+  context.compositeSafety.set(symbol, safety);
+  return safety;
 }
 
 /** array 내용을 바꾸는 표준 mutator의 receiver 참조인지 본다. 그 밖의 탈출은 unproven이다. */
@@ -626,8 +775,11 @@ function screenIdentity(
   context: ExtractionContext,
   depth: number,
   seen: Set<ts.Declaration>,
+  lazyModel?: RouterModel['lazyScreen'],
 ): NavigationScreenIdentity | undefined {
   if (depth > MAX_ALIAS_DEPTH || !context.bindings.complete) return undefined;
+  const inner = skipWrappers(expression);
+  if (ts.isCallExpression(inner)) return lazyScreenIdentity(inner, lazyModel, context);
   const reference = screenReference(expression);
   if (reference === undefined) return undefined;
   const local = symbolAt(context.project.checker, reference);
@@ -645,7 +797,35 @@ function screenIdentity(
   if (direct !== undefined) return direct;
   if (!ts.isVariableDeclaration(declaration) || declaration.initializer === undefined
     || !isStableConstDeclaration(declaration, symbol, context.bindings)) return undefined;
-  return screenIdentity(declaration.initializer, context, depth + 1, seen);
+  return screenIdentity(declaration.initializer, context, depth + 1, seen, lazyModel);
+}
+
+/** 명시 wrapper의 단일 import 리터럴만 읽는다. loader/module은 실행하지 않는다. */
+function lazyScreenIdentity(call: ts.CallExpression, model: RouterModel['lazyScreen'], context: ExtractionContext): NavigationScreenIdentity | undefined {
+  if (model === undefined || call.questionDotToken !== undefined) return undefined;
+  const binding = packageBindingOf(context.project.checker, call.expression);
+  if (binding?.module !== model.module || binding.name !== model.name) return undefined;
+  const factorySymbol = symbolAt(context.project.checker, call.expression);
+  if (factorySymbol === undefined || context.bindings.written.has(resolveAlias(context.project.checker, factorySymbol))) return undefined;
+  const loader = call.arguments[model.loaderArgument];
+  if (loader === undefined || !ts.isArrowFunction(loader) || loader.parameters.length !== 0
+    || loader.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)) return undefined;
+  if (ts.isBlock(loader.body)) return undefined;
+  const body = skipWrappers(loader.body);
+  if (!ts.isCallExpression(body) || body.expression.kind !== ts.SyntaxKind.ImportKeyword || body.arguments.length !== 1) return undefined;
+  const specifier = body.arguments[0];
+  if (specifier === undefined || !ts.isStringLiteralLike(specifier) || !specifier.text.startsWith('.')) return undefined;
+  const module = symbolAt(context.project.checker, specifier);
+  if (module === undefined) return undefined;
+  const exported = context.project.checker.getExportsOfModule(module).find((candidate) => candidate.name === model.exportName);
+  if (exported === undefined) return undefined;
+  const symbol = resolveAlias(context.project.checker, exported);
+  if (context.bindings.written.has(symbol)) return undefined;
+  const declarations = screenDeclarations(symbol);
+  if (declarations.length !== 1) return undefined;
+  const identity = screenDeclarationIdentity(declarations[0]!, context.project);
+  if (identity !== undefined) context.tally.lazyScreen++;
+  return identity;
 }
 
 function screenReference(expression: ts.Expression): ts.Node | undefined {
@@ -716,6 +896,8 @@ function joinNavigationPath(
 }
 
 function normalizePathSegment(segment: string, syntax: RouterModel['pathSyntax']): string | undefined {
+  // splat의 자식 결합 의미는 router마다 다르므로 literal 별표로 확정하지 않는다.
+  if (segment.includes('*')) return undefined;
   if (syntax === 'colon') {
     if (/^:[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*$/u.test(segment)) return '{}';
     if (segment.includes(':') || /[{}]/u.test(segment)) return undefined;
@@ -776,6 +958,12 @@ function buildLimitations(
         + `(${details})`,
     );
   }
+  if (tally.path > 0) limitations.push('navigation-path-coverage: dynamic paths, splats and their relative children require router-specific semantics; no literal wildcard path is asserted');
+  if (tally.recursiveChildren > 0) limitations.push(`navigation-model-coverage: ${tally.recursiveChildren} internal recursive children call(s) represented only by the configured outer registration expansion`);
+  if (tally.lazyScreen > 0) limitations.push(`navigation-lazy-evidence: ${tally.lazyScreen} screen candidate(s) resolved from an explicit lazy model and literal import; loader execution, module side effects and runtime selection are not assessed; facts remain dynamic`);
+  if (tally.exportedCandidates > 0) limitations.push(`navigation-binding-coverage: ${tally.exportedCandidates} exported route container initializer(s) recovered through owned import/export/const aliases; observed writes and escapes were checked within the selected source program, but external consumers and omitted sources are not assessed; path/screen evidence remains dynamic and is not an immutability proof`);
+  if (tally.freshFactories > 0) limitations.push(`navigation-factory-evidence: ${tally.freshFactories} zero-argument owned factory call(s) have a single fresh literal array return without evaluated calls or effects; only the returned construction was read, factory execution and runtime registration are not assessed`);
+  if (tally.sharedFactoryChildren > 0) limitations.push(`navigation-factory-coverage: ${tally.sharedFactoryChildren} factory construction(s) reference non-literal children containers; cross-call sharing, mutation and escape are not proven; no static factory expansion`);
   if (unmatchedModels > 0) {
     limitations.push(
       `navigation-model-coverage: ${unmatchedModels} configured router model(s) matched no exact project factory call`,
@@ -890,6 +1078,7 @@ function validateRouterModel(value: unknown): RouterModel {
     'screenProperty',
     'childrenProperty',
     'pathSyntax',
+    'lazyScreen',
   ]);
   assertKeys(value.factory, ['path', 'name']);
   const factoryPath = value.factory.path;
@@ -899,6 +1088,7 @@ function validateRouterModel(value: unknown): RouterModel {
   const screenProperty = value.screenProperty;
   const childrenProperty = value.childrenProperty;
   const pathSyntax = value.pathSyntax;
+  const lazyScreen = value.lazyScreen === undefined ? undefined : validateLazyScreen(value.lazyScreen);
   if (!isSafeSourcePath(factoryPath) || !isIdentifierName(factoryName)
     || typeof routesArgument !== 'number' || !Number.isSafeInteger(routesArgument)
     || routesArgument < 0 || routesArgument > 64
@@ -916,7 +1106,18 @@ function validateRouterModel(value: unknown): RouterModel {
     screenProperty,
     ...(childrenProperty === undefined ? {} : { childrenProperty }),
     pathSyntax,
+    ...(lazyScreen === undefined ? {} : { lazyScreen }),
   };
+}
+
+function validateLazyScreen(value: unknown): NonNullable<RouterModel['lazyScreen']> {
+  if (!isRecord(value)) throw new RouterModelError('invalid-shape');
+  assertKeys(value, ['module', 'name', 'loaderArgument', 'exportName']);
+  if (typeof value.module !== 'string' || value.module.length > MAX_MODEL_STRING_LENGTH || !isSafeIdentifier(value.module)
+    || !isIdentifierName(value.name) || !isIdentifierName(value.exportName)
+    || typeof value.loaderArgument !== 'number' || !Number.isSafeInteger(value.loaderArgument)
+    || value.loaderArgument < 0 || value.loaderArgument > 64) throw new RouterModelError('unsafe-value');
+  return { module: value.module, name: value.name, loaderArgument: value.loaderArgument, exportName: value.exportName };
 }
 
 function assertKeys(value: Record<string, unknown>, allowed: readonly string[]): void {

@@ -41,10 +41,10 @@ const POLL_INTERVAL_MS = 50;
  * 있는 기계에서도 선언과 무관한 검사가 같은 Program을 만들도록 fixture에 이 설정을 둔다(628bc19가 graph 합성 Program에
  * 쓴 방식과 같다). 다른 compiler 옵션은 기본값과 같다.
  *
- * `include: []`라 설정이 루트 파일을 더하지 않는다(TypeScript의 '입력 없음' 18003은 분석기가 무시한다). 그래서 Program의
- * 루트는 tsconfig가 없을 때처럼 걷기가 고른 소스뿐이고, 걷기가 뺀 금지 문자 이름·읽지 못한 파일을 설정이 다시 넣지 않는다.
+ * include를 생략해 합성 소스를 기본 진입으로 고른다. 명시적 `include: []`는 실제 빈 진입 범위이므로 이 공통 fixture에서
+ * 쓰지 않는다. 설정의 진입 파일도 걷기와 같은 제외·경로 정책으로 거른다.
  */
-export const ambientTypesFreeConfig = JSON.stringify({ include: [], compilerOptions: {
+export const ambientTypesFreeConfig = JSON.stringify({ compilerOptions: {
   target: 'es2022', module: 'esnext', moduleResolution: 'bundler', jsx: 'preserve', esModuleInterop: true, resolveJsonModule: true, types: [],
 } });
 

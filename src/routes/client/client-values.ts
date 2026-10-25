@@ -107,7 +107,32 @@ export type ConfigValue = ts.Expression | undefined | null;
 export class ClientValues {
   readonly project: NodeProject;
   readonly mutated = new Set<ts.Symbol>();
-  mutationAnalysisIncomplete = false;
+  readonly #mutatedThisFields = new Set<ts.Symbol>();
+  readonly #mutatedPrototypes = new Set<ts.Symbol>();
+  #mutationAnalysisIncomplete = false;
+  #queryNode: ts.Node | undefined;
+  readonly #incompleteCauses = new Set<ts.Node>();
+  #unlocatedIncomplete = false;
+
+  /** 원인을 특정하지 못한 provenance나 예산 중단은 전체 범위를 미완으로 둔다. */
+  get mutationAnalysisIncomplete(): boolean { return this.#mutationAnalysisIncomplete; }
+  set mutationAnalysisIncomplete(value: boolean) {
+    this.#mutationAnalysisIncomplete = value;
+    if (!value) return;
+    if (this.#queryNode === undefined) this.#unlocatedIncomplete = true;
+    else this.#incompleteCauses.add(this.#queryNode);
+  }
+
+  /** 원문 대신 상대 위치와 원인 수를 노출하며 위치 출력은 고정 상한을 둔다. */
+  mutationDiagnostic(): string {
+    const locations = [...this.#incompleteCauses].slice(0, 8).map((node) => {
+      const location = this.project.locationOf(node);
+      return `${location.path}:${location.line}:${location.column}`;
+    });
+    const count = this.#incompleteCauses.size + (this.#unlocatedIncomplete ? 1 : 0);
+    return `causeCount=${count}; positions=${locations.join(',') || 'unavailable'}`
+      + (count > locations.length ? `; additionalCauses=${count - locations.length}` : '');
+  }
   readonly #assignmentSources = new Map<ts.Symbol, MutationSource[]>();
   readonly #assignmentSourceIndex = new Map<ts.Symbol, Map<string, MutationSource[]>>();
   readonly #classSources = new Map<ts.ClassLikeDeclaration, ClassSource[]>();
@@ -148,7 +173,7 @@ export class ClientValues {
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const indexAliases = (node: ts.Node): void => {
-        this.beginMutationQuery();
+        this.beginMutationQuery(node);
         if (ts.isClassLike(node)) projectClasses.add(node);
         if (ts.isPropertyDeclaration(node) && ts.isClassLike(node.parent) && node.initializer !== undefined) {
           const key = staticName(node.name);
@@ -199,7 +224,7 @@ export class ClientValues {
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const indexStores = (node: ts.Node): void => {
-        this.beginMutationQuery();
+        this.beginMutationQuery(node);
         if (ts.isBinaryExpression(node) && [ts.SyntaxKind.EqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken,
           ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken].includes(node.operatorToken.kind)
           && memberAssignmentTarget(node.left)) {
@@ -217,13 +242,13 @@ export class ClientValues {
     do {
       previousClassSourceVersion = this.#classSourceVersion;
       for (const store of classStores) {
-        this.beginMutationQuery();
+        this.beginMutationQuery(store.target);
         if (!this.#chargeMutation()) break;
         this.#indexClassStore(store, 'static');
       }
     } while (!this.mutationAnalysisIncomplete && previousClassSourceVersion !== this.#classSourceVersion);
     if (!this.mutationAnalysisIncomplete) for (const store of classStores) {
-      this.beginMutationQuery();
+      this.beginMutationQuery(store.target);
       if (!this.#chargeMutation()) break;
       this.#indexClassStore(store, 'instance');
     }
@@ -240,14 +265,14 @@ export class ClientValues {
     this.#phase = { work: 0, exhausted: false };
     if (!this.mutationAnalysisIncomplete) {
       for (const value of this.#unknownMemberStoreSources) {
-        this.beginMutationQuery();
+        this.beginMutationQuery(value);
         this.markMutated(value, true);
       }
     }
     for (const [path, source] of project.files) {
       if (!includeTests && isNodeTestPath(path)) continue;
       const visit = (node: ts.Node): void => {
-        this.beginMutationQuery();
+        this.beginMutationQuery(node);
         let target: ts.Expression | undefined;
         if (ts.isDeleteExpression(node)) target = node.expression;
         if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
@@ -1077,7 +1102,7 @@ export class ClientValues {
    *
    * 질의 예산만 새로 채운다. 단계 누적과 방문 메모는 그대로라 같은 상태를 다시 보는 질의는 거의 작업을 쓰지 않는다.
    */
-  beginMutationQuery(): void { this.#queryWork = 0; }
+  beginMutationQuery(node?: ts.Node): void { this.#queryWork = 0; this.#queryNode = node; }
 
   /**
    * 작업 한 단위를 쓴다. 질의 예산이나 단계 상한을 넘으면 그 단계의 남은 작업을 멈추고 분석 전체를 미완으로 둔다.
@@ -1147,9 +1172,78 @@ export class ClientValues {
       ? symbolAt(this.project.checker, declaration.name) : symbol;
   }
 
+  /** identifier root 외에 this 필드와 관찰한 class prototype 변경도 수신자 후보에 연결한다. */
+  receiverIsMutated(expression: ts.Expression): boolean {
+    const root = this.rootSymbol(expression);
+    if (root !== undefined && this.mutated.has(root)) return true;
+    const member = symbolAt(this.project.checker, unwrap(expression));
+    if (member !== undefined && this.#mutatedThisFields.has(resolveAlias(this.project.checker, member))) return true;
+    if (member?.declarations?.some((declaration) => {
+      if (!ts.isPropertyDeclaration(declaration)) return false;
+      const declared = symbolAt(this.project.checker, declaration.name);
+      return declared !== undefined && this.#mutatedThisFields.has(declared);
+    }) === true) return true;
+    const pending = [this.project.checker.getTypeAtLocation(expression)];
+    const visited = new Set<ts.Type>();
+    while (pending.length > 0) {
+      const type = pending.pop()!;
+      if (visited.has(type)) continue;
+      // 상속 확인 자체가 고정 상한을 넘으면 이 수신자만 안전하다고 확정하지 않는다.
+      if (visited.size >= 64) return true;
+      visited.add(type);
+      const typeSymbol = type.getSymbol();
+      if (typeSymbol !== undefined && this.#mutatedPrototypes.has(resolveAlias(this.project.checker, typeSymbol))) return true;
+      pending.push(...(type.getBaseTypes() ?? []));
+    }
+    return false;
+  }
+
+  #recordReceiverMutation(expression: ts.Expression, depth = 0, seen = new Set<ts.Symbol>()): void {
+    if (depth > MAX_PROJECTION_DEPTH) { this.mutationAnalysisIncomplete = true; return; }
+    let node = unwrap(expression);
+    const members: ts.Symbol[] = [];
+    while (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const symbol = symbolAt(this.project.checker, node);
+      if (symbol !== undefined) {
+        const member = resolveAlias(this.project.checker, symbol);
+        members.push(member);
+        // w.http의 쓰기와 메서드 안 this.http는 같은 class 필드 선언을 가리킨다.
+        // 인스턴스별 별칭 구분은 증명하지 않으므로 그 선언의 수신자를 보수적으로 표시한다.
+        for (const declaration of member.declarations ?? []) {
+          if (!ts.isPropertyDeclaration(declaration) || !ts.isClassLike(declaration.parent)) continue;
+          this.#mutatedThisFields.add(member);
+          // 인스턴스 접근의 transient 심볼과 this 접근은 선언은 같아도 심볼 객체가 다를 수 있다.
+          const declared = symbolAt(this.project.checker, declaration.name);
+          if (declared !== undefined) this.#mutatedThisFields.add(declared);
+        }
+      }
+      if (accessKey(node) === 'prototype') {
+        const owner = symbolAt(this.project.checker, node.expression);
+        if (owner !== undefined) this.#mutatedPrototypes.add(resolveAlias(this.project.checker, owner));
+        // const C = Http의 C는 변수 심볼이지만 C.prototype의 타입은 Http 인스턴스다.
+        // 이름이나 initializer 경로를 추측하지 않고 컴파일러가 연결한 원형 타입도 기록한다.
+        const instance = this.project.checker.getTypeAtLocation(node).getSymbol();
+        if (instance !== undefined) this.#mutatedPrototypes.add(resolveAlias(this.project.checker, instance));
+      }
+      node = unwrap(node.expression);
+    }
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+      for (const member of members) this.#mutatedThisFields.add(member);
+    } else if (ts.isIdentifier(node)) {
+      const symbol = this.rootSymbol(node);
+      const declaration = symbol?.valueDeclaration;
+      if (symbol !== undefined && !seen.has(symbol) && declaration !== undefined
+        && ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
+        seen.add(symbol);
+        this.#recordReceiverMutation(declaration.initializer, depth + 1, seen);
+      }
+    }
+  }
+
   /** 같은 객체를 가리키는 상수 별칭과 escape된 컨테이너를 bounded worklist로 변경 대상으로 기록한다. */
   markMutated(expression: ts.Expression, contentsMayEscape = false, unresolvedIsIncomplete = false,
     wholeContentsEscape = contentsMayEscape): void {
+    this.#recordReceiverMutation(expression);
     if (this.mutationAnalysisIncomplete) {
       const symbol = this.rootSymbol(expression);
       if (symbol !== undefined) this.mutated.add(symbol);
@@ -1161,6 +1255,10 @@ export class ClientValues {
       if (!this.#chargeMutation()) return;
       const current = pending.pop()!;
       const node = current.kind === 'capture' ? current.node : unwrap(current.expression);
+      // primitive 결과는 객체와 별칭을 이루지 않는다. 호출 인자는 별도 escape 순회가
+      // 검사한다. unknown/any/object 결과는 좁히지 않고 기존 provenance를 따른다.
+      if (current.kind === 'value' && current.contentsMayEscape
+        && this.#definitelyPrimitive(node as ts.Expression)) continue;
       if (current.projection.length > MAX_PROJECTION_DEPTH) {
         this.mutationAnalysisIncomplete = true; return;
       }
@@ -1326,6 +1424,7 @@ export class ClientValues {
         }
       }
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        this.#recordReceiverMutation(node);
         const key = accessKey(node);
         if (key === undefined) pending.push({ ...current, expression: node.expression, projection: [], wholeContentsEscape: true });
         else pending.push({ ...current, expression: node.expression, projection: [key, ...current.projection] });
@@ -1338,6 +1437,13 @@ export class ClientValues {
           continue;
         }
         if (current.projection.length === 0 && !current.wholeContentsEscape) continue;
+        if (current.projection.length === 0 && current.wholeContentsEscape) {
+          // this 전체를 넘기면 initializer뿐 아니라 필드 자체를 교체할 수 있다.
+          for (const member of this.project.checker.getTypeAtLocation(node).getProperties()) {
+            if (!this.#chargeMutation()) return;
+            this.#mutatedThisFields.add(resolveAlias(this.project.checker, member));
+          }
+        }
         this.#enqueueClassSources(owner, current, pending, false);
         continue;
       }

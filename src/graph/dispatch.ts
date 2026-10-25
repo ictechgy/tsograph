@@ -32,7 +32,7 @@ import type { EdgeGaps, PendingDispatch } from './edge-collector.ts';
 import { climbWrappers, type FlowIndex, type ModuleResolver, stringLeaves } from './flow-index.ts';
 import type { CallStatistics, GraphStore } from './graph-model.ts';
 import { delegateCallbackExpression, isNextCacheWrapperExpression } from './next-cache-model.ts';
-import { createBoundedResolutionHost } from './program.ts';
+import { configImportIsBlocked, createBoundedResolutionHost, resolveProgramModule } from './program.ts';
 import { moduleScopeId, scopeIdOf } from './symbol-ids.ts';
 import type { TargetResolver } from './target-resolver.ts';
 import { type CallableValue, type FlowPolicy, ValueFlow } from './value-flow.ts';
@@ -196,15 +196,15 @@ function moduleSpecifiers(sourceFile: ts.SourceFile): ts.StringLiteralLike[] {
  * @returns 지정자 → 모듈 심볼(풀리지 않거나 Program 밖 파일이면 undefined)
  */
 export function createModuleResolver(program: ts.Program, checker: ts.TypeChecker): ModuleResolver {
-  const cache = ts.createModuleResolutionCache(program.getCurrentDirectory(), (name) => name, program.getCompilerOptions());
   // Program을 만든 compiler host와 같은 상한으로 package.json을 읽는다. 상한을 넘은 파일은 Program처럼 없는 것으로
   // 보고 해석하므로 결과가 Program의 import 해석과 같고, Program이 해석한 import의 공백은 Program 상태가 알린다.
   const host = createBoundedResolutionHost(() => undefined);
   const memo = new Map<string, ts.Symbol | undefined>();
   return (specifier, from) => {
+    if (configImportIsBlocked(program, from.fileName)) return undefined;
     const key = `${from.fileName}\u0000${specifier}`;
     if (memo.has(key)) return memo.get(key);
-    const resolved = ts.resolveModuleName(specifier, from.fileName, program.getCompilerOptions(), host, cache).resolvedModule;
+    const resolved = resolveProgramModule(program, specifier, from.fileName, host);
     const sourceFile = resolved === undefined ? undefined : program.getSourceFile(resolved.resolvedFileName);
     const module = sourceFile === undefined ? undefined : checker.getSymbolAtLocation(sourceFile);
     memo.set(key, module);
