@@ -168,7 +168,7 @@ test('서로 다른 server 문맥의 AST는 각 checker로 문서화하고 등�
   });
 });
 
-test('문맥 예산 초과는 선언 후보와 한계를 유지하고 import 연결을 보류한다', async () => {
+test('많은 문맥도 선언 후보와 소유권을 유지하며 같은 문맥 import를 해석한다', async () => {
   const files: Record<string,string> = {};
   for (let index=0;index<17;index++) {
     files[`p${index}/tsconfig.json`] = config({types:[`missing-${index}`]});
@@ -178,8 +178,8 @@ test('문맥 예산 초과는 선언 후보와 한계를 유지하고 import 연
   await fixture(files, async root => {
     const graph = await buildCallGraph(root,createNodeFileSystem());
     assert.equal(graph.nodes.filter(node => node.id.endsWith('main.ts#main')).length,17);
-    assert.ok(!graph.edges.some(edge => edge.kinds.includes('call')));
-    assert.ok(graph.limitations.some(line => line.includes('config-context-budget:')));
+    assert.equal(graph.edges.filter(edge => edge.kinds.includes('call')).length,17);
+    assert.ok(!graph.limitations.some(line => line.includes('config-context-budget:')));
   });
 });
 
@@ -269,7 +269,7 @@ test('review: triple slash는 다른 설정의 global 선언을 반입하거나 
   });
 });
 
-test('review: 문맥 예산 초과에도 직접 알려진 typed sink의 위치와 dynamic 후보가 남는다', async () => {
+test('review: 많은 문맥의 typed sink는 기존 다중 문맥 dynamic 경계를 유지한다', async () => {
   const files:Record<string,string>={};
   for(let i=0;i<17;i++) {
     files[`p${i}/tsconfig.json`]=config({types:[`missing-${i}`]});
@@ -282,7 +282,7 @@ test('review: 문맥 예산 초과에도 직접 알려진 typed sink의 위치�
     assert.equal(client.facts.length,17);
     assert.equal(new Set(client.facts.map(fact=>fact.location.path)).size,17);
     assert.ok(client.facts.every(fact=>fact.dynamic && fact.channel===null));
-    assert.ok(client.limitations.some(line=>line.includes('config-context-budget:')));
+    assert.ok(!client.limitations.some(line=>line.includes('config-context-budget:')));
   });
 });
 

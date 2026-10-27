@@ -64,6 +64,8 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly compilerContexts?: number;
   readonly contextBoundaryImports?: number;
   readonly contextBudgetExceeded?: boolean;
+  /** 큰 순차 계획에서는 타입 오류 의미를 보존하며 TS 문서 전용 JSDoc AST만 만들지 않는다. */
+  readonly compactDocumentation?: boolean;
   /** 설정 진입 범위 밖 후보 수와 그중 import 의존성으로 읽은 수다. */
   readonly excludedSourceRoots?: number;
   readonly importedOutsideRoots?: number;
@@ -125,7 +127,7 @@ export function createGraphProgram(
   const { candidates, ownership } = entries;
   const config = context?.config ?? entries.config;
   const contextKey = context?.keys.get(config) ?? semanticOptionsKey(config.options);
-  const rootNames = context === undefined || context.exceeded ? entries.rootNames : entries.rootNames.filter(path => {
+  const rootNames = context === undefined ? entries.rootNames : entries.rootNames.filter(path => {
     const owner = ownership.owners.get(resolve(path));
     return owner === undefined || context.keys.get(owner) === contextKey;
   });
@@ -137,6 +139,9 @@ export function createGraphProgram(
   const allNonRoots = candidates.filter((path) => !roots.has(sourceEntryKey(path)));
   const nonRoots = allNonRoots.filter(path => context === undefined || context.ownedSources.has(path));
   const host = ts.createCompilerHost(options, true);
+  // JS JSDoc과 타입 오류에 필요한 TS @link/@see는 유지한다. 일반 Program의 ParseAll
+  // 계약은 바꾸지 않으며, 서로 다른 checker가 프로젝트 AST를 공유하지도 않는다.
+  if (context?.compactDocumentation === true) host.jsDocParsingMode = ts.JSDocParsingMode.ParseForTypeErrors;
   // 설정이 없거나 읽지 못하면 TypeScript는 자동 타입 루트를 host의 현재 디렉터리와 그 조상의 `node_modules/@types`에서
   // 찾는다. 실행 위치 대신 프로젝트 루트를 주어 tsconfig가 루트에 있을 때와 같은 타입을 쓴다. 설정이 있으면 TypeScript가
   // 설정 디렉터리를 쓰고, 루트·import·옵션 경로는 모두 절대 경로라 다른 해석은 바뀌지 않는다.
@@ -159,14 +164,15 @@ export function createGraphProgram(
   });
   // 다른 설정 소유 소스에 선택한 한 설정의 alias를 적용하면 잘못된 직접 간선이 생긴다. 지원하지 않는
   // 소유권은 import를 미해결로 남긴다. 로더나 설정의 코드를 실행하지 않는다.
-  const blocked = context === undefined ? ownership.blocked : ownership.ambiguous;
+  const conflicts = context === undefined ? ownership.blocked : ownership.ambiguous;
+  const blocked = conflicts;
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   const choices = new Map<string, Map<string, ts.ResolvedModuleFull | undefined>>();
   const choiceModes = new Map<string, ts.ResolutionMode>();
   const resolveModule = (name: string, containingFile: string, mode?: ts.ResolutionMode, resolutionHost: ts.ModuleResolutionHost = host): ts.ResolvedModuleFull | undefined => {
     const absolute = resolve(containingFile);
-    if (blocked.has(absolute) && context?.exceeded !== true) return undefined;
+    if (blocked.has(absolute)) return undefined;
     const sourceOptions = context === undefined ? options : analysisOptions(ownership.owners.get(absolute)?.options ?? config.options);
     let refused = false;
     const boundedHost: ts.ModuleResolutionHost = { ...resolutionHost, readFile: file => {
@@ -177,7 +183,7 @@ export function createGraphProgram(
     const resolved = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
     if (refused) return undefined;
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
-    if (context !== undefined && resolved !== undefined && (context.exceeded || ownership.ambiguous.has(resolve(resolved.resolvedFileName))
+    if (context !== undefined && resolved !== undefined && (ownership.ambiguous.has(resolve(resolved.resolvedFileName))
       || (target !== undefined && context.keys.get(target) !== contextKey))) {
       boundaryImports.add(`${absolute}\u0000${name}`);
       boundaryTargets.set(`${absolute}\u0000${name}`, resolve(resolved.resolvedFileName));
@@ -199,7 +205,7 @@ export function createGraphProgram(
   const deeplyNested = new Set<string>();
   // triple-slash/type reference는 module resolver를 거치지 않는다. 다른 문맥의 source universe를
   // getSourceFile 경계에서도 막아 checker 통계에서 resolved 후 사라지는 거짓 호출을 만들지 않는다.
-  if (context !== undefined && !context.exceeded) {
+  if (context !== undefined) {
     const getSourceFile = host.getSourceFile.bind(host);
     host.getSourceFile = (fileName, ...args) => {
       const owner = ownership.owners.get(resolve(fileName));
@@ -236,10 +242,10 @@ export function createGraphProgram(
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
         ...ownershipStatus(config, ownership), ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
         ...(nonRoots.length > 0 ? { excludedSourceRoots: nonRoots.length, importedOutsideRoots } : {}),
-        ...(blocked.size > 0 ? { conflictingConfigSourceCount: blocked.size,
-          conflictingConfigSources: [...blocked].map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(conflicts.size > 0 ? { conflictingConfigSourceCount: conflicts.size,
+          conflictingConfigSources: [...conflicts].map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
         ...(context === undefined ? {} : { compilerContexts: context.count, contextBoundaryImports: boundaryImports.size,
-          ...(context.exceeded ? { contextBudgetExceeded: true } : {}) }),
+          ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
@@ -287,7 +293,7 @@ interface CompilerContext {
   readonly config: ProjectConfig;
   readonly ownedSources: ReadonlySet<string>;
   readonly count: number;
-  readonly exceeded: boolean;
+  readonly compactDocumentation: boolean;
 }
 
 /** 같은 타입 의미는 한 checker를 쓰고, 다른 의미는 순차 Program으로 분리해 Node/Symbol을 교환하지 않는다. */
@@ -304,16 +310,12 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
     groups.set(key, group);
   }
   if (groups.size === 0) groups.set(semanticOptionsKey(entries.config.options), { config: entries.config, sources: new Set() });
-  // 설정 수와 Program×후보 수를 함께 제한한다. 초과하면 기존 미해결 모드로 후보를 보존한다.
-  const exceeded = groups.size > 16 || (groups.size > 1 && groups.size * entries.candidates.length > 200_000);
-  if (exceeded) {
-    const conservative = { ...entries, ownership: { ...entries.ownership, ambiguous: new Set(entries.candidates) } };
-    yield createGraphProgram(root, sourcePaths, ts.createProgram, explicitConfig, boundary,
-      { entries: conservative, keys, config: entries.config, ownedSources: new Set(entries.candidates), count: 1, exceeded: true });
-    return;
-  }
+  // 총 문맥 수는 동시에 살아 있는 checker 수가 아니다. 전체 계획을 이유로 모든 호출을
+  // 버리지 않고 기존 소유권·ambient 경계를 유지한 채 하나씩 처리한다. 큰 계획은 타입
+  // 오류를 보존하는 JSDoc 모드로 문서 전용 AST의 보유 비용을 줄인다.
+  const compactDocumentation = groups.size > 16 || (groups.size > 1 && groups.size * entries.candidates.length > 200_000);
   for (const group of groups.values()) yield createGraphProgram(root, sourcePaths, ts.createProgram, explicitConfig, boundary,
-    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, exceeded: false });
+    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, compactDocumentation });
 }
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.

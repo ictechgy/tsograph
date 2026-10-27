@@ -27,8 +27,11 @@ import { createTraversalDocument } from '../graph/traversal-document.ts';
 import { MAX_TRAVERSAL_DEPTH, traverse, type TraversalDirection, type TraversalResult } from '../graph/traversal.ts';
 import {
   MAX_SAVED_GRAPH_BYTES,
+  SAVED_GRAPH_STREAM_LIMITS,
   SavedGraphError,
+  parseSavedGraphChunks,
   parseSavedGraphInput,
+  type ParsedSavedGraph,
 } from '../graph/saved-graph.ts';
 import { type CommandResult, inputFailure, isStackExhaustion, stackExhaustionFailure, success, usageFailure, usageFailureWithOutput } from './command-result.ts';
 import type { CommandFileSystem } from './file-system.ts';
@@ -69,6 +72,7 @@ Options:
 Exit codes: 0 success, 2 input/output failure, 64 usage error (including a --tsconfig file
 outside --project).
 Stream failures may leave partial graph output; discard it whenever the exit code is 2.
+Exit 0 confirms output was written. Declaration-only partial analysis is reported on stderr and in limitations.
 `;
 
 /** reach·impact 공통 옵션 설명이다. */
@@ -78,6 +82,7 @@ const traversalOptions = `Options:
   --tsconfig <file>           Explicit compiler config inside --project (live --project input only)
   --workspace <root>         Enclosing workspace source boundary (live --project input only)
   --graph-file <path>         Traverse a saved JSON or NDJSON graph without reading project sources
+                              JSON/text: 128 MiB; bounded large NDJSON: 1 GiB with safe chunk support
   --max-depth <n>             Stop after n edges from the roots (1-${MAX_TRAVERSAL_DEPTH}, default ${MAX_TRAVERSAL_DEPTH})
   --max-reached <n>           Emit at most n reached symbols (default and maximum: ${DEFAULT_MAX_REACHED})
   --dispatch <mode>           Edges to follow: direct (proven by the checker), bound (direct plus
@@ -148,19 +153,31 @@ export async function runGraphCommand(arguments_: readonly string[], environment
   const document = createGraphSnapshot(loaded.graph, loaded.header);
   const format = parsed!.valueFlags.get('--format') === 'ndjson' ? 'ndjson' : 'json';
   if (environment.graphOutput !== undefined) {
-    try { await writeGraphOutput(document, format, environment.graphOutput); return success(''); }
+    try { await writeGraphOutput(document, format, environment.graphOutput); return graphAnalysisStatus(success(''), document.limitations); }
     catch (error) {
       if (error instanceof GraphOutputWriteError) return inputFailure('graph output could not be written; check the destination and discard any partial output.');
       throw error;
     }
   }
-  if (format === 'json') return render(document);
+  if (format === 'json') return graphAnalysisStatus(render(document), document.limitations);
   let output = '';
   for (const chunk of graphOutputChunks(document, format)) {
     if (output.length + chunk.length > MAX_OUTPUT_LENGTH) return inputFailure('in-memory graph output exceeds its size limit; use the CLI streaming output.');
     output += chunk;
   }
-  return success(output);
+  return graphAnalysisStatus(success(output), document.limitations);
+}
+
+/** 저장 성공과 실제 부분 분석 사유를 구분한다. 0개 간선만으로 불완전성을 추측하지 않는다. */
+function graphAnalysisStatus(result: CommandResult, limitations: readonly string[]): CommandResult {
+  if (result.exitCode !== 0) return result;
+  if (limitations.some(line => line.startsWith('analysis-partial: bounded-function-bindings;'))) {
+    return { ...result, standardError: 'tsograph: partial bounded semantic graph; effect proof budget was exhausted. Only checked stable function bindings were analyzed in affected contexts; see graph limitations.\n' };
+  }
+  if (limitations.some(line => line.startsWith('analysis-partial: declaration-only;'))) {
+    return { ...result, standardError: 'tsograph: partial declaration-only graph; semantic dependency edges were not analyzed. See graph limitations for the compiler-context budget.\n' };
+  }
+  return result;
 }
 
 /**
@@ -444,7 +461,17 @@ async function loadSavedGraph(
     return inputFailure('--graph-file does not name a readable saved graph file; pass an existing tsograph-graph v1 JSON or NDJSON file.');
   }
   if (size > MAX_SAVED_GRAPH_BYTES) {
-    return inputFailure(`the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes; produce a smaller graph snapshot.`);
+    if (size > SAVED_GRAPH_STREAM_LIMITS.bytes) return inputFailure(new SavedGraphError('stream-too-large').message);
+    if (environment.fileSystem.readChunks === undefined) {
+      return inputFailure(`the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes for this filesystem; a chunk-capable reader and NDJSON are required for larger snapshots.`);
+    }
+    try {
+      return loadedSavedGraph(await parseSavedGraphChunks(savedGraphChunks(environment.fileSystem, graphFile)), environment);
+    } catch (error) {
+      if (error instanceof SavedGraphError) return inputFailure(error.message);
+      if (error instanceof SavedGraphReadError) return inputFailure('the saved graph file could not be read safely; check file permissions and safe chunked-read support.');
+      throw error;
+    }
   }
   let bytes: Uint8Array;
   try { bytes = await environment.fileSystem.readBytes(graphFile, MAX_SAVED_GRAPH_BYTES); }
@@ -457,25 +484,35 @@ async function loadSavedGraph(
   catch { return inputFailure('the saved graph is not valid UTF-8; re-encode it as UTF-8 JSON.'); }
   try {
     const parsed = parseSavedGraphInput(text);
-    const provenance = `saved-graph-input: built by tsograph ${parsed.toolVersion} at ${parsed.generatedAt}; `
-      + 'sources were not re-read; graphRevision verifies topology, not limitation, location or statistics integrity';
-    const modeLimits = parsed.graph.limitationsByMode;
-    return {
-      graph: { ...parsed.graph, limitationsByMode: {
-        direct: [...modeLimits.direct, provenance], bound: [...modeLimits.bound, provenance], candidates: [...modeLimits.candidates, provenance],
-      } },
-      graphRevision: parsed.graphRevision,
-      header: {
-        toolVersion: environment.toolVersion,
-        generatedAt: environment.now(),
-        project: parsed.project,
-        revision: parsed.revision,
-      },
-    };
+    return loadedSavedGraph(parsed, environment);
   } catch (error) {
     if (error instanceof SavedGraphError) return inputFailure(error.message);
     throw error;
   }
+}
+
+/** I/O 오류만 구분하여 parser 내부 결함을 입력 오류로 숨기지 않는다. */
+class SavedGraphReadError extends Error {}
+
+/** read iterator의 획득·읽기·닫기 오류를 원문 없는 I/O 종류로 바꾼다. */
+async function* savedGraphChunks(fileSystem: CommandFileSystem, path: string): AsyncGenerator<Uint8Array> {
+  try {
+    for await (const chunk of fileSystem.readChunks!(path, SAVED_GRAPH_STREAM_LIMITS.bytes)) yield chunk;
+  } catch { throw new SavedGraphReadError(); }
+}
+
+/** 두 입력 경로에 같은 provenance와 부분 limitation을 붙인다. */
+function loadedSavedGraph(parsed: ParsedSavedGraph, environment: GraphEnvironment): LoadedGraph {
+  const provenance = `saved-graph-input: built by tsograph ${parsed.toolVersion} at ${parsed.generatedAt}; `
+    + 'sources were not re-read; graphRevision verifies topology, not limitation, location or statistics integrity';
+  const modeLimits = parsed.graph.limitationsByMode;
+  return {
+    graph: { ...parsed.graph, limitationsByMode: {
+      direct: [...modeLimits.direct, provenance], bound: [...modeLimits.bound, provenance], candidates: [...modeLimits.candidates, provenance],
+    } },
+    graphRevision: parsed.graphRevision,
+    header: { toolVersion: environment.toolVersion, generatedAt: environment.now(), project: parsed.project, revision: parsed.revision },
+  };
 }
 
 /**

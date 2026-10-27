@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -70,4 +70,41 @@ test('bounded read의 cap은 유한한 nonnegative safe integer다', async () =>
   for (const limit of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER]) {
     await assert.rejects(fileSystem.readBytes('/unused', limit), RangeError, String(limit));
   }
+});
+
+test('chunk reader는 고정 조각·cap+1·성장·조기 종료를 제한된 regular file handle로 다룬다', {
+  skip: !constants.O_NOFOLLOW || !constants.O_NONBLOCK,
+}, async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-fs-chunks-')));
+  try {
+    const file = join(directory, 'bytes.bin');
+    writeFileSync(file, Buffer.alloc(128 * 1024, 7));
+    const fileSystem = createNodeFileSystem();
+    const parts: Uint8Array[] = [];
+    for await (const part of fileSystem.readChunks!(file, 64 * 1024)) parts.push(part);
+    assert.deepEqual(parts.map(part => part.byteLength), [64 * 1024, 1]);
+    assert.ok(parts.every(part => part.every(value => value === 7)));
+    writeFileSync(file, 'abc');
+    const before = await fileSystem.status(file);
+    appendFileSync(file, 'defgh');
+    const grown: number[] = [];
+    for await (const part of fileSystem.readChunks!(file, before.size)) grown.push(...part);
+    assert.deepEqual(grown, [...Buffer.from('abcd')]);
+    const iterator = fileSystem.readChunks!(file, 100)[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).done, false);
+    await iterator.return?.();
+    assert.equal((await iterator.next()).done, true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('chunk reader는 invalid cap·symlink·directory·device를 안전하게 거부한다', async () => {
+  const fileSystem = createNodeFileSystem();
+  const consume = async (path: string, limit: number) => { for await (const _part of fileSystem.readChunks!(path, limit)) { /* 소비만 한다. */ } };
+  for (const limit of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER]) await assert.rejects(consume('/unused', limit), RangeError);
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-fs-chunk-boundary-')));
+  try {
+    writeFileSync(join(directory, 'a.txt'), 'a');
+    symlinkSync(join(directory, 'a.txt'), join(directory, 'link'));
+    for (const path of [directory, join(directory, 'link'), '/dev/null']) await assert.rejects(consume(path, 100));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

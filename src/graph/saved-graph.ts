@@ -27,6 +27,15 @@ import {
 
 /** 독립 그래프 스냅샷 입력의 바이트 상한이다. */
 export const MAX_SAVED_GRAPH_BYTES = 128 * 1024 * 1024;
+/** 큰 NDJSON만 사용하는 실제 총 입력·단일 행·보관 가중치의 별도 상한이다. */
+export const SAVED_GRAPH_STREAM_LIMITS = Object.freeze({
+  bytes: 1024 * 1024 * 1024, headerBytes: 8 * 1024 * 1024,
+  recordBytes: 256 * 1024, retainedBytes: 512 * 1024 * 1024,
+});
+/** SDK chunk 하나도 무제한 decode하지 않는다. Node reader는64KiB를 공급한다. */
+const MAX_STREAM_CHUNK_BYTES = 1024 * 1024;
+/** 테스트는 제품 상한을 낮출 수만 있다. 가중치는 실제 RSS 측정값이 아니다. */
+export type SavedGraphStreamLimits = Readonly<{ bytes: number; headerBytes: number; recordBytes: number; retainedBytes: number }>;
 /** 한 스냅샷의 노드 상한이다. */
 export const MAX_SAVED_GRAPH_NODES = 500_000;
 /** 한 스냅샷의 간선 상한이다. */
@@ -92,7 +101,169 @@ export type SavedGraphErrorCode =
   | 'too-large' | 'invalid-json' | 'too-deep' | 'too-many-values' | 'duplicate-key'
   | 'invalid-schema' | 'invalid-provenance' | 'invalid-node' | 'duplicate-node'
   | 'invalid-edge' | 'missing-endpoint' | 'duplicate-edge' | 'invalid-statistics'
-  | 'invalid-limitations' | 'revision-mismatch';
+  | 'invalid-limitations' | 'revision-mismatch' | 'stream-too-large' | 'stream-line-too-large'
+  | 'stream-retained-limit' | 'stream-chunk-too-large' | 'invalid-utf8';
+
+/** 큰 NDJSON을 한 행씩 검증하며 원본 전체 bytes/text/중복 raw 배열을 보관하지 않는다. */
+export async function parseSavedGraphChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  requested: Partial<SavedGraphStreamLimits> = {},
+): Promise<ParsedSavedGraph> {
+  const limits = boundedStreamLimits(requested);
+  const builder = new SavedGraphStreamBuilder(limits.retainedBytes);
+  for await (const record of savedGraphRecords(chunks, limits)) builder.add(record.text, record.bytes);
+  return builder.finish();
+}
+
+/** 주입한 상한도 유한한 정수로 검사하고 고정 제품 최대보다 커지지 않게 한다. */
+function boundedStreamLimits(requested: Partial<SavedGraphStreamLimits>): SavedGraphStreamLimits {
+  const result = { ...SAVED_GRAPH_STREAM_LIMITS };
+  for (const key of Object.keys(result) as (keyof SavedGraphStreamLimits)[]) {
+    const value = requested[key] ?? result[key];
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError('stream limits must be nonnegative safe integers');
+    result[key] = Math.min(value, result[key]);
+  }
+  return result;
+}
+
+/** LF를 UTF8 decoder에도 전달하여 불완전 sequence가 다음 행과 이어지지 못하게 한다. */
+async function* savedGraphRecords(
+  chunks: AsyncIterable<Uint8Array>, limits: SavedGraphStreamLimits,
+): AsyncGenerator<{ text: string; bytes: number }> {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let total = 0, lineBytes = 0, lines = 0;
+  let parts: string[] = [];
+  const decode = (bytes?: Uint8Array): string => {
+    try { return bytes === undefined ? decoder.decode() : decoder.decode(bytes, { stream: true }); }
+    catch { throw new SavedGraphError('invalid-utf8'); }
+  };
+  for await (const chunk of chunks) {
+    if (!(chunk instanceof Uint8Array)) throw new SavedGraphError('invalid-utf8');
+    total += chunk.byteLength;
+    if (total > limits.bytes) throw new SavedGraphError('stream-too-large');
+    if (chunk.byteLength > MAX_STREAM_CHUNK_BYTES) throw new SavedGraphError('stream-chunk-too-large');
+    for (let start = 0; start < chunk.byteLength;) {
+      const newline = chunk.indexOf(10, start);
+      const end = newline < 0 ? chunk.byteLength : newline + 1;
+      lineBytes += end - start;
+      if (lineBytes > (lines === 0 ? limits.headerBytes : limits.recordBytes)) throw new SavedGraphError('stream-line-too-large');
+      parts.push(decode(chunk.subarray(start, end)));
+      if (newline >= 0) {
+        yield { text: parts.join('').slice(0, -1), bytes: lineBytes };
+        parts = []; lineBytes = 0; lines++;
+      }
+      start = end;
+    }
+  }
+  const tail = decode();
+  if (tail) parts.push(tail);
+  if (lineBytes > 0) yield { text: parts.join(''), bytes: lineBytes };
+}
+
+/** 검증한 문서 머리만 보관하고 원래 JSON 객체는 버린다. */
+interface SavedGraphStreamHeader {
+  readonly provenance: ReturnType<typeof validateProvenance>;
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+  readonly statistics: GraphStatistics;
+  readonly limitations: readonly string[];
+  readonly limitationsByMode: CallGraph['limitationsByMode'];
+}
+
+/** 정렬 witness와 canonical 문자열을 사용하여 연결된 그래프만 보관한다. */
+class SavedGraphStreamBuilder {
+  private readonly nodes: GraphNode[] = [];
+  private readonly edges: GraphEdge[] = [];
+  private readonly ids = new Map<string, string>();
+  private readonly paths = new Map<string, string>();
+  private readonly maximumWeight: number;
+  private header: SavedGraphStreamHeader | undefined;
+  private readingEdges = false;
+  private weight = 0;
+  private values = 0;
+
+  constructor(maximumWeight: number) { this.maximumWeight = maximumWeight; }
+
+  /** JSON lexical 방어를 schema 전에 적용하며 wrapper 값도 전체 예산에 포함한다. */
+  add(text: string, bytes: number): void {
+    this.values += new JsonLimitsScanner(text).scan();
+    if (this.values > MAX_SAVED_GRAPH_JSON_VALUES + 2 * (MAX_SAVED_GRAPH_NODES + MAX_SAVED_GRAPH_EDGES)) throw new SavedGraphError('too-many-values');
+    let value: unknown;
+    try { value = JSON.parse(text) as unknown; }
+    catch { throw new SavedGraphError('invalid-json'); }
+    if (!isRecord(value)) throw new SavedGraphError('invalid-schema');
+    if (this.header === undefined) { this.readHeader(value, bytes); return; }
+    if (value.record === 'node' && !this.readingEdges) {
+      assertKeys(value, ['record', 'node'], 'invalid-schema');
+      this.addNode(value.node);
+    } else if (value.record === 'edge') {
+      assertKeys(value, ['record', 'edge'], 'invalid-schema');
+      this.readingEdges = true;
+      this.addEdge(value.edge);
+    } else throw new SavedGraphError('invalid-schema');
+  }
+
+  /** provenance·통계·부분 한계와 선언한 collection 상한을 기존 validator로 고정한다. */
+  private readHeader(value: Record<string, unknown>, bytes: number): void {
+    assertKeys(value, ['format', 'version', 'tool', 'generatedAt', 'platform', 'project', 'revision', 'graphRevision',
+      'statistics', 'limitations', 'limitationsByMode', 'record', 'nodeCount', 'edgeCount'], 'invalid-schema');
+    if (value.format !== 'tsograph-graph-ndjson' || value.version !== 1 || value.record !== 'header'
+      || !nonNegativeInteger(value.nodeCount) || value.nodeCount > MAX_SAVED_GRAPH_NODES
+      || !nonNegativeInteger(value.edgeCount) || value.edgeCount > MAX_SAVED_GRAPH_EDGES) throw new SavedGraphError('invalid-schema');
+    const provenance = validateProvenance(value);
+    const statistics = validateStatistics(value.statistics);
+    const limitations = validateLimitations(value.limitations);
+    const limitationsByMode = value.limitationsByMode === undefined
+      ? fallbackLimitations(limitations) : validateLimitationsByMode(value.limitationsByMode);
+    this.charge(bytes * 2);
+    this.header = { provenance, statistics, limitations, limitationsByMode, nodeCount: value.nodeCount, edgeCount: value.edgeCount };
+  }
+
+  /** 노드·경로를 검증하고 repeated path payload를 한 문자열로 합친다. */
+  private addNode(raw: unknown): void {
+    if (this.nodes.length >= this.header!.nodeCount) throw new SavedGraphError('invalid-schema');
+    const node = validateNode(raw);
+    if (this.ids.has(node.id)) throw new SavedGraphError('duplicate-node');
+    if (this.nodes.length && compareStrings(this.nodes[this.nodes.length - 1]!.id, node.id) >= 0) throw new SavedGraphError('invalid-node');
+    const path = this.paths.get(node.location.path);
+    this.charge(384 + node.id.length * 2 + (path === undefined ? node.location.path.length * 2 : 0));
+    if (path === undefined) this.paths.set(node.location.path, node.location.path);
+    this.ids.set(node.id, node.id);
+    this.nodes.push({ ...node, location: { ...node.location, path: path ?? node.location.path } });
+  }
+
+  /** 모든 endpoint는 이전에 검증한 노드 ID이며 정렬 순서로 중복도 거부한다. */
+  private addEdge(raw: unknown): void {
+    if (this.edges.length >= this.header!.edgeCount) throw new SavedGraphError('invalid-schema');
+    const edge = validateEdge(raw);
+    const from = this.ids.get(edge.from), to = this.ids.get(edge.to);
+    if (from === undefined || to === undefined) throw new SavedGraphError('missing-endpoint');
+    const previous = this.edges[this.edges.length - 1];
+    if (previous !== undefined) {
+      const order = compareEdges(previous, edge);
+      if (order === 0) throw new SavedGraphError('duplicate-edge');
+      if (order > 0) throw new SavedGraphError('invalid-edge');
+    }
+    this.charge(224);
+    this.edges.push({ ...edge, from, to });
+  }
+
+  /** 고정 overhead와 UTF16 payload의 보관 가중치이며 실제 RSS 상한으로 오인하지 않는다. */
+  private charge(bytes: number): void {
+    this.weight += bytes;
+    if (this.weight > this.maximumWeight) throw new SavedGraphError('stream-retained-limit');
+  }
+
+  /** 완전한 EOF·count·topology hash 검증 전에는 순회 가능한 그래프를 반환하지 않는다. */
+  finish(): ParsedSavedGraph {
+    const header = this.header;
+    if (header === undefined || this.nodes.length !== header.nodeCount || this.edges.length !== header.edgeCount) throw new SavedGraphError('invalid-schema');
+    const graph: CallGraph = { nodes: this.nodes, edges: this.edges, statistics: header.statistics,
+      limitations: header.limitations, limitationsByMode: header.limitationsByMode };
+    if (computeGraphRevision(graph) !== header.provenance.graphRevision) throw new SavedGraphError('revision-mismatch');
+    return { graph, ...header.provenance };
+  }
+}
 
 /**
  * JSON 텍스트를 bounded하게 읽고 완전한 `CallGraph`로 검증한다.
@@ -503,6 +674,11 @@ function validTimestamp(value: unknown): value is string {
 /** 저장 그래프 오류를 경로·원문 없는 해결 문구로 바꾼다. */
 function savedGraphMessage(code: SavedGraphErrorCode): string {
   switch (code) {
+    case 'stream-too-large': return `the saved NDJSON exceeds the ${SAVED_GRAPH_STREAM_LIMITS.bytes}-byte streaming input limit.`;
+    case 'stream-line-too-large': return `the saved NDJSON exceeds the ${SAVED_GRAPH_STREAM_LIMITS.headerBytes}-byte header or ${SAVED_GRAPH_STREAM_LIMITS.recordBytes}-byte record limit.`;
+    case 'stream-retained-limit': return `the saved NDJSON exceeds the ${SAVED_GRAPH_STREAM_LIMITS.retainedBytes}-byte retained graph weight limit.`;
+    case 'stream-chunk-too-large': return `the saved NDJSON reader supplied a chunk larger than ${MAX_STREAM_CHUNK_BYTES} bytes.`;
+    case 'invalid-utf8': return 'the saved graph is not valid UTF-8; re-encode it as UTF-8 JSON.';
     case 'too-large': return `the saved graph exceeds ${MAX_SAVED_GRAPH_BYTES} bytes; produce a smaller graph snapshot.`;
     case 'invalid-json': return 'the saved graph is not valid JSON; regenerate it with tsograph graph.';
     case 'too-deep': return `the saved graph exceeds the ${MAX_JSON_DEPTH}-level JSON depth limit; regenerate it with tsograph graph.`;
@@ -529,11 +705,12 @@ class JsonLimitsScanner {
 
   constructor(text: string) { this.text = text; }
 
-  scan(): void {
+  scan(): number {
     try {
       this.value(0);
       this.space();
       if (this.#index !== this.text.length) throw new SavedGraphError('invalid-json');
+      return this.#values;
     } catch (error) {
       if (error instanceof SavedGraphError) throw error;
       throw new SavedGraphError('invalid-json');

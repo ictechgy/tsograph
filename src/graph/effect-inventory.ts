@@ -20,6 +20,8 @@ export function effectEmitPolicy(options: ts.CompilerOptions): EffectEmitPolicy 
 export interface EffectBuildBudget {
   visited: number;
   records: number;
+  /** 실제 전체 quota 거부가 있었다. per-file 거부나 계수의 우연한 경계 일치는 포함하지 않는다. */
+  aggregateCapped?: boolean;
   /** manifest/part 재방문을 합친 source별 visited 수다. */
   perFileVisited?: Map<ts.SourceFile, number>;
   /** checker symbol별 require binding 증거를 usage source별로 한 번만 조사한다. */
@@ -156,7 +158,8 @@ function chargeBindingWork(
   limits: BindingWalkLimits,
 ): boolean {
   const sourceVisited = budget.perFileVisited?.get(source) ?? 0;
-  if (sourceVisited >= limits.perFile || budget.visited >= limits.visited) return false;
+  if (budget.visited >= limits.visited) { budget.aggregateCapped = true; return false; }
+  if (sourceVisited >= limits.perFile) return false;
   budget.visited++;
   budget.perFileVisited?.set(source, sourceVisited + 1);
   return true;
@@ -243,7 +246,8 @@ function hasBindingWrite(
     const stack: ts.Node[] = [source];
     while (stack.length > 0) {
       const sourceVisited = budget.perFileVisited?.get(source) ?? 0;
-      if (sourceVisited >= limits.perFile || budget.visited >= limits.visited) return undefined;
+      if (budget.visited >= limits.visited) { budget.aggregateCapped = true; return undefined; }
+      if (sourceVisited >= limits.perFile) return undefined;
       const node = stack.pop()!;
       budget.visited++;
       budget.perFileVisited?.set(source, sourceVisited + 1);
@@ -253,15 +257,19 @@ function hasBindingWrite(
         if (target === symbol) return true;
       }
       const children: ts.Node[] = [];
-      const room = Math.min(limits.perFile - (budget.perFileVisited?.get(source) ?? 0),
-        limits.visited - budget.visited) - stack.length;
+      const perFileRoom = limits.perFile - (budget.perFileVisited?.get(source) ?? 0);
+      const aggregateRoom = limits.visited - budget.visited;
+      const room = Math.min(perFileRoom, aggregateRoom) - stack.length;
       let overflow = false;
       ts.forEachChild(node, (child) => {
         if (children.length >= room) { overflow = true; return true; }
         children.push(child);
         return undefined;
       });
-      if (overflow) return undefined;
+      if (overflow) {
+        if (aggregateRoom <= perFileRoom) budget.aggregateCapped = true;
+        return undefined;
+      }
       for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
     }
   }
@@ -1124,7 +1132,8 @@ export function collectEffectPart(
   const requireClassifier = createRequireClassifier(checker, budget, limits);
   while (stack.length > 0) {
     const sourceVisited = budget.perFileVisited.get(source) ?? 0;
-    if (sourceVisited >= limits.perFile || budget.visited >= limits.visited) { status = 'incomplete(build-cap)'; break; }
+    if (budget.visited >= limits.visited) { budget.aggregateCapped = true; status = 'incomplete(build-cap)'; break; }
+    if (sourceVisited >= limits.perFile) { status = 'incomplete(build-cap)'; break; }
     const node = stack.pop()!;
     visited++;
     budget.visited++;
@@ -1172,7 +1181,7 @@ export function collectEffectPart(
     const kind = runtime ? classifyEffectOperation(node) : undefined;
     const additions = Number(tokenText !== undefined) + Number(alias !== undefined) + Number(reference !== undefined)
       + edges.length + Number(kind !== undefined);
-    if (budget.records + additions > limits.records) { status = 'incomplete(build-cap)'; break; }
+    if (budget.records + additions > limits.records) { budget.aggregateCapped = true; status = 'incomplete(build-cap)'; break; }
     budget.records += additions;
     retained += additions;
     if (tokenText !== undefined) tokens.push({ text: tokenText, site: node });
@@ -1183,9 +1192,13 @@ export function collectEffectPart(
     if (!runtime) continue;
     const children: ts.Node[] = [];
     const remainingPerFile = limits.perFile - (budget.perFileVisited.get(source) ?? 0);
-    const room = Math.min(remainingPerFile, limits.visited - budget.visited) - stack.length;
+    const remainingAggregate = limits.visited - budget.visited;
+    const room = Math.min(remainingPerFile, remainingAggregate) - stack.length;
     ts.forEachChild(node, (child) => {
-      if (children.length >= room) { status = 'incomplete(build-cap)'; return true; }
+      if (children.length >= room) {
+        if (remainingAggregate <= remainingPerFile) budget.aggregateCapped = true;
+        status = 'incomplete(build-cap)'; return true;
+      }
       children.push(child);
       return undefined;
     });

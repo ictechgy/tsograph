@@ -5,7 +5,8 @@
  * 가짜 구현으로 재현하고, 실제 실행은 Node 구현을 쓴다.
  */
 
-import { open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { lstat, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
 
 /** capped read가 한 번에 할당하고 읽는 고정 byte 상한이다. */
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -31,6 +32,8 @@ export interface CommandFileSystem {
   status(path: string): Promise<PathStatus>;
   /** 파일 바이트를 읽는다. 상한이 있으면 oversized 판정을 위해 최대 상한+1 byte만 돌려준다. */
   readBytes(path: string, maximumBytes?: number): Promise<Uint8Array>;
+  /** 선택 기능이다. 고정 chunk로 최대 상한+1 byte만 읽고 조기 종료에도 handle을 닫는다. */
+  readChunks?(path: string, maximumBytes: number): AsyncIterable<Uint8Array>;
   /** 디렉터리 항목을 읽는다(순서 보장 없음). symlink를 따라가지 않는다. */
   listDirectory(path: string): Promise<readonly DirectoryEntry[]>;
 }
@@ -51,11 +54,34 @@ export function createNodeFileSystem(): CommandFileSystem {
     readBytes: (path, maximumBytes) => maximumBytes === undefined
       ? readFile(path)
       : readBytesWithin(path, maximumBytes),
+    readChunks: readChunksWithin,
     listDirectory: async (path) => {
       const entries = await readdir(path, { withFileTypes: true });
       return entries.map((entry) => ({ name: entry.name, kind: directoryEntryKind(entry) }));
     },
   };
+}
+
+/** 실제 regular file만 한 handle에서 읽으며 경로 교체와 성장도 고정 read 예산을 넘지 못한다. */
+async function* readChunksWithin(path: string, maximumBytes: number): AsyncGenerator<Uint8Array> {
+  const budget = readBudget(maximumBytes);
+  // 지원하지 않는 host에서는 보호를 생략해 open하지 않는다. 기존 readBytes 경로는 유지한다.
+  if (!constants.O_NOFOLLOW || !constants.O_NONBLOCK) throw new Error('safe chunked reads are unavailable');
+  const before = await lstat(path, { bigint: true });
+  if (!before.isFile()) throw new Error('not a regular file');
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('file identity changed');
+    let total = 0;
+    while (total < budget) {
+      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, budget - total));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      yield chunk.subarray(0, bytesRead);
+    }
+  } finally { await handle.close(); }
 }
 
 /**

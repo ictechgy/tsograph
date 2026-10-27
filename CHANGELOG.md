@@ -18,6 +18,8 @@
 
 ### Added
 
+- 큰 저장 NDJSON의 reach/impact:128MiB text 경로와 별도로1GiB 실제 입력·8MiB header·256KiB record·512MiB 보관 가중치 안의 chunk 경로를 추가했다. 기존 node/edge/schema/깊이/UTF8/중복·정렬·참조·hash 방어와 부분 limitation을 유지하고 실제 EOF 뒤에만 순회한다. Node reader는 안전한 regular-file handle과 신원을 확인하며 지원하지 않는 파일 시스템은 명시적으로 실패한다. 큰 그룹의 의미 분석 범위를 확장한 변경은 아니다.
+
 - 정적 PnP: `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal을 실행 없이 읽고, Yarn ZIP/virtual peer location을 compiler host에 연결한다. TypeScript의 exports/import·require 조건과 명시 local typeRoots를 유지하며 잘못된 archive·locator 대체·경계 밖 읽기를 거부한다. 실제 Yarn4.18.1 생성물과 정상/부정 회귀를 추가했다. 전체 Yarn 런타임/임의 loader 표현식·사용자 정규식·경계 밖 global cache 지원을 주장하지 않는다.
 
 - `--respect-gitignore`: graph/reach/impact/routes/schema/navigation/change-impact의 진입 선택에 프로젝트 내부 `.gitignore`를 선택적으로 적용한다. 기본 동작·import 의존성 읽기는 유지하며 중첩·negation·escape 규칙, 명시 files 범위, 선택 limitation과 실패 예산을 문서화했다. 전역 Git 설정·추적 신원은 사용하지 않는다.
