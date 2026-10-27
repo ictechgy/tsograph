@@ -242,10 +242,36 @@ export function buildFileIndex(
  * @returns 합친 색인
  */
 export function mergeFlowIndexes(parts: Iterable<FlowIndex>, manifest?: EffectManifest): FlowIndex {
-  const index = emptyIndex();
-  let validParts = true;
+  const builder = new FlowIndexBuilder();
+  for (const part of parts) builder.append(part);
+  return builder.finish(manifest);
+}
+
+/** 파일별 임시 맵을 쌓아 두지 않고 두 proof view에 같은 관찰을 순서대로 병합한다. */
+export function mergeFlowIndexViews(
+  parts: Iterable<{ readonly index: FlowIndex; readonly production: boolean }>,
+  wholeManifest: EffectManifest,
+  productionManifest?: EffectManifest,
+): { readonly whole: FlowIndex; readonly production: FlowIndex } {
+  const whole = new FlowIndexBuilder();
+  const production = productionManifest === undefined ? undefined : new FlowIndexBuilder();
   for (const part of parts) {
-    validParts &&= part.files.length === 1 && part.effectParts.length === 1 && part.effectParts[0]?.source === part.files[0];
+    whole.append(part.index);
+    if (part.production) production?.append(part.index);
+  }
+  const merged = whole.finish(wholeManifest);
+  return { whole: merged, production: production?.finish(productionManifest) ?? merged };
+}
+
+/** 최종 view의 버킷만 소유한다. 독립 manifest와 실제 part의 대조는 finish까지 유지한다. */
+class FlowIndexBuilder {
+  private readonly index = emptyIndex();
+  private validParts = true;
+
+  /** 한 파일의 관찰을 기존 순서와 alias·mutation 정보 그대로 이어 붙인다. */
+  append(part: FlowIndex): void {
+    const index = this.index;
+    this.validParts &&= part.files.length === 1 && part.effectParts.length === 1 && part.effectParts[0]?.source === part.files[0];
     index.effectParts.push(...part.effectParts);
     mergeLists(index.references, part.references);
     mergeLists(index.identifierWrites, part.identifierWrites);
@@ -263,24 +289,29 @@ export function mergeFlowIndexes(parts: Iterable<FlowIndex>, manifest?: EffectMa
     index.hasOpaqueMutation ||= part.hasOpaqueMutation;
     index.hasOpaqueImport ||= part.hasOpaqueImport;
   }
-  if (manifest) {
-    const inventory = reconcileEffectInventory(manifest, index.effectParts, manifest.view, {
-      references: index.references,
-      aliasNames: index.aliasNames,
-      tokenOccurrences: index.tokenOccurrences,
-    });
-    const aliasesSafe = !index.hasOpaqueImport && !index.hasOpaqueMutation && index.openModules.size === 0;
-    index.effectInventory = validParts ? inventory : {
-      ...inventory, enumeration: 'incomplete', referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
-      reasons: [...inventory.reasons, 'index-part-mismatch'],
-    };
-    if (index.effectInventory !== undefined && !aliasesSafe) index.effectInventory = {
-      ...index.effectInventory,
-      referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
-      reasons: [...new Set([...index.effectInventory.reasons, 'reference-alias-open'])].sort(),
-    };
+
+  /** 빠진 관찰과 알 수 없는 쓰기는 성공한 view로 인증하지 않는다. */
+  finish(manifest?: EffectManifest): FlowIndex {
+    const index = this.index;
+    if (manifest) {
+      const inventory = reconcileEffectInventory(manifest, index.effectParts, manifest.view, {
+        references: index.references,
+        aliasNames: index.aliasNames,
+        tokenOccurrences: index.tokenOccurrences,
+      });
+      const aliasesSafe = !index.hasOpaqueImport && !index.hasOpaqueMutation && index.openModules.size === 0;
+      index.effectInventory = this.validParts ? inventory : {
+        ...inventory, enumeration: 'incomplete', referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
+        reasons: [...inventory.reasons, 'index-part-mismatch'],
+      };
+      if (index.effectInventory !== undefined && !aliasesSafe) index.effectInventory = {
+        ...index.effectInventory,
+        referenceAliases: 'incomplete', initialization: 'incomplete', ambientSafety: 'unknown',
+        reasons: [...new Set([...index.effectInventory.reasons, 'reference-alias-open'])].sort(),
+      };
+    }
+    return index;
   }
-  return index;
 }
 
 /**

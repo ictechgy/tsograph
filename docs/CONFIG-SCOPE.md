@@ -30,10 +30,23 @@ schema의 바인더는 타입 추론 없이 기존 scanned AST만 사용한다. 
 읽지 않고 로컬 명시 별칭만 보존하며 부분 설정 한계를 알린다. frozen change capture에서는 외부 설정/소스 읽기를
 계속 거부하고 compiler SDK의 제한된 lib 예외만 유지한다.
 
-준비는 최대 128개 소유 설정, 모든 설정을 합쳐 500,000개 디렉터리 항목, 최대 16개 타입 문맥과
-200,000개 후보 파일×문맥으로 제한한다. 원래 config 1 MiB/source 4 MiB 및 구문 깊이 제한도 유지한다.
-예산 초과는 import를 보류하고 선언 후보·불완전성 진단을 남긴다. 많은 패키지의 정밀한 분석은 소유 패키지를
-별도 project로 선택할 수 있다. 이 경계는 전체 runtime/빌드 설정 조합의 호환성 증명이 아니다.
+준비는 최대 128개 소유 설정과 모든 설정을 합쳐 500,000개 디렉터리 항목으로 제한한다. 원래 config 1 MiB/source 4 MiB 및
+구문 깊이 제한도 유지한다. 총 문맥 수가 동시에 살아 있는 checker 수는 아니므로, 16개 문맥 또는 200,000개 후보×문맥을
+넘었다는 이유로 모든 import를 보류하지 않는다. 소유권과 진입 선택·global/ambient 의미가 같은 문맥을 순차 처리한다.
+큰 계획은 `ParseForTypeErrors`로 JS JSDoc 타입과 TS 타입 오류에 필요한 문서를 보존하고 문서 전용 TS 태그 AST만 생략한다.
+일반 Program 생성의 ParseAll 계약과 SDK 캐시의 별도 정책은 유지하며 기존 AST의 문서·부모·심볼을 사후 삭제하지 않는다.
+파일별 flow 임시 맵은 whole/production view로 즉시 병합한다. 독립 manifest와 실제 effect part는 계속 별도 수집하고,
+예상 파일은 로드 성공 목록이 아니라 원래 소유 계획에서 얻으므로 누락 입력을 완전하다고 인증하지 않는다.
+문맥 간 import·모호한 소유권·읽기/구문 실패와 실제 proof 예산은 미해결·불완전성으로 남긴다. 종료 0은 저장 성공이다.
+독립 effect manifest의 실제 전체 quota(visited/records 각1,000,000)를 소진한 문맥은 모든 AST의 바인딩 쓰기 census 뒤
+checker-selected 단일 본문의 ESM 함수 선언 호출만 잇는다. 파일당 visited100,000의 지역 cap도 유지하지만, 파일 하나의 cap만으로
+기존 지역 증명까지 일괄 중지하지 않는다.
+쓰기 이름은 대상 선택이 아니라 보수적인 거부 필터다. merged 선언·타입 전용 별칭·관찰하지 못한 star export·namespace·
+CommonJS·eval/with·불완전 census는 확정 함수 호출로 승격하지 않는다. 일반 멤버·생성자·간접 호출·참조·export alias·
+bound/candidate dispatch는 이 부분 경로에서 인증하지 않으며 모드별 unresolved 계수와 한계·stderr 경고에 남긴다.
+부분 reference map을 ValueFlow에 전달하지 않으며 cap에 이르지 않은 문맥의 기존 분석은 유지한다.
+숫자 호출 진단은 각 모드의 실제 공백을 합산하며 다른 지역 한계에는 compiler-context 범위를 붙여 중복 제거로 수를 잃지 않는다.
+이 경계는 전체 runtime/빌드 설정 조합의 호환성 증명이 아니다.
 
 회귀는 두 앱 baseUrl, cross-package 반환 타입의 내부 alias, strict/target/JSX/lib/types 분리, 같은 디렉터리의
 서로 다른 reference, 중복/누락/순환 reference, include/dependency closure, typed dynamic sink, server 문맥,

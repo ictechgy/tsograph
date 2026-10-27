@@ -556,10 +556,10 @@ test('저장 그래프의 endpoint·revision·duplicate·UTF-8·크기·읽기 �
 
     let read = false;
     const bounded = environment({ fileSystem: {
-      ...createNodeFileSystem(),
       realPath: async () => '/virtual/graph.json',
       status: async () => ({ kind: 'file' as const, size: 128 * 1024 * 1024 + 1, modifiedAt: fixedNow }),
       readBytes: async () => { read = true; return new Uint8Array(); },
+      listDirectory: async () => [],
     } });
     const oversized = await runReachCommand(['--graph-file', 'graph.json', 'a.ts#a'], bounded);
     assert.equal(oversized.exitCode, 2);
@@ -593,5 +593,39 @@ test('금지 문자 이름 파일이 있는 프로젝트의 graph 출력도 reac
     assert.ok(document.limitations.some((line: string) => line.startsWith('unsafe-names: 1 file or directory name(s)')));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+/** 부분 선언 출력은 저장 성공과 의미 분석 완료를 구분해 알린다. */
+test('declaration-only graph warns in stderr for JSON and NDJSON, streamed and in-memory', async () => {
+  const graph = { ...tinyGraph, limitations: ['analysis-partial: declaration-only; semantic edges unavailable'] };
+  for (const format of ['json', 'ndjson']) {
+    for (const streaming of [false, true]) {
+      const chunks: string[] = [];
+      const result = await runGraphCommand(['--project', '.', '--format', format], environment({
+        buildGraph: async () => graph,
+        ...(streaming ? { graphOutput: async (chunk: string) => { chunks.push(chunk); } } : {}),
+      }));
+      assert.equal(result.exitCode, 0, 'output write contract is retained');
+      assert.match(result.standardError, /partial declaration-only graph; semantic dependency edges were not analyzed/);
+      assert.ok((streaming ? chunks.join('') : result.standardOutput).includes('analysis-partial: declaration-only;'));
+    }
+  }
+  const zeroEdges = await runGraphCommand(['--project', '.'], environment({ buildGraph: async () => ({ ...tinyGraph, edges: [], limitations: [] }) }));
+  assert.equal(zeroEdges.standardError, '', 'zero edges without a real partial diagnostic do not trigger a warning');
+});
+
+/** 저장에 성공한 bounded 그래프도 전체 의미 분석 완료로 보이지 않게 한다. */
+test('bounded semantic graph reports its proof-budget partial status in every output path', async () => {
+  const graph = { ...tinyGraph, limitations: ['analysis-partial: bounded-function-bindings; effect proof cap reached'] };
+  for (const format of ['json', 'ndjson']) for (const streaming of [false, true]) {
+    const chunks: string[] = [];
+    const result = await runGraphCommand(['--project', '.', '--format', format], environment({ buildGraph: async () => graph,
+      ...(streaming ? { graphOutput: async (chunk: string) => { chunks.push(chunk); } } : {}),
+    }));
+    assert.equal(result.exitCode, 0);
+    assert.match(result.standardError, /partial bounded semantic graph/);
+    assert.ok((streaming ? chunks.join('') : result.standardOutput).includes('analysis-partial: bounded-function-bindings;'));
   }
 });

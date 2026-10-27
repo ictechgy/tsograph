@@ -100,6 +100,15 @@ graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclu
 각각 `baseUrl: "./src"`를 써도 각 앱 내부 별칭과 import한 패키지 내부 별칭을 올바른 위치에서 해석한다.
 같은 타입 의미는 하나의 Program을 쓰고 다른 의미는 독립 Program으로 분석한다. 문맥 간 import와 모호하거나 누락된
 소유권은 미해결로 남긴다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
+소유 문맥은 순차 처리하며 총 그룹 수 때문에 모든 의미 호출을 포기하지 않는다. 큰 계획에서는 새 AST를
+`ParseForTypeErrors`로 만들어 JS JSDoc 타입과 TS 타입 오류에 필요한 문서를 유지하고 TS 문서 전용 태그 AST만 생략한다.
+일반 Program API의 기본 문서 동작은 유지한다. 파일별 flow 색인을 whole/production view에 스트리밍하여 임시 맵의
+동시 보유를 줄이며 독립 effect witness·미해결 호출·불완전 coverage는 유지한다.
+독립 effect manifest가 기존 전체 방문/기록 quota를 소진하면 해당 문맥은 제한된 함수 바인딩 분석을 사용한다. 전체 AST 쓰기 census는
+보수적 거부 필터이며 대상은 checker가 선택한 재대입 없는 ESM 함수 선언으로만 고른다. 멤버·생성자·간접·참조·export alias·
+flow dispatch 관계는 미해결로 남고 `analysis-partial: bounded-function-bindings`와 stderr 경고를 출력한다. cap에 도달하지 않은
+작은 문맥은 전체 분석을 유지하며 파일별 cap만 도달한 경우 기존 지역 증명을 일괄 포기하지 않는다. 소스나 roots를 빼지 않으며
+종료 0은 저장 성공이지 의미 분석 완전성의 보증이 아니다.
 PnP loader는 소스 진입에서 제외하고 실행하지 않는다. compiler 기반 graph·Node/client routes·navigation은 유계 `.pnp.data.json` 또는 상수 `RAW_RUNTIME_STATE` literal과 ZIP 안 선언을 정적으로 읽는다. [정적 PnP 범위·한계](docs/STATIC-PNP.md)를 참고한다. 지원 밖 metadata는 명시적 미해결로 남는다. PnP 범위의 서로 다른 소유 설정은 compiler 옵션이 같아도 global/type universe를 분리한다.
 프로젝트 내부 `.gitignore` 진입 선택은 `--respect-gitignore`로 켠다(기본 off). [선택 범위·예산](docs/GITIGNORE.md)을 참고한다. lazy 화면의 명시적 근거와 wildcard 한계는 [navigation 모델](docs/NAVIGATION.md)에 있다.
 
@@ -729,10 +738,17 @@ CLI의 graph JSON은 문서 전체 문자열 없이 순서대로 쓴다. `--form
 `tsograph-graph-ndjson` v1 header 뒤에 노드·간선 하나씩을 행으로 내보낸다. 그래프·compiler
 상태는 여전히 메모리에 존재한다. bridge-facts·순회는 교환 상한을, in-memory 명령 API는 제한된
 String 반환 계약을 유지한다. 저장 순회는 128 MiB 이내의 검증된 JSON·NDJSON 스냅샷을 읽으며 현재
-소스·설정·Git을 조회하지 않는다. 캡처된 project·revision·hash와 가능한 mode별 한계를 보존한다.
+소스·설정·Git을 조회하지 않는다. 더 큰 NDJSON은 별도 chunk reader로 실제 입력1GiB·header8MiB·record256KiB,
+노드500,000개·간선2,000,000개와 보관 가중치512MiB 상한 안에서 읽는다. ID·소스 경로 문자열을 공유하며,
+가중치는 UTF16 payload와 고정 record overhead의 admission 예산이지 실제 RSS 측정·보장이 아니다.
+일반 JSON/text API의128MiB 상한은 유지한다. 큰 입력은 chunk 기능이 있는 파일 시스템이 필요하다.
+Node reader는 no-follow/nonblocking regular-file 읽기와 열린 파일의 신원을 검사하며, 지원하지 않는
+host에서는 무제한 읽기로 대체하지 않고 실패한다. 캡처된 project·revision·hash와 가능한 mode별 한계를 보존한다.
 옛 스냅샷은 전역 한계와 mode 정보 부재를 명시한다. NDJSON의 header 개수·행 순서·참조 무결성·
-그래프 해시를 검사하고 잘리거나 변조된 입력은 거부한다. 읽은 입력과 복원된 그래프는 여전히
-메모리에 존재한다. 코드 변경 뒤에는 다시 캡처한다.
+그래프 해시를 검사하고 잘리거나 변조된 입력은 거부한다. 작은 경로는 제한된 전체 입력과 복원된 그래프를
+보관하고, 큰 경로는 bounded record 한 개와 검증된 그래프를 보관한다. 순회 색인은 별도이므로 streaming을
+전체 메모리 보장으로 보지 않는다. 실제 EOF·개수·graphRevision 검증 전에는 순회 결과를 반환하지 않는다.
+코드 변경 뒤에는 다시 캡처한다.
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { buildFileIndex, mergeFlowIndexes } from './flow-index.ts';
+import { buildFileIndex, mergeFlowIndexes, mergeFlowIndexViews } from './flow-index.ts';
 import { EFFECT_BUILD_CAPS, createEffectManifest, collectEffectPart, reconcileEffectInventory, selectEffectManifest,
   type EffectBuildBudget, type EffectPart } from './effect-inventory.ts';
 
@@ -68,6 +68,51 @@ function actualReferenceMaps(files: readonly ts.SourceFile[], resolve: () => ts.
   checker = ts.createProgram([], { noLib: true, types: [] }).getTypeChecker()) {
   return mergeFlowIndexes(files.map((file) => buildFileIndex(checker, file, resolve)));
 }
+
+/** 다음 관찰의 여러 record가 남은 quota보다 크면 실제 누적값이 cap 미만이어도 전체 거부다. */
+test('aggregate record refusal is distinct from a per-file cap before the counter reaches the limit', () => {
+  const { file, resolve } = fixture('import("./missing.js");');
+  const budget: EffectBuildBudget = { visited: 0, records: EFFECT_BUILD_CAPS.records - 1 };
+  const part = collectEffectPart(file, resolve, undefined, budget);
+  assert.equal(part.status, 'incomplete(build-cap)');
+  assert.equal(budget.records, EFFECT_BUILD_CAPS.records - 1);
+  assert.ok(budget.visited < EFFECT_BUILD_CAPS.visited);
+  assert.equal(budget.aggregateCapped, true);
+  const localBudget: EffectBuildBudget = { visited: 0, records: 0, perFileVisited: new Map([[file, EFFECT_BUILD_CAPS.perFile]]) };
+  assert.equal(collectEffectPart(file, resolve, undefined, localBudget).status, 'incomplete(build-cap)');
+  assert.notEqual(localBudget.aggregateCapped, true);
+});
+
+/** 스트리밍은 기존 whole/production 결과를 보존하고 독립 누락·중복 검증도 유지한다. */
+test('streamed flow views preserve reference buckets, test isolation and independent witnesses', () => {
+  const { files, checker } = checkedSources({
+    'production.ts': 'const obj = { value: 1 }; export function read() { return obj.value; }',
+    'fixture.test.ts': 'export {}; const obj = { value: 2 }; obj.value++;',
+  }, { noLib: true, types: [] });
+  const resolve = () => undefined;
+  const wholeManifest = createEffectManifest(files, 'whole', resolve);
+  const productionFiles = new Map([...files].filter(([path]) => !path.endsWith('.test.ts')));
+  const productionManifest = selectEffectManifest(wholeManifest, productionFiles, 'production');
+  const parts = [...files].map(([path, source]) => ({ production: !path.endsWith('.test.ts'), index: buildFileIndex(checker, source, resolve) }));
+  let consumed = 0;
+  function* stream() {
+    for (const part of parts) { consumed++; yield part; }
+  }
+  const result = mergeFlowIndexViews(stream(), wholeManifest, productionManifest);
+  assert.equal(consumed, 2);
+  assert.deepEqual(result.whole, mergeFlowIndexes(parts.map(part => part.index), wholeManifest));
+  assert.deepEqual(result.production, mergeFlowIndexes(parts.filter(part => part.production).map(part => part.index), productionManifest));
+  assert.equal(result.production.files.length, 1);
+  assert.equal(result.whole.files.length, 2);
+  assert.equal(result.whole.mutations.length, result.production.mutations.length + 1);
+  const shared = mergeFlowIndexViews(stream(), wholeManifest);
+  assert.equal(shared.whole, shared.production, '별도 production view가 없으면 복사하지 않는다');
+  const missing = mergeFlowIndexViews(parts.slice(0, 1), wholeManifest, productionManifest);
+  assert.equal(missing.whole.effectInventory?.enumeration, 'incomplete');
+  assert.equal(missing.whole.effectInventory?.ambientSafety, 'unknown');
+  const duplicate = mergeFlowIndexViews([...parts, parts[0]!], wholeManifest);
+  assert.equal(duplicate.whole.effectInventory?.enumeration, 'incomplete');
+});
 
 test('실제 reference map 없는 part 대조는 열거·초기화만 검사하고 폐쇄·안전을 인증하지 않는다', () => {
   const { file, manifest, resolve } = fixture();

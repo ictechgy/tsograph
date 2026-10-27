@@ -79,7 +79,10 @@ export type PendingDispatch = PendingMemberDispatch | PendingCallableDispatch;
 export interface EdgeContext {
   readonly checker: ts.TypeChecker;
   readonly store: GraphStore;
-  readonly resolver: TargetResolver;
+  readonly resolver: Pick<TargetResolver, 'resolveCallee' | 'referenceTargets'>;
+  /** 실제 proof cap 뒤의 제한 경로는 참조를 인증하거나 부분 map을 dispatch에 넘기지 않는다. */
+  readonly references?: boolean;
+  readonly deferDispatch?: boolean;
   /** 기반 메서드 id → 재정의한 메서드 id */
   readonly overrides: ReadonlyMap<string, readonly string[]>;
   readonly calls: CallStatistics;
@@ -146,7 +149,7 @@ function visitNode(context: EdgeContext, path: string, node: ts.Node): void {
     visitJsxTag(context, path, node);
   } else if (isInlineCallback(node)) {
     addContainsEdge(context.store, path, node);
-  } else {
+  } else if (context.references !== false) {
     visitReference(context, path, node);
   }
 }
@@ -166,7 +169,7 @@ function visitCall(context: EdgeContext, path: string, call: ts.CallExpression):
     return;
   }
   const resolution = context.resolver.resolveCallee(call.expression);
-  const pending = isDecoratorCall(call) ? undefined : isInterfaceGap(resolution)
+  const pending = context.deferDispatch === false || isDecoratorCall(call) ? undefined : isInterfaceGap(resolution)
     ? memberDispatchSite(context.store, path, call, resolution)
     : isCallableGap(resolution) ? callableDispatchSite(context.store, path, call, resolution) : undefined;
   if (pending !== undefined) context.pending.push(pending);

@@ -115,6 +115,17 @@ the nearest or explicitly referenced owner configuration: two apps with `baseUrl
 own aliases, including aliases inside an imported package. Compatible type-checking options share a
 Program; incompatible options use independent Programs and cross-context imports remain unresolved.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
+Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
+use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript
+documentation are retained, while documentation-only TypeScript JSDoc tag ASTs are omitted. The ordinary Program
+API retains its default documentation behavior. File flow indexes stream into whole/production views without
+retaining every intermediate map; independent effect witnesses and explicit incomplete coverage are preserved.
+If the independent effect manifest exhausts its existing aggregate visit/record quota, affected contexts use a bounded function-binding
+pass. A complete AST write census is a conservative refusal filter; only checker-selected, non-reassigned ESM function
+declarations are linked. Member/constructor/indirect/reference/export-alias/flow-dispatch relationships remain unresolved.
+The graph includes `analysis-partial: bounded-function-bindings` and a stderr warning. Smaller uncapped contexts retain
+full analysis; a per-file cap alone does not disable their existing local proofs. No source files or roots are removed.
+Exit 0 confirms storage, not complete semantic coverage.
 PnP loaders are excluded from source entries and never executed. Compiler-backed graph, Node/client routes and navigation can read bounded static `.pnp.data.json` or a constant `RAW_RUNTIME_STATE` literal and ZIP-contained declarations. See [static PnP scope and limits](docs/STATIC-PNP.md); unsupported metadata remains explicitly unresolved. In a PnP scope, different owner configs retain separate global/type universes even when their compiler options match. Project-local `.gitignore` entry selection is available with `--respect-gitignore` (default off); see [selection semantics and budgets](docs/GITIGNORE.md).
 See [navigation models](docs/NAVIGATION.md) for explicit lazy screen evidence and wildcard limits.
 
@@ -909,11 +920,19 @@ The CLI streams graph JSON without a whole-document string; `--format ndjson` em
 `tsograph-graph-ndjson` v1 header followed by one `node` or `edge` record per line. The graph and
 compiler state still reside in memory. Bridge-facts and traversal outputs retain their exchange limits;
 the in-memory command API also retains its bounded String result. Saved traversal accepts validated
-JSON or NDJSON snapshots up to 128 MiB, without reading current sources, configs or Git. It preserves captured
+JSON or NDJSON snapshots up to 128 MiB, without reading current sources, configs or Git. Larger NDJSON uses a
+separate chunk reader: up to 1 GiB of actual input, an 8 MiB header, 256 KiB records, 500,000 nodes and 2,000,000
+edges, with a 512 MiB retained-graph weight budget. IDs and source paths are shared in the retained graph;
+the weight accounts for UTF-16 payload and fixed record overhead, and is not an RSS measurement or guarantee.
+The ordinary JSON/text API keeps its 128 MiB cap. Large input requires a chunk-capable filesystem; the Node
+reader requires no-follow/nonblocking regular-file reads and verifies the opened file identity. Unsupported
+hosts fail explicitly instead of falling back to an unbounded read. It preserves captured
 project/revision/hash and exact mode limitations when available. Older snapshots keep their global
 limitations with an explicit mode-information gap. NDJSON input validates its header counts, record order,
 node/edge integrity and graph hash; truncated or modified records fail rather than producing partial reachability.
-The reader still holds the bounded input and reconstructed graph in memory. Recapture after code changes.
+The small-input path holds the bounded input and reconstructed graph in memory. The large path holds one bounded
+record and the validated graph, then traversal builds its own indexes; streaming is not a total-memory guarantee.
+No traversal result is returned before complete EOF, counts and graphRevision validation. Recapture after code changes.
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`

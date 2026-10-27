@@ -28,12 +28,13 @@ import { isSourceFileName } from '../schema/source-module.ts';
 import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
+import { BoundedFunctionResolver, collectBindingCensus } from './bounded-function-bindings.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
-import { createEffectManifest, effectEmitPolicy, selectEffectManifest } from './effect-inventory.ts';
+import { createEffectManifest, effectEmitPolicy, selectEffectManifest, type EffectBuildBudget, type EffectInventory } from './effect-inventory.ts';
 import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
 import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
-import { buildFileIndex, type FlowIndex, mergeFlowIndexes } from './flow-index.ts';
+import { buildFileIndex, type FlowIndex, mergeFlowIndexViews } from './flow-index.ts';
 import {
   type CallGraph,
   type CallStatistics,
@@ -95,7 +96,10 @@ interface RouteInputs {
 
 /** limitation을 만드는 데 필요한 계수다. */
 interface GraphCounts {
-  readonly flowIndex: FlowIndex;
+  readonly declarationsOnly: boolean;
+  readonly inventorySummary: Pick<EffectInventory, 'enumeration' | 'reasons'> | undefined;
+  readonly proofDiagnostics: ReadonlySet<string> | undefined;
+  readonly boundedSemantic?: BoundedSemanticSummary;
   readonly calls: CallStatistics;
   readonly gaps: EdgeGaps;
   readonly config: ProgramConfigStatus;
@@ -114,6 +118,15 @@ interface GraphCounts {
   readonly routeFactLimit: RouteFactLimitCause | undefined;
   /** bound의 열린 프로그램 판정 이유(없으면 닫힌 프로그램) */
   readonly openProgram: OpenProgramReason | undefined;
+}
+
+/** AST·checker를 보유하지 않는 문맥별 호출 진단이다. */
+type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram'>;
+
+/** 직렬화할 DTO와 숫자 진단만 보존하여 끝난 Program을 해제할 수 있게 한다. */
+interface ContextGraphResult {
+  readonly graph: CallGraph;
+  readonly diagnostics: CallDiagnosticCounts;
 }
 
 /** bound 디스패치가 내보낸 선언을 스캔 밖에서 부를 수 있다고 보는 이유다. */
@@ -148,7 +161,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const gitignoreLimitation = gitignoreSelectionLimitation();
   // 설정이 고르는 루트 파일도 소스 걷기와 같은 경계(`--workspace`면 workspace)와 제외 디렉터리를 따른다.
   const boundary = { root: project, excludedDirectories: inputs.excludedDirectories };
-  const results: CallGraph[] = [];
+  const results: ContextGraphResult[] = [];
   for (const { program, checker, status, deeplyNestedSources, excludedSources, ownedSources } of createGraphPrograms(
     selectedProject, [...inputs.sources.values(), ...inputs.declarations], config, boundary,
   )) {
@@ -171,7 +184,11 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
-  const analysis = analyzeFiles(program, checker, files, inputs.sources, coverageComplete, routes.testSources);
+  // 성공한 파일 목록으로 기대 분모를 줄이지 않는다. 원래 소유권 계획에 속한 입력은
+  // 읽기 실패·예산·구문 실패가 있어도 independent effect witness에 남아야 한다.
+  const expectedSources = ownedSources === undefined ? inputs.sources
+    : new Map([...inputs.sources].filter(([, absolute]) => ownedSources.has(resolve(absolute))));
+  const analysis = analyzeFiles(program, checker, files, expectedSources, coverageComplete, routes.testSources);
   const crons = readCronPaths(project);
   const entryInput: EntryInput = {
     routeFacts: routes.facts,
@@ -186,7 +203,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const openProgram = gitignoreLimitation !== undefined || compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
-  resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
+  if (analysis.kind === 'full') resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
     ...analysis, config: status, inputs, parseErrorFiles, deeplyNestedFiles, deeplyNestedInputs, unreadableSources, unmatchedCrons, openProgram,
@@ -201,14 +218,16 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const limitations = [...buildLimitations(nodes, counts, 'snapshot'), ...environmentLimits];
   const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
   const ownedIds = new Set(ownedNodes.map(node => node.id));
-  results.push({ nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } });
+  results.push({ graph: { nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } },
+    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram } });
   }
   return mergeContextGraphs(results);
 }
 
 /** 서로 다른 checker의 객체를 버리고 각 소유 문맥의 문자열 결과만 합친다. */
-function mergeContextGraphs(graphs: readonly CallGraph[]): CallGraph {
-  if (graphs.length === 1) return graphs[0]!;
+function mergeContextGraphs(contexts: readonly ContextGraphResult[]): CallGraph {
+  if (contexts.length === 1) return contexts[0]!.graph;
+  const graphs = contexts.map(context => context.graph);
   const nodes: GraphNode[] = [], edges: GraphEdge[] = [];
   const calls = createCallStatistics();
   for (const graph of graphs) {
@@ -224,12 +243,44 @@ function mergeContextGraphs(graphs: readonly CallGraph[]): CallGraph {
       if (count !== undefined) { calls.indirectSites ??= {}; calls.indirectSites[kind] = (calls.indirectSites[kind] ?? 0) + count; }
     }
   }
-  const unique = (lines: readonly string[]) => [...new Set(lines)].sort(compareStrings);
+  const diagnostics: CallDiagnosticCounts = { calls, gaps: mergeContextGaps(contexts),
+    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined };
+  const limits = (view: LimitationView): string[] => mergeContextLimitations(contexts, diagnostics, view);
   return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
     edges: edges.sort((a, b) => compareStrings(a.from, b.from) || compareStrings(a.to, b.to) || EDGE_EVIDENCE_ORDER.indexOf(a.evidence) - EDGE_EVIDENCE_ORDER.indexOf(b.evidence)),
-    limitations: unique(graphs.flatMap(graph => graph.limitations)),
-    limitationsByMode: Object.fromEntries(DISPATCH_MODES.map(mode => [mode, unique(graphs.flatMap(graph => graph.limitationsByMode[mode]))])) as Record<DispatchMode, string[]>,
+    limitations: limits('snapshot'),
+    limitationsByMode: Object.fromEntries(DISPATCH_MODES.map(mode => [mode, limits(mode)])) as Record<DispatchMode, string[]>,
     statistics: { files: graphs.reduce((sum, graph) => sum + graph.statistics.files, 0), calls } };
+}
+
+/** 관점별 차감을 다시 계산할 수 있도록 지역 공백을 문자열 파싱 없이 합한다. */
+function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
+  const result: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
+  for (const { diagnostics } of contexts) {
+    result.overriddenCalls += diagnostics.gaps.overriddenCalls;
+    for (const key of ['partial', 'bound', 'boundPartial', 'candidate', 'candidatePartial'] as const) {
+      for (const reason of UNRESOLVED_REASONS) {
+        const count = diagnostics.gaps[key][reason];
+        if (count !== undefined) result[key][reason] = (result[key][reason] ?? 0) + count;
+      }
+    }
+  }
+  return result;
+}
+
+/** 호출 숫자는 모드별 합계로 만들고, 나머지 지역 경고는 문맥 범위를 명시한다. */
+function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
+  const result = new Set(callLimitations(counts, view));
+  const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
+  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership):/u;
+  for (const [index, { graph }] of contexts.entries()) {
+    const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
+    for (const line of lines) {
+      if (countedCalls.test(line)) continue;
+      result.add(globalInputs.test(line) ? line : `${line}; compiler-context: ${index + 1}/${contexts.length}`);
+    }
+  }
+  return [...result].sort(compareStrings);
 }
 
 /**
@@ -276,8 +327,20 @@ function readManifestEntry(project: string): 'public-package' | 'unreadable-mani
 }
 
 /** 노드·간선 분석 결과다. */
-interface FileAnalysis {
+interface FileAnalysisBase {
+  /** 모든 소유 파일의 의미 연결이 보류되어 선언·미해석 호출 계수만 내는지다. */
+  readonly declarationsOnly: boolean;
   readonly store: GraphStore;
+  readonly calls: CallStatistics;
+  readonly gaps: EdgeGaps;
+  readonly unresolvedExports: number;
+  readonly inventorySummary: Pick<EffectInventory, 'enumeration' | 'reasons'> | undefined;
+  readonly proofDiagnostics: ReadonlySet<string> | undefined;
+}
+
+/** 전체 proof index를 가진 경로만 ValueFlow·candidate·carrier 해석에 접근한다. */
+interface FullFileAnalysis extends FileAnalysisBase {
+  readonly kind: 'full';
   readonly resolver: TargetResolver;
   readonly productionResolver: TargetResolver;
   /** 모든 소스 파일 색인을 합친 direct 해석·전체 dispatch 공용 색인 */
@@ -287,10 +350,23 @@ interface FileAnalysis {
   readonly separateTests: boolean;
   readonly overrides: ReadonlyMap<string, readonly string[]>;
   readonly pending: readonly PendingDispatch[];
-  readonly calls: CallStatistics;
-  readonly gaps: EdgeGaps;
-  readonly unresolvedExports: number;
 }
+
+/** 실제 proof cap 뒤의 관찰 범위와 보수적 거부 수다. 소스·checker를 담지 않는다. */
+interface BoundedSemanticSummary {
+  readonly files: number;
+  readonly writtenNames: number;
+  readonly unsafeFiles: number;
+  readonly incompleteFiles: number;
+}
+
+/** 빈 flow map을 완전한 증명처럼 전달할 수 없도록 타입도 분리한다. */
+interface BoundedFileAnalysis extends FileAnalysisBase {
+  readonly kind: 'bounded';
+  readonly boundedSemantic: BoundedSemanticSummary;
+}
+
+type FileAnalysis = FullFileAnalysis | BoundedFileAnalysis;
 
 /**
  * 노드 파일을 두 단계로 분석한다: 노드(선언·export 노드)와 재정의 표 → 간선(호출·참조·클래스·별칭).
@@ -308,11 +384,15 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
   const classes = new Map([...files].map(([path, sourceFile]) => [path, collectFileNodes(store, path, sourceFile).classes]));
   const pendingExports: PendingExport[] = [...files].flatMap(([path, sourceFile]) => registerExportNodes(store, path, sourceFile));
   const pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
+  // 소유 설정이 모두 보류된 문맥은 아래에서 선언과 unresolved 계수만 낸다. 소비할
+  // semantic 간선이 없는데도 전체 flow/type 색인을 만들면 큰 프로젝트에서 힙만 소모한다.
+  // 기대 파일은 누락 witness로 남겨 effect inventory가 완전하다고 인증하지 못하게 한다.
+  const declarationsOnly = files.size > 0 && [...files.values()].every(file => configImportIsBlocked(program, file.fileName));
   const resolveModule = createModuleResolver(program, checker);
   const testPaths = new Set([...files.keys()].filter((path) => isProjectTestPath(path, testSources)));
-  const separateTests = testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
-  const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, files.get(path)]));
-  const effectBudget = { visited: 0, records: 0 };
+  const separateTests = !declarationsOnly && testPaths.size > 0 && !importsTestSources(files, testPaths, resolveModule);
+  const expectedFiles = new Map([...expectedPaths].map(([path, absolute]) => [absolute, declarationsOnly ? undefined : files.get(path)]));
+  const effectBudget: EffectBuildBudget = { visited: 0, records: 0 };
   const emitPolicy = effectEmitPolicy(program.getCompilerOptions());
   const wholeManifest = createEffectManifest(expectedFiles, 'whole', resolveModule, coverageComplete, effectBudget, checker, emitPolicy);
   const productionManifest = separateTests
@@ -320,10 +400,20 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
       .filter(([path]) => !testPaths.has(path))
       .map(([path, absolute]) => [absolute, files.get(path)])), 'production')
     : wholeManifest;
-  const flowIndexes = new Map([...files].map(([path, sourceFile]) => [path, buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy)]));
-  const flowIndex = { ...mergeFlowIndexes(flowIndexes.values(), wholeManifest), proofProgram: program, proofDiagnostics: new Set<string>() };
+  // 작은 파일 하나의 cap은 별도 지역 증명까지 불가능하다는 뜻이 아니다. 실제 전체
+  // quota가 소진된 계획에서만 큰 eager index를 보류하며 기존 지역 증명은 유지한다.
+  if (wholeManifest.buildCapped && effectBudget.aggregateCapped === true && !declarationsOnly) {
+    return analyzeBoundedBindings(program, checker, files, store, testPaths, separateTests, pendingExports.length);
+  }
+  function* fileIndexes(): Generator<{ index: FlowIndex; production: boolean }> {
+    if (!declarationsOnly) for (const [path, sourceFile] of files) {
+      yield { index: buildFileIndex(checker, sourceFile, resolveModule, effectBudget, emitPolicy), production: !testPaths.has(path) };
+    }
+  }
+  const merged = mergeFlowIndexViews(fileIndexes(), wholeManifest, separateTests ? productionManifest : undefined);
+  const flowIndex = { ...merged.whole, proofProgram: program, proofDiagnostics: new Set<string>() };
   const productionFlowIndex = separateTests
-    ? { ...mergeFlowIndexes([...flowIndexes].filter(([path]) => !testPaths.has(path)).map(([, index]) => index), productionManifest), proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
+    ? { ...merged.production, proofProgram: program, proofDiagnostics: flowIndex.proofDiagnostics }
     : flowIndex;
   const matchesProject = projectSpecifierMatcher(program.getCompilerOptions());
   const projectSpecifier = (specifier: string, sourceFile?: ts.SourceFile) =>
@@ -347,7 +437,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
     )
     : resolver;
   const overrides = new Map<string, string[]>();
-  for (const [path, declarations] of classes) declarations.forEach((declaration) => addOverrides(overrides, checker, resolver, path, declaration));
+  if (!declarationsOnly) for (const [path, declarations] of classes) declarations.forEach((declaration) => addOverrides(overrides, checker, resolver, path, declaration));
   const calls = createCallStatistics();
   const gaps: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
   const pending: PendingDispatch[] = [];
@@ -369,13 +459,39 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
     classes.get(path)!.forEach((declaration) => addClassEdges(store, resolver, path, declaration));
   }
   return {
+    kind: 'full',
     store, resolver, productionResolver, flowIndex, productionFlowIndex, testPaths, separateTests,
+    declarationsOnly,
+    inventorySummary: flowIndex.effectInventory === undefined ? undefined
+      : { enumeration: flowIndex.effectInventory.enumeration, reasons: flowIndex.effectInventory.reasons },
+    proofDiagnostics: flowIndex.proofDiagnostics,
     overrides, pending, calls, gaps,
     unresolvedExports: linkExportNodes(store, checker, (sourceFile) => {
       const path = pathByFile.get(sourceFile);
       return separateTests && path !== undefined && !testPaths.has(path) ? productionResolver : resolver;
     }, pendingExports.filter(entry => !configImportIsBlocked(program, entry.name.getSourceFile().fileName))),
   };
+}
+
+/** 실제 cap 상태를 보존하며 모든 AST의 바인딩 쓰기를 먼저 센 뒤 제한된 호출만 해석한다. */
+function analyzeBoundedBindings(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>,
+  store: GraphStore, testPaths: ReadonlySet<string>, separateTests: boolean, unresolvedExports: number): BoundedFileAnalysis {
+  const census = collectBindingCensus(files.values());
+  const production = separateTests ? collectBindingCensus([...files].filter(([path]) => !testPaths.has(path)).map(([, file]) => file)) : census;
+  const pathByFile = new Map([...files].map(([path, file]) => [file, path]));
+  const createResolver = (input: typeof census) => new BoundedFunctionResolver(checker, store, file => pathByFile.get(file), input,
+    program.getCompilerOptions().module, file => configImportIsBlocked(program, file.fileName));
+  const wholeResolver = createResolver(census);
+  const productionResolver = production === census ? wholeResolver : createResolver(production);
+  const calls = createCallStatistics();
+  const gaps: EdgeGaps = { partial: {}, bound: {}, boundPartial: {}, candidate: {}, candidatePartial: {}, overriddenCalls: 0 };
+  for (const [path, sourceFile] of files) {
+    collectFileEdges({ checker, store, resolver: separateTests && !testPaths.has(path) ? productionResolver : wholeResolver,
+      overrides: new Map(), calls, gaps, pending: [], references: false, deferDispatch: false }, path, sourceFile);
+  }
+  return { kind: 'bounded', declarationsOnly: false, store, calls, gaps, unresolvedExports,
+    inventorySummary: { enumeration: 'incomplete', reasons: ['build-cap', 'proof-index-unavailable'] }, proofDiagnostics: undefined,
+    boundedSemantic: { files: files.size, writtenNames: census.writtenNames.size, unsafeFiles: census.unsafeFiles.size, incompleteFiles: census.incompleteFiles.size } };
 }
 
 /**
@@ -554,10 +670,15 @@ type LimitationView = DispatchMode | 'snapshot';
  * @returns limitation 목록(고정 순서)
  */
 function buildLimitations(nodes: readonly GraphNode[], counts: GraphCounts, view: LimitationView): string[] {
-  const inventory = counts.flowIndex.effectInventory;
+  const inventory = counts.inventorySummary;
   const coverage = inventory?.enumeration === 'incomplete'
     ? [`effect-inventory: incomplete(${inventory.reasons.includes('build-cap') ? 'build-cap' : 'coverage'}); coverage cannot certify ambient safety.`] : [];
-  return [...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts), ...coverage, ...[...counts.flowIndex.proofDiagnostics ?? []].sort()];
+  const partial = counts.boundedSemantic !== undefined
+    ? [`analysis-partial: bounded-function-bindings; effect proof cap reached for ${counts.boundedSemantic.files} source file(s); only checker-selected stable ESM function bindings were analyzed; member, constructor, indirect, reference, export-alias and flow-dispatch relationships remain incomplete`,
+      `proof-index-budget: binding census retained ${counts.boundedSemantic.writtenNames} conservative write name(s); ${counts.boundedSemantic.unsafeFiles} dynamic-scope/CommonJS file(s) and ${counts.boundedSemantic.incompleteFiles} incomplete-census file(s) cannot certify callable bindings`]
+    : counts.declarationsOnly && counts.config.contextBudgetExceeded === true
+    ? ['analysis-partial: declaration-only; compiler-context precision budget disabled semantic dependency edges; declaration nodes and unresolved call counts are retained'] : [];
+  return [...partial, ...callLimitations(counts, view), ...inputLimitations(counts), ...entryLimitations(nodes, counts), ...coverage, ...[...counts.proofDiagnostics ?? []].sort()];
 }
 
 /** 관점에서 아직 잇지 못한 호출 공백을 이유별로 계산한다. */
@@ -587,16 +708,10 @@ function remainingDispatchGaps(
  * @param view 관점
  * @returns limitation 목록
  */
-function callLimitations(counts: GraphCounts, view: LimitationView): string[] {
+function callLimitations(counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const { calls, gaps, unresolvedExports } = counts;
-  const result: string[] = [];
   const remaining = remainingDispatchGaps(calls, gaps, view);
-  const unresolved = remaining.unresolved;
-  const unresolvedTotal = UNRESOLVED_REASONS.reduce((sum, reason) => sum + unresolved[reason], 0);
-  if (unresolvedTotal > 0) {
-    const breakdown = UNRESOLVED_REASONS.filter((reason) => unresolved[reason] > 0).map((reason) => `${reason}: ${unresolved[reason]}`);
-    result.push(`unresolved-calls: ${unresolvedTotal} call(s) could not be linked to a project declaration and were not guessed (${breakdown.join(', ')})`);
-  }
+  const result = unresolvedCallLimitations(remaining.unresolved);
   const partial = Object.entries(remaining.partial)
     .filter(([, count]) => count > 0);
   if (partial.length > 0) {
@@ -616,6 +731,14 @@ function callLimitations(counts: GraphCounts, view: LimitationView): string[] {
   return result;
 }
 
+/** 미해석 원인별 계수로 전체 합계와 같은 breakdown을 만든다. */
+function unresolvedCallLimitations(unresolved: Record<UnresolvedReason, number>): string[] {
+  const total = UNRESOLVED_REASONS.reduce((sum, reason) => sum + unresolved[reason], 0);
+  if (total === 0) return [];
+  const breakdown = UNRESOLVED_REASONS.filter(reason => unresolved[reason] > 0).map(reason => `${reason}: ${unresolved[reason]}`);
+  return [`unresolved-calls: ${total} call(s) could not be linked to a project declaration and were not guessed (${breakdown.join(', ')})`];
+}
+
 /**
  * bound·candidate 디스패치 limitation이다. direct 모드 문서에는 싣지 않는다.
  *
@@ -623,7 +746,7 @@ function callLimitations(counts: GraphCounts, view: LimitationView): string[] {
  * @param view 관점
  * @returns limitation 목록
  */
-function dispatchLimitations({ calls, gaps, openProgram }: GraphCounts, view: LimitationView): string[] {
+function dispatchLimitations({ calls, gaps, openProgram }: CallDiagnosticCounts, view: LimitationView): string[] {
   if (view === 'direct') return [];
   const result: string[] = [];
   const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
