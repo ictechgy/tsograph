@@ -4,6 +4,8 @@
 
 ## [0.11.0] - Unreleased
 
+- Refresh shared conformance vectors from isthmus `1d6683ab2cd4f7804370c85d4869501042bc3dec`; execute SQL relation cases directly from the hashed source vector. Document published versus candidate versions and feature-specific consumer requirements.
+
 아직 npm에 발행하지 않은 릴리스 후보이다.
 
 - 정적 PnP host: Windows slash·상대·dot 경로 정규화를 실제 overlay 사상과 구분한다. 표기 차이로 도구 SDK lib를 거부하거나 예약 `.tsograph-pnp` 실제 파일을 채택하지 않으며 유효한 metadata의 CLI 회귀 실패에는 알려진 issue code만 남긴다.
