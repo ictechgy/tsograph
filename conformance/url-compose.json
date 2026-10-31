@@ -2597,6 +2597,321 @@
         "path": "ftp://other.example.com/items"
       },
       "expectDynamic": true
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/decoded-segments",
+      "input": {
+        "main": "/v2/items",
+        "segments": [
+          {
+            "literal": "a/b"
+          },
+          {
+            "value": "slug"
+          },
+          {
+            "literal": "%?{}é"
+          }
+        ]
+      },
+      "expect": {
+        "template": "/v2/items/a%2Fb/{}/%25%3F%7B%7D%C3%A9"
+      }
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/empty-array",
+      "input": {
+        "main": "/v2/items",
+        "segments": []
+      },
+      "expect": {
+        "template": "/v2/items"
+      }
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/unresolved",
+      "input": {
+        "main": "/v2/items",
+        "unresolved": true
+      },
+      "expect": {
+        "channelPrefix": "/v2/items"
+      },
+      "expectDynamic": true
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/dot-segment",
+      "input": {
+        "main": "/v2/items",
+        "segments": [
+          {
+            "literal": ".."
+          }
+        ]
+      },
+      "expect": {
+        "channelPrefix": "/v2/items"
+      },
+      "expectDynamic": true
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/main-dynamic",
+      "input": {
+        "main": null,
+        "channelPrefix": "/v2",
+        "segments": [
+          {
+            "literal": "detail"
+          }
+        ]
+      },
+      "expect": {
+        "channelPrefix": "/v2"
+      },
+      "expectDynamic": true
+    },
+    {
+      "ruleId": "compose.wrapper-suffix",
+      "provenance": "contract",
+      "source": "docs/HTTP-WRAPPERS.md#v2의-선택적-경로-suffix",
+      "appliesTo": [
+        "producer:cartograph"
+      ],
+      "id": "wrapper-suffix/expanded-limit",
+      "input": {
+        "main": "/v2/items",
+        "segments": [
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          },
+          {
+            "value": "id"
+          }
+        ]
+      },
+      "expect": {
+        "channelPrefix": "/v2/items"
+      },
+      "expectDynamic": true
     }
   ]
 }

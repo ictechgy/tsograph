@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { escapeName, escapeQualified, lexSql, looksLikeSql, type SqlToken, sqlRelations, tokenRelations } from './sql-relations.ts';
 
@@ -99,37 +100,23 @@ test('이름 escape는 한정자와 한 세그먼트를 구분한다', () => {
   assert.equal(escapeName('a.b'), 'a%2Eb');
 });
 
-/**
- * 계열 공통 사례다. persistence 생산자 7곳의 SQL 관계 추출 테스트와 isthmus `conformance/sql-relations.json` 벡터가 같은
- * SQL 문자열과 기대값을 쓴다. 공통 사례 파일에서 기계적으로 옮겼으므로 고치지 않는다(벡터를 벤더링하면 그 파일로 옮긴다).
- * `relations`는 관계 이름의 집합이다 — 순서와 중복(키워드마다 따로 낸다)은 이 저장소의 규칙을 따른다.
- * 규칙: R1 함수 인자 안의 FROM, R2 문장 단위 CTE 이름, R3 `IS [NOT] DISTINCT FROM`.
- */
-const sharedRelationCases: readonly {
-  readonly id: string;
-  readonly rule: 'R1' | 'R2' | 'R3';
-  readonly sql: string;
-  readonly relations: readonly string[];
-}[] = [
-  { id: 'cte/simple', rule: 'R2', sql: 'WITH recent AS (SELECT * FROM orders) SELECT * FROM recent', relations: ['orders'] },
-  { id: 'cte/recursive-with-columns', rule: 'R2', sql: 'WITH RECURSIVE tree(id, parent_id) AS (SELECT id, parent_id FROM nodes UNION ALL SELECT n.id, n.parent_id FROM nodes n JOIN tree t ON n.parent_id = t.id) SELECT * FROM tree', relations: ['nodes'] },
-  { id: 'cte/multiple-materialized', rule: 'R2', sql: 'WITH a AS (SELECT 1), b AS MATERIALIZED (SELECT * FROM orders) SELECT * FROM a JOIN b ON true', relations: ['orders'] },
-  { id: 'cte/not-materialized', rule: 'R2', sql: 'WITH c AS NOT MATERIALIZED (SELECT * FROM orders) SELECT * FROM c', relations: ['orders'] },
-  { id: 'cte/insert-select', rule: 'R2', sql: 'WITH staged AS (SELECT * FROM imports) INSERT INTO orders SELECT * FROM staged', relations: ['imports', 'orders'] },
-  { id: 'cte/scope-is-one-statement', rule: 'R2', sql: 'WITH recent AS (SELECT 1) SELECT * FROM recent; SELECT * FROM recent', relations: ['recent'] },
-  { id: 'function-from/extract', rule: 'R1', sql: 'SELECT EXTRACT(YEAR FROM created_at) FROM orders', relations: ['orders'] },
-  { id: 'function-from/trim', rule: 'R1', sql: "SELECT TRIM(BOTH ' ' FROM name) FROM users", relations: ['users'] },
-  { id: 'function-from/substring', rule: 'R1', sql: 'SELECT SUBSTRING(name FROM 2 FOR 3) FROM users', relations: ['users'] },
-  { id: 'subquery/derived-table-still-fires', rule: 'R1', sql: 'SELECT * FROM (SELECT * FROM orders) AS sub', relations: ['orders'] },
-  { id: 'subquery/scalar-still-fires', rule: 'R1', sql: 'SELECT (SELECT max(id) FROM users) FROM orders', relations: ['users', 'orders'] },
-  { id: 'subquery/in-select-still-fires', rule: 'R1', sql: 'SELECT * FROM orders WHERE id IN (SELECT order_id FROM payments)', relations: ['orders', 'payments'] },
-  { id: 'distinct-from/is', rule: 'R3', sql: 'SELECT * FROM events WHERE a IS DISTINCT FROM b', relations: ['events'] },
-  { id: 'distinct-from/is-not', rule: 'R3', sql: 'SELECT * FROM events WHERE a IS NOT DISTINCT FROM b', relations: ['events'] },
-];
+/** 정본 벡터를 직접 읽어 사본 배열과 공유 계약의 드리프트를 막는다. */
+const sharedSuite = JSON.parse(readFileSync(new URL('../../conformance/sql-relations.json', import.meta.url), 'utf8')) as {
+  readonly suite: string;
+  readonly cases: readonly {
+    readonly id: string;
+    readonly appliesTo: readonly string[];
+    readonly input: { readonly sql: string };
+    readonly expect: { readonly relations: readonly string[] };
+  }[];
+};
+const sharedRelationCases = sharedSuite.cases.filter((entry) => entry.appliesTo.includes('producer'));
 
 test('계열 공통 사례: CTE 이름·함수 인자 안의 FROM·IS [NOT] DISTINCT FROM 피연산자는 관계가 아니다', () => {
   // 공통 사례는 키워드가 모두 대문자라 strict 모드에서도 같다. 내지 않는 피연산자는 미해석으로도 세지 않는다.
-  for (const { id, sql, relations: expected } of sharedRelationCases) {
+  assert.equal(sharedSuite.suite, 'sql-relations');
+  assert.ok(sharedRelationCases.length > 0);
+  for (const { id, input: { sql }, expect: { relations: expected } } of sharedRelationCases) {
     for (const strict of [false, true]) {
       const result = sqlRelations(sql, strict);
       const names = [...new Set(result.relations.map((relation) => relation.name))].sort();
@@ -138,7 +125,7 @@ test('계열 공통 사례: CTE 이름·함수 인자 안의 FROM·IS [NOT] DIST
   }
   // CTE 이름은 그 문장 안에서만 가린다 — 두 번째 문장의 `recent` 하나만 남는다(개수까지 본다).
   const scope = sharedRelationCases.find((testCase) => testCase.id === 'cte/scope-is-one-statement')!;
-  assert.deepEqual(relations(scope.sql), ['recent']);
+  assert.deepEqual(relations(scope.input.sql), ['recent']);
 });
 
 // 아래는 공유 벡터 밖의 포트 분기 회귀 테스트다(원본 알고리즘의 같은 분기를 고정한다).
