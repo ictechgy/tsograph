@@ -1,6 +1,6 @@
 # tsograph
 
-Verified on 2026-11-01: npm publishes **0.10.0**; **0.11.0** is a source candidate. HTTP v1 starts at isthmus-cli 0.10.0, non-HTTP entry marks require 0.12.0, and strict trailing-slash optional catch-all prefixes require the pending isthmus 0.14.0 consumer correction. Released 0.13.0 rejects that last case; use a validated candidate checkout until it is published. See [Contributing](CONTRIBUTING.md).
+Verified on 2026-11-01: npm publishes **0.10.0**; **0.11.0** is a source candidate. HTTP v1 starts at isthmus-cli 0.10.0, non-HTTP entry marks require 0.12.0, and strict trailing-slash optional catch-all prefixes require the pending isthmus 0.14.0 consumer correction. Released 0.13.0 rejects that last case; use a validated candidate checkout until it is published. See [Contributing](https://github.com/ictechgy/tsograph/blob/main/CONTRIBUTING.md).
 
 <img src="https://raw.githubusercontent.com/ictechgy/tsograph/main/icon.png" alt="tsograph's kingfisher mascot" width="112" height="112" align="right">
 
