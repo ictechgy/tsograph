@@ -494,11 +494,15 @@ function aliasDeclarationName(site: ts.Node): ts.Identifier | undefined {
 /**
  * Object/Reflect 소유자 식 또는 그 alias 참조 site의 사용이 mutator 멤버·계산 멤버 접근이거나 mutator를 구조 분해하는지 본다.
  * FlowIndex가 보지 못하는 다른 모듈의 alias 사용도 같은 규칙으로 닫기 위해 소유자와 alias가 공유한다.
+ *
+ * site는 이미 소유자(또는 소유자 alias)로 알려졌으므로 `set`·계산 멤버도 `intrinsicOwner`로 다시 증명하지 않고 바로 닫는다.
+ * 다시 증명하면 깊이 상한에 걸린 긴 alias 사슬에서 이미 아는 사실을 잃는다.
  */
 function isDangerousOwnerUse(context: MutationSafetyContext, site: ts.Node): boolean {
   const parent = site.parent;
   if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === site) {
-    return mutatorReference(context, parent) !== undefined || dynamicIntrinsicNamespace(context, parent);
+    const member = ts.isPropertyAccessExpression(parent) ? parent.name.text : literalName(parent.argumentExpression);
+    return member === undefined || MUTATOR_NAMES.has(member) || mutatorReference(context, parent) !== undefined;
   }
   if (!ts.isVariableDeclaration(parent) || parent.initializer !== site || !ts.isObjectBindingPattern(parent.name)) return false;
   return parent.name.elements.some((element) => {
@@ -586,37 +590,51 @@ function dynamicIntrinsicNamespace(context: MutationSafetyContext, expression: t
   return intrinsicOwner(context, expression.expression) !== undefined;
 }
 
+/** `intrinsicOwner`가 소유자가 아님을 증명하지 못했을 때 돌려주는 표식이다(호출자는 소유자로 취급한다). */
+const UNPROVEN_OWNER = 'unproven';
+/** alias 초깃값을 따라가는 최대 깊이다(기존 상한과 같다). 넘기면 소유자가 아님을 증명하지 못한 것으로 보고 닫는다. */
+const MAX_OWNER_ALIAS_DEPTH = 16;
+
 /**
  * Object/Reflect 소유자 표기 또는 그 변수 alias를 bounded하게 확인한다.
  *
  * 표기는 `intrinsicOwnerName`과 같고, alias는 감싼 초깃값, alias의 alias, import·re-export·namespace 멤버(`ns.o`,
  * `ns["o"]`)를 따라간다. guard는 "소유자일 수 있음"을 위험으로 보므로 `let`·`var` 초깃값도 소유자로 본다.
+ * 깊이 상한을 넘기거나 checker가 실패하면 소유자가 아님을 증명하지 못한 것이므로 `UNPROVEN_OWNER`로 닫는다.
+ * 순환 alias 사슬은 어느 초깃값도 소유자 표기에 닿지 않으므로 소유자가 아니다.
  */
 function intrinsicOwner(context: MutationSafetyContext, expression: ts.Expression, depth = 0, seen = new Set<ts.Symbol>()): string | undefined {
-  if (depth > 16) return undefined;
   const direct = intrinsicOwnerName(expression);
   if (direct !== undefined) return direct;
-  const initializer = aliasedVariableDeclaration(context, expression, seen)?.initializer;
-  return initializer === undefined ? undefined : intrinsicOwner(context, initializer, depth + 1, seen);
+  const location = aliasLocation(expression);
+  if (location === undefined) return undefined;
+  if (depth > MAX_OWNER_ALIAS_DEPTH) return UNPROVEN_OWNER;
+  const declaration = aliasedVariableDeclaration(context, location, seen);
+  if (declaration === UNPROVEN_OWNER) return UNPROVEN_OWNER;
+  return declaration?.initializer === undefined ? undefined : intrinsicOwner(context, declaration.initializer, depth + 1, seen);
 }
 
-/** 식별자·정적 멤버 접근이 가리키는 단일 변수 선언을 import·re-export alias를 풀어 찾는다. */
+/** alias를 가리킬 수 있는 식의 심볼 조회 위치다(식별자, property 이름, 문자열 키). 그 밖의 식은 alias가 아니다. */
+function aliasLocation(expression: ts.Expression): ts.Node | undefined {
+  const inner = skipWrappers(expression);
+  if (ts.isIdentifier(inner)) return inner;
+  if (ts.isPropertyAccessExpression(inner)) return inner.name;
+  const key = ts.isElementAccessExpression(inner) ? skipWrappers(inner.argumentExpression) : undefined;
+  return key !== undefined && isStringLiteralNode(key) ? key : undefined;
+}
+
+/** 조회 위치가 가리키는 단일 변수 선언을 import·re-export alias를 풀어 찾는다. checker 실패는 증명 실패다. */
 function aliasedVariableDeclaration(
   context: MutationSafetyContext,
-  expression: ts.Expression,
+  location: ts.Node,
   seen: Set<ts.Symbol>,
-): ts.VariableDeclaration | undefined {
-  const inner = skipWrappers(expression);
-  const key = ts.isElementAccessExpression(inner) ? skipWrappers(inner.argumentExpression) : undefined;
-  const location = ts.isIdentifier(inner) ? inner : ts.isPropertyAccessExpression(inner) ? inner.name
-    : key !== undefined && isStringLiteralNode(key) ? key : undefined;
-  if (location === undefined) return undefined;
+): ts.VariableDeclaration | typeof UNPROVEN_OWNER | undefined {
   let symbol: ts.Symbol | undefined;
   try {
     symbol = context.checker.getSymbolAtLocation(location);
     if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = context.checker.getAliasedSymbol(symbol);
   } catch {
-    return undefined;
+    return UNPROVEN_OWNER;
   }
   if (symbol === undefined || seen.has(symbol)) return undefined;
   seen.add(symbol);

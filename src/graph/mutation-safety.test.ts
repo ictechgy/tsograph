@@ -240,6 +240,44 @@ test('qualified or wrapped direct owners, chained aliases and let aliases are re
   }
 });
 
+test('an owner alias chain longer than the resolver depth fails closed instead of proving a non-owner', () => {
+  // alias 재검사 worklist를 끄려고 참조 색인을 비우고, FlowIndex 표식·기록도 꺼서 `.set` 수신자 해석만 남긴다.
+  const isolated = (source: string) => {
+    const context = contextOf(source);
+    return { ...context, index: { ...context.index, hasOpaqueMutation: false, mutations: [], references: new Map() } };
+  };
+  const chainOf = (origin: string, hops: number, use: string) => [
+    `const link0 = ${origin};`,
+    ...Array.from({ length: hops }, (_, index) => `const link${index + 1} = link${index};`),
+    'declare const target: object;',
+    `link${hops}.${use};`,
+  ].join('\n');
+  assert.equal(isMutationCleanView(isolated(chainOf('Reflect', 4, 'set(target, "key", 1)'))), false);
+  assert.equal(isMutationCleanView(isolated(chainOf('Reflect', 20, 'set(target, "key", 1)'))), false);
+  // 상한 안에서 끝까지 따라가 소유자가 아님을 증명한 사슬은 열린 채로 남고, 상한을 넘긴 사슬은 증명하지 못해 닫힌다.
+  assert.equal(isMutationCleanView(isolated(chainOf('new Map<string, number>()', 10, 'set("key", 1)'))), true);
+  assert.equal(isMutationCleanView(isolated(chainOf('new Map<string, number>()', 20, 'set("key", 1)'))), false);
+});
+
+test('a checker failure while resolving a set receiver fails closed', () => {
+  const source = 'declare const store: { set(key: string, value: number): void }; store.set("key", 1);';
+  const context = contextOf(source);
+  assert.equal(isMutationCleanView(context), true);
+  const failing = new Proxy(context.checker, {
+    get(target, property) {
+      if (property !== 'getSymbolAtLocation') {
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      return (node: ts.Node) => {
+        if (ts.isIdentifier(node) && node.text === 'store' && ts.isPropertyAccessExpression(node.parent)) throw new Error('checker failure');
+        return target.getSymbolAtLocation(node);
+      };
+    },
+  });
+  assert.equal(isMutationCleanView({ ...context, checker: failing }), false);
+});
+
 test('global Map and Date member replacements are visible to the guard', () => {
   for (const source of [
     'Map = Replacement; declare let Replacement: typeof Map;',

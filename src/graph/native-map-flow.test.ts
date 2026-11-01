@@ -333,10 +333,61 @@ test('cross-module Object or Reflect aliases that patch Map.prototype close the 
       'src/owner.ts': 'export const owner = Reflect;',
       'src/main.ts': [`import { owner } from './owner';`, shared, 'const { ...methods } = owner;', `methods.set${setMap}`, registryTail].join('\n'),
     }],
+    ['imported alias computed-key destructuring', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, "declare const key: 'set';", 'const { [key]: put } = owner;', `put${setMap}`, registryTail].join('\n'),
+    }],
+    ['export * barrel', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/barrel.ts': "export * from './owner';",
+      'src/main.ts': [`import { owner } from './barrel';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['export * as namespace barrel', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/barrel.ts': "export * as owners from './owner';",
+      'src/main.ts': [`import { owners } from './barrel';`, shared, `owners.owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['default import of an alias', {
+      'src/owner.ts': 'const owner = Reflect;\nexport default owner;',
+      'src/main.ts': [`import owner from './owner';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['export = alias with import-equals', {
+      'src/owner.ts': 'const owner = Reflect;\nexport = owner;',
+      'src/main.ts': [`import owner = require('./owner');`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['dynamic import member', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/main.ts': [shared, `export async function patch() { const owners = await import('./owner'); owners.owner.set${setMap} }`, registryTail].join('\n'),
+    }],
+    ['value and type merged alias', {
+      'src/owner.ts': 'export const owner = Reflect;\nexport type owner = typeof Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['value and type merged alias computed member', {
+      'src/owner.ts': 'export const owner = Reflect;\nexport type owner = typeof Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, "declare const key: 'set';", `owner[key]${setMap}`, registryTail].join('\n'),
+    }],
     ['re-exported let alias', {
       'src/owner.ts': 'export let owner = Reflect;',
       'src/barrel.ts': "export { owner as reflect } from './owner';",
       'src/main.ts': [`import { reflect } from './barrel';`, shared, `reflect.set${setMap}`, registryTail].join('\n'),
+    }],
+  ];
+  for (const [label, files] of cases) assertClosedProof(await graphOf(files), label);
+});
+
+test('alias chains longer than the resolver depth close the native Map proof', async () => {
+  // FlowIndex의 alias 추적(4단계)과 소유자 해석기(16단계)가 모두 끝나기 전에 끊기는 사슬이다.
+  const chainOf = (origin: string, hops: number) => [
+    `const link0 = ${origin};`,
+    ...Array.from({ length: hops }, (_, index) => `const link${index + 1} = link${index};`),
+  ];
+  const cases: readonly [string, Record<string, string>][] = [
+    ['20 hops .set', { 'src/main.ts': [shared, ...chainOf("globalThis['Reflect']", 20), `link20.set${"(Map.prototype, 'get', () => () => new Second());"}`, registryTail].join('\n') }],
+    ['20 hops computed', { 'src/main.ts': [shared, ...chainOf('Object', 20), "declare const key: 'defineProperty';", `link20[key]${"(Map.prototype, 'get', { value: () => () => new Second() });"}`, registryTail].join('\n') }],
+    ['40 hops across modules', {
+      'src/owner.ts': 'export const link0 = Reflect;',
+      'src/main.ts': [`import { link0 } from './owner';`, shared, ...chainOf('link0', 40).slice(1), `link40.set${"(Map.prototype, 'get', () => () => new Second());"}`, registryTail].join('\n'),
     }],
   ];
   for (const [label, files] of cases) assertClosedProof(await graphOf(files), label);
