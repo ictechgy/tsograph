@@ -7,39 +7,19 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 
 import { CaptureError, capture, contentDigest } from './capture.ts';
-
-/** 전역 설정·hook 없이 합성 저장소를 만든다. */
-function repository() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-')));
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture',
-    GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
-  const git = (args: readonly string[], input?: Buffer) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: root, env, windowsHide: true, ...(input === undefined ? {} : { input }),
-  });
-  git(['init', '-q', '--object-format=sha1', '--template=']);
-  /** (mode, 이름, 내용) 항목만 담은 tree로 커밋을 만든다. */
-  const commitTree = (entries: readonly (readonly [string, string, string])[]): string => {
-    const rows = [...entries].sort(([, a], [, b]) => Buffer.compare(Buffer.from(a), Buffer.from(b))).map(([mode, name, content]) => {
-      const blob = git(['hash-object', '-w', '--stdin'], Buffer.from(content)).toString('ascii').trim();
-      return Buffer.concat([Buffer.from(`${mode} ${name}`), Buffer.from([0]), Buffer.from(blob, 'hex')]);
-    });
-    const tree = git(['hash-object', '-w', '-t', 'tree', '--literally', '--stdin'], Buffer.concat(rows)).toString('ascii').trim();
-    return git(['commit-tree', tree, '-m', 'synthetic capture fixture']).toString('ascii').trim();
-  };
-  return { root, git, commitTree, close: () => rmSync(root, { recursive: true, force: true }) };
-}
+import { gitFixture as repository } from './git-fixture.test.ts';
 
 test('committed symlink entries are omitted instead of being read as source', () => {
   const repo = repository();
   try {
     const commit = repo.commitTree([
-      ['100644', 'main.ts', 'export const main = 1;\n'],
-      ['100755', 'tool.ts', 'export const tool = 1;\n'],
-      ['120000', 'link.ts', 'main.ts'],
+      { mode: '100644', name: 'main.ts', content: 'export const main = 1;\n' },
+      { mode: '100755', name: 'tool.ts', content: 'export const tool = 1;\n' },
+      { mode: '120000', name: 'link.ts', content: 'main.ts' },
     ]);
     const captured = capture(repo.root, commit);
     assert.deepEqual([...captured.files.keys()].sort(), ['main.ts', 'tool.ts']);
@@ -69,7 +49,7 @@ test('reserved device names, trailing dots and Git metadata paths in a tree are 
   for (const name of ['con.ts', 'trailing.', '.git']) {
     const repo = repository();
     try {
-      const commit = repo.commitTree([['100644', 'main.ts', 'export {};\n'], ['100644', name, 'export {};\n']]);
+      const commit = repo.commitTree([{ mode: '100644', name: 'main.ts', content: 'export {};\n' }, { mode: '100644', name, content: 'export {};\n' }]);
       assert.throws(() => capture(repo.root, commit),
         (error: unknown) => error instanceof CaptureError && /unsupported path spelling/u.test(error.message), name);
     } finally { repo.close(); }
@@ -100,27 +80,66 @@ test('content digest is independent of insertion order and sensitive to path and
   assert.notEqual(contentDigest(first), contentDigest(edited));
 });
 
-test('a git executable inside the project or a relative PATH entry is never trusted', { skip: process.platform === 'win32' }, () => {
+/** 실제 git 위치다. 심은 git은 표식을 남긴 뒤 실제 git으로 넘겨, 선택되면 캡처가 성공해도 표식으로 드러난다. */
+function realGit(): string {
+  return realpathSync(execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim());
+}
+
+/** directory/git에 표식을 남기는 실행 파일을 심는다. */
+function plantGit(directory: string, marker: string): void {
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'git'), `#!/bin/sh\necho ran >> '${marker}'\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
+}
+
+/** PATH를 바꾼 채 실행하고 원래 값으로 되돌린다. */
+function withPath<T>(entries: readonly string[], run: () => T): T {
+  const original = process.env.PATH;
+  process.env.PATH = entries.join(delimiter);
+  try { return run(); } finally { process.env.PATH = original; }
+}
+
+const unavailable = (error: unknown) => error instanceof CaptureError && /trusted Git executable unavailable/u.test(error.message);
+
+test('a git executable planted inside the project is never selected', { skip: process.platform === 'win32' }, () => {
   const repo = repository();
-  const originalPath = process.env.PATH;
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-marker-')));
   try {
     writeFileSync(join(repo.root, 'main.ts'), 'export const main = 1;\n');
-    const trustedDirectory = dirname(realpathSync(execFileSync('sh', ['-c', 'command -v git']).toString('utf8').trim()));
-    const planted = join(repo.root, 'bin');
-    mkdirSync(planted);
-    writeFileSync(join(planted, 'git'), `#!/bin/sh\necho planted > "${join(repo.root, 'planted-ran')}"\nexit 1\n`, { mode: 0o755 });
-
-    process.env.PATH = [planted, 'relative-bin'].join(delimiter);
-    assert.throws(() => capture(repo.root), (error: unknown) => error instanceof CaptureError && /trusted Git executable unavailable/u.test(error.message));
-    assert.equal(existsSync(join(repo.root, 'planted-ran')), false);
-
-    process.env.PATH = [planted, 'relative-bin', trustedDirectory].join(delimiter);
-    const captured = capture(repo.root);
+    const marker = join(outside, 'planted-ran');
+    plantGit(join(repo.root, 'bin'), marker);
+    assert.throws(() => withPath([join(repo.root, 'bin')], () => capture(repo.root)), unavailable);
+    const captured = withPath([join(repo.root, 'bin'), dirname(realGit())], () => capture(repo.root));
     assert.ok(captured.files.has('main.ts'));
-    assert.equal(captured.files.has('planted-ran'), false);
-    assert.equal(existsSync(join(repo.root, 'planted-ran')), false);
+    assert.equal(existsSync(marker), false);
   } finally {
-    process.env.PATH = originalPath;
+    rmSync(outside, { recursive: true, force: true });
+    repo.close();
+  }
+});
+
+test('relative PATH entries and the current directory are skipped even when they hold a git outside the project', { skip: process.platform === 'win32' }, () => {
+  const repo = repository();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-outside-')));
+  const originalDirectory = process.cwd();
+  try {
+    writeFileSync(join(repo.root, 'main.ts'), 'export const main = 1;\n');
+    const marker = join(outside, 'planted-ran');
+    const plantedDirectory = join(outside, 'bin');
+    plantGit(plantedDirectory, marker);
+
+    const relativeEntry = relative(process.cwd(), plantedDirectory);
+    assert.ok(!relativeEntry.startsWith('/'));
+    assert.throws(() => withPath([relativeEntry], () => capture(repo.root)), unavailable);
+    assert.ok(withPath([relativeEntry, dirname(realGit())], () => capture(repo.root)).files.has('main.ts'));
+    assert.equal(existsSync(marker), false, 'relative PATH entry');
+
+    process.chdir(plantedDirectory);
+    assert.throws(() => withPath([plantedDirectory], () => capture(repo.root)), unavailable);
+    assert.ok(withPath([plantedDirectory, dirname(realGit())], () => capture(repo.root)).files.has('main.ts'));
+    assert.equal(existsSync(marker), false, 'current-directory PATH entry');
+  } finally {
+    process.chdir(originalDirectory);
+    rmSync(outside, { recursive: true, force: true });
     repo.close();
   }
 });
