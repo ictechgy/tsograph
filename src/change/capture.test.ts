@@ -143,3 +143,26 @@ test('relative PATH entries and the current directory are skipped even when they
     repo.close();
   }
 });
+
+test('a differently cased PATH spelling of the project is still recognized as inside it', { skip: process.platform === 'win32' }, (t) => {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-case-')));
+  try {
+    const repo = repository(join(parent, 'Proj'));
+    const alternate = join(parent, 'proj');
+    if (!existsSync(alternate)) {
+      // 대소문자를 구분하는 파일 시스템에서는 다른 표기가 같은 디렉터리를 가리킬 수 없다.
+      assert.equal(existsSync(join(parent, 'Proj')), true);
+      t.skip('case-sensitive filesystem: differently cased spelling does not name the project');
+      return;
+    }
+    writeFileSync(join(repo.root, 'main.ts'), 'export const main = 1;\n');
+    const marker = join(parent, 'planted-ran');
+    plantGit(join(repo.root, 'bin'), marker);
+    for (const root of [repo.root, alternate]) {
+      assert.throws(() => withPath([join(alternate, 'bin')], () => capture(root)), unavailable, root);
+      const captured = withPath([join(alternate, 'bin'), join(repo.root, 'bin'), dirname(realGit())], () => capture(root));
+      assert.ok(captured.files.has('main.ts'), root);
+      assert.equal(existsSync(marker), false, root);
+    }
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
