@@ -258,6 +258,35 @@ test('intrinsic helper needs the authoritative default-library predicate and vis
   assert.equal(isIntrinsicDefaultLibraryGlobal(writes, mapExpression.expression, 'Map'), false);
 });
 
+/** 파일의 마지막 `new Map()` callee 식별자다. */
+function newMapCallee(context: ReturnType<typeof contextOf>): ts.Identifier {
+  let callee: ts.Identifier | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Map') callee = node.expression;
+    ts.forEachChild(node, visit);
+  };
+  visit(context.source.file);
+  assert.ok(callee);
+  return callee;
+}
+
+test('intrinsic helper sees globalThis-qualified and element-access static or prototype writes', () => {
+  for (const write of [
+    'globalThis.Map.prototype.get = replacement;',
+    'globalThis["Map"].prototype.get = replacement;',
+    'globalThis.Map["prototype"].get = replacement;',
+    'Map["prototype"].get = replacement;',
+    'globalThis["Map"].groupBy = replacement;',
+  ]) {
+    const context = contextOf(`${write} const registry = new Map(); declare const replacement: any;`);
+    assert.equal(isIntrinsicDefaultLibraryGlobal(context, newMapCallee(context), 'Map'), false, write);
+  }
+  // 다른 builtin의 prototype 쓰기는 Map intrinsic 판정을 닫지 않는다(clean-view는 별도로 닫는다).
+  const unrelated = contextOf('globalThis.Date.prototype.getTime = replacement; const registry = new Map(); declare const replacement: any;');
+  assert.equal(isIntrinsicDefaultLibraryGlobal(unrelated, newMapCallee(unrelated), 'Map'), true);
+  assert.equal(isMutationCleanView(unrelated), false);
+});
+
 test('opaque mutation index state closes both the clean-view result and audited exceptions', () => {
   const context = contextOf('const state = { count: 0 }; state.count = 1;');
   const opaque = { ...context.index, hasOpaqueMutation: true };

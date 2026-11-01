@@ -136,20 +136,37 @@ export function isIntrinsicDefaultLibraryGlobal(
   return !hasVisibleIntrinsicWrite(context, symbol, name);
 }
 
-/** intrinsic global·prototype에 보이는 쓰기와 broad reflective/prototype effect를 닫는다. */
+/**
+ * intrinsic global·prototype에 보이는 쓰기와 broad reflective/prototype effect를 닫는다.
+ *
+ * 소유자는 `Map`, `globalThis.Map`, `globalThis["Map"]` 표기를 모두 보고, prototype은 `.prototype`·`["prototype"]`을 모두 본다.
+ */
 function hasVisibleIntrinsicWrite(context: MutationSafetyContext, symbol: ts.Symbol, name: string): boolean {
   return context.index.mutations.some((record) => {
     if (record.effect === 'prototype' || record.effect === 'unknown' || record.operation !== 'assignment') return true;
     if (record.effect !== 'property') return false;
     const target = skipWrappers(record.target);
-    if (ts.isIdentifier(target) && context.checker.getSymbolAtLocation(target) === symbol) return true;
-    if (ts.isPropertyAccessExpression(target) && target.name.text === 'prototype') {
-      const owner = skipWrappers(target.expression);
-      if (ts.isIdentifier(owner) && owner.text === name && context.checker.getSymbolAtLocation(owner) === symbol) return true;
-    }
-    if (ts.isPropertyAccessExpression(target) && target.name.text === name && isGlobalThisExpression(target.expression)) return true;
+    if (isIntrinsicOwnerReference(context, target, symbol, name)) return true;
+    const member = staticMember(target);
+    if (member?.name === 'prototype' && isIntrinsicOwnerReference(context, member.owner, symbol, name)) return true;
     return isGlobalThisExpression(target) && record.staticKey === name;
   });
+}
+
+/** 식이 해당 intrinsic 심볼 자체이거나 `globalThis.<name>`·`globalThis["<name>"]`인지 본다. */
+function isIntrinsicOwnerReference(context: MutationSafetyContext, expression: ts.Expression, symbol: ts.Symbol, name: string): boolean {
+  const inner = skipWrappers(expression);
+  if (ts.isIdentifier(inner)) return context.checker.getSymbolAtLocation(inner) === symbol;
+  const member = staticMember(inner);
+  return member?.name === name && isGlobalThisExpression(member.owner);
+}
+
+/** property access 또는 문자열 literal element access의 소유자와 정적 멤버 이름이다. */
+function staticMember(expression: ts.Expression): { readonly owner: ts.Expression; readonly name: string } | undefined {
+  if (ts.isPropertyAccessExpression(expression)) return { owner: expression.expression, name: expression.name.text };
+  if (!ts.isElementAccessExpression(expression)) return undefined;
+  const name = literalName(expression.argumentExpression);
+  return name === undefined ? undefined : { owner: expression.expression, name };
 }
 
 /** 한 mutation이 허용된 private own-data primitive assignment인지 판정한다. */
