@@ -206,16 +206,38 @@ test('builtin mutator aliases, call/apply/bind and dynamic Object or Reflect rea
   for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), false, source);
 });
 
-test('globalThis-qualified Object and Reflect aliases are rechecked by the guard itself', () => {
+/** FlowIndex가 Object·Reflect 수신자로 인정하는 표기다(`reflectiveOwner`: 감싼 형태와 문자열 키 포함). */
+const intrinsicOwnerSpellings = [
+  'Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect',
+  "globalThis['Object']", 'globalThis["Reflect"]', 'globalThis[`Object`]', '(globalThis)["Reflect"]',
+  '(Object)', 'Reflect as typeof Reflect', 'globalThis.Object!', '(globalThis["Object"] satisfies ObjectConstructor)',
+];
+
+test('every FlowIndex owner spelling is rechecked by the guard itself as an alias initializer', () => {
   // FlowIndex의 opaque 표식이 이미 닫는 입력이지만, guard 자체의 alias 재검사도 독립적으로 닫아야 한다.
   // 표식을 끈 색인으로 두 번째 방어선만 검사한다.
-  for (const owner of ['Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect']) {
+  for (const owner of intrinsicOwnerSpellings) {
     const context = contextOf(`const owner = ${owner}; const member = 'define' + 'Property'; const read = owner[member];`);
     assert.equal(isMutationCleanView(context), false, owner);
     assert.equal(isMutationCleanView({ ...context, index: { ...context.index, hasOpaqueMutation: false } }), false, owner);
   }
-  const literalMember = contextOf('const owner = globalThis.Reflect; const keys = owner.ownKeys; const state = { count: 0 }; state.count = 1;');
-  assert.equal(isMutationCleanView(literalMember), true);
+  for (const owner of ['globalThis.Reflect', 'globalThis["Reflect"]', '(Reflect)']) {
+    const literalMember = contextOf(`const owner = ${owner}; const keys = owner.ownKeys; const state = { count: 0 }; state.count = 1;`);
+    assert.equal(isMutationCleanView(literalMember), true, owner);
+  }
+});
+
+test('qualified or wrapped direct owners, chained aliases and let aliases are rechecked by the guard itself', () => {
+  const cases = [
+    ...intrinsicOwnerSpellings.map((owner) => `const member = 'define' + 'Property'; const read = (${owner})[member];`),
+    "const first = globalThis['Object']; const owner = first; const member = 'define' + 'Property'; const read = owner[member];",
+    "const first = Reflect; const second = (first); const owner = second as typeof Reflect; const member = 'set'; const read = owner[member + ''];",
+    "let owner = Object; const member = 'define' + 'Property'; const read = owner[member];",
+  ];
+  for (const source of cases) {
+    const context = contextOf(source);
+    assert.equal(isMutationCleanView({ ...context, index: { ...context.index, hasOpaqueMutation: false } }), false, source);
+  }
 });
 
 test('global Map and Date member replacements are visible to the guard', () => {
