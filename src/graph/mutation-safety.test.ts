@@ -228,6 +228,49 @@ test('global Map and Date member replacements are visible to the guard', () => {
   ]) assert.equal(isMutationCleanView(contextOf(source)), false, source);
 });
 
+test('fresh, wrapped and string-keyed literal receivers keep the own-data primitive proof', () => {
+  const cases = [
+    '({ count: 0 }).count = 1;',
+    '[0][0] = 1;',
+    'const state = ({ count: 0 }) as { count: number }; state.count = 1;',
+    'const state = { count: 0 }; state["count"] = 1;',
+    // 참조되지 않은 const 배열은 원소가 객체여도 clean-view를 닫지 않는다.
+    'const unused = [{}]; const state = { count: 0 }; state.count = 1;',
+  ];
+  for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), true, source);
+});
+
+test('mutable bindings, export aliases, missing keys, ambiguous keys and non-primitive siblings stay unsafe', () => {
+  const cases = [
+    'let state = { count: 0 }; state.count = 1;',
+    'let state = { count: 0 }; state = { count: 2 }; state.count = 1;',
+    'const state = { count: 0 }; state.count = 1; export { state as publicState };',
+    'const state = { count: 0 }; (state as { other?: number }).other = 1;',
+    "const state = { a: 0, b: 0 }; declare const flag: boolean; const key = flag ? 'a' : 'b'; state[key] = 1;",
+    'const state = { count: 0, nested: {} }; state.count = 1;',
+    'const state = { __proto__: null, count: 0 }; state.count = 1;',
+    'const scratch: ReadonlyArray<number> = [0]; (scratch as number[])[0] = 1;',
+  ];
+  for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), false, source);
+});
+
+test('type positions, property declarations and non-intrinsic set calls are not dynamic references', () => {
+  const clean = [
+    'declare function accept(callback: Function): void;',
+    'declare const evaluate: typeof eval;',
+    'declare const handler: ProxyHandler<object>;',
+    'const holder = { eval: 1 };',
+    'const registry = new Map<string, number>(); registry.set("key", 1);',
+  ];
+  for (const prefix of clean) {
+    assert.equal(isMutationCleanView(contextOf(`${prefix} const state = { count: 0 }; state.count = 1;`)), true, prefix);
+  }
+  // 같은 이름의 멤버 접근은 전역 eval과 구분할 근거가 없으므로 보수적으로 닫는다.
+  assert.equal(isMutationCleanView(contextOf(
+    'declare const holder: { eval(): void }; holder.eval(); const state = { count: 0 }; state.count = 1;',
+  )), false);
+});
+
 test('object accessor, spread and computed properties do not become own-data proofs', () => {
   const cases = [
     'const state = { get count() { return 0; } }; state.count = 1;',

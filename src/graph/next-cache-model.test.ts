@@ -68,6 +68,58 @@ test('Next 16.2.7 named and namespace imports delegate direct wrappers to the or
   assert.ok(boundTo(graph, 'src/main.ts#namespaced', 'src/main.ts#original'));
 });
 
+test('string-literal namespace members, type wrappers, and const callback aliases keep the proven delegation', async () => {
+  // 문서화한 허용 표면(문자열 literal element access, 타입 wrapper, const callback alias)이 실제로 위임되는지 고정한다.
+  const cases: readonly [string, string][] = [
+    ['string element access', [
+      'import * as NextCache from "next/cache";',
+      'function original(value: string) { return value; }',
+      'export function run() { return NextCache["unstable_cache"](original, [])("x"); }',
+    ].join('\n')],
+    ['template element access', [
+      'import * as NextCache from "next/cache";',
+      'function original(value: string) { return value; }',
+      'export function run() { return NextCache[`unstable_cache`](original, [])("x"); }',
+    ].join('\n')],
+    ['type and non-null wrappers', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'const cached = (unstable_cache(original, []) as (value: string) => Promise<unknown>);',
+      'export function run() { return (cached)!("x"); }',
+    ].join('\n')],
+    ['const callback alias chain', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'const first = original;',
+      'const callback = first;',
+      'export function run() { return unstable_cache(callback, [])("x"); }',
+    ].join('\n')],
+  ];
+
+  for (const [name, source] of cases) {
+    const graph = await graphOf({ 'src/main.ts': source });
+    assert.deepEqual(allBound(graph), ['src/main.ts#run -> src/main.ts#original'], name);
+  }
+});
+
+test('inline function expressions and arrow callbacks delegate to their stable inline callback id', async () => {
+  for (const callback of [
+    'function (value: string) { return original(value); }',
+    '(value: string) => original(value)',
+  ]) {
+    const graph = await graphOf({
+      'src/main.ts': [
+        'import { unstable_cache } from "next/cache";',
+        'function original(value: string) { return value; }',
+        `export function run() { return unstable_cache(${callback}, [])("x"); }`,
+      ].join('\n'),
+    });
+    assert.deepEqual(allBound(graph), ['src/main.ts#run -> src/main.ts#run.unstable_cache()'], callback);
+    assert.ok(graph.edges.some((edge) => edge.from === 'src/main.ts#run.unstable_cache()' && edge.to === 'src/main.ts#original'
+      && edge.evidence === 'direct'), callback);
+  }
+});
+
 test('immutable const aliases and async callbacks retain only callback delegation', async () => {
   const graph = await graphOf({
     'src/main.ts': [
@@ -177,6 +229,77 @@ test('unknown callbacks and unsupported wrapper shapes remain unresolved', async
       'const cached = unstable_cache(original, []);',
       'export function run() { return cached?.("x"); }',
     ].join('\n')],
+    ['mutable callback alias', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'let callback = original;',
+      'export function run() { return unstable_cache(callback, [])("x"); }',
+    ].join('\n')],
+    ['member callback', [
+      'import { unstable_cache } from "next/cache";',
+      'class Service { static load(value: string) { return value; } }',
+      'export function run() { return unstable_cache(Service.load, [])("x"); }',
+    ].join('\n')],
+    ['callback alias cycle', [
+      'import { unstable_cache } from "next/cache";',
+      'const first: (value: string) => string = second;',
+      'const second: (value: string) => string = first;',
+      'export function run() { return unstable_cache(first, [])("x"); }',
+    ].join('\n')],
+    ['callback alias depth', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'const callback0 = original;',
+      ...Array.from({ length: 20 }, (_, index) => `const callback${index + 1} = callback${index};`),
+      'export function run() { return unstable_cache(callback20, [])("x"); }',
+    ].join('\n')],
+    ['missing callback', [
+      'import { unstable_cache } from "next/cache";',
+      '// @ts-expect-error 합성 오류 입력이다.',
+      'export function run() { return unstable_cache()("x"); }',
+    ].join('\n')],
+    ['spread factory arguments', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'const args = [original, []] as const;',
+      'export function run() { return unstable_cache(...args)("x"); }',
+    ].join('\n')],
+    ['optional factory call', [
+      'import { unstable_cache } from "next/cache";',
+      'function original(value: string) { return value; }',
+      'export function run() { return unstable_cache?.(original, [])("x"); }',
+    ].join('\n')],
+    ['optional namespace access', [
+      'import * as NextCache from "next/cache";',
+      'function original(value: string) { return value; }',
+      'export function run() { return NextCache?.unstable_cache(original, [])("x"); }',
+    ].join('\n')],
+    ['computed namespace key', [
+      'import * as NextCache from "next/cache";',
+      'function original(value: string) { return value; }',
+      'declare const key: "unstable_cache";',
+      'export function run() { return NextCache[key](original, [])("x"); }',
+    ].join('\n')],
+    ['mutable namespace alias', [
+      'import * as NextCache from "next/cache";',
+      'function original(value: string) { return value; }',
+      'let namespace = NextCache;',
+      'export function run() { return namespace.unstable_cache(original, [])("x"); }',
+    ].join('\n')],
+    ['conditional factory selection', [
+      'import { unstable_cache } from "next/cache";',
+      'import * as NextCache from "next/cache";',
+      'declare const flag: boolean;',
+      'function original(value: string) { return value; }',
+      'export function run() { return (flag ? unstable_cache : NextCache.unstable_cache)(original, [])("x"); }',
+    ].join('\n')],
+    ['conditional wrapper initializer', [
+      'import { unstable_cache } from "next/cache";',
+      'declare const flag: boolean;',
+      'function original(value: string) { return value; }',
+      'const cached = flag ? unstable_cache(original, []) : unstable_cache(original, ["b"]);',
+      'export function run() { return cached("x"); }',
+    ].join('\n')],
   ];
 
   for (const [name, source] of cases) {
@@ -187,6 +310,27 @@ test('unknown callbacks and unsupported wrapper shapes remain unresolved', async
 
 test('factory provenance and public mutation guards fail closed', async () => {
   const cases: readonly [string, Record<string, string>, string?][] = [
+    ['type-only named import', {
+      'src/main.ts': [
+        'import type { unstable_cache } from "next/cache";',
+        'function original(value: string) { return value; }',
+        'export function run() { return unstable_cache(original, [])("x"); }',
+      ].join('\n'),
+    }],
+    ['type-only import specifier', {
+      'src/main.ts': [
+        'import { type unstable_cache } from "next/cache";',
+        'function original(value: string) { return value; }',
+        'export function run() { return unstable_cache(original, [])("x"); }',
+      ].join('\n'),
+    }],
+    ['type-only namespace import', {
+      'src/main.ts': [
+        'import type * as NextCache from "next/cache";',
+        'function original(value: string) { return value; }',
+        'export function run() { return NextCache.unstable_cache(original, [])("x"); }',
+      ].join('\n'),
+    }],
     ['factory shadow', {
       'src/main.ts': [
         'declare function unstable_cache(callback: (value: string) => string): (value: string) => Promise<unknown>;',
@@ -314,6 +458,16 @@ test('factory provenance and public mutation guards fail closed', async () => {
         'export function namespaceRun() { return NextCache.unstable_cache(original, [])("x"); }',
       ].join('\n'),
     }],
+    ['namespace string-element reflective write affects named import', {
+      'src/main.ts': [
+        'import { unstable_cache } from "next/cache";',
+        'import * as NextCache from "next/cache";',
+        'function original(value: string) { return value; }',
+        'declare const replacement: unknown;',
+        'Reflect.set(NextCache["unstable_cache"], "marker", replacement);',
+        'export function run() { return unstable_cache(original, [])("x"); }',
+      ].join('\n'),
+    }],
     ['SDK function alias reflection is guarded', {
       'src/main.ts': [
         'import { unstable_cache } from "next/cache";',
@@ -368,6 +522,19 @@ test('factory provenance and public mutation guards fail closed', async () => {
         'import { unstable_cache } from "next/cache";',
         'function original(value: string) { return value; }',
         'export function run() { return unstable_cache(original, [])("x"); }',
+      ].join('\n'),
+    }],
+    ['renamed SDK export', {
+      'node_modules/next/cache.d.ts': [
+        'declare function cacheImpl<Args extends readonly unknown[], Result>(callback: (...args: Args) => Result, keyParts?: readonly string[]): (...args: Args) => Promise<unknown>;',
+        'export { cacheImpl as unstable_cache };',
+      ].join('\n'),
+      'src/main.ts': [
+        'import { unstable_cache } from "next/cache";',
+        'import * as NextCache from "next/cache";',
+        'function original(value: string) { return value; }',
+        'export function namedRun() { return unstable_cache(original, [])("x"); }',
+        'export function namespaceRun() { return NextCache.unstable_cache(original, [])("x"); }',
       ].join('\n'),
     }],
     ['unsupported version', {
