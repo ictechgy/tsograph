@@ -28,8 +28,10 @@ function gitExecutable(root: string): string {
 /** Git 객체·파일 이름만 읽는다. diff, checkout, status, textconv를 실행하지 않는다. */
 function git(root: string, args: readonly string[], maxBuffer = CAPTURE_LIMITS.totalBytes): Buffer {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  // 신뢰할 실행 파일이 없다는 진단은 실행 실패 문구로 덮지 않는다.
+  const executable = gitExecutable(root);
   try {
-    return execFileSync(gitExecutable(root), ['--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args], {
+    return execFileSync(executable, ['--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args], {
       cwd: root, env: { ...env, GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
       timeout: 60_000, maxBuffer, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     });

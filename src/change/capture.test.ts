@@ -5,9 +5,9 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import { CaptureError, capture, contentDigest } from './capture.ts';
@@ -98,4 +98,29 @@ test('content digest is independent of insertion order and sensitive to path and
   assert.equal(contentDigest(first), contentDigest(reordered));
   assert.notEqual(contentDigest(first), contentDigest(renamed));
   assert.notEqual(contentDigest(first), contentDigest(edited));
+});
+
+test('a git executable inside the project or a relative PATH entry is never trusted', { skip: process.platform === 'win32' }, () => {
+  const repo = repository();
+  const originalPath = process.env.PATH;
+  try {
+    writeFileSync(join(repo.root, 'main.ts'), 'export const main = 1;\n');
+    const trustedDirectory = dirname(realpathSync(execFileSync('sh', ['-c', 'command -v git']).toString('utf8').trim()));
+    const planted = join(repo.root, 'bin');
+    mkdirSync(planted);
+    writeFileSync(join(planted, 'git'), `#!/bin/sh\necho planted > "${join(repo.root, 'planted-ran')}"\nexit 1\n`, { mode: 0o755 });
+
+    process.env.PATH = [planted, 'relative-bin'].join(delimiter);
+    assert.throws(() => capture(repo.root), (error: unknown) => error instanceof CaptureError && /trusted Git executable unavailable/u.test(error.message));
+    assert.equal(existsSync(join(repo.root, 'planted-ran')), false);
+
+    process.env.PATH = [planted, 'relative-bin', trustedDirectory].join(delimiter);
+    const captured = capture(repo.root);
+    assert.ok(captured.files.has('main.ts'));
+    assert.equal(captured.files.has('planted-ran'), false);
+    assert.equal(existsSync(join(repo.root, 'planted-ran')), false);
+  } finally {
+    process.env.PATH = originalPath;
+    repo.close();
+  }
 });
