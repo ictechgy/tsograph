@@ -237,3 +237,26 @@ test('unknown maker, registry escape, Proxy context and fake Map declaration fai
   });
   assert.deepEqual(boundTo(fakeMap, 'read'), []);
 });
+
+test('zero-argument computed calls through Object or Reflect aliases close the native Map proof', async () => {
+  // FlowIndex는 인자 없는 계산 호출을 reflective mutation으로 기록하지 않으므로 mutation guard의 alias 재검사가 닫는다.
+  // `globalThis.` 한정 alias도 bare alias와 같이 bound 대신 보수적인 candidate로 남는다.
+  for (const owner of ['Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect']) {
+    const graph = await graphOf({
+      'src/main.ts': [
+        shared,
+        `const owner = ${owner};`,
+        'declare const member: "keys";',
+        'owner[member]();',
+        'const registry = new Map<string, () => Service>();',
+        'registry.set("service", () => new First());',
+        'const make = registry.get("service");',
+        'const service = make();',
+        'export const read = () => service.run();',
+      ].join('\n'),
+    });
+    assert.deepEqual(boundTo(graph, 'read'), [], owner);
+    const candidates = graph.edges.filter((edge) => edge.from === 'src/main.ts#read' && edge.evidence === 'candidate').map((edge) => edge.to);
+    assert.deepEqual(candidates, ['src/main.ts#First.run', 'src/main.ts#Second.run'], owner);
+  }
+});
