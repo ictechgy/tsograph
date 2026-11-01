@@ -330,6 +330,19 @@ test('intrinsic helper sees globalThis-qualified and element-access static or pr
   assert.equal(isMutationCleanView(unrelated), false);
 });
 
+test('indirect Map receivers are left to the clean-view guard the intrinsic helper requires first', () => {
+  // helper가 보지 않는 간접 수신자 쓰기는 호출자 전제인 clean-view 검사가 반드시 닫아야 한다.
+  for (const write of [
+    'const M = Map; M.prototype.get = replacement;',
+    'declare const key: "prototype"; Map[key].get = replacement;',
+    'declare const window: { Map: MapConstructor }; window.Map.prototype.get = replacement;',
+    'Object.getPrototypeOf(new Map()).get = replacement;',
+  ]) {
+    const context = contextOf(`${write} const registry = new Map(); declare const replacement: any;`);
+    assert.equal(isMutationCleanView(context), false, write);
+  }
+});
+
 test('opaque mutation index state closes both the clean-view result and audited exceptions', () => {
   const context = contextOf('const state = { count: 0 }; state.count = 1;');
   const opaque = { ...context.index, hasOpaqueMutation: true };

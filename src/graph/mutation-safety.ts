@@ -116,6 +116,11 @@ function hasLiteralReceiverDeclaration(context: MutationSafetyContext, target: t
 /**
  * 이름이 같은 프로젝트 declaration이나 declaration file을 intrinsic으로 착각하지 않고, default lib symbol만 인정한다.
  * `isDeclarationFile`만으로는 dependency `.d.ts` shadow를 구별할 수 없으므로 반드시 Program predicate를 사용한다.
+ *
+ * 완전한 mutation guard가 아니다. 쓰기는 알려진 표기(`Map`, `globalThis.Map`, `globalThis["Map"]`과 그 `.prototype`·
+ * `["prototype"]`)만 본다. alias(`const M = Map`), 계산 키(`Map[k]`), 다른 전역 객체(`window.Map`),
+ * `Object.getPrototypeOf(…)` 같은 간접 수신자는 판정하지 않는다. 그래서 호출자는 같은 문맥이 `isMutationCleanView`를
+ * 통과했을 때만 이 결과를 증명으로 쓴다(native Map 후보 판정과 descriptor 수집이 그렇게 한다).
  * @param context mutation 분석 문맥
  * @param expression 전역 builtin 표기
  * @param name 기대 builtin 이름
@@ -139,7 +144,8 @@ export function isIntrinsicDefaultLibraryGlobal(
 /**
  * intrinsic global·prototype에 보이는 쓰기와 broad reflective/prototype effect를 닫는다.
  *
- * 소유자는 `Map`, `globalThis.Map`, `globalThis["Map"]` 표기를 모두 보고, prototype은 `.prototype`·`["prototype"]`을 모두 본다.
+ * 소유자는 `Map`, `globalThis.Map`, `globalThis["Map"]` 표기를 보고, prototype은 `.prototype`·`["prototype"]`을 본다.
+ * 그 밖의 간접 수신자는 clean-view guard의 몫이다(`isIntrinsicDefaultLibraryGlobal` 문서 참고).
  */
 function hasVisibleIntrinsicWrite(context: MutationSafetyContext, symbol: ts.Symbol, name: string): boolean {
   return context.index.mutations.some((record) => {
