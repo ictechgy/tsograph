@@ -170,6 +170,11 @@
 
 ### Fixed
 
+- graph 내부 guard: mutation guard가 `const o = globalThis.Object`·`globalThis.Reflect` alias의 계산 멤버 읽기를 직접 다시
+  검사하고, intrinsic Map 판정이 `globalThis.Map.prototype`·`globalThis["Map"]`·`Map["prototype"]` 쓰기를 닫는다. 앞단
+  FlowIndex·clean-view 검사가 같은 입력을 이미 닫으므로 그래프 출력은 바뀌지 않는다(자기 소스 대조 동일).
+  change-impact 캡처는 신뢰할 git이 없다는 진단을 일반 실행 실패 문구로 덮지 않는다(CLI 문구·종료 코드는 그대로).
+
 - persistence 소스 reader가 파일을 연 뒤 같은 핸들에서 최대 4 MiB+1 바이트만 읽는다. 크기 확인 뒤 커진 파일도
   과대 입력으로 세고 사실을 내지 않으며, FIFO·비일반 파일과 지원 플랫폼의 마지막 파일 링크를 거부한다.
 
