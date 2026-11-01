@@ -141,3 +141,37 @@ test('budget exhaustion and key cardinality stop resolution conservatively', () 
   const manyContext = contextOf(manySource);
   assert.equal(resolvePrimitiveKeys(expressionOf(manyContext.source, 'key'), manyContext, 'map'), undefined);
 });
+
+test('signed literals, SameValueZero branch merging and alias guards resolve exactly', () => {
+  const cases: readonly [string, 'map' | 'property', readonly unknown[] | undefined][] = [
+    ['const key = +1;', 'map', [1]],
+    ['const key = -1;', 'map', [-1]],
+    ['const key = 1_000;', 'map', [1000]],
+    ['const key = -1_000n;', 'map', [-1000n]],
+    ['const key = -1e309;', 'map', undefined],
+    ['declare const condition: boolean; const key = condition ? 0 : -0;', 'map', [0]],
+    ['declare const condition: boolean; const key = condition ? 1 : "1";', 'map', [1, '1']],
+    ['declare const condition: boolean; const key = condition ? 1 : "1";', 'property', ['1']],
+    ['declare const condition: boolean; declare const other: string; const key = condition ? "a" : other;', 'map', undefined],
+    ['let mutable = "a"; const key = mutable;', 'map', undefined],
+    ['const first: string = second; const second: string = first; const key = first;', 'map', undefined],
+  ];
+  for (const [source, kind, expected] of cases) {
+    const context = contextOf(source);
+    assert.deepEqual(resolvePrimitiveKeys(expressionOf(context.source, 'key'), context, kind), expected, `${kind}: ${source}`);
+  }
+});
+
+test('caller depth and key limits override the defaults', () => {
+  const alias = 'const first = "a"; const key = first;';
+  const shallow = contextOf(alias, { maxDepth: 0 });
+  assert.equal(resolvePrimitiveKeys(expressionOf(shallow.source, 'key'), shallow, 'map'), undefined);
+  const deepEnough = contextOf(alias, { maxDepth: 1 });
+  assert.deepEqual(resolvePrimitiveKeys(expressionOf(deepEnough.source, 'key'), deepEnough, 'map'), ['a']);
+
+  const branches = 'declare const condition: boolean; const key = condition ? "a" : "b";';
+  const single = contextOf(branches, { maxKeys: 1 });
+  assert.equal(resolvePrimitiveKeys(expressionOf(single.source, 'key'), single, 'map'), undefined);
+  const pair = contextOf(branches, { maxKeys: 2 });
+  assert.deepEqual(resolvePrimitiveKeys(expressionOf(pair.source, 'key'), pair, 'map'), ['a', 'b']);
+});

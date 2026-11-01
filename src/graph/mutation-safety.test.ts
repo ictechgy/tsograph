@@ -206,6 +206,18 @@ test('builtin mutator aliases, call/apply/bind and dynamic Object or Reflect rea
   for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), false, source);
 });
 
+test('globalThis-qualified Object and Reflect aliases are rechecked by the guard itself', () => {
+  // FlowIndex의 opaque 표식이 이미 닫는 입력이지만, guard 자체의 alias 재검사도 독립적으로 닫아야 한다.
+  // 표식을 끈 색인으로 두 번째 방어선만 검사한다.
+  for (const owner of ['Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect']) {
+    const context = contextOf(`const owner = ${owner}; const member = 'define' + 'Property'; const read = owner[member];`);
+    assert.equal(isMutationCleanView(context), false, owner);
+    assert.equal(isMutationCleanView({ ...context, index: { ...context.index, hasOpaqueMutation: false } }), false, owner);
+  }
+  const literalMember = contextOf('const owner = globalThis.Reflect; const keys = owner.ownKeys; const state = { count: 0 }; state.count = 1;');
+  assert.equal(isMutationCleanView(literalMember), true);
+});
+
 test('global Map and Date member replacements are visible to the guard', () => {
   for (const source of [
     'Map = Replacement; declare let Replacement: typeof Map;',
@@ -214,6 +226,49 @@ test('global Map and Date member replacements are visible to the guard', () => {
     'globalThis["Map"].prototype.set = replacement; declare const replacement: any;',
     'const globalObject = globalThis; globalObject["Map"].prototype.set = replacement; declare const replacement: any;',
   ]) assert.equal(isMutationCleanView(contextOf(source)), false, source);
+});
+
+test('fresh, wrapped and string-keyed literal receivers keep the own-data primitive proof', () => {
+  const cases = [
+    '({ count: 0 }).count = 1;',
+    '[0][0] = 1;',
+    'const state = ({ count: 0 }) as { count: number }; state.count = 1;',
+    'const state = { count: 0 }; state["count"] = 1;',
+    // 참조되지 않은 const 배열은 원소가 객체여도 clean-view를 닫지 않는다.
+    'const unused = [{}]; const state = { count: 0 }; state.count = 1;',
+  ];
+  for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), true, source);
+});
+
+test('mutable bindings, export aliases, missing keys, ambiguous keys and non-primitive siblings stay unsafe', () => {
+  const cases = [
+    'let state = { count: 0 }; state.count = 1;',
+    'let state = { count: 0 }; state = { count: 2 }; state.count = 1;',
+    'const state = { count: 0 }; state.count = 1; export { state as publicState };',
+    'const state = { count: 0 }; (state as { other?: number }).other = 1;',
+    "const state = { a: 0, b: 0 }; declare const flag: boolean; const key = flag ? 'a' : 'b'; state[key] = 1;",
+    'const state = { count: 0, nested: {} }; state.count = 1;',
+    'const state = { __proto__: null, count: 0 }; state.count = 1;',
+    'const scratch: ReadonlyArray<number> = [0]; (scratch as number[])[0] = 1;',
+  ];
+  for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), false, source);
+});
+
+test('type positions, property declarations and non-intrinsic set calls are not dynamic references', () => {
+  const clean = [
+    'declare function accept(callback: Function): void;',
+    'declare const evaluate: typeof eval;',
+    'declare const handler: ProxyHandler<object>;',
+    'const holder = { eval: 1 };',
+    'const registry = new Map<string, number>(); registry.set("key", 1);',
+  ];
+  for (const prefix of clean) {
+    assert.equal(isMutationCleanView(contextOf(`${prefix} const state = { count: 0 }; state.count = 1;`)), true, prefix);
+  }
+  // 같은 이름의 멤버 접근은 전역 eval과 구분할 근거가 없으므로 보수적으로 닫는다.
+  assert.equal(isMutationCleanView(contextOf(
+    'declare const holder: { eval(): void }; holder.eval(); const state = { count: 0 }; state.count = 1;',
+  )), false);
 });
 
 test('object accessor, spread and computed properties do not become own-data proofs', () => {
@@ -244,6 +299,48 @@ test('intrinsic helper needs the authoritative default-library predicate and vis
   const mapExpression = target.left.expression;
   assert.ok(ts.isPropertyAccessExpression(mapExpression));
   assert.equal(isIntrinsicDefaultLibraryGlobal(writes, mapExpression.expression, 'Map'), false);
+});
+
+/** 파일의 마지막 `new Map()` callee 식별자다. */
+function newMapCallee(context: ReturnType<typeof contextOf>): ts.Identifier {
+  let callee: ts.Identifier | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'Map') callee = node.expression;
+    ts.forEachChild(node, visit);
+  };
+  visit(context.source.file);
+  assert.ok(callee);
+  return callee;
+}
+
+test('intrinsic helper sees globalThis-qualified and element-access static or prototype writes', () => {
+  for (const write of [
+    'globalThis.Map.prototype.get = replacement;',
+    'globalThis["Map"].prototype.get = replacement;',
+    'globalThis.Map["prototype"].get = replacement;',
+    'Map["prototype"].get = replacement;',
+    'globalThis["Map"].groupBy = replacement;',
+  ]) {
+    const context = contextOf(`${write} const registry = new Map(); declare const replacement: any;`);
+    assert.equal(isIntrinsicDefaultLibraryGlobal(context, newMapCallee(context), 'Map'), false, write);
+  }
+  // 다른 builtin의 prototype 쓰기는 Map intrinsic 판정을 닫지 않는다(clean-view는 별도로 닫는다).
+  const unrelated = contextOf('globalThis.Date.prototype.getTime = replacement; const registry = new Map(); declare const replacement: any;');
+  assert.equal(isIntrinsicDefaultLibraryGlobal(unrelated, newMapCallee(unrelated), 'Map'), true);
+  assert.equal(isMutationCleanView(unrelated), false);
+});
+
+test('indirect Map receivers are left to the clean-view guard the intrinsic helper requires first', () => {
+  // helper가 보지 않는 간접 수신자 쓰기는 호출자 전제인 clean-view 검사가 반드시 닫아야 한다.
+  for (const write of [
+    'const M = Map; M.prototype.get = replacement;',
+    'declare const key: "prototype"; Map[key].get = replacement;',
+    'declare const window: { Map: MapConstructor }; window.Map.prototype.get = replacement;',
+    'Object.getPrototypeOf(new Map()).get = replacement;',
+  ]) {
+    const context = contextOf(`${write} const registry = new Map(); declare const replacement: any;`);
+    assert.equal(isMutationCleanView(context), false, write);
+  }
 });
 
 test('opaque mutation index state closes both the clean-view result and audited exceptions', () => {

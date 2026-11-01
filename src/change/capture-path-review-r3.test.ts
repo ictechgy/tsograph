@@ -1,29 +1,18 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runCli } from '../cli/run-cli.ts';
 import { CaptureError, capture } from './capture.ts';
+import { gitFixture } from './git-fixture.test.ts';
 
 /** 파일시스템에 invalid byte 이름을 만들지 않고 Git 원시 tree 객체를 조립한다. */
 function rawTreeFixture(names: readonly Buffer[]) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-path-r3-')));
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Fixture',
-    GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
-  const git = (args: readonly string[], input?: Buffer) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd: root, env, windowsHide: true, ...(input === undefined ? {} : { input }),
-  });
-  git(['init', '-q', '--object-format=sha1', '--template=']);
-  const entries = [...names].sort(Buffer.compare).map((name, index) => {
-    const blob = git(['hash-object', '-w', '--stdin'], Buffer.from(`export const item${index} = ${index};\n`)).toString('ascii').trim();
-    return Buffer.concat([Buffer.from('100644 '), name, Buffer.from([0]), Buffer.from(blob, 'hex')]);
-  });
-  const tree = git(['hash-object', '-w', '-t', 'tree', '--stdin'], Buffer.concat(entries)).toString('ascii').trim();
-  const commit = git(['commit-tree', tree, '-m', 'synthetic raw path fixture']).toString('ascii').trim();
-  return { root, commit, git, close: () => rmSync(root, { recursive: true, force: true }) };
+  const fixture = gitFixture();
+  const entries = [...names].sort(Buffer.compare)
+    .map((name, index) => ({ mode: '100644', name, content: `export const item${index} = ${index};\n` }));
+  return { ...fixture, commit: fixture.commitTree(entries) };
 }
 
 const invalidNames = () => [Buffer.concat([Buffer.from('f'), Buffer.from([0xff]), Buffer.from('.ts')]),

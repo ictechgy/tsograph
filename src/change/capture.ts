@@ -11,29 +11,52 @@ export interface Capture { readonly files: ReadonlyMap<string, Buffer>; readonly
 /** 예상한 입력 실패다. 원문 경로나 git stderr를 공개하지 않는다. */
 export class CaptureError extends Error {}
 
-/** 프로젝트 밖의 절대 PATH 항목에서만 git 실행 파일을 찾는다. */
+/**
+ * 프로젝트 밖의 절대 PATH 항목에서만 git 실행 파일을 찾는다.
+ *
+ * 루트·현재 디렉터리·후보를 모두 OS realpath(`realpathSync.native`)로 정규화해 비교한다. JavaScript realpath는 받은
+ * 대소문자를 그대로 두므로, 대소문자를 무시하는 파일 시스템에서는 `…/proj/bin`이 `…/Proj` 안을 가리켜도 밖으로 보였다.
+ * 호출자가 넘긴 루트 표기를 믿지 않고 여기서 정규화한다.
+ */
 function gitExecutable(root: string): string {
+  let canonicalRoot: string;
+  let workingDirectory: string;
+  try {
+    canonicalRoot = realpathSync.native(root);
+    workingDirectory = realpathSync.native(process.cwd());
+  } catch { throw new CaptureError('trusted Git executable unavailable'); }
   for (const directory of (process.env.PATH ?? '').split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     const candidate = join(directory, process.platform === 'win32' ? 'git.exe' : 'git');
     try {
-      const actual = realpathSync(candidate);
-      const inside = relative(root, actual);
-      if (statSync(actual).isFile() && (inside.startsWith(`..${sep}`) || isAbsolute(inside)) && dirname(actual) !== process.cwd()) return actual;
+      const actual = realpathSync.native(candidate);
+      const inside = relative(canonicalRoot, actual);
+      if (statSync(actual).isFile() && (inside.startsWith(`..${sep}`) || isAbsolute(inside)) && dirname(actual) !== workingDirectory) return actual;
     } catch { /* 존재하지 않는 PATH 항목은 건너뛴다. */ }
   }
   throw new CaptureError('trusted Git executable unavailable');
 }
 
-/** Git 객체·파일 이름만 읽는다. diff, checkout, status, textconv를 실행하지 않는다. */
-function git(root: string, args: readonly string[], maxBuffer = CAPTURE_LIMITS.totalBytes): Buffer {
+/** 한 캡처 동안 쓰는 git 실행기다. */
+type GitRunner = (args: readonly string[], maxBuffer?: number) => Buffer;
+
+/**
+ * Git 객체·파일 이름만 읽는 실행기를 만든다. diff, checkout, status, textconv를 실행하지 않는다.
+ *
+ * 실행 파일은 캡처마다 한 번만 고른다(blob마다 PATH를 다시 훑지 않는다). 신뢰할 실행 파일이 없다는 진단은
+ * 실행 실패 문구로 덮지 않는다.
+ */
+function gitRunner(root: string): GitRunner {
+  const executable = gitExecutable(root);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-  try {
-    return execFileSync(gitExecutable(root), ['--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args], {
-      cwd: root, env: { ...env, GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
-      timeout: 60_000, maxBuffer, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch { throw new CaptureError('Git capture failed (requires Git 2.45+, local objects and a repository root)'); }
+  return (args, maxBuffer = CAPTURE_LIMITS.totalBytes) => {
+    try {
+      return execFileSync(executable, ['--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args], {
+        cwd: root, env: { ...env, GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+        timeout: 60_000, maxBuffer, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch { throw new CaptureError('Git capture failed (requires Git 2.45+, local objects and a repository root)'); }
+  };
 }
 
 /** 상대 일반 파일만 임시 캡처에 쓴다. Windows 별칭·경로 탈출도 거부한다. */
@@ -80,9 +103,10 @@ function readWorkingFile(path: string): Buffer {
 /** Git 커밋 또는 현재 작업 트리(추적·비무시 미추적 파일)를 메모리에 고정한다. */
 export function capture(root: string, revision?: string): Capture {
   if (!existsSync(join(root, '.git'))) throw new CaptureError('--project must be a Git repository root');
-  const commit = revision === undefined ? undefined : git(root, ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`]).toString('ascii').trim();
+  const git = gitRunner(root);
+  const commit = revision === undefined ? undefined : git(['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`]).toString('ascii').trim();
   if (commit !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(commit)) throw new CaptureError('invalid Git commit');
-  const listing = git(root, commit === undefined ? ['ls-files', '--cached', '--others', '--exclude-standard', '-z'] : ['ls-tree', '-rz', commit]);
+  const listing = git(commit === undefined ? ['ls-files', '--cached', '--others', '--exclude-standard', '-z'] : ['ls-tree', '-rz', commit]);
   let text: string;
   try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(listing); }
   catch { throw new CaptureError('capture contains non-UTF-8 file path bytes'); }
@@ -104,7 +128,7 @@ export function capture(root: string, revision?: string): Capture {
     if (spellings.has(spelling)) throw new CaptureError('capture contains colliding file paths');
     spellings.add(spelling);
     if (commit === undefined && statSync(join(root, path)).size > CAPTURE_LIMITS.fileBytes) throw new CaptureError('capture per-file byte budget exceeded');
-    const bytes = commit === undefined ? readWorkingFile(join(root, path)) : git(root, ['cat-file', 'blob', metadata[2]!], CAPTURE_LIMITS.fileBytes);
+    const bytes = commit === undefined ? readWorkingFile(join(root, path)) : git(['cat-file', 'blob', metadata[2]!], CAPTURE_LIMITS.fileBytes);
     if (bytes.length > CAPTURE_LIMITS.fileBytes || (total += bytes.length) > CAPTURE_LIMITS.totalBytes) throw new CaptureError('capture byte budget exceeded');
     files.set(path, bytes);
   }

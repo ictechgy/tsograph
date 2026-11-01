@@ -170,6 +170,17 @@
 
 ### Fixed
 
+- graph: mutation guard가 `const o = globalThis.Object`·`globalThis.Reflect` alias를 bare `Object`·`Reflect` alias와
+  같이 추적한다. 예전에는 alias 대신 전역 심볼을 등록해, FlowIndex가 reflective mutation으로 기록하지 않는 인자 없는
+  계산 호출(`o[k]()`)이 있어도 이 guard에 기대는 native Map(재현 확인)·constructor carrier 증명이 열릴 수 있었다. 이제 그런 프로젝트에서는 해당 bound 간선이
+  보수적인 candidate 간선으로 바뀔 수 있다(bare alias는 이미 그렇게 닫혔다). bridge-facts(routes·schema·openapi)
+  출력과 자기 소스 그래프는 바뀌지 않는다. intrinsic Map 판정은 `globalThis.Map.prototype`·`globalThis["Map"]`·
+  `Map["prototype"]` 쓰기도 직접 닫는다(호출자가 먼저 쓰는 clean-view 검사가 이미 닫으므로 출력 변화는 없다).
+- change-impact 캡처: 대소문자를 무시하는 POSIX 파일 시스템(macOS 기본 APFS 등)에서 PATH 항목을 프로젝트와 다른
+  대소문자로 쓰면(`…/proj/bin`, 실제 `…/Proj`) 프로젝트 안에 심은 `git`을 밖의 실행 파일로 보고 실행하던 문제를 고친다.
+  루트·현재 디렉터리·후보를 OS realpath로 정규화해 비교하고, 실행 파일은 캡처마다 한 번만 고른다. 신뢰할 git이 없다는
+  진단도 일반 실행 실패 문구로 덮지 않는다(CLI 문구·종료 코드는 그대로).
+
 - persistence 소스 reader가 파일을 연 뒤 같은 핸들에서 최대 4 MiB+1 바이트만 읽는다. 크기 확인 뒤 커진 파일도
   과대 입력으로 세고 사실을 내지 않으며, FIFO·비일반 파일과 지원 플랫폼의 마지막 파일 링크를 거부한다.
 
