@@ -363,8 +363,9 @@ function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: Gu
         ? (budget.step(), tokens[index]!) : context.currentFact(() => context.index.tokenOccurrences.get(name)?.[index]);
       if (token === undefined) return true;
       if (dangerousToken(context, token, forbidden)) return true;
-      if (isIntrinsicOwnerAliasDeclaration(token)) {
-        const symbol = context.checker.getSymbolAtLocation((token.parent as ts.VariableDeclaration).name);
+      const aliasName = intrinsicOwnerAliasName(token);
+      if (aliasName !== undefined) {
+        const symbol = context.checker.getSymbolAtLocation(aliasName);
         if (symbol !== undefined) ownerAliases.add(symbol);
       }
     }
@@ -402,16 +403,23 @@ function dangerousToken(context: MutationSafetyContext, token: ts.Node, forbidde
   return !isStringLiteralNode(key) || forbidden.has(key.text);
 }
 
-/** Object/Reflect를 local const alias로 만들었는지 candidate declaration에서 확인한다. */
-function isIntrinsicOwnerAliasDeclaration(token: ts.Node): boolean {
-  if (!ts.isIdentifier(token)) return false;
+/**
+ * candidate token이 Object/Reflect의 local alias 선언(`const o = Object`, `const o = globalThis.Object`)이면 alias 이름을 돌려준다.
+ *
+ * `globalThis.Object` 형태에서 token의 부모는 property access이고 선언은 그 위다. 선언 이름을 여기서 돌려주어
+ * 호출자가 token 부모를 선언으로 가정해 전역 심볼을 alias로 잘못 등록하지 않게 한다.
+ * @param token `Object`·`Reflect` candidate token
+ * @returns alias 선언의 이름 식별자, 아니면 undefined
+ */
+function intrinsicOwnerAliasName(token: ts.Node): ts.Identifier | undefined {
+  if (!ts.isIdentifier(token)) return undefined;
   let initializer: ts.Expression = token;
   if (ts.isPropertyAccessExpression(token.parent) && token.parent.name === token) initializer = token.parent;
   const declaration = initializer.parent;
-  if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== initializer || !ts.isIdentifier(declaration.name)) return false;
-  if (ts.isIdentifier(initializer)) return initializer.text === 'Object' || initializer.text === 'Reflect';
-  return ts.isPropertyAccessExpression(initializer) && isGlobalThisExpression(initializer.expression)
-    && (initializer.name.text === 'Object' || initializer.name.text === 'Reflect');
+  if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== initializer || !ts.isIdentifier(declaration.name)) return undefined;
+  const owner = ts.isIdentifier(initializer) ? initializer.text
+    : ts.isPropertyAccessExpression(initializer) && isGlobalThisExpression(initializer.expression) ? initializer.name.text : undefined;
+  return owner === 'Object' || owner === 'Reflect' ? declaration.name : undefined;
 }
 
 /** token이 속한 direct property/element access다. */
