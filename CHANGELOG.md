@@ -193,11 +193,34 @@
   `new Map()`처럼 소유자가 아니어도 증명하지 못하므로)의 해당 bound 간선이 candidate 간선으로 바뀐다. native Map에서
   재현을 확인했고, 같은 guard를 쓰는 constructor carrier 증명도 같은 보수적 방향으로만 바뀔 수 있다. bridge-facts(routes·schema·openapi·
   navigation)는 이 guard를 import하지 않아 바뀌지 않고, 같은 입력의 자기 소스 그래프는 `generatedAt`을 빼고 바이트 단위로 같다.
-  아직 추적하지 않아 실행과 다른 bound 간선이 남는 경우(재현 확인): `export default Object`·`Reflect`; namespace·dynamic
-  import 결과를 구조 분해한 alias(`const { owner } = ns`, `const { owner } = await import(…)`); 객체 속성·클래스 static 필드에
-  담은 값; 함수 반환값·매개변수(기본값, `any` 매개변수 포함)로 넘긴 값; 선언 뒤 대입(`let o; o = Reflect`); 조건식·`??`·쉼표
-  초깃값; 대입 패턴·매개변수 기본값·중첩·배열 구조 분해; `globalThis` 밖의 전역 객체(`self.Reflect`, `window.Reflect`,
-  `globalThis.globalThis.Reflect`).
+  이 항목이 남긴 경로(`export default`, 구조 분해, 속성, 반환값·매개변수, 선언 뒤 대입, 조건식 초깃값, 다른 전역 객체)는 바로
+  아래 typed owner 항목이 닫는다. 그래도 남는 경로는 그 항목에 적는다.
+- graph: mutation guard가 Object·Reflect 소유자를 표기·변수 alias뿐 아니라 checker 타입으로도 판정한다.
+  - 수신자 타입(union 구성원, 타입 매개변수 제약 포함)의 심볼이 default lib에 선언을 하나라도 가진 `ObjectConstructor`·`Reflect`면
+    소유자다. `reflect-metadata`의 `declare global { namespace Reflect … }` 같은 증강이 있어도 같다.
+  - `any`·`unknown`(풀리지 않는 import의 오류 타입 포함)·제약 없는 타입 매개변수, 그리고 전역 `Object`·`Reflect` 타입이
+    대입될 수 있는 구조적 상위 타입(`{}`, `object`, `Function`, `Record<string, unknown>`, 같은 모양의 interface)은
+    소유자가 아님을 증명하지 못하므로 닫는다. checker 실패도 닫는다.
+  - 문자열 키 멤버(`x["defineProperty"]`)와 구조 분해한 mutator 이름(`const { defineProperty } = x`, `({ set: f } = x)`)을
+    점 표기와 같이 본다. `set` 밖의 mutator 이름은 수신자와 무관하게, `set`은 원본이 소유자일 수 있을 때 닫는다.
+  - 계산 키 읽기(`x[k]`, 계산 키·rest 구조 분해)는 원본이 소유자일 수 있으면 닫는다(`holder.O[k]`, `({}).constructor[k]`).
+  - 소유자를 반사 reader의 대상으로 넘겨 멤버를 꺼내거나(`Reflect.get(Reflect, k)`, `Object.getOwnPropertyDescriptor(s)(Reflect, …)`,
+    비mutator literal 이름은 제외), `any`·`unknown` 단언을 거쳐 수신자·alias가 아닌 자리로 보내면(`f(Reflect as any)`) 닫는다.
+  - 소유자 값이 받는 자리의 문맥 타입(대입 대상, 매개변수, 반환 타입 …)에 대입될 수 없는 타입 오류 흐름(`m = Reflect`,
+    `Map` 매개변수에 `Reflect`)은 닫는다. 타입이 맞는 코드에서는 생기지 않는다.
+  - 선언 뒤 대입이 있는 `let`·`var` alias는 초깃값과 함께 사용 자리 타입도 본다. 순수 alias 순환(지역 `const a = b;
+    const b = a`, 서로를 re-export)은 실행하면 값이 생기지 않으므로 소유자가 아니다. 16단계 alias 상한 경계는 그대로다.
+  이로써 #54 항목이 남긴 경로(`export default Object`·`Reflect`, namespace·dynamic import 결과 구조 분해, 객체 속성·클래스
+  static 필드, 함수 반환값·매개변수(기본값, `any`), 선언 뒤 대입, 조건식·`??`·쉼표 초깃값, 대입 패턴·매개변수 기본값·중첩·배열
+  구조 분해, `self.Reflect`·`window.Reflect`·`globalThis.globalThis.Reflect`)와 `({}).constructor[k]`가 닫힌다(재현 확인).
+  출력 변화(graph·reach·impact·change-impact): 위 경로로 Object·Reflect를 다루는 프로젝트, 그리고 `.set` 수신자나 계산 키
+  읽기 원본이 `any`·`unknown`·구조적 상위 타입인 프로젝트에서 이 guard에 기대는 native Map·constructor carrier 증명의 bound
+  간선이 candidate 간선으로 바뀔 수 있다. bridge-facts는 이 guard를 import하지 않아 바뀌지 않는다. 같은 입력의 자기 소스·
+  vuejs/core·nestjs/nest·typeorm 그래프는 바이트 단위로 같다(네 입력 모두 이 guard가 한 번도 호출되지 않는다).
+  아직 추적하지 않아 실행과 다른 bound 간선이 남는 경우(재현 확인): 단언 없이 `any`·`unknown` 값(`any` 매개변수, `any`를
+  돌려주는 호출)을 무관한 타입의 매개변수로 다시 받은 뒤 쓰는 흐름(`function patch(m: Map<any, any>) { m.set(…) }`에 그런
+  값을 넘김). 이를 닫으려면 Object·Reflect를 `any`·`unknown` 자리로 넘기는 모든 사용(`describe(Object)` 같은 무해한 전달
+  포함)을 닫아야 해 넣지 않았다.
 - change-impact 캡처: 대소문자를 무시하는 POSIX 파일 시스템(macOS 기본 APFS 등)에서 PATH 항목을 프로젝트와 다른
   대소문자로 쓰면(`…/proj/bin`, 실제 `…/Proj`) 프로젝트 안에 심은 `git`을 밖의 실행 파일로 보고 실행하던 문제를 고친다.
   루트·현재 디렉터리·후보를 OS realpath로 정규화해 비교하고, 실행 파일은 캡처마다 한 번만 고른다. 신뢰할 git이 없다는

@@ -278,6 +278,29 @@ test('a checker failure while resolving a set receiver fails closed', () => {
   assert.equal(isMutationCleanView({ ...context, checker: failing }), false);
 });
 
+test('checker failures in the typed owner check fail closed', () => {
+  // 수신자 타입 조회, 전역 소유자 타입 해석, 구조적 대입 검사 중 어느 것이 실패해도 소유자가 아님을 증명하지 못한 것이다.
+  const source = 'declare const store: { set(key: string, value: number): void }; store.set("key", 1);';
+  const context = contextOf(source);
+  assert.equal(isMutationCleanView(context), true);
+  const failingOn = (method: 'getTypeAtLocation' | 'resolveName' | 'isTypeAssignableTo') => new Proxy(context.checker, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (property !== method) return typeof value === 'function' ? value.bind(target) : value;
+      return (...args: unknown[]) => {
+        const node = args[0];
+        const receiverLookup = method !== 'getTypeAtLocation'
+          || (ts.isIdentifier(node as ts.Node) && (node as ts.Identifier).text === 'store' && ts.isPropertyAccessExpression((node as ts.Node).parent));
+        if (receiverLookup) throw new Error(`${method} failure`);
+        return (value as (...values: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  for (const method of ['getTypeAtLocation', 'resolveName', 'isTypeAssignableTo'] as const) {
+    assert.equal(isMutationCleanView({ ...context, checker: failingOn(method) }), false, method);
+  }
+});
+
 test('global Map and Date member replacements are visible to the guard', () => {
   for (const source of [
     'Map = Replacement; declare let Replacement: typeof Map;',

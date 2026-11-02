@@ -410,7 +410,7 @@ function hasForbiddenDynamicReference(context: MutationSafetyContext, budget: Gu
       }
     }
   }
-  return false;
+  return hasPossibleOwnerComputedRead(context, budget);
 }
 
 /** token map/list identity와 길이를 한 current guard로 읽어 append·교체를 닫는다. */
@@ -431,6 +431,7 @@ function dangerousToken(context: MutationSafetyContext, token: ts.Node, forbidde
     && !isDeclarationName(token) && !isTypePosition(token)) return true;
   const owner = intrinsicOwnerExpression(token);
   if (owner !== undefined && isDangerousOwnerUse(context, owner)) return true;
+  if (isDangerousDestructuredMember(context, token)) return true;
   const access = accessContainingToken(token);
   if (access === undefined) return false;
   if (mutatorReference(context, access) !== undefined || dynamicIntrinsicNamespace(context, access)) return true;
@@ -504,6 +505,7 @@ function isDangerousOwnerUse(context: MutationSafetyContext, site: ts.Node): boo
     const member = ts.isPropertyAccessExpression(parent) ? parent.name.text : literalName(parent.argumentExpression);
     return member === undefined || MUTATOR_NAMES.has(member) || mutatorReference(context, parent) !== undefined;
   }
+  if (isReflectiveMemberExtraction(context, site) || isTypeErasedOwnerEscape(site) || isMistypedOwnerFlow(context, site)) return true;
   if (!ts.isVariableDeclaration(parent) || parent.initializer !== site || !ts.isObjectBindingPattern(parent.name)) return false;
   return parent.name.elements.some((element) => {
     if (element.dotDotDotToken !== undefined) return true;
@@ -513,12 +515,214 @@ function isDangerousOwnerUse(context: MutationSafetyContext, site: ts.Node): boo
   });
 }
 
-/** token이 속한 direct property/element access다. */
+/** 멤버를 이름이나 descriptor로 꺼내는 Object·Reflect 반사 reader다. */
+const REFLECTIVE_MEMBER_READERS = new Set(['get', 'getOwnPropertyDescriptor', 'getOwnPropertyDescriptors']);
+
+/**
+ * 소유자 식이 반사 reader의 대상 인자로 넘어가 멤버를 꺼내는지 본다(`Reflect.get(Reflect, "set")`,
+ * `Object.getOwnPropertyDescriptors(Reflect)`). 비mutator 이름을 literal로 꺼내는 경우만 안전하다.
+ */
+function isReflectiveMemberExtraction(context: MutationSafetyContext, site: ts.Node): boolean {
+  const call = site.parent;
+  if (!ts.isCallExpression(call) || call.arguments[0] !== site) return false;
+  const callee = skipWrappers(call.expression);
+  if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return false;
+  const reader = ts.isPropertyAccessExpression(callee) ? callee.name.text : literalName(callee.argumentExpression);
+  if (reader === undefined || !REFLECTIVE_MEMBER_READERS.has(reader) || intrinsicOwner(context, callee.expression) === undefined) return false;
+  if (reader === 'getOwnPropertyDescriptors') return true;
+  const key = call.arguments[1] === undefined ? undefined : literalName(call.arguments[1]);
+  return key === undefined || MUTATOR_NAMES.has(key);
+}
+
+/**
+ * 소유자 식이 `any`·`unknown` 단언(`Reflect as any`, `<unknown>Object`)을 거쳐 수신자·alias·구조 분해가 아닌 자리로 나가면
+ * 타입을 지운 escape로 닫는다. 단언 뒤 다른 타입으로 다시 받으면 타입으로는 소유자를 되찾을 수 없기 때문이다.
+ */
+function isTypeErasedOwnerEscape(site: ts.Node): boolean {
+  let erased = false;
+  for (let node: ts.Node = site; ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)
+    || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node); node = node.expression) {
+    if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node))
+      && (node.type.kind === ts.SyntaxKind.AnyKeyword || node.type.kind === ts.SyntaxKind.UnknownKeyword)) erased = true;
+  }
+  if (!erased) return false;
+  const parent = site.parent;
+  if (ts.isVariableDeclaration(parent) && parent.initializer === site) return false;
+  if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === site) return false;
+  return !ts.isExpressionStatement(parent);
+}
+
+/**
+ * 소유자 값이 받는 자리의 문맥 타입(대입 대상, 매개변수, 반환 타입 …)에 대입될 수 없으면 타입 오류로 흘러간 것이다. 그 뒤로는
+ * 받는 자리 타입으로 소유자를 되찾을 수 없으므로 닫는다. 타입이 맞는 코드에서는 생기지 않는다. 문맥 타입이 `any`·`unknown`이면
+ * 그 값을 쓰는 자리의 타입 검사가 닫는다.
+ */
+function isMistypedOwnerFlow(context: MutationSafetyContext, site: ts.Node): boolean {
+  if (!ts.isExpression(site)) return false;
+  // 구조 분해 원본의 문맥 타입은 pattern이 만든 모양일 뿐 받는 자리 타입이 아니다(구조 분해 규칙이 따로 본다).
+  const parent = site.parent;
+  if ((ts.isVariableDeclaration(parent) || ts.isParameter(parent)) && parent.initializer === site && !ts.isIdentifier(parent.name)) return false;
+  if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === site
+    && (ts.isObjectLiteralExpression(skipWrappers(parent.left)) || ts.isArrayLiteralExpression(skipWrappers(parent.left)))) return false;
+  try {
+    const contextual = context.checker.getContextualType(site);
+    if (contextual === undefined || (contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false;
+    return !context.checker.isTypeAssignableTo(context.checker.getTypeAtLocation(skipWrappers(site)), contextual);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * token이 속한 direct property/element access다.
+ *
+ * 문자열 literal 키(`x["defineProperty"]`)는 점 표기(`x.defineProperty`)와 같은 멤버 이름이므로 그 access를 돌려준다.
+ */
 function accessContainingToken(token: ts.Node): ts.PropertyAccessExpression | ts.ElementAccessExpression | undefined {
   const parent = token.parent;
   if (ts.isPropertyAccessExpression(parent) && (parent.name === token || parent.expression === token)) return parent;
   if (ts.isElementAccessExpression(parent) && parent.expression === token) return parent;
+  if (!ts.isStringLiteralLike(token)) return undefined;
+  const key = climbWrappers(token);
+  return ts.isElementAccessExpression(key.parent) && key.parent.argumentExpression === key ? key.parent : undefined;
+}
+
+/**
+ * 구조 분해로 떼어 낸 mutator 이름(`const { defineProperty } = x`, `({ set: put } = x)`)을 멤버 읽기처럼 판정한다.
+ *
+ * 점 표기와 같이 `set` 밖의 mutator 이름은 수신자와 무관하게 닫고, `set`은 구조 분해 원본이 소유자일 수 있을 때만 닫는다.
+ * @param context mutation 분석 문맥
+ * @param token mutator 이름 candidate token
+ * @returns 위험한 구조 분해 멤버이면 true
+ */
+function isDangerousDestructuredMember(context: MutationSafetyContext, token: ts.Node): boolean {
+  if ((!ts.isIdentifier(token) && !ts.isStringLiteralLike(token)) || !MUTATOR_NAMES.has(token.text)) return false;
+  const member = destructuredMember(token);
+  if (member === undefined) return false;
+  return token.text !== 'set' || patternSourceOwner(context, member.pattern) !== undefined;
+}
+
+/** token이 객체 구조 분해 pattern의 속성 이름이면 그 pattern이다(binding pattern과 대입 pattern 모두). */
+function destructuredMember(token: ts.Identifier | ts.StringLiteralLike): { readonly pattern: ts.ObjectBindingPattern | ts.ObjectLiteralExpression } | undefined {
+  const parent = token.parent;
+  if (ts.isBindingElement(parent) && ts.isObjectBindingPattern(parent.parent)
+    && (parent.propertyName === token || (parent.propertyName === undefined && parent.name === token))) return { pattern: parent.parent };
+  if ((ts.isPropertyAssignment(parent) || ts.isShorthandPropertyAssignment(parent)) && parent.name === token
+    && ts.isObjectLiteralExpression(parent.parent) && assignmentPatternRoot(parent.parent) !== undefined) return { pattern: parent.parent };
   return undefined;
+}
+
+/**
+ * 객체·배열 literal이 구조 분해 대입의 대상(`({ a } = x)`, `[{ a }] = x`, `for ({ a } of xs)`)이면 그 바깥 literal이다.
+ * @param literal 검사할 literal
+ * @returns 대입 대상 pattern의 바깥 literal, 아니면 undefined
+ */
+function assignmentPatternRoot(literal: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression): ts.Expression | undefined {
+  let current: ts.Node = literal;
+  for (;;) {
+    const site = climbWrappers(current);
+    const parent = site.parent;
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === site) {
+      const holder = parent.parent;
+      // 구조 분해 안의 기본값(`{ a: { b } = {} }`, `[{ b } = {}]`)이면 바깥 pattern으로 계속 오른다.
+      const isDefault = (ts.isPropertyAssignment(holder) && holder.initializer === parent) || ts.isArrayLiteralExpression(holder);
+      if (!isDefault) return site as ts.Expression;
+      current = parent;
+    } else if ((ts.isForOfStatement(parent) || ts.isForInStatement(parent)) && parent.initializer === site) {
+      return site as ts.Expression;
+    } else if (ts.isPropertyAssignment(parent) && parent.initializer === site && ts.isObjectLiteralExpression(parent.parent)) {
+      current = parent.parent;
+    } else if ((ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent))
+      && (ts.isObjectLiteralExpression(parent.parent) || ts.isArrayLiteralExpression(parent.parent))) {
+      current = parent.parent;
+    } else if (ts.isArrayLiteralExpression(parent)) {
+      current = parent;
+    } else {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * 구조 분해 pattern 원본이 Object/Reflect 소유자일 수 있는지 본다.
+ *
+ * binding pattern은 checker가 원본 타입을 준다. 대입 pattern은 오른쪽 식에서 속성 이름을 따라 내려가고, 따라갈 수 없으면
+ * 증명 실패로 닫는다.
+ */
+function patternSourceOwner(context: MutationSafetyContext, pattern: ts.ObjectBindingPattern | ts.ObjectLiteralExpression): string | undefined {
+  if (ts.isObjectBindingPattern(pattern)) {
+    const declaration = pattern.parent;
+    if (ts.isVariableDeclaration(declaration) && declaration.name === pattern && declaration.initializer !== undefined) {
+      return intrinsicOwner(context, declaration.initializer);
+    }
+    return typedOwnerOfNode(context, pattern);
+  }
+  const source = assignmentPatternSourceType(context, pattern);
+  return source === undefined ? UNPROVEN_OWNER : ownerOfType(context, source);
+}
+
+/** 대입 pattern 안의 객체 literal이 받는 값의 타입이다. 오른쪽 식에서 정적 속성 이름으로만 내려간다. */
+function assignmentPatternSourceType(context: MutationSafetyContext, literal: ts.ObjectLiteralExpression): ts.Type | undefined {
+  const site = climbWrappers(literal);
+  const parent = site.parent;
+  try {
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === site) {
+      return context.checker.getTypeAtLocation(skipWrappers(parent.right));
+    }
+    if (ts.isPropertyAssignment(parent) && parent.initializer === site && ts.isObjectLiteralExpression(parent.parent)) {
+      const name = ts.isIdentifier(parent.name) || ts.isStringLiteralLike(parent.name) ? parent.name.text : undefined;
+      const outer = assignmentPatternSourceType(context, parent.parent);
+      const property = name === undefined || outer === undefined ? undefined : context.checker.getPropertyOfType(outer, name);
+      return property === undefined ? undefined : context.checker.getTypeOfSymbolAtLocation(property, literal);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * 계산 키 읽기(`x[k]`, `const { [k]: v } = x`, `const { ...rest } = x`)의 원본이 소유자일 수 있으면 어떤 method를 떼어 낼지
+ * 몰라 닫는다. 원본 표기·alias뿐 아니라 checker 타입으로 본다(`holder.O[k]`, `({}).constructor[k]`).
+ */
+function hasPossibleOwnerComputedRead(context: MutationSafetyContext, budget: GuardBudget): boolean {
+  for (const file of context.index.files) {
+    for (const read of computedReadsOf(file)) {
+      budget.step();
+      const owner = ts.isElementAccessExpression(read) ? intrinsicOwner(context, read.expression)
+        : ts.isObjectBindingPattern(read) || ts.isObjectLiteralExpression(read) ? patternSourceOwner(context, read) : undefined;
+      if (owner !== undefined) return true;
+    }
+  }
+  return false;
+}
+
+/** 파일의 계산 키 읽기 지점을 한 번만 모은다(AST는 바뀌지 않으므로 파일별로 재사용한다). */
+const computedReadCache = new WeakMap<ts.SourceFile, readonly ComputedRead[]>();
+
+/** 계산 키 원소 접근, 계산 키·rest가 있는 객체 binding pattern, 계산 키·spread가 있는 객체 대입 pattern이다. */
+type ComputedRead = ts.ElementAccessExpression | ts.ObjectBindingPattern | ts.ObjectLiteralExpression;
+
+function computedReadsOf(file: ts.SourceFile): readonly ComputedRead[] {
+  const cached = computedReadCache.get(file);
+  if (cached !== undefined) return cached;
+  const reads: ComputedRead[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isElementAccessExpression(node)) {
+      const key = skipWrappers(node.argumentExpression);
+      if (!ts.isStringLiteralLike(key) && !ts.isNumericLiteral(key)) reads.push(node);
+    } else if (ts.isObjectBindingPattern(node)) {
+      if (node.elements.some((element) => element.dotDotDotToken !== undefined
+        || (element.propertyName !== undefined && ts.isComputedPropertyName(element.propertyName)))) reads.push(node);
+    } else if (ts.isObjectLiteralExpression(node) && assignmentPatternRoot(node) !== undefined) {
+      if (node.properties.some((property) => ts.isSpreadAssignment(property)
+        || (property.name !== undefined && ts.isComputedPropertyName(property.name)))) reads.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  computedReadCache.set(file, reads);
+  return reads;
 }
 
 /** 문자열 literal AST node만 type-safe하게 판정한다. */
@@ -592,26 +796,138 @@ function dynamicIntrinsicNamespace(context: MutationSafetyContext, expression: t
 
 /** `intrinsicOwner`가 소유자가 아님을 증명하지 못했을 때 돌려주는 표식이다(호출자는 소유자로 취급한다). */
 const UNPROVEN_OWNER = 'unproven';
+/** 순수 alias 순환을 만났다는 내부 표식이다. 실행하면 TDZ·undefined·링크 오류라 소유자가 아니다(밖으로 내보내지 않는다). */
+const CYCLIC_ALIAS = 'cyclic';
 /** alias 초깃값을 따라가는 최대 깊이다(기존 상한과 같다). 넘기면 소유자가 아님을 증명하지 못한 것으로 보고 닫는다. */
 const MAX_OWNER_ALIAS_DEPTH = 16;
+/** union·제약을 따라 타입을 내려가는 최대 깊이다. 넘기면 증명 실패다. */
+const MAX_OWNER_TYPE_DEPTH = 8;
 
 /**
- * Object/Reflect 소유자 표기 또는 그 변수 alias를 bounded하게 확인한다.
+ * Object/Reflect 소유자 표기, 그 변수 alias, 또는 checker 타입상 소유자일 수 있는 식인지 bounded하게 확인한다.
  *
  * 표기는 `intrinsicOwnerName`과 같고, alias는 감싼 초깃값, alias의 alias, import·re-export·namespace 멤버(`ns.o`,
- * `ns["o"]`)를 따라간다. guard는 "소유자일 수 있음"을 위험으로 보므로 `let`·`var` 초깃값도 소유자로 본다.
- * 깊이 상한을 넘기거나 checker가 실패하면 소유자가 아님을 증명하지 못한 것이므로 `UNPROVEN_OWNER`로 닫는다.
- * 순환 alias 사슬은 어느 초깃값도 소유자 표기에 닿지 않으므로 소유자가 아니다.
+ * `ns["o"]`)를 따라간다. alias로 끝나지 않으면(속성, 반환값, 매개변수, 구조 분해, 조건식 …) checker 타입을 본다
+ * (`ownerOfType`). 대입이 있는 `let`·`var` alias는 초깃값만 믿지 않고 사용 자리 타입도 본다. 깊이 상한을 넘기거나
+ * checker가 실패하면 증명 실패(`UNPROVEN_OWNER`)로 닫는다. 순수 alias 순환은 소유자가 아니다.
  */
-function intrinsicOwner(context: MutationSafetyContext, expression: ts.Expression, depth = 0, seen = new Set<ts.Symbol>()): string | undefined {
+function intrinsicOwner(context: MutationSafetyContext, expression: ts.Expression): string | undefined {
+  const owner = resolveOwner(context, expression, 0, new Set<ts.Symbol>());
+  return owner === CYCLIC_ALIAS ? undefined : owner;
+}
+
+/** `intrinsicOwner`의 재귀 본체다. 순수 alias 순환은 `CYCLIC_ALIAS`로 위에 알린다. */
+function resolveOwner(context: MutationSafetyContext, expression: ts.Expression, depth: number, seen: Set<ts.Symbol>): string | undefined {
   const direct = intrinsicOwnerName(expression);
   if (direct !== undefined) return direct;
   const location = aliasLocation(expression);
-  if (location === undefined) return undefined;
-  if (depth > MAX_OWNER_ALIAS_DEPTH) return UNPROVEN_OWNER;
-  const declaration = aliasedVariableDeclaration(context, location, seen);
-  if (declaration === UNPROVEN_OWNER) return UNPROVEN_OWNER;
-  return declaration?.initializer === undefined ? undefined : intrinsicOwner(context, declaration.initializer, depth + 1, seen);
+  if (location !== undefined) {
+    if (depth > MAX_OWNER_ALIAS_DEPTH) return UNPROVEN_OWNER;
+    const alias = aliasedVariableDeclaration(context, location, seen);
+    if (alias === UNPROVEN_OWNER || alias === CYCLIC_ALIAS) return alias;
+    if (alias?.declaration.initializer !== undefined) {
+      const viaInitializer = resolveOwner(context, alias.declaration.initializer, depth + 1, seen);
+      if (!alias.reassigned) return viaInitializer;
+      if (viaInitializer !== undefined && viaInitializer !== CYCLIC_ALIAS) return viaInitializer;
+    }
+  }
+  return typedOwnerOfNode(context, skipWrappers(expression));
+}
+
+/** 노드의 checker 타입으로 소유자일 수 있는지 본다. checker 실패는 증명 실패다. */
+function typedOwnerOfNode(context: MutationSafetyContext, node: ts.Node): string | undefined {
+  let type: ts.Type;
+  try {
+    type = context.checker.getTypeAtLocation(node);
+  } catch {
+    return UNPROVEN_OWNER;
+  }
+  return ownerOfType(context, type);
+}
+
+/** 소유자일 수 없는 원시·literal·void 계열 타입이다. */
+const NON_OWNER_TYPE_FLAGS = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike | ts.TypeFlags.BooleanLike
+  | ts.TypeFlags.EnumLike | ts.TypeFlags.ESSymbolLike | ts.TypeFlags.VoidLike | ts.TypeFlags.Null | ts.TypeFlags.Never;
+
+/**
+ * 타입의 값이 Object 생성자나 Reflect namespace일 수 있는지 본다.
+ *
+ * - 타입 심볼이 default lib에 선언을 가진 `ObjectConstructor`·`Reflect`이면 그 소유자다. 증강
+ *   (`reflect-metadata`의 `declare global { namespace Reflect … }`)이 있어도 default lib 선언이 하나라도 있으면 같다.
+ * - `any`·`unknown`·제약 없는 타입 매개변수와, 두 소유자 타입이 대입될 수 있는 구조적 상위 타입(`{}`, `object`,
+ *   `Function`, `Record<string, unknown>`, 같은 모양의 interface)은 소유자가 아님을 증명하지 못하므로 `UNPROVEN_OWNER`다.
+ * - 그 밖의 타입은 소유자가 아니다.
+ */
+function ownerOfType(context: MutationSafetyContext, type: ts.Type, depth = 0): string | undefined {
+  if (depth > MAX_OWNER_TYPE_DEPTH) return UNPROVEN_OWNER;
+  if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return UNPROVEN_OWNER;
+  if ((type.flags & NON_OWNER_TYPE_FLAGS) !== 0) return undefined;
+  if ((type.flags & ts.TypeFlags.InstantiableNonPrimitive) !== 0) {
+    const constraint = context.checker.getBaseConstraintOfType(type);
+    return constraint === undefined || constraint === type ? UNPROVEN_OWNER : ownerOfType(context, constraint, depth + 1);
+  }
+  if (type.isUnion()) {
+    let unproven = false;
+    for (const part of type.types) {
+      const owner = ownerOfType(context, part, depth + 1);
+      if (owner === 'Object' || owner === 'Reflect') return owner;
+      if (owner !== undefined) unproven = true;
+    }
+    return unproven ? UNPROVEN_OWNER : undefined;
+  }
+  const named = libOwnerName(context, type)
+    ?? (type.isIntersection() ? type.types.map((part) => libOwnerName(context, part)).find((name) => name !== undefined) : undefined);
+  if (named !== undefined) return named;
+  const owners = ownerTypes(context);
+  if (owners === undefined) return UNPROVEN_OWNER;
+  try {
+    if (owners.object !== undefined && context.checker.isTypeAssignableTo(owners.object, type)) return UNPROVEN_OWNER;
+    if (owners.reflect !== undefined && context.checker.isTypeAssignableTo(owners.reflect, type)) return UNPROVEN_OWNER;
+  } catch {
+    return UNPROVEN_OWNER;
+  }
+  return undefined;
+}
+
+/** 타입 심볼이 default lib에 선언을 가진 `ObjectConstructor`·`Reflect`이면 소유자 이름이다. */
+function libOwnerName(context: MutationSafetyContext, type: ts.Type): string | undefined {
+  const symbol = type.getSymbol();
+  const name = symbol?.getName();
+  if (name !== 'ObjectConstructor' && name !== 'Reflect') return undefined;
+  const fromDefaultLibrary = (symbol!.declarations ?? []).some((declaration) => context.isDefaultLibraryFile(declaration.getSourceFile()));
+  return !fromDefaultLibrary ? undefined : name === 'ObjectConstructor' ? 'Object' : 'Reflect';
+}
+
+/** 구조적 대입 검사에 쓰는 전역 `Object`·`Reflect` 값의 타입이다. */
+interface OwnerTypes {
+  readonly object: ts.Type | undefined;
+  readonly reflect: ts.Type | undefined;
+}
+
+/** 문맥마다 한 번만 전역 소유자 타입을 푼다. */
+const ownerTypeCache = new WeakMap<MutationSafetyContext, OwnerTypes | null>();
+
+/**
+ * 프로그램이 전역 `Object`·`Reflect` 값에 준 타입이다. 대입 검사는 실제 전역 타입과 비교하면 되므로 default lib 판정을 요구하지
+ * 않는다(판정 함수가 없는 문맥도 정밀도를 잃지 않는다). 둘 다 없으면(lib 없음) undefined라 호출자가 닫는다.
+ */
+function ownerTypes(context: MutationSafetyContext): OwnerTypes | undefined {
+  const cached = ownerTypeCache.get(context);
+  if (cached !== undefined) return cached ?? undefined;
+  const resolve = (name: string): ts.Type | undefined => {
+    const symbol = context.checker.resolveName(name, undefined, ts.SymbolFlags.Value, false);
+    return symbol === undefined ? undefined : context.checker.getTypeOfSymbol(symbol);
+  };
+  let result: OwnerTypes | null;
+  try {
+    const object = resolve('Object');
+    const reflect = resolve('Reflect');
+    result = object === undefined && reflect === undefined ? null : { object, reflect };
+  } catch {
+    result = null;
+  }
+  ownerTypeCache.set(context, result);
+  return result ?? undefined;
 }
 
 /** alias를 가리킬 수 있는 식의 심볼 조회 위치다(식별자, property 이름, 문자열 키). 그 밖의 식은 alias가 아니다. */
@@ -623,23 +939,51 @@ function aliasLocation(expression: ts.Expression): ts.Node | undefined {
   return key !== undefined && isStringLiteralNode(key) ? key : undefined;
 }
 
-/** 조회 위치가 가리키는 단일 변수 선언을 import·re-export alias를 풀어 찾는다. checker 실패는 증명 실패다. */
+/** 조회 위치가 가리키는 단일 변수 선언과, 그 변수에 선언 뒤 대입이 있는지다. */
+interface AliasDeclaration {
+  readonly declaration: ts.VariableDeclaration;
+  readonly reassigned: boolean;
+}
+
+/**
+ * 조회 위치가 가리키는 단일 변수 선언을 import·re-export alias를 풀어 찾는다.
+ *
+ * checker 실패는 증명 실패다. 이미 지나온 심볼이나 서로를 가리키는 import·re-export는 순수 alias 순환이다. 풀리지 않는
+ * import(없는 모듈)는 변수 선언이 아니므로 호출자가 타입(오류 타입은 `any` 계열)으로 판정한다.
+ */
 function aliasedVariableDeclaration(
   context: MutationSafetyContext,
   location: ts.Node,
   seen: Set<ts.Symbol>,
-): ts.VariableDeclaration | typeof UNPROVEN_OWNER | undefined {
+): AliasDeclaration | typeof UNPROVEN_OWNER | typeof CYCLIC_ALIAS | undefined {
   let symbol: ts.Symbol | undefined;
   try {
     symbol = context.checker.getSymbolAtLocation(location);
-    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = context.checker.getAliasedSymbol(symbol);
+    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+      const target = context.checker.getAliasedSymbol(symbol);
+      if ((target.declarations?.length ?? 0) === 0) return isCyclicImportAlias(context, symbol) ? CYCLIC_ALIAS : undefined;
+      symbol = target;
+    }
   } catch {
     return UNPROVEN_OWNER;
   }
-  if (symbol === undefined || seen.has(symbol)) return undefined;
+  if (symbol === undefined) return undefined;
+  if (seen.has(symbol)) return CYCLIC_ALIAS;
   seen.add(symbol);
   const declaration = symbol.declarations?.length === 1 ? symbol.declarations[0] : undefined;
-  return declaration !== undefined && ts.isVariableDeclaration(declaration) ? declaration : undefined;
+  if (declaration === undefined || !ts.isVariableDeclaration(declaration)) return undefined;
+  return { declaration, reassigned: (context.index.identifierWrites.get(symbol)?.length ?? 0) > 0 };
+}
+
+/** 선언 없는 대상으로 풀린 import·re-export alias가 서로를 가리키는 순환인지 바로 다음 alias를 따라가 본다. */
+function isCyclicImportAlias(context: MutationSafetyContext, symbol: ts.Symbol): boolean {
+  const visited = new Set<ts.Symbol>();
+  for (let current: ts.Symbol | undefined = symbol; current !== undefined && (current.flags & ts.SymbolFlags.Alias) !== 0;
+    current = context.checker.getImmediateAliasedSymbol(current)) {
+    if (visited.has(current)) return true;
+    visited.add(current);
+  }
+  return false;
 }
 
 /** string literal member name만 읽는다. */
