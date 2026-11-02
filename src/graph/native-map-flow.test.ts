@@ -503,6 +503,9 @@ test('typed owner checks keep the native Map proof for unrelated receivers, iner
     ['typed .set receivers', { 'src/main.ts': mainWith([], 'declare const headers: { append(key: string, value: string): void; set(key: string, value: string): void };', "headers.set('a', 'b');", 'export function remember(target: WeakMap<object, number>) { target.set({}, 1); }') }],
     ['computed reads on non-owner types', { 'src/main.ts': mainWith([], 'declare const env: Record<string, string>;', 'declare const list: number[];', 'declare const key: string;', 'export const values = [env[key], list[Number(key)]];') }],
     ['any receiver non-mutator member', { 'src/main.ts': mainWith([], 'declare const anything: any;', 'export const names = anything.keys();') }],
+    ['set destructured from a typed Map', { 'src/main.ts': mainWith([], 'declare const store: Map<string, number>;', 'const { set } = store;', "export const update = () => set.call(store, 'a', 1);") }],
+    ['set destructured by assignment from a typed Map', { 'src/main.ts': mainWith([], 'declare const store: Map<string, number>;', 'let put: Map<string, number>["set"] | undefined;', '({ set: put } = store);', 'export const update = () => put;') }],
+    ['any-cast alias with static reads', { 'src/main.ts': mainWith([], 'const owner = Reflect as any;', 'export const keys = owner.ownKeys({ a: 1 });') }],
     ['union and constrained non-owner receivers', { 'src/main.ts': mainWith([], 'declare const store: Map<object, number> | WeakMap<object, number>;', 'store.set({}, 1);', "export function update<T extends Map<string, number>>(cache: T) { cache.set('a', 1); }") }],
     ['Object called through an any cast', { 'src/main.ts': mainWith([], 'export const box = (value: unknown) => (Object as any)(value);') }],
     ['non-mutator member read by Reflect.get', { 'src/main.ts': mainWith([], "export const keys = Reflect.get(Reflect, 'ownKeys');") }],
@@ -510,6 +513,35 @@ test('typed owner checks keep the native Map proof for unrelated receivers, iner
     ['cyclic local alias', { 'src/main.ts': mainWith([], 'const first = second;', 'const second = first;', 'first.set(1, 2);') }],
   ];
   for (const [label, files] of cases) assert.deepEqual(boundTo(await graphOf(files), 'read'), ['src/main.ts#First.run'], label);
+});
+
+/** 사례마다 증명이 닫혔는지 보고, 아직 열린 사례 이름을 모아 한 번에 단언한다. */
+async function stillOpenLabels(cases: readonly (readonly [string, Record<string, string>])[]): Promise<string[]> {
+  const open: string[] = [];
+  for (const [label, files] of cases) {
+    const graph = await graphOf(files);
+    const candidates = graph.edges.filter((edge) => edge.from === 'src/main.ts#read' && edge.evidence === 'candidate').map((edge) => edge.to);
+    if (boundTo(graph, 'read').length > 0 || candidates.join() !== 'src/main.ts#First.run,src/main.ts#Second.run') open.push(label);
+  }
+  return open;
+}
+
+test('a union with one possible-owner member closes the native Map proof even when the other members are proven non-owners', async () => {
+  // Map은 소유자가 아님을 증명하지만, 구조적 상위 타입·제약 없는 타입 매개변수·Record 구성원은 증명하지 못한다.
+  const cases: readonly [string, Record<string, string>][] = [
+    ['Map or structural setter parameter', { 'src/main.ts': mainWith([], `function apply(target: Map<any, any> | { set(o: object, k: PropertyKey, v: unknown): boolean }) { target.set${setPatch} }`, 'apply(Reflect);') }],
+    ['unconstrained type parameter or Map', { 'src/main.ts': mainWith([], `export function apply<T>(target: T | Map<any, any>) { (target as Map<any, any>).set${setPatch} }`) }],
+    ['Map or function record computed read', { 'src/main.ts': mainWith([], "declare const key: 'set';", `function apply(target: Map<any, any> | Record<string, Function>) { (target as Record<string, Function>)[key]${setPatch} }`, 'apply(Reflect);') }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
+});
+
+test('computed-key binding patterns over typed owner sources close the native Map proof', async () => {
+  const cases: readonly [string, Record<string, string>][] = [
+    ['holder property source', { 'src/main.ts': mainWith([], 'const holder = { r: Reflect };', "declare const key: 'set';", 'const { [key]: put } = holder.r;', `put${setPatch}`) }],
+    ['typed parameter source', { 'src/main.ts': mainWith([], "declare const key: 'set';", `function apply(r: typeof Reflect) { const { [key]: put } = r; put${setPatch} }`, 'apply(Reflect);') }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
 });
 
 test('the 16 and 17 hop alias boundary keeps proven non-owners open and unproven chains closed', async () => {

@@ -301,6 +301,20 @@ test('checker failures in the typed owner check fail closed', () => {
   }
 });
 
+test('a contextual type failure for an owner value fails closed', () => {
+  // `unknown` 매개변수로 넘기는 Object·Reflect는 무해한 전달로 열어 두지만, 문맥 타입 조회가 실패하면 증명하지 못한 것이다.
+  const context = contextOf('declare function describe(type: unknown): void; describe(Reflect);');
+  assert.equal(isMutationCleanView(context), true);
+  const failing = new Proxy(context.checker, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (property !== 'getContextualType') return typeof value === 'function' ? value.bind(target) : value;
+      return () => { throw new Error('getContextualType failure'); };
+    },
+  });
+  assert.equal(isMutationCleanView({ ...context, checker: failing }), false);
+});
+
 test('global Map and Date member replacements are visible to the guard', () => {
   for (const source of [
     'Map = Replacement; declare let Replacement: typeof Map;',

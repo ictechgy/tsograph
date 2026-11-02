@@ -217,10 +217,16 @@
   읽기 원본이 `any`·`unknown`·구조적 상위 타입인 프로젝트에서 이 guard에 기대는 native Map·constructor carrier 증명의 bound
   간선이 candidate 간선으로 바뀔 수 있다. bridge-facts는 이 guard를 import하지 않아 바뀌지 않는다. 같은 입력의 자기 소스·
   vuejs/core·nestjs/nest·typeorm 그래프는 바이트 단위로 같다(네 입력 모두 이 guard가 한 번도 호출되지 않는다).
-  아직 추적하지 않아 실행과 다른 bound 간선이 남는 경우(재현 확인): 단언 없이 `any`·`unknown` 값(`any` 매개변수, `any`를
-  돌려주는 호출)을 무관한 타입의 매개변수로 다시 받은 뒤 쓰는 흐름(`function patch(m: Map<any, any>) { m.set(…) }`에 그런
-  값을 넘김). 이를 닫으려면 Object·Reflect를 `any`·`unknown` 자리로 넘기는 모든 사용(`describe(Object)` 같은 무해한 전달
-  포함)을 닫아야 해 넣지 않았다.
+  - 계산 키 읽기 규칙은 그런 읽기가 프로그램 어디에 하나라도 있으면 증명을 닫는다. 원본이 소유자일 수 있는 계산 키 읽기는
+    이 저장소 제품 소스에 약 30곳(의존성 설치 상태에서 27곳), vuejs/core에 약 430곳 있다. 그래서 clean-view 증명은 사실상
+    그런 읽기가 없는 작은 프로그램으로 좁아진다.
+  - 계산 키 읽기 하나가 질의 예산(20,000 step)에서 한 step을 쓴다. 무해한 `xs[i]` 읽기 N개를 둔 프로그램에서 예전에는
+    N=6,000에서도 증명했지만, 이제는 N=4,000에서 증명하고 N=5,000에서 예산을 넘겨 증명하지 못한다.
+  아직 추적하지 않아 실행과 다른 bound 간선이 남는 경우(재현 확인): 단언 없이 `any`·`unknown` 경계를 지난 값을 나중에 다른
+  타입으로 다시 받는 흐름. 무관한 타입의 매개변수로 다시 받기(`function patch(m: Map<any, any>) { m.set(…) }`에 `any` 매개변수
+  값·`any`를 돌려주는 호출 결과를 넘김), 반환 타입 주석(`function wrap(x: any): Map<…> { return x }`), 타입 술어
+  (`x is Map<…>`), 단언 함수(`asserts x is Map<…>`)가 그렇다. 이를 닫으려면 Object·Reflect를 `any`·`unknown` 자리로 넘기는
+  모든 사용(`describe(Object)` 같은 무해한 전달 포함)을 닫아야 해 넣지 않았다.
 - change-impact 캡처: 대소문자를 무시하는 POSIX 파일 시스템(macOS 기본 APFS 등)에서 PATH 항목을 프로젝트와 다른
   대소문자로 쓰면(`…/proj/bin`, 실제 `…/Proj`) 프로젝트 안에 심은 `git`을 밖의 실행 파일로 보고 실행하던 문제를 고친다.
   루트·현재 디렉터리·후보를 OS realpath로 정규화해 비교하고, 실행 파일은 캡처마다 한 번만 고른다. 신뢰할 git이 없다는
