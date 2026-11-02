@@ -407,3 +407,121 @@ test('static non-mutating members through recognized aliases keep the native Map
   };
   for (const files of [...cases, destructured]) assert.deepEqual(boundTo(await graphOf(files), 'read'), ['src/main.ts#First.run']);
 });
+
+/** `Map.prototype.get`을 `Second`를 만드는 함수로 바꾸는 인자 꼬리다(실행하면 `read`는 `Second.run`을 부른다). */
+const definePatch = "(Map.prototype, 'get', { value: () => () => new Second() });";
+const setPatch = "(Map.prototype, 'get', () => () => new Second());";
+
+/** import 줄, 공통 선언, 본문 줄, registry 꼬리 순서로 main.ts를 만든다. */
+function mainWith(imports: readonly string[], ...lines: readonly string[]): string {
+  return [...imports, shared, ...lines, registryTail].join('\n');
+}
+
+test('Object or Reflect values typed as owners outside variable aliases close the native Map proof', async () => {
+  // 변수 alias가 아닌 경로(default export, 구조 분해, 속성, 반환값, 매개변수, 대입, 조건식, 다른 전역 객체)로 온 값도
+  // checker 타입이 default lib의 ObjectConstructor·Reflect이면 소유자로 보고 닫는다.
+  const reflectOwner = { 'src/owner.ts': 'export const owner = Reflect;' };
+  const cases: readonly [string, Record<string, string>][] = [
+    ['export default Object string member', { 'src/owner.ts': 'export default Object;', 'src/main.ts': mainWith(["import O from './owner';"], `O['defineProperty']${definePatch}`) }],
+    ['export default Reflect .set', { 'src/owner.ts': 'export default Reflect;', 'src/main.ts': mainWith(["import R from './owner';"], `R.set${setPatch}`) }],
+    ['namespace import destructuring', { ...reflectOwner, 'src/main.ts': mainWith(["import * as owners from './owner';"], 'const { owner } = owners;', `owner.set${setPatch}`) }],
+    ['dynamic import destructuring', { ...reflectOwner, 'src/main.ts': mainWith([], `export async function patch() { const { owner } = await import('./owner'); owner.set${setPatch} }`) }],
+    ['holder property string member', { 'src/main.ts': mainWith([], 'const holder = { O: Object };', `holder.O['defineProperty']${definePatch}`) }],
+    ['holder property .set', { 'src/main.ts': mainWith([], 'const holder = { r: Reflect };', `holder.r.set${setPatch}`) }],
+    ['holder property computed member', { 'src/main.ts': mainWith([], 'const holder = { O: Object };', "declare const key: 'defineProperty';", `holder.O[key]${definePatch}`) }],
+    ['class static field .set', { 'src/main.ts': mainWith([], 'class Holder { static R = Reflect; }', `Holder.R.set${setPatch}`) }],
+    ['class static field computed member', { 'src/main.ts': mainWith([], 'class Holder { static O = Object; }', "declare const key: 'defineProperty';", `Holder.O[key]${definePatch}`) }],
+    ['function return .set', { 'src/main.ts': mainWith([], 'function reflect() { return Reflect; }', `reflect().set${setPatch}`) }],
+    ['function return computed member', { 'src/main.ts': mainWith([], 'function object() { return Object; }', "declare const key: 'defineProperty';", `object()[key]${definePatch}`) }],
+    ['typed parameter .set', { 'src/main.ts': mainWith([], `const patchWith = (r: typeof Reflect) => r.set${setPatch.slice(0, -1)};`, 'patchWith(Reflect);') }],
+    ['typed parameter computed member', { 'src/main.ts': mainWith([], `const patchWith = (o: ObjectConstructor, key: 'defineProperty') => o[key]${definePatch.slice(0, -1)};`, "patchWith(Object, 'defineProperty');") }],
+    ['parameter default .set', { 'src/main.ts': mainWith([], `function patchWith(r = Reflect) { r.set${setPatch} }`, 'patchWith();') }],
+    ['any parameter .set', { 'src/main.ts': mainWith([], `const patchWith = (r: any) => r.set${setPatch.slice(0, -1)};`, 'patchWith(Reflect);') }],
+    ['any return .set', { 'src/main.ts': mainWith([], 'function owner(): any { return Reflect; }', `owner().set${setPatch}`) }],
+    ['any variable reassigned', { 'src/main.ts': mainWith([], 'let owner: any = {};', 'owner = Reflect;', `owner.set${setPatch}`) }],
+    ['union variable narrowed by reassignment', { 'src/main.ts': mainWith([], 'let owner: Map<string, number> | typeof Reflect = new Map<string, number>();', 'owner = Reflect;', `owner.set${setPatch}`) }],
+    ['empty object variable reassigned', { 'src/main.ts': mainWith([], 'let owner = {};', 'owner = Reflect;', `owner.set${setPatch}`) }],
+    ['conditional initializer', { 'src/main.ts': mainWith([], 'declare const flag: boolean;', 'const owner = flag ? Reflect : Reflect;', `owner.set${setPatch}`) }],
+    ['nullish initializer', { 'src/main.ts': mainWith([], 'declare const maybe: typeof Reflect | undefined;', 'const owner = maybe ?? Reflect;', `owner.set${setPatch}`) }],
+    ['comma initializer', { 'src/main.ts': mainWith([], 'const owner = (0, Reflect);', `owner.set${setPatch}`) }],
+    ['assignment-pattern destructuring', { ...reflectOwner, 'src/main.ts': mainWith(["import { owner } from './owner';"], 'let put: any;', '({ set: put } = owner);', `put${setPatch}`) }],
+    ['parameter-default destructuring', { ...reflectOwner, 'src/main.ts': mainWith(["import { owner } from './owner';"], `function patchIt({ set } = owner) { set${setPatch} }`, 'patchIt();') }],
+    ['nested destructuring', { 'src/main.ts': mainWith([], 'const holder = { r: Reflect };', 'const { r: { set: put } } = holder;', `put${setPatch}`) }],
+    ['array destructuring', { 'src/main.ts': mainWith([], 'const [owner] = [Reflect];', `owner.set${setPatch}`) }],
+    ['self.Reflect', { 'src/main.ts': mainWith([], 'declare const self: typeof globalThis;', `self.Reflect.set${setPatch}`) }],
+    ['window.Reflect alias', { 'src/main.ts': mainWith([], 'declare const window: typeof globalThis;', 'const owner = window.Reflect;', `owner.set${setPatch}`) }],
+    ['globalThis.globalThis.Reflect', { 'src/main.ts': mainWith([], `globalThis.globalThis.Reflect.set${setPatch}`) }],
+    ['constructor property computed member', { 'src/main.ts': mainWith([], "declare const key: 'defineProperty';", `({}).constructor[key]${definePatch}`) }],
+    ['structural supertype parameter .set', { 'src/main.ts': mainWith([], `function applyTo(setter: { set(target: object, key: PropertyKey, value: unknown): boolean }) { setter.set${setPatch} }`, 'applyTo(Reflect);') }],
+    ['record parameter computed member', { 'src/main.ts': mainWith([], `function dispatch(table: Record<string, Function>, name: string) { table[name]${setPatch} }`, "dispatch(Reflect, 'set');") }],
+    ['any cast passed to a typed parameter', { 'src/main.ts': mainWith([], `function patchWith(m: Map<any, any>) { m.set${setPatch} }`, 'patchWith(Reflect as any);') }],
+    ['unknown cast returned as a typed value', { 'src/main.ts': mainWith([], 'function owner(): Map<any, any> { return Reflect as unknown as Map<any, any>; }', `owner().set${setPatch}`) }],
+    ['any cast stored in a typed property', { 'src/main.ts': mainWith([], 'const holder: { m: Map<any, any> } = { m: Reflect as any };', `holder.m.set${setPatch}`) }],
+    ['union receiver containing Reflect', { 'src/main.ts': mainWith([], 'declare const target: typeof Reflect | Map<string, number>;', `target.set${setPatch}`) }],
+    ['type parameter constrained to Reflect', { 'src/main.ts': mainWith([], `export function patchWith<T extends typeof Reflect>(r: T) { r.set${setPatch} }`) }],
+    ['unconstrained type parameter', { 'src/main.ts': mainWith([], `export function patchWith<T>(r: T) { (r as { set: typeof Reflect.set }).set${setPatch} }`) }],
+    ['nested assignment-pattern destructuring', { 'src/main.ts': mainWith([], 'const holder = { r: Reflect };', 'let put: any;', '({ r: { set: put } } = holder);', `put${setPatch}`) }],
+    ['for-of assignment-pattern destructuring', { 'src/main.ts': mainWith([], 'let put: any;', 'for ({ set: put } of [Reflect]) { /* 첫 원소의 set을 꺼낸다. */ }', `put${setPatch}`) }],
+    ['computed-key assignment-pattern destructuring', { 'src/main.ts': mainWith([], "declare const key: 'set';", 'let put: any;', '({ [key]: put } = Reflect);', `put${setPatch}`) }],
+    ['unresolved module value', { 'src/main.ts': mainWith(["import { owner } from 'missing-module';"], `owner.set${setPatch}`) }],
+    ['any cast into an untyped array then a typed callback', { 'src/main.ts': mainWith([], `[Reflect as any].forEach((m: Map<any, any>) => m.set${setPatch.slice(0, -1)});`) }],
+    ['type-error assignment to an unrelated variable', { 'src/main.ts': mainWith([], 'let m: Map<string, number> = new Map<string, number>();', 'm = Reflect;', `m.set${setPatch}`) }],
+    ['type-error argument to an unrelated parameter', { 'src/main.ts': mainWith([], `function patchWith(m: Map<any, any>) { m.set${setPatch} }`, 'patchWith(Reflect);') }],
+    ['Reflect.get member extraction', { 'src/main.ts': mainWith([], "const put = Reflect.get(Reflect, 'set');", `put${setPatch}`) }],
+    ['property descriptor extraction', { 'src/main.ts': mainWith([], `Object.getOwnPropertyDescriptor(Reflect, 'set')!.value${setPatch}`) }],
+    ['property descriptors extraction', { 'src/main.ts': mainWith([], `Object.getOwnPropertyDescriptors(Reflect).set.value${setPatch}`) }],
+    ['reflect-metadata style augmentation', {
+      'src/globals.d.ts': 'declare namespace Reflect { function metadata(key: unknown, value: unknown): (target: object) => void; }',
+      'src/main.ts': mainWith([], `const patchWith = (r: typeof Reflect) => r.set${setPatch.slice(0, -1)};`, 'patchWith(Reflect);'),
+    }],
+    ['augmented Reflect in a branded intersection', {
+      // 구조적 대입으로는 잡히지 않는 교차 타입이라, default lib 선언을 "하나라도" 가진 Reflect 심볼로만 소유자를 안다.
+      'src/globals.d.ts': 'declare namespace Reflect { function metadata(key: unknown, value: unknown): (target: object) => void; }',
+      'src/main.ts': mainWith([], `export function patchWith(r: typeof Reflect & { readonly brand: true }) { r.set${setPatch} }`),
+    }],
+  ];
+  // 실패한 사례를 한 번에 보이도록 모아서 단언한다.
+  const stillOpen: string[] = [];
+  for (const [label, files] of cases) {
+    const graph = await graphOf(files);
+    const candidates = graph.edges.filter((edge) => edge.from === 'src/main.ts#read' && edge.evidence === 'candidate').map((edge) => edge.to);
+    if (boundTo(graph, 'read').length > 0 || candidates.join() !== 'src/main.ts#First.run,src/main.ts#Second.run') stillOpen.push(label);
+  }
+  assert.deepEqual(stillOpen, []);
+});
+
+test('typed owner checks keep the native Map proof for unrelated receivers, inert Object uses and cyclic aliases', async () => {
+  const cases: readonly [string, Record<string, string>][] = [
+    ['props type Object', { 'src/main.ts': mainWith([], 'export const props = { item: { type: Object, required: true } };') }],
+    ['instanceof Object', { 'src/main.ts': mainWith([], 'export const isObject = (value: unknown) => value instanceof Object;') }],
+    ['constructor comparison', { 'src/main.ts': mainWith([], 'export const plain = (value: { constructor: unknown }) => value.constructor === Object;') }],
+    ['Object call', { 'src/main.ts': mainWith([], 'export const box = (value: unknown) => Object(value);') }],
+    ['Object passed to a declared function', { 'src/main.ts': mainWith([], 'declare function describe(type: unknown): void;', 'describe(Object);') }],
+    ['let alias static read', { 'src/main.ts': mainWith([], 'let owner = Object;', 'export const names = owner.keys({});') }],
+    ['let Map .set', { 'src/main.ts': mainWith([], 'let cache = new Map<string, number>();', "cache.set('a', 1);") }],
+    ['imported let alias static read', { 'src/owner.ts': 'export let owner = Object;', 'src/main.ts': mainWith(["import { owner } from './owner';"], 'export const names = owner.keys({});') }],
+    ['typed .set receivers', { 'src/main.ts': mainWith([], 'declare const headers: { append(key: string, value: string): void; set(key: string, value: string): void };', "headers.set('a', 'b');", 'export function remember(target: WeakMap<object, number>) { target.set({}, 1); }') }],
+    ['computed reads on non-owner types', { 'src/main.ts': mainWith([], 'declare const env: Record<string, string>;', 'declare const list: number[];', 'declare const key: string;', 'export const values = [env[key], list[Number(key)]];') }],
+    ['any receiver non-mutator member', { 'src/main.ts': mainWith([], 'declare const anything: any;', 'export const names = anything.keys();') }],
+    ['union and constrained non-owner receivers', { 'src/main.ts': mainWith([], 'declare const store: Map<object, number> | WeakMap<object, number>;', 'store.set({}, 1);', "export function update<T extends Map<string, number>>(cache: T) { cache.set('a', 1); }") }],
+    ['Object called through an any cast', { 'src/main.ts': mainWith([], 'export const box = (value: unknown) => (Object as any)(value);') }],
+    ['non-mutator member read by Reflect.get', { 'src/main.ts': mainWith([], "export const keys = Reflect.get(Reflect, 'ownKeys');") }],
+    ['cyclic re-export', { 'src/a.ts': "export { cyclic } from './b';", 'src/b.ts': "export { cyclic } from './a';", 'src/main.ts': mainWith(["import { cyclic } from './a';"], 'cyclic.set(1, 2);') }],
+    ['cyclic local alias', { 'src/main.ts': mainWith([], 'const first = second;', 'const second = first;', 'first.set(1, 2);') }],
+  ];
+  for (const [label, files] of cases) assert.deepEqual(boundTo(await graphOf(files), 'read'), ['src/main.ts#First.run'], label);
+});
+
+test('the 16 and 17 hop alias boundary keeps proven non-owners open and unproven chains closed', async () => {
+  const chainOf = (origin: string, hops: number) => [
+    `const link0 = ${origin};`,
+    ...Array.from({ length: hops }, (_, index) => `const link${index + 1} = link${index};`),
+  ];
+  // 16단계는 끝까지 따라가 `new Map()`임을 증명한다. 17단계는 상한을 넘어 증명하지 못하므로 닫는다.
+  const open = await graphOf({ 'src/main.ts': mainWith([], ...chainOf('new Map<string, number>()', 16), "link16.set('a', 1);") });
+  assert.deepEqual(boundTo(open, 'read'), ['src/main.ts#First.run']);
+  assertClosedProof(await graphOf({ 'src/main.ts': mainWith([], ...chainOf('new Map<string, number>()', 17), "link17.set('a', 1);") }), '17 hop Map');
+  for (const hops of [16, 17]) {
+    assertClosedProof(await graphOf({ 'src/main.ts': mainWith([], ...chainOf('Reflect', hops), `link${hops}.set${setPatch}`) }), `${hops} hop Reflect`);
+  }
+});
