@@ -176,6 +176,28 @@
   보수적인 candidate 간선으로 바뀔 수 있다(bare alias는 이미 그렇게 닫혔다). bridge-facts(routes·schema·openapi)
   출력과 자기 소스 그래프는 바뀌지 않는다. intrinsic Map 판정은 `globalThis.Map.prototype`·`globalThis["Map"]`·
   `Map["prototype"]` 쓰기도 직접 닫는다(호출자가 먼저 쓰는 clean-view 검사가 이미 닫으므로 출력 변화는 없다).
+- graph: mutation guard가 Object·Reflect 수신자를 FlowIndex(`reflectiveOwner`)와 같은 표기로 본다. `globalThis["Object"]`,
+  `` globalThis[`Reflect`] ``, 괄호·`as`·`satisfies`·non-null로 감싼 형태를 직접 수신자와 alias 초깃값 모두에서 인정한다.
+  alias는 다른 모듈의 import·re-export(`export *`, `export * as ns` 포함)·default import·`export =`·namespace 멤버(`ns.o`,
+  `ns["o"]`, dynamic import 결과의 멤버), alias의 alias(단계 상한 없이 guard 예산 안에서, 예산을 넘기면 닫는다),
+  선언 초깃값이 소유자인 `let`·`var` alias, mutator·rest·계산 키 구조 분해(`const { defineProperty } = o`,
+  `const { [k]: f } = o`)까지 따라가 다시 검사한다. 소유자로 알려진
+  alias의 `.set`·계산 멤버 사용은 다시 증명하지 않고 바로 닫는다. FlowIndex는 import를 따라가지 않으므로 다른 모듈 사용은
+  이 검사만 본다. 소유자 해석(`intrinsicOwner`)은 16단계 상한을 넘기거나 checker가 실패하면 소유자가 아님을 증명하지 못한
+  것으로 보고 닫는다(예전에는 "소유자 아님"으로 열었다).
+  예전에는 다른 모듈에서 이런 alias로 `Map.prototype`을 바꿔도(`o["defineProperty"](Map.prototype, …)`, `r.set(Map.prototype, …)`)
+  native Map 증명이 열려, 실행 시 다른 구현을 부르는 호출에 잘못된 bound 간선이 나왔다. `export const r = Reflect`처럼 bare
+  alias여도 다른 모듈의 `r.set(…)`, 16단계 이상의 alias 사슬 끝의 `.set`·계산 멤버도 놓쳤다.
+  출력 변화(graph·reach·impact·change-impact): 위 프로젝트, 같은 표기로 인자 없는 계산 호출(`o[k]()`, `globalThis.Object[k]()`,
+  `(Object)[k]()`)을 하는 프로젝트, 그리고 16단계를 넘는 alias 사슬 끝에서 `.set`을 부르는 프로젝트(사슬 시작이
+  `new Map()`처럼 소유자가 아니어도 증명하지 못하므로)의 해당 bound 간선이 candidate 간선으로 바뀐다. native Map에서
+  재현을 확인했고, 같은 guard를 쓰는 constructor carrier 증명도 같은 보수적 방향으로만 바뀔 수 있다. bridge-facts(routes·schema·openapi·
+  navigation)는 이 guard를 import하지 않아 바뀌지 않고, 같은 입력의 자기 소스 그래프는 `generatedAt`을 빼고 바이트 단위로 같다.
+  아직 추적하지 않아 실행과 다른 bound 간선이 남는 경우(재현 확인): `export default Object`·`Reflect`; namespace·dynamic
+  import 결과를 구조 분해한 alias(`const { owner } = ns`, `const { owner } = await import(…)`); 객체 속성·클래스 static 필드에
+  담은 값; 함수 반환값·매개변수(기본값, `any` 매개변수 포함)로 넘긴 값; 선언 뒤 대입(`let o; o = Reflect`); 조건식·`??`·쉼표
+  초깃값; 대입 패턴·매개변수 기본값·중첩·배열 구조 분해; `globalThis` 밖의 전역 객체(`self.Reflect`, `window.Reflect`,
+  `globalThis.globalThis.Reflect`).
 - change-impact 캡처: 대소문자를 무시하는 POSIX 파일 시스템(macOS 기본 APFS 등)에서 PATH 항목을 프로젝트와 다른
   대소문자로 쓰면(`…/proj/bin`, 실제 `…/Proj`) 프로젝트 안에 심은 `git`을 밖의 실행 파일로 보고 실행하던 문제를 고친다.
   루트·현재 디렉터리·후보를 OS realpath로 정규화해 비교하고, 실행 파일은 캡처마다 한 번만 고른다. 신뢰할 git이 없다는

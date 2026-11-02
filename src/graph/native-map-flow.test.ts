@@ -238,25 +238,172 @@ test('unknown maker, registry escape, Proxy context and fake Map declaration fai
   assert.deepEqual(boundTo(fakeMap, 'read'), []);
 });
 
+/** native Map registry가 `First`만 담는 공통 꼬리다. 증명이 열리면 `read -> First.run`이 bound로 나온다. */
+const registryTail = [
+  'const registry = new Map<string, () => Service>();',
+  'registry.set("service", () => new First());',
+  'const make = registry.get("service");',
+  'const service = make();',
+  'export const read = () => service.run();',
+].join('\n');
+
+/** 증명이 닫혀 `read`가 두 구현 모두에 candidate로만 이어졌는지 확인한다. */
+function assertClosedProof(graph: Awaited<ReturnType<typeof graphOf>>, label: string): void {
+  assert.deepEqual(boundTo(graph, 'read'), [], label);
+  const candidates = graph.edges.filter((edge) => edge.from === 'src/main.ts#read' && edge.evidence === 'candidate').map((edge) => edge.to);
+  assert.deepEqual(candidates, ['src/main.ts#First.run', 'src/main.ts#Second.run'], label);
+}
+
+/** FlowIndex가 Object·Reflect 수신자로 인정하는 표기다(감싼 형태와 문자열 키 포함). */
+const ownerSpellings = [
+  'Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect',
+  "globalThis['Object']", 'globalThis["Reflect"]', 'globalThis[`Object`]', '(Object)', 'Object as ObjectConstructor', 'globalThis.Reflect!',
+];
+
 test('zero-argument computed calls through Object or Reflect aliases close the native Map proof', async () => {
   // FlowIndex는 인자 없는 계산 호출을 reflective mutation으로 기록하지 않으므로 mutation guard의 alias 재검사가 닫는다.
-  // `globalThis.` 한정 alias도 bare alias와 같이 bound 대신 보수적인 candidate로 남는다.
-  for (const owner of ['Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect']) {
+  // 모든 수신자 표기의 alias, alias의 alias, let alias가 bare alias와 같이 bound 대신 보수적인 candidate로 남는다.
+  const declarations = [
+    ...ownerSpellings.map((owner) => `const owner = ${owner};`),
+    "const first = globalThis['Object']; const owner = first;",
+    'let owner = Reflect;',
+  ];
+  for (const declaration of declarations) {
     const graph = await graphOf({
-      'src/main.ts': [
-        shared,
-        `const owner = ${owner};`,
-        'declare const member: "keys";',
-        'owner[member]();',
-        'const registry = new Map<string, () => Service>();',
-        'registry.set("service", () => new First());',
-        'const make = registry.get("service");',
-        'const service = make();',
-        'export const read = () => service.run();',
-      ].join('\n'),
+      'src/main.ts': [shared, declaration, 'declare const member: "keys";', 'owner[member]();', registryTail].join('\n'),
     });
-    assert.deepEqual(boundTo(graph, 'read'), [], owner);
-    const candidates = graph.edges.filter((edge) => edge.from === 'src/main.ts#read' && edge.evidence === 'candidate').map((edge) => edge.to);
-    assert.deepEqual(candidates, ['src/main.ts#First.run', 'src/main.ts#Second.run'], owner);
+    assertClosedProof(graph, declaration);
   }
+});
+
+test('zero-argument computed calls on qualified or wrapped owners close the native Map proof', async () => {
+  for (const owner of ownerSpellings) {
+    const graph = await graphOf({
+      'src/main.ts': [shared, 'declare const member: "keys";', `(${owner})[member]();`, registryTail].join('\n'),
+    });
+    assertClosedProof(graph, owner);
+  }
+});
+
+test('cross-module Object or Reflect aliases that patch Map.prototype close the native Map proof', async () => {
+  // FlowIndex의 alias 추적은 import를 따라가지 않으므로 guard의 alias 재검사만이 이 쓰기를 본다.
+  // 그대로 열리면 실행 시 `read`가 `Second.run`을 부르는데도 bound `read -> First.run`이 나온다.
+  const patchMap = "(Map.prototype, 'get', { value: () => () => new Second() });";
+  const setMap = "(Map.prototype, 'get', () => () => new Second());";
+  const cases: readonly [string, Record<string, string>][] = [
+    ...ownerSpellings.filter((owner) => owner.includes('Object')).map((owner): [string, Record<string, string>] => [owner, {
+      'src/owner.ts': `export const owner = ${owner};`,
+      'src/main.ts': [`import { owner } from './owner';`, shared, `owner['defineProperty']${patchMap}`, registryTail].join('\n'),
+    }]),
+    ...ownerSpellings.filter((owner) => owner.includes('Reflect')).flatMap((owner): [string, Record<string, string>][] => [
+      [`${owner} .set`, {
+        'src/owner.ts': `export const owner = ${owner};`,
+        'src/main.ts': [`import { owner } from './owner';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+      }],
+      [`${owner} ['set']`, {
+        'src/owner.ts': `export const owner = ${owner};`,
+        'src/main.ts': [`import { owner } from './owner';`, shared, `owner['set']${setMap}`, registryTail].join('\n'),
+      }],
+    ]),
+    ['imported alias chain', {
+      'src/owner.ts': 'export const first = Object;',
+      'src/main.ts': [`import { first } from './owner';`, shared, 'const owner = first;', `owner['defineProperty']${patchMap}`, registryTail].join('\n'),
+    }],
+    ['namespace import member', {
+      'src/owner.ts': 'export const owner = Object;',
+      'src/main.ts': [`import * as owners from './owner';`, shared, `owners.owner['defineProperty']${patchMap}`, registryTail].join('\n'),
+    }],
+    ['namespace import member .set', {
+      'src/owner.ts': 'export const reflect = Reflect;',
+      'src/main.ts': [`import * as owners from './owner';`, shared, `owners.reflect.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['namespace import string member .set', {
+      'src/owner.ts': 'export const reflect = Reflect;',
+      'src/main.ts': [`import * as owners from './owner';`, shared, `owners['reflect'].set${setMap}`, registryTail].join('\n'),
+    }],
+    ['imported alias destructuring', {
+      'src/owner.ts': 'export const owner = Object;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, 'const { defineProperty } = owner;', `defineProperty${patchMap}`, registryTail].join('\n'),
+    }],
+    ['imported alias renamed destructuring', {
+      'src/owner.ts': "export const owner = globalThis['Reflect'];",
+      'src/main.ts': [`import { owner } from './owner';`, shared, 'const { set: put } = owner;', `put${setMap}`, registryTail].join('\n'),
+    }],
+    ['imported alias rest destructuring', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, 'const { ...methods } = owner;', `methods.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['imported alias computed-key destructuring', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, "declare const key: 'set';", 'const { [key]: put } = owner;', `put${setMap}`, registryTail].join('\n'),
+    }],
+    ['export * barrel', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/barrel.ts': "export * from './owner';",
+      'src/main.ts': [`import { owner } from './barrel';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['export * as namespace barrel', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/barrel.ts': "export * as owners from './owner';",
+      'src/main.ts': [`import { owners } from './barrel';`, shared, `owners.owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['default import of an alias', {
+      'src/owner.ts': 'const owner = Reflect;\nexport default owner;',
+      'src/main.ts': [`import owner from './owner';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['export = alias with import-equals', {
+      'src/owner.ts': 'const owner = Reflect;\nexport = owner;',
+      'src/main.ts': [`import owner = require('./owner');`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['dynamic import member', {
+      'src/owner.ts': 'export const owner = Reflect;',
+      'src/main.ts': [shared, `export async function patch() { const owners = await import('./owner'); owners.owner.set${setMap} }`, registryTail].join('\n'),
+    }],
+    ['value and type merged alias', {
+      'src/owner.ts': 'export const owner = Reflect;\nexport type owner = typeof Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, `owner.set${setMap}`, registryTail].join('\n'),
+    }],
+    ['value and type merged alias computed member', {
+      'src/owner.ts': 'export const owner = Reflect;\nexport type owner = typeof Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, "declare const key: 'set';", `owner[key]${setMap}`, registryTail].join('\n'),
+    }],
+    ['re-exported let alias', {
+      'src/owner.ts': 'export let owner = Reflect;',
+      'src/barrel.ts': "export { owner as reflect } from './owner';",
+      'src/main.ts': [`import { reflect } from './barrel';`, shared, `reflect.set${setMap}`, registryTail].join('\n'),
+    }],
+  ];
+  for (const [label, files] of cases) assertClosedProof(await graphOf(files), label);
+});
+
+test('alias chains longer than the resolver depth close the native Map proof', async () => {
+  // FlowIndex의 alias 추적(4단계)과 소유자 해석기(16단계)가 모두 끝나기 전에 끊기는 사슬이다.
+  const chainOf = (origin: string, hops: number) => [
+    `const link0 = ${origin};`,
+    ...Array.from({ length: hops }, (_, index) => `const link${index + 1} = link${index};`),
+  ];
+  const cases: readonly [string, Record<string, string>][] = [
+    ['20 hops .set', { 'src/main.ts': [shared, ...chainOf("globalThis['Reflect']", 20), `link20.set${"(Map.prototype, 'get', () => () => new Second());"}`, registryTail].join('\n') }],
+    ['20 hops computed', { 'src/main.ts': [shared, ...chainOf('Object', 20), "declare const key: 'defineProperty';", `link20[key]${"(Map.prototype, 'get', { value: () => () => new Second() });"}`, registryTail].join('\n') }],
+    ['40 hops across modules', {
+      'src/owner.ts': 'export const link0 = Reflect;',
+      'src/main.ts': [`import { link0 } from './owner';`, shared, ...chainOf('link0', 40).slice(1), `link40.set${"(Map.prototype, 'get', () => () => new Second());"}`, registryTail].join('\n'),
+    }],
+  ];
+  for (const [label, files] of cases) assertClosedProof(await graphOf(files), label);
+});
+
+test('static non-mutating members through recognized aliases keep the native Map proof', async () => {
+  const cases: readonly Record<string, string>[] = [
+    { 'src/main.ts': [shared, "const owner = globalThis['Object'];", 'export const names = owner.keys({ a: 1 });', registryTail].join('\n') },
+    {
+      'src/owner.ts': 'export const owner = globalThis["Reflect"] as typeof Reflect;',
+      'src/main.ts': [`import { owner } from './owner';`, shared, 'export const keys = owner.ownKeys({ a: 1 });', registryTail].join('\n'),
+    },
+  ];
+  const destructured = {
+    'src/owner.ts': 'export const owner = Object;',
+    'src/main.ts': [`import { owner } from './owner';`, shared, 'const { keys } = owner;', 'export const names = keys({ a: 1 });', registryTail].join('\n'),
+  };
+  for (const files of [...cases, destructured]) assert.deepEqual(boundTo(await graphOf(files), 'read'), ['src/main.ts#First.run']);
 });

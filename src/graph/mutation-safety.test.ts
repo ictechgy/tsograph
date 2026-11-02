@@ -206,16 +206,76 @@ test('builtin mutator aliases, call/apply/bind and dynamic Object or Reflect rea
   for (const source of cases) assert.equal(isMutationCleanView(contextOf(source)), false, source);
 });
 
-test('globalThis-qualified Object and Reflect aliases are rechecked by the guard itself', () => {
+/** FlowIndex가 Object·Reflect 수신자로 인정하는 표기다(`reflectiveOwner`: 감싼 형태와 문자열 키 포함). */
+const intrinsicOwnerSpellings = [
+  'Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect',
+  "globalThis['Object']", 'globalThis["Reflect"]', 'globalThis[`Object`]', '(globalThis)["Reflect"]',
+  '(Object)', 'Reflect as typeof Reflect', 'globalThis.Object!', '(globalThis["Object"] satisfies ObjectConstructor)',
+];
+
+test('every FlowIndex owner spelling is rechecked by the guard itself as an alias initializer', () => {
   // FlowIndex의 opaque 표식이 이미 닫는 입력이지만, guard 자체의 alias 재검사도 독립적으로 닫아야 한다.
   // 표식을 끈 색인으로 두 번째 방어선만 검사한다.
-  for (const owner of ['Object', 'Reflect', 'globalThis.Object', 'globalThis.Reflect']) {
+  for (const owner of intrinsicOwnerSpellings) {
     const context = contextOf(`const owner = ${owner}; const member = 'define' + 'Property'; const read = owner[member];`);
     assert.equal(isMutationCleanView(context), false, owner);
     assert.equal(isMutationCleanView({ ...context, index: { ...context.index, hasOpaqueMutation: false } }), false, owner);
   }
-  const literalMember = contextOf('const owner = globalThis.Reflect; const keys = owner.ownKeys; const state = { count: 0 }; state.count = 1;');
-  assert.equal(isMutationCleanView(literalMember), true);
+  for (const owner of ['globalThis.Reflect', 'globalThis["Reflect"]', '(Reflect)']) {
+    const literalMember = contextOf(`const owner = ${owner}; const keys = owner.ownKeys; const state = { count: 0 }; state.count = 1;`);
+    assert.equal(isMutationCleanView(literalMember), true, owner);
+  }
+});
+
+test('qualified or wrapped direct owners, chained aliases and let aliases are rechecked by the guard itself', () => {
+  const cases = [
+    ...intrinsicOwnerSpellings.map((owner) => `const member = 'define' + 'Property'; const read = (${owner})[member];`),
+    "const first = globalThis['Object']; const owner = first; const member = 'define' + 'Property'; const read = owner[member];",
+    "const first = Reflect; const second = (first); const owner = second as typeof Reflect; const member = 'set'; const read = owner[member + ''];",
+    "let owner = Object; const member = 'define' + 'Property'; const read = owner[member];",
+  ];
+  for (const source of cases) {
+    const context = contextOf(source);
+    assert.equal(isMutationCleanView({ ...context, index: { ...context.index, hasOpaqueMutation: false } }), false, source);
+  }
+});
+
+test('an owner alias chain longer than the resolver depth fails closed instead of proving a non-owner', () => {
+  // alias 재검사 worklist를 끄려고 참조 색인을 비우고, FlowIndex 표식·기록도 꺼서 `.set` 수신자 해석만 남긴다.
+  const isolated = (source: string) => {
+    const context = contextOf(source);
+    return { ...context, index: { ...context.index, hasOpaqueMutation: false, mutations: [], references: new Map() } };
+  };
+  const chainOf = (origin: string, hops: number, use: string) => [
+    `const link0 = ${origin};`,
+    ...Array.from({ length: hops }, (_, index) => `const link${index + 1} = link${index};`),
+    'declare const target: object;',
+    `link${hops}.${use};`,
+  ].join('\n');
+  assert.equal(isMutationCleanView(isolated(chainOf('Reflect', 4, 'set(target, "key", 1)'))), false);
+  assert.equal(isMutationCleanView(isolated(chainOf('Reflect', 20, 'set(target, "key", 1)'))), false);
+  // 상한 안에서 끝까지 따라가 소유자가 아님을 증명한 사슬은 열린 채로 남고, 상한을 넘긴 사슬은 증명하지 못해 닫힌다.
+  assert.equal(isMutationCleanView(isolated(chainOf('new Map<string, number>()', 10, 'set("key", 1)'))), true);
+  assert.equal(isMutationCleanView(isolated(chainOf('new Map<string, number>()', 20, 'set("key", 1)'))), false);
+});
+
+test('a checker failure while resolving a set receiver fails closed', () => {
+  const source = 'declare const store: { set(key: string, value: number): void }; store.set("key", 1);';
+  const context = contextOf(source);
+  assert.equal(isMutationCleanView(context), true);
+  const failing = new Proxy(context.checker, {
+    get(target, property) {
+      if (property !== 'getSymbolAtLocation') {
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+      return (node: ts.Node) => {
+        if (ts.isIdentifier(node) && node.text === 'store' && ts.isPropertyAccessExpression(node.parent)) throw new Error('checker failure');
+        return target.getSymbolAtLocation(node);
+      };
+    },
+  });
+  assert.equal(isMutationCleanView({ ...context, checker: failing }), false);
 });
 
 test('global Map and Date member replacements are visible to the guard', () => {
