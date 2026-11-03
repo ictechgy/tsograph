@@ -4,7 +4,7 @@ Read [AGENTS.md](AGENTS.md) for product contracts and module boundaries. Reprodu
 
 ## Local verification
 
-Use the committed lockfiles and toolchains configured in CI. These are the basic local checks; `.github/workflows/` also defines compiler/database fixtures, installation and platform checks.
+Use the committed lockfiles and toolchains configured in CI. These are the basic local checks; `.github/workflows/` also runs them on later Node versions, checks a packed tarball installed into an isolated prefix (`TSOGRAPH_CLI`), runs the full verification on macOS, and runs compiler-path checks on Windows. `tsograph change-impact` tests need Git 2.45+; with an older local Git they are skipped with that reason (never under `CI`).
 
 ```sh
 npm ci

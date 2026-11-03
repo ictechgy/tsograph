@@ -900,8 +900,8 @@ let `isthmus trace` follow a route to its tables and their database dependents
 
 ```sh
 tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
-tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
-tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph reach  (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 ```
 
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
@@ -951,8 +951,8 @@ No traversal result is returned before complete EOF, counts and graphRevision va
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`
-  (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `graphRevision`, and `revision`
-  when readable. The snapshot represents every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)):
+  (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `limitationsByMode` (the exact limitations
+  of each `--dispatch` mode: `direct`, `bound`, `candidates`), `graphRevision`, and `revision` when readable. The snapshot represents every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)):
   a pair of symbols has at most one edge per evidence tier, and a weaker edge is omitted when stronger
   edges between the same pair already carry all of its kinds, because it cannot change any traversal
   in any mode. Node `unresolvedCalls` holds exact counts (not capped).
@@ -1375,6 +1375,12 @@ Only `route-handler` entries are reachable through the isthmus http join. `reach
 documents count the other entry kinds among their roots and reached symbols under
 `non-http-entries:`, so isthmus `trace` can report them as `non-http-entry` gaps instead of
 missing routes.
+
+Entry kinds outside this table are not marked, so they are neither roots for the isthmus join nor counted
+under `non-http-entries:`: `package.json` `bin`/`main`/`exports` targets, serverless handlers (AWS Lambda
+`handler`, Cloudflare Workers `fetch`/`scheduled`/`queue`), queue/event consumers (NestJS `@Cron`,
+`@MessagePattern`, `@EventPattern`, BullMQ processors), GraphQL resolvers, CLI scripts and test runners. Their
+callers still appear as graph edges, but an impact on them is not reported as a non-HTTP entry gap.
 
 `reach` and `impact --entry-points` additionally emit observed `symbol.entries` on roots and reached
 symbols, with locations for marked roots. isthmus-cli 0.12.0+ can report non-HTTP entry points

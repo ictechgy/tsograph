@@ -720,8 +720,8 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 ```sh
 tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
-tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
-tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph reach  (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 ```
 
 TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
@@ -764,7 +764,8 @@ host에서는 무제한 읽기로 대체하지 않고 실패한다. 캡처된 pr
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,
-  `limitations`, `graphRevision`, 읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급을 나타낸다
+  `limitations`, `limitationsByMode`(`--dispatch` 모드 `direct`·`bound`·`candidates`별 정확한 limitation), `graphRevision`,
+  읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급을 나타낸다
   ([인터페이스 디스패치](#인터페이스-디스패치boundcandidate-간선) 참고): 심볼 쌍마다 근거 등급별 간선은 많아야 하나이고,
   같은 쌍의 더 강한 간선들이 종류를 모두 덮는 약한 간선은 어느 모드의 순회도 바꾸지 못하므로 뺀다. 노드
   `unresolvedCalls`는 상한 없는 정확한 수다.
@@ -1107,6 +1108,11 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
 isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impact` 문서는 root·도달 심볼 중 그 밖의
 진입점을 `non-http-entries:`로 세어, isthmus `trace`가 route 누락 대신 `non-http-entry` gap으로 보고할 수
 있게 한다.
+
+이 표 밖의 진입점 종류는 표시하지 않으므로 isthmus 조인의 root도 아니고 `non-http-entries:`에도 세지 않는다:
+`package.json`의 `bin`·`main`·`exports` 대상, serverless handler(AWS Lambda `handler`, Cloudflare Workers
+`fetch`·`scheduled`·`queue`), queue·event 소비자(NestJS `@Cron`·`@MessagePattern`·`@EventPattern`, BullMQ processor),
+GraphQL resolver, CLI 스크립트와 테스트 러너. 그 호출자는 그래프 간선으로 남지만, 그 영향은 비HTTP 진입점 gap으로 보고되지 않는다.
 
 `reach`·`impact --entry-points`는 root·도달 심볼에 관찰한 `symbol.entries`를 추가하고, 표시된 root의 위치도 싣는다.
 isthmus-cli 0.12.0 이상은 relation·심볼·파일 선택에서 비HTTP 진입점을 API 영향과 함께 보고한다. page 표식에는
