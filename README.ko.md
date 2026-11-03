@@ -978,6 +978,13 @@ private 최상위 `const registry = new Map()`은 실제 TypeScript default libr
 조건식 합집합만 키 일치를 좁힌다. Map은 primitive 종류를 구분하고 `-0`과 `0`을 같게 본다. symbol/object/enum/call
 유래 키는 추측하지 않는다. delete/clear 후에도 문맥 비민감 분석의 가능한 값은 보존하고 iterator 결과는 opaque다.
 
+mutation 범위는 분석한 파일 어디에도 다음이 없을 때만 깨끗하다: `Object`·`Reflect` mutator나 그 별칭,
+`eval`·`Function`·`Proxy`, 수신자가 `Object`·`Reflect`일 수 있는 계산 키 읽기(`any`·`unknown`·`Record<string, unknown>` 같은
+index signature 타입·`JSON.parse(…)[k]`·풀리지 않은 import를 거친 읽기), 객체 literal로 증명되지 않은 수신자의 속성 쓰기
+(예: `this.n = this.n + 1`), `with` 문, `vm`·`node:vm` import, `data:`·`http(s):`·`blob:` 모듈 지정자, 문자열 타입의
+`setTimeout`·`setInterval` handler. 하나만 있어도 프로그램 전체의 증명이 닫히므로 실제로는 작은 프로그램에만 적용되고
+큰 프로그램은 `candidate` 간선을 유지한다. 프로젝트 밖 모듈의 부수효과 import는 내장 객체를 바꾸지 않는다고 가정한다.
+
 호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수와 익명 인라인
 callback의 직접 호출, 함수·getter 반환값, 생성자 대입·기본값, 안전하게 읽은 객체·클래스 메서드를 따라간다. 인라인
 callback은 직접 호출 인자이면서 본문이 하나인 닫힌 프로젝트 함수 선언에서만 연결한다. 이름 있는 함수 식,

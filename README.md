@@ -1207,6 +1207,15 @@ const aliases, and conditional unions can narrow key matches. Primitive kinds re
 Map, and `-0` matches `0`. Symbol/object/enum/call-derived keys are not guessed. Delete and clear do
 not remove possible values from this context-insensitive analysis, and iterator results remain opaque.
 
+The mutation view is clean only when no analyzed file has any of these: `Object`/`Reflect` mutators or aliases
+of them, `eval`/`Function`/`Proxy`, a computed-key read whose receiver may be `Object` or `Reflect` (a read through
+`any`, `unknown`, an index-signature type such as `Record<string, unknown>`, `JSON.parse(…)[k]`, or an unresolved
+import), property writes on receivers that are not proven object literals (for example `this.n = this.n + 1`),
+a `with` statement, a `vm`/`node:vm` import, a `data:`/`http(s):`/`blob:` module specifier, or a string-typed
+`setTimeout`/`setInterval` handler. One such site anywhere closes the proof for the whole program, so in practice
+it applies to small programs and larger programs keep `candidate` edges. Side-effect imports of modules outside the
+project are assumed not to replace built-ins.
+
 Callable values use the same flow engine: function declarations and function-valued initializers plus
 their observed assignments, closed callback parameters, direct invocations of anonymous inline
 callbacks, function and getter return values, constructor assignments/defaults, and safely readable

@@ -557,3 +557,37 @@ test('the 16 and 17 hop alias boundary keeps proven non-owners open and unproven
     assertClosedProof(await graphOf({ 'src/main.ts': mainWith([], ...chainOf('Reflect', hops), `link${hops}.set${setPatch}`) }), `${hops} hop Reflect`);
   }
 });
+
+test('with statements, vm evaluation, data/http module imports and string timers close the native Map proof', async () => {
+  // 모두 문자열로 받은 코드를 실행하거나 스코프 체인으로 쓰기 대상을 숨겨 Map.prototype.get을 바꿀 수 있다.
+  const patch = 'Map.prototype.get = function () { return () => new Second(); };';
+  const declarations = 'declare function require(name: string): any;';
+  const cases: readonly [string, Record<string, string>][] = [
+    ['with statement in a CommonJS JavaScript file', {
+      'tsconfig.json': '{ "compilerOptions": { "strict": true, "allowJs": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+      'src/patch.js': 'with (Map.prototype) { get = function () { return function () { return {}; }; }; }\nmodule.exports = {};\n',
+      'src/main.ts': mainWith([]),
+    }],
+    ['with statement in a script JavaScript file', {
+      'tsconfig.json': '{ "compilerOptions": { "strict": true, "allowJs": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+      'src/patch.js': 'var prototype = Map.prototype;\nwith (prototype) { get = function () { return function () { return {}; }; }; }\n',
+      'src/main.ts': mainWith([]),
+    }],
+    ['node:vm runInThisContext', { 'src/main.ts': mainWith(['import { runInThisContext } from "node:vm";'], `runInThisContext(${JSON.stringify(patch)});`) }],
+    ['vm Script instance', { 'src/main.ts': mainWith(['import * as vm from "vm";'], `new vm.Script(${JSON.stringify(patch)}).runInThisContext();`) }],
+    ['require("vm")', { 'src/main.ts': mainWith([], declarations, `require("vm").runInThisContext(${JSON.stringify(patch)});`) }],
+    ['static data: URL import', { 'src/main.ts': mainWith([`import ${JSON.stringify(`data:text/javascript,${patch}`)};`]) }],
+    ['dynamic https: URL import', { 'src/main.ts': mainWith([], 'void import("https://example.invalid/patch.js");') }],
+    ['string setTimeout', { 'src/main.ts': mainWith([], 'declare function setTimeout(handler: string | (() => void), ms?: number): number;', `setTimeout(${JSON.stringify(patch)}, 0);`) }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
+});
+
+test('function timers and unrelated imports keep the native Map proof', async () => {
+  const graph = await graphOf({
+    'src/main.ts': mainWith(['import { join } from "node:path";'],
+      'declare function setTimeout(handler: string | (() => void), ms?: number): number;',
+      'setTimeout(() => undefined, 0);', 'export const joined = join;'),
+  });
+  assert.deepEqual(boundTo(graph, 'read'), ['src/main.ts#First.run']);
+});

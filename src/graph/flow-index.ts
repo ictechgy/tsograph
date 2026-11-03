@@ -372,6 +372,12 @@ class IndexCollector {
    * @param node 노드
    */
   private visitNode(node: ts.Node): void {
+    // `with`는 스코프 체인으로 쓰기 대상을 숨긴다(`with (Map.prototype) { get = f }`). 대상을 증명할 수 없으므로 연다.
+    if (ts.isWithStatement(node)) this.index.hasOpaqueMutation = true;
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) this.visitStaticModuleSpecifier(node);
+    else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      this.visitEvaluatingSpecifier(node.moduleReference.expression);
+    }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) this.visitMemberRead(node);
     else if (ts.isBindingElement(node)) this.visitBindingRead(node);
     if (ts.isElementAccessExpression(node)) this.visitElementAccess(node);
@@ -652,9 +658,11 @@ class IndexCollector {
   private visitCall(call: ts.CallExpression): void {
     const callee = skipWrappers(call.expression);
     if (callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === 'require')) {
+      if (call.arguments[0] !== undefined) this.visitEvaluatingSpecifier(call.arguments[0]);
       this.visitModuleLoad(call);
       return;
     }
+    if (this.evaluatesStringTimer(callee, call)) this.index.hasOpaqueMutation = true;
     if (isPatternModuleLoader(callee)) {
       this.index.hasOpaqueImport = true;
       return;
@@ -663,6 +671,42 @@ class IndexCollector {
     if (this.reflectiveEscape(callee)) this.index.hasOpaqueMutation = true;
     const reflective = this.reflectiveCall(callee);
     if (reflective !== undefined) this.recordReflectiveMutation(call, reflective);
+  }
+
+  /**
+   * 정적 import·re-export 지정자를 본다. 타입 전용 선언은 코드를 실행하지 않으므로 건너뛴다.
+   *
+   * @param node import·export 선언
+   */
+  private visitStaticModuleSpecifier(node: ts.ImportDeclaration | ts.ExportDeclaration): void {
+    const typeOnly = ts.isImportDeclaration(node) ? node.importClause?.isTypeOnly === true : node.isTypeOnly;
+    if (!typeOnly && node.moduleSpecifier !== undefined) this.visitEvaluatingSpecifier(node.moduleSpecifier);
+  }
+
+  /**
+   * 문자열 코드를 실행하는 모듈(`vm`·`node:vm`)이나, 프로젝트 밖 코드를 불러와 실행하는 URL 지정자(`data:`·`http(s):`·`blob:`)를
+   * 불러오면 내장 객체를 바꿀 수 있는 코드를 볼 수 없으므로 쓰기를 열어 둔다. 지정자가 문자열이 아니면 기존 규칙(opaque import)이 맡는다.
+   *
+   * @param specifier 모듈 지정자 식
+   */
+  private visitEvaluatingSpecifier(specifier: ts.Expression): void {
+    for (const leaf of stringLeaves(specifier) ?? []) {
+      if (isEvaluatingModuleSpecifier(leaf.text)) this.index.hasOpaqueMutation = true;
+    }
+  }
+
+  /**
+   * 문자열 handler를 받은 `setTimeout`·`setInterval`(브라우저는 문자열을 코드로 실행한다)인지 본다. 함수만 받는 호출은 열지 않는다.
+   *
+   * @param callee 호출 대상 식
+   * @param call 호출식
+   * @returns 문자열 코드를 실행할 수 있으면 true
+   */
+  private evaluatesStringTimer(callee: ts.Expression, call: ts.CallExpression): boolean {
+    const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
+    if (name !== 'setTimeout' && name !== 'setInterval') return false;
+    const handler = call.arguments[0];
+    return handler !== undefined && mayBeString(this.checker.getTypeAtLocation(handler));
   }
 
   /** legacy accessor member의 direct call과 alias call/apply/bind escape를 opaque로 표시한다. */
@@ -1122,6 +1166,22 @@ function isReferencePosition(identifier: ts.Identifier): boolean {
  * @param callee 호출 대상 식(래퍼를 벗긴)
  * @returns 패턴 로더면 true
  */
+/**
+ * 불러오는 것만으로 문자열·원격 코드를 실행할 수 있는 모듈 지정자인지 본다.
+ *
+ * @param text 지정자 문자열
+ * @returns `vm`·`node:vm`이거나 `data:`·`http:`·`https:`·`blob:` URL이면 true
+ */
+function isEvaluatingModuleSpecifier(text: string): boolean {
+  return text === 'vm' || text === 'node:vm' || /^(?:data|https?|blob):/iu.test(text);
+}
+
+/** 타입이 문자열일 수 있는지 본다(union 구성원 포함). */
+function mayBeString(type: ts.Type): boolean {
+  if (type.isUnion()) return type.types.some(mayBeString);
+  return (type.flags & ts.TypeFlags.StringLike) !== 0;
+}
+
 function isPatternModuleLoader(callee: ts.Expression): boolean {
   if (!ts.isPropertyAccessExpression(callee)) return false;
   const owner = callee.expression;
