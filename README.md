@@ -155,6 +155,8 @@ exchange fields and versions stay unchanged.
 
 - Node.js 22.18.0 or newer
 - isthmus-cli 0.10.0 or newer to join the documents (`npm install -g isthmus-cli`)
+- Git 2.45 or newer for `tsograph change-impact` (it runs `git --no-lazy-fetch`; Ubuntu 24.04's default Git 2.43
+  fails with exit 2). Other commands never run Git; they read `revision` from `.git` metadata files.
 - The analyzed project's own TypeScript is not used: tsograph bundles TypeScript 5.9.3 and reads compiler
   configs with it. Option values that 5.9.3 does not know (for example a newer `target` or `lib`) are ignored one
   option at a time, newer `target`/`lib` values are approximated with ESNext, and the rest of the config (`paths`,

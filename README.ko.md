@@ -132,6 +132,8 @@ navigation은 owned import·재내보내기·const 별칭을 거친 공유 route
 
 - Node.js 22.18.0 이상
 - 문서를 이으려면 isthmus-cli 0.10.0 이상(`npm install -g isthmus-cli`)
+- `tsograph change-impact`에는 Git 2.45 이상(`git --no-lazy-fetch`를 쓴다. Ubuntu 24.04 기본 Git 2.43에서는 코드 2로
+  실패한다). 다른 명령은 Git을 실행하지 않고 `.git` 메타데이터 파일에서 `revision`만 읽는다.
 - 분석 대상 프로젝트의 TypeScript는 쓰지 않는다. tsograph는 TypeScript 5.9.3을 내장해 compiler 설정을 읽는다.
   5.9.3이 모르는 옵션 값(예: 더 새 `target`·`lib`)은 옵션 하나씩 버리고, 새 `target`·`lib` 값은 ESNext로 근사하며,
   나머지 설정(`paths`·`baseUrl`·`include`)은 유지한다. `compiler-options:`가 버린 알려진 옵션 이름과 모르는 옵션 수를 알린다.
