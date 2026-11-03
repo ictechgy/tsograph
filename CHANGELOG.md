@@ -27,6 +27,8 @@
 
 - 테스트: change 캡처가 필요한 테스트는 로컬 Git이 2.45 미만이면 이유를 남기고 건너뛴다(CI에서는 건너뛰지 않고 실패한다).
   README 요구 사항에 `change-impact`의 Git 2.45+ 요구를 적었다.
+- CI: Node 24·26에서도 `npm run verify`를 돌리고, `npm pack` tarball을 격리 prefix에 설치해 같은 CLI 계약을 검사한다
+  (`TSOGRAPH_CLI`로 검사할 진입점을 바꿀 수 있다). 게시본 검증(provenance·발행 workflow)은 아니다.
 
 - graph·routes·navigation·schema: 내장 TypeScript 5.9.3이 모르는 compiler 옵션이나 값(`target: "es2025"` 등)이 하나라도
   있으면 설정 전체를 기본값으로 바꿔 `paths`·`include`가 사라지고 "could not be parsed"로 알리던 동작을 바꿨다. 그 옵션만

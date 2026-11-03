@@ -33,6 +33,48 @@ jobs:
       - run: npm ci
       - run: npm run verify
 
+  node-versions:
+    # engines는 Node 22.18.0 이상이다. 하한은 verify 잡이 맡고, 이후 LTS·Current 주 버전에서도 같은 검증을 돌린다.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '26']
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+
+  package-install:
+    # 소스 dist가 아니라 npm에 올라갈 tarball을 격리 prefix에 설치해 같은 CLI 계약을 검사한다(files 목록 누락 등을 잡는다).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.18.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:build
+      - name: Pack and install the tarball into an isolated prefix
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          npm install --global --ignore-scripts --prefix "$RUNNER_TEMP/prefix" "$RUNNER_TEMP"/tsograph-*.tgz
+      - name: Verify the installed CLI
+        run: |
+          "$RUNNER_TEMP/prefix/bin/tsograph" --version
+          TSOGRAPH_CLI="$RUNNER_TEMP/prefix/lib/node_modules/tsograph/dist/cli/main.js" node scripts/verify-cli-contract.mjs
+
   windows-schema:
     runs-on: windows-latest
     timeout-minutes: 10

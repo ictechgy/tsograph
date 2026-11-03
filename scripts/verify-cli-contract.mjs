@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { runChild } from './run-child.mjs';
 
 // 빌드된 CLI(dist)가 종료 코드 계약(0/2/64, 1은 예약)을 지키는지 실제 프로세스로 확인한다.
-const binaryPath = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
+// TSOGRAPH_CLI는 `npm pack`으로 만든 tarball을 격리 설치한 진입점을 같은 계약으로 검사할 때 쓴다(소스 검증과 설치 검증을 구분한다).
+const binaryPath = process.env.TSOGRAPH_CLI ?? fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const fixtures = fileURLToPath(new URL('../fixtures/openapi/', import.meta.url));
 const nextFixtures = fileURLToPath(new URL('../fixtures/next/', import.meta.url));
 const schemaFixture = fileURLToPath(new URL('../fixtures/schema/prisma-app/', import.meta.url));
