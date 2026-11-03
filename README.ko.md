@@ -1,6 +1,6 @@
 # tsograph
 
-2026-11-01 확인: npm 발행본은 **0.10.0**이며 **0.11.0**은 소스 후보이다. HTTP v1은 isthmus-cli 0.10.0부터, 비HTTP entry 표식은 0.12.0부터 지원된다. strict 끝 슬래시 optional catch-all 접두사에는 미발행 isthmus 0.14.0 소비자 수정이 필요하다. 발행본 0.13.0은 이 사례를 거부하므로 배포 전에는 검증된 후보 checkout을 사용한다. [기여 안내](https://github.com/ictechgy/tsograph/blob/main/CONTRIBUTING.md).
+이 checkout의 대상은 **0.11.0**이다. 같은 버전의 발행은 [npm](https://www.npmjs.com/package/tsograph)에서 확인한다. HTTP v1은 isthmus-cli 0.10.0 이상, 비 HTTP entry mark는 0.12.0 이상, strict trailing-slash optional catch-all prefix는 0.14.0 이상이 필요하다. 발행된 0.13.0은 마지막 사례를 거부한다.
 
 <img src="https://raw.githubusercontent.com/ictechgy/tsograph/main/icon.png" alt="tsograph의 물총새 마스코트" width="112" height="112" align="right">
 
