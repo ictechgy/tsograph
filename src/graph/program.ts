@@ -14,11 +14,12 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { DeclarationOutputMapper } from './declaration-outputs.ts';
 import { ConfigRootBoundary, type ConfigRootGaps, type ScanBoundary } from './config-roots.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
@@ -74,6 +75,12 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly conflictingConfigSourceCount?: number;
   readonly configOwnershipIncomplete?: boolean;
   readonly skippedLoaderEntries?: number;
+  /**
+   * 프로젝트 안 선언 산출물(스캔이 건너뛴 `dist/*.d.ts` 등)로 해석됐지만 스캔한 소스로 되짚지 못한 import 수와
+   * 그 산출물의 프로젝트 기준 경로(최대 10개)다. 그 import를 거친 호출은 외부로 세어진다.
+   */
+  readonly declarationOutputImports?: number;
+  readonly declarationOutputFiles?: readonly string[];
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
@@ -168,6 +175,17 @@ export function createGraphProgram(
   const blocked = conflicts;
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
+  // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
+  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates);
+  const unmappedDeclarationOutputs = new Map<string, string>();
+  const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
+    const match = declarationOutputs.match(resolved.resolvedFileName);
+    if (match.kind === 'unmapped') unmappedDeclarationOutputs.set(importKey, resolve(resolved.resolvedFileName));
+    if (match.kind !== 'source') return resolved;
+    return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
+      isExternalLibraryImport: false, resolvedUsingTsExtension: false };
+  };
   const choices = new Map<string, Map<string, ts.ResolvedModuleFull | undefined>>();
   const choiceModes = new Map<string, ts.ResolutionMode>();
   const resolveModule = (name: string, containingFile: string, mode?: ts.ResolutionMode, resolutionHost: ts.ModuleResolutionHost = host): ts.ResolvedModuleFull | undefined => {
@@ -180,8 +198,9 @@ export function createGraphProgram(
       if (text === undefined && resolutionHost.fileExists(file)) refused = true;
       return text;
     } };
-    const resolved = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
+    const found = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
     if (refused) return undefined;
+    const resolved = found === undefined ? undefined : redirectDeclarationOutput(found, `${absolute}\u0000${name}`);
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
     if (context !== undefined && resolved !== undefined && (ownership.ambiguous.has(resolve(resolved.resolvedFileName))
       || (target !== undefined && context.keys.get(target) !== contextKey))) {
@@ -247,6 +266,9 @@ export function createGraphProgram(
         ...(context === undefined ? {} : { compilerContexts: context.count, contextBoundaryImports: boundaryImports.size,
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
+        ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
+          declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
+            .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
@@ -300,7 +322,8 @@ interface CompilerContext {
 export function* createGraphPrograms(root: string, sourcePaths: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): Generator<GraphProgram> {
   const entries = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
-  const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root));
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, entries.ownership.configs, entries.candidates);
+  const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root), declarationOutputs);
   const groups = new Map<string, { config: ProjectConfig; sources: Set<string> }>();
   for (const path of entries.candidates) {
     const config = entries.ownership.owners.get(path) ?? entries.config;
@@ -320,19 +343,30 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.
  * 명시 types:[]와 전부 external-module인 유계 입력에서만 별칭이 다른 설정의 공유를 허용한다. */
-function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>, pnpScope = false): ReadonlyMap<ProjectConfig, string> {
+function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>, pnpScope = false,
+  declarationOutputs?: DeclarationOutputMapper): ReadonlyMap<ProjectConfig, string> {
   const configs = [...new Set([entries.config, ...entries.ownership.owners.values()])];
   const keys = new Map<ProjectConfig, string>();
   for (const [index, config] of configs.entries()) {
     const sources = [...entries.ownership.owners].filter(([, owner]) => owner === config).map(([path]) => path);
     const isolated = configs.length > 1 && (pnpScope || config.options.types?.length !== 0
-      || sources.some(path => !isModuleOnly(path, config.options, entries.ownership.owners)));
+      || sources.some(path => !isModuleOnly(path, config.options, entries.ownership.owners, declarationOutputs)));
     keys.set(config, semanticOptionsKey(config.options) + (isolated ? `\u0000global-universe:${index}` : ''));
   }
   return keys;
 }
 
-function isModuleOnly(path: string, options: ts.CompilerOptions, owners: ReadonlyMap<string, ProjectConfig>): boolean {
+/**
+ * 소스가 전역 선언 없이 프로젝트 소유 파일만 import하는 module인지 본다. 선언 산출물은 되짚은 소스로 판정한다.
+ *
+ * @param path 소스 절대 경로
+ * @param options 소유 설정 옵션
+ * @param owners 소스별 소유 설정
+ * @param declarationOutputs 선언 산출물 역매핑(없으면 되짚지 않는다)
+ * @returns module 전용이면 true
+ */
+function isModuleOnly(path: string, options: ts.CompilerOptions, owners: ReadonlyMap<string, ProjectConfig>,
+  declarationOutputs?: DeclarationOutputMapper): boolean {
   const read = readBoundedConfigText(path, MAX_SOURCE_BYTES);
   if (!read.ok) return false;
   const source = parseWithinSyntaxDepth(() => ts.createSourceFile(path, read.text, ts.ScriptTarget.Latest, true));
@@ -353,7 +387,9 @@ function isModuleOnly(path: string, options: ts.CompilerOptions, owners: Readonl
   const modes: readonly ts.ResolutionMode[] = [undefined, ts.ModuleKind.ESNext, ts.ModuleKind.CommonJS];
   return ts.preProcessFile(read.text, true, true).importedFiles.every(imported => modes.every(mode => {
     const target = ts.resolveModuleName(imported.fileName, path, analysisOptions(options), host, undefined, undefined, mode).resolvedModule;
-    return target === undefined || owners.has(resolve(target.resolvedFileName));
+    if (target === undefined) return true;
+    const mapped = declarationOutputs?.match(target.resolvedFileName);
+    return owners.has(resolve(mapped?.kind === 'source' ? mapped.fileName : target.resolvedFileName));
   }));
 }
 
@@ -523,6 +559,12 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   if ((status.pnpIssues?.length ?? 0) > 0) gaps.push(`pnp-dependencies: static dependency inputs were refused (${status.pnpIssues!.join(', ')}); unresolved inputs may hide ${affected}; verify the static metadata, project boundary and ZIP budgets`);
   if ((status.contextBoundaryImports ?? 0) > 0) gaps.push(`config-context-boundary: ${status.contextBoundaryImports} import(s) cross separated type-checking contexts and remain unresolved; ${affected} may be incomplete`);
   if (status.contextBudgetExceeded === true) gaps.push(`config-context-budget: more than 16 type-checking contexts or 200000 source-context entries; imports remain unresolved and ${affected} may be incomplete`);
+  if ((status.declarationOutputImports ?? 0) > 0) {
+    gaps.push(`declaration-outputs: ${status.declarationOutputImports} import(s) resolve to declaration files inside the project that the scan does not `
+      + `analyze as sources (for example build output) and could not be mapped to a scanned source through a declaration map, `
+      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation; calls through them are counted as external and ${affected} `
+      + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
+  }
   if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loaders are never executed`);
   if ((status.excludedSourceRoots ?? 0) > 0) {
     gaps.push(`source-scope: ${status.excludedSourceRoots} scanned candidate(s) were not entry files selected by files/include/exclude or TypeScript sibling precedence; `
@@ -563,6 +605,17 @@ function unreadableConfig(configName: string): ProjectConfig {
 }
 
 /**
+ * 산출물 위치·형식만 정하고 심볼 해석에는 영향을 주지 않는 옵션이다. 분석은 emit하지 않으므로 지운다.
+ * 남겨 두면 `rootDir`만 다른 workspace 패키지와 앱이 서로 다른 checker 문맥으로 갈려, 선언 산출물을 소스로
+ * 되짚어도 문맥 경계에서 import가 미해결로 남는다.
+ */
+const EMIT_ONLY_OPTIONS = [
+  'incremental', 'composite', 'tsBuildInfoFile', 'declaration', 'declarationMap', 'emitDeclarationOnly', 'plugins', 'outDir', 'outFile',
+  'rootDir', 'declarationDir', 'sourceMap', 'inlineSourceMap', 'inlineSources', 'sourceRoot', 'mapRoot', 'removeComments', 'newLine',
+  'emitBOM', 'noEmitOnError', 'stripInternal',
+] as const;
+
+/**
  * 분석용으로 옵션을 조정한다: emit·증분 빌드·플러그인을 끄고 JS를 허용한다.
  *
  * @param options 설정의 옵션
@@ -570,9 +623,7 @@ function unreadableConfig(configName: string): ProjectConfig {
  */
 function analysisOptions(options: ts.CompilerOptions): ts.CompilerOptions {
   const adjusted: ts.CompilerOptions = { ...options, noEmit: true, allowJs: true, checkJs: false, skipLibCheck: true };
-  for (const key of ['incremental', 'composite', 'tsBuildInfoFile', 'declaration', 'declarationMap', 'emitDeclarationOnly', 'plugins', 'outDir', 'outFile'] as const) {
-    delete adjusted[key];
-  }
+  for (const key of EMIT_ONLY_OPTIONS) delete adjusted[key];
   return adjusted;
 }
 

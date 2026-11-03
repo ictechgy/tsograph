@@ -116,6 +116,12 @@ Imported dependencies can still enter the analyzed closure even when excluded as
 the nearest or explicitly referenced owner configuration: two apps with `baseUrl: "./src"` resolve their
 own aliases, including aliases inside an imported package. Compatible type-checking options share a
 Program; incompatible options use independent Programs and cross-context imports remain unresolved.
+Emit-only options (`rootDir`, `outDir`, `declarationDir`, `composite`, source-map and comment options) do not
+separate Programs. A workspace package whose `exports`/`types` points at build output inside the project
+(`packages/lib/dist/index.d.ts`) is followed back to its scanned source when a declaration map, the emitting
+config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
+directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
+source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
 use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- graph·reach·impact: workspace 패키지가 `exports.types`로 프로젝트 안 빌드 산출물(`dist/index.d.ts`)을 가리키면
+  앱의 호출이 외부로 조용히 사라지던 문제를 고쳤다. declaration map, 산출물을 낸 설정의 `declarationDir`/`outDir`↔`rootDir`,
+  손으로 쓴 선언 옆 JavaScript 구현으로 스캔한 소스 하나를 증명할 때만 그 소스로 잇고, 근거가 없으면
+  `graph-config: declaration-outputs:`로 import 수와 산출물 경로를 알리며 프로그램을 열린 쪽(`incomplete-scan`)으로 본다.
+  `rootDir`·`declarationDir`·source map 같은 emit 전용 옵션은 더 이상 type-checking 문맥을 나누지 않는다.
+
 ## [0.11.0] - 2026-11-03
 
 - Refresh shared conformance vectors from isthmus `1d6683ab2cd4f7804370c85d4869501042bc3dec`; execute SQL relation cases directly from the hashed source vector. Document published versus candidate versions and feature-specific consumer requirements.
