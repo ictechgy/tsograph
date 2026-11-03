@@ -38,7 +38,8 @@ isthmus-cli 0.9.0 and earlier reject `target: "http"` documents.
 
 ```sh
 tsograph routes --role client --project ./web --service example-api > calls.json
-tsograph impact --project ./web --roots-from affected-call-symbols.json
+# Impact on the symbols that make those calls (each fact keeps its enclosing graph id in symbol.usr)
+tsograph impact --project ./web $(jq -r '[.facts[].symbol.usr // empty] | unique[]' calls.json)
 ```
 
 Extracts global `fetch` (web and React Native), symbol-proven axios imports/`create` instances,

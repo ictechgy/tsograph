@@ -36,7 +36,8 @@ HTTP v1 계약은 isthmus-cli **0.10.0**에 발행됐다. `check`(`--pairs` 포�
 
 ```sh
 tsograph routes --role client --project ./web --service example-api > calls.json
-tsograph impact --project ./web --roots-from affected-call-symbols.json
+# 그 호출을 하는 심볼(사실마다 감싸는 그래프 id를 symbol.usr에 싣는다)의 영향 범위
+tsograph impact --project ./web $(jq -r '[.facts[].symbol.usr // empty] | unique[]' calls.json)
 ```
 
 전역 `fetch`(웹·React Native), 심볼 provenance가 있는 axios import·`create` 인스턴스,
