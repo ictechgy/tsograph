@@ -11,7 +11,7 @@ Static facts for TypeScript/JavaScript (Node) services, emitted in the
 
 tsograph is the TypeScript/JavaScript member of a family of static-analysis CLIs
 (cartograph for Swift, kartograph for Kotlin, dartograph for Dart, gartograph for Go,
-rustograph for Rust, schemagraph for SQL). Each tool reports only what it observes in its
+rustograph for Rust, pythograph for Python, schemagraph for SQL). Each tool reports only what it observes in its
 own language; isthmus joins the documents.
 
 ## Status

@@ -10,7 +10,7 @@ TypeScript/JavaScript(Node) 서비스의 정적 사실을
 [isthmus](https://github.com/ictechgy/isthmus) bridge-facts 교환 형식으로 낸다.
 
 tsograph는 정적 분석 CLI 가족(Swift의 cartograph, Kotlin의 kartograph, Dart의 dartograph,
-Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScript 생산자다. 각 도구는
+Go의 gartograph, Rust의 rustograph, Python의 pythograph, SQL의 schemagraph)의 TypeScript/JavaScript 생산자다. 각 도구는
 자기 언어에서 본 것만 보고하고, 조인은 isthmus가 한다.
 
 ## 상태
