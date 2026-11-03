@@ -15,6 +15,9 @@
   하위 패키지가 내보낸 흐름을 bound로 닫던 문제를 고쳤다. 파일마다 루트 아래 가장 가까운 `package.json`이 공개 진입점을
   선언하고 `"private": true`가 아니거나 읽을 수 없으면 그 파일의 내보낸 함수·클래스를 열고 속성 쓰기는 프로그램 전체에서
   열린 쪽으로 본다(`bound-dispatch: nested package.json file(s) …`).
+- graph·reach·impact: 가장 가까운 compiler 설정이 128개를 넘는 모노레포에서 예산을 넘는 순간 모든 소스의 import를 막아
+  그래프 간선이 0개가 되던 문제를 고쳤다. 예산 밖 설정이 소유한 소스만 보류하고, 원인을 소유권 충돌(`config-conflict:`)이
+  아니라 `graph-config: config-budget:`으로 알린다.
 
 ## [0.11.0] - 2026-11-03
 

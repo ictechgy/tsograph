@@ -74,6 +74,8 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly conflictingConfigSources?: readonly string[];
   readonly conflictingConfigSourceCount?: number;
   readonly configOwnershipIncomplete?: boolean;
+  /** 가장 가까운 설정이 128개 설정 예산 밖이라 import를 보류한 소스 수다. */
+  readonly configBudgetSources?: number;
   readonly skippedLoaderEntries?: number;
   /**
    * 프로젝트 안 선언 산출물(스캔이 건너뛴 `dist/*.d.ts` 등)로 해석됐지만 스캔한 소스로 되짚지 못한 import 수와
@@ -173,6 +175,8 @@ export function createGraphProgram(
   // 소유권은 import를 미해결로 남긴다. 로더나 설정의 코드를 실행하지 않는다.
   const conflicts = context === undefined ? ownership.blocked : ownership.ambiguous;
   const blocked = conflicts;
+  // 예산 때문에 막은 소스는 소유권 충돌이 아니므로 config-conflict가 아니라 config-budget으로 따로 알린다.
+  const reportedConflicts = [...conflicts].filter((path) => !ownership.budgetBlocked.has(path));
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
@@ -261,8 +265,9 @@ export function createGraphProgram(
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
         ...ownershipStatus(config, ownership), ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
         ...(nonRoots.length > 0 ? { excludedSourceRoots: nonRoots.length, importedOutsideRoots } : {}),
-        ...(conflicts.size > 0 ? { conflictingConfigSourceCount: conflicts.size,
-          conflictingConfigSources: [...conflicts].map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(reportedConflicts.length > 0 ? { conflictingConfigSourceCount: reportedConflicts.length,
+          conflictingConfigSources: reportedConflicts.map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(ownership.budgetBlocked.size > 0 ? { configBudgetSources: ownership.budgetBlocked.size } : {}),
         ...(context === undefined ? {} : { compilerContexts: context.count, contextBoundaryImports: boundaryImports.size,
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
@@ -575,6 +580,11 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
       + `their imports were left unresolved instead of applying another project's aliases; ${affected} may be incomplete; `
       + `files: ${JSON.stringify(status.conflictingConfigSources ?? [])}; omitted: ${status.conflictingConfigSourceCount! - (status.conflictingConfigSources?.length ?? 0)}`);
   }
+  if ((status.configBudgetSources ?? 0) > 0) {
+    gaps.push(`config-budget: ${status.configBudgetSources} source(s) are owned by compiler configs beyond the ${MAX_OWNER_CONFIGS}-config budget; `
+      + `their imports were left unresolved instead of applying another project's options; ${affected} may be incomplete `
+      + '(analyze a smaller --project, or a package with --workspace)');
+  }
   if (status.configOwnershipIncomplete === true) gaps.push(`config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; ${affected} may be incomplete`);
   const outside = status.outsideConfigRoots ?? 0;
   if (outside > 0) {
@@ -660,6 +670,8 @@ export function configImportIsBlocked(program: ts.Program, fileName: string): bo
 interface ConfigOwnership {
   readonly configs: readonly ProjectConfig[];
   readonly blocked: ReadonlySet<string>;
+  /** 가장 가까운 설정이 128개 예산 밖이라 소유 설정을 읽지 못해 막은 소스다(blocked·ambiguous에도 들어 있다). */
+  readonly budgetBlocked: ReadonlySet<string>;
   readonly referenceRoots: readonly string[];
   readonly incomplete: boolean;
   readonly owners: ReadonlyMap<string, ProjectConfig>;
@@ -674,6 +686,9 @@ function configOwnership(
   if (selected.path !== undefined) cache.set(resolve(selected.path), selected);
   const blocked = new Set<string>();
   const ambiguous = new Set<string>();
+  // 예산 때문에 읽지 못한 설정 경로다. 가장 가까운 설정이 여기 있는 소스만 막고, 예산 안 설정이 소유한 소스는 계속 분석한다.
+  const budgetRefused = new Set<string>();
+  const budgetBlocked = new Set<string>();
   const ownersBySource = new Map<string, ProjectConfig>();
   let incomplete = selected.status.configRootsTruncated === true;
   const inside = (path: string) => {
@@ -683,7 +698,8 @@ function configOwnership(
   const read = (path: string): ProjectConfig | undefined => {
     const absolute = resolve(path);
     if (cache.has(absolute)) return cache.get(absolute);
-    if (!inside(absolute) || cache.size >= 128) { incomplete = true; return undefined; }
+    if (!inside(absolute)) { incomplete = true; return undefined; }
+    if (cache.size >= MAX_OWNER_CONFIGS) { budgetRefused.add(absolute); return undefined; }
     let config: ProjectConfig;
     try { config = readProjectConfig(dirname(absolute), boundary, absolute, confinedConfigs); }
     catch { config = unreadableConfig(basename(absolute)); incomplete = true; }
@@ -701,6 +717,8 @@ function configOwnership(
     visited.add(path);
     if (visited.size > 128) { incomplete = true; break; }
     const config = read(path);
+    // reference가 소유할 소스는 읽기 전에는 모른다. 예산 밖 reference도 예전처럼 전체를 불완전으로 본다.
+    if (config === undefined && budgetRefused.has(path)) incomplete = true;
     if (config === undefined || config.status.configUnreadable) { sources.forEach((source) => blocked.add(source)); continue; }
     for (const source of config.fileNames) {
       referenceRoots.add(source);
@@ -716,14 +734,25 @@ function configOwnership(
     if (!inside(directory)) return undefined;
     if (explicit && resolve(directory) === resolve(root)) { byDirectory.set(directory, selected); return selected; }
     const name = configNames.find((candidate) => existsSync(join(directory, candidate)));
-    const owner = name === undefined ? nearest(dirname(directory)) : read(join(directory, name));
+    const path = name === undefined ? undefined : join(directory, name);
+    const found = path === undefined ? nearest(dirname(directory)) : read(path);
+    // 예산 밖이라 읽지 못한 가장 가까운 설정은 상위 설정으로 대신하지 않는다(다른 프로젝트의 옵션·별칭을 적용하게 된다).
+    const owner = path !== undefined && found === undefined && budgetRefused.has(resolve(path)) ? budgetOwner : found;
     byDirectory.set(directory, owner);
     return owner;
   };
   const selectedKey = resolutionOptionsKey(selected.options);
   for (const source of new Set([...sources, ...selected.fileNames, ...referenceRoots])) {
     const owners = [...(referenced.get(source) ?? [])];
-    const owner = nearest(dirname(source));
+    const nearestOwner = nearest(dirname(source));
+    if (nearestOwner === budgetOwner) {
+      budgetBlocked.add(source);
+      blocked.add(source);
+      ambiguous.add(source);
+      ownersBySource.set(source, selected);
+      continue;
+    }
+    const owner = nearestOwner;
     if (owner !== undefined) owners.push(owner);
     if (owners.some((config) => config !== selected && (config.status.configUnreadable || resolutionOptionsKey(config.options) !== selectedKey))) blocked.add(source);
     const referenceOwners = referenced.get(source) ?? [];
@@ -734,8 +763,15 @@ function configOwnership(
     ownersBySource.set(source, unique.size === 1 ? [...unique.values()][0]! : selected);
   }
   if (incomplete) sources.forEach((source) => { blocked.add(source); ambiguous.add(source); });
-  return { configs: [...new Set([selected, ...cache.values()])], blocked, referenceRoots: [...referenceRoots], incomplete, owners: ownersBySource, ambiguous };
+  return { configs: [...new Set([selected, ...cache.values()])], blocked, budgetBlocked, referenceRoots: [...referenceRoots], incomplete,
+    owners: ownersBySource, ambiguous };
 }
+
+/** 한 계획이 읽는 compiler 설정 수의 상한이다. 큰 모노레포에서 설정 읽기 비용을 묶는다. */
+const MAX_OWNER_CONFIGS = 128;
+
+/** 가장 가까운 설정이 예산 밖이라 읽지 못했음을 나타내는 표식이다. 실제 설정으로 쓰지 않는다. */
+const budgetOwner: ProjectConfig = { options: {}, fileNames: [], status: { configName: undefined, configUnreadable: false } };
 
 /** 같은 의미 그룹의 대표 설정만 보고 다른 소유 설정의 준비 공백을 버리지 않는다. */
 function ownershipStatus(selected: ProjectConfig, ownership: ConfigOwnership): ProgramConfigStatus {

@@ -182,7 +182,8 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
     || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
     || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true
-    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0 || (status.declarationOutputImports ?? 0) > 0;
+    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0 || (status.declarationOutputImports ?? 0) > 0
+    || (status.configBudgetSources ?? 0) > 0;
   const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
@@ -278,7 +279,7 @@ function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
 function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const result = new Set(callLimitations(counts, view));
   const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
-  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership):/u;
+  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget):/u;
   for (const [index, { graph }] of contexts.entries()) {
     const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
     for (const line of lines) {
