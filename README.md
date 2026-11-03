@@ -1251,7 +1251,11 @@ What `bound` guarantees, and what it does not:
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
   1 MiB), or an incomplete scan (skipped, oversized, unreadable, symlinked, or
   unsafely named files, or parse errors), additionally opens every exported function and class and every
-  non-private property; the document then says so under `bound-dispatch:`. An exported function whose
+  non-private property; the document then says so under `bound-dispatch:`. Below the root, each file uses its
+  nearest `package.json`: a workspace package that declares those fields and is not `"private": true` (or whose
+  manifest cannot be read) opens the exported functions and classes of its own files and, conservatively, every
+  non-private property in the program (`bound-dispatch: nested package.json file(s) …`); a private workspace
+  package cannot be published, so its consumers are the scanned workspace. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
   parameter value alone is never taken as the whole flow) unless a strict syntactic re-scan proves it

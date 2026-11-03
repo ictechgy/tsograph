@@ -11,6 +11,10 @@
   손으로 쓴 선언 옆 JavaScript 구현으로 스캔한 소스 하나를 증명할 때만 그 소스로 잇고, 근거가 없으면
   `graph-config: declaration-outputs:`로 import 수와 산출물 경로를 알리며 프로그램을 열린 쪽(`incomplete-scan`)으로 본다.
   `rootDir`·`declarationDir`·source map 같은 emit 전용 옵션은 더 이상 type-checking 문맥을 나누지 않는다.
+- graph·reach·impact: 공개 패키지 판정이 루트 `package.json`만 봐서, 루트가 private인 모노레포의 게시 가능한
+  하위 패키지가 내보낸 흐름을 bound로 닫던 문제를 고쳤다. 파일마다 루트 아래 가장 가까운 `package.json`이 공개 진입점을
+  선언하고 `"private": true`가 아니거나 읽을 수 없으면 그 파일의 내보낸 함수·클래스를 열고 속성 쓰기는 프로그램 전체에서
+  열린 쪽으로 본다(`bound-dispatch: nested package.json file(s) …`).
 
 ## [0.11.0] - 2026-11-03
 

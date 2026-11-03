@@ -1532,3 +1532,49 @@ test('visible prototype replacement invalidates direct and bound immutable recei
   assert.ok(clean.edges.some((edge) => edge.from === 'src/main.ts#invoke'
     && edge.to === 'src/main.ts#LivePort.run' && edge.evidence === 'direct'));
 });
+
+/** 중첩 공개 manifest가 연 프로그램의 limitation 앞부분이다. */
+const nestedManifestLimitation = 'bound-dispatch: nested package.json file(s) declare public entry points or could not be read as a JSON object within 1 MiB: ';
+
+test('nested public package: exported dispatch in a published workspace package is not bound', async () => {
+  const lib = [
+    'export interface Service { run(): string; }',
+    'export class First implements Service { private readonly brand = true; run() { return "first"; } }',
+    'export function invoke(service: Service) { return service.run(); }',
+  ].join('\n');
+  const app = ['import { First, invoke } from "../../../packages/lib/src/index.ts";', 'export const main = () => invoke(new First());'].join('\n');
+  const tsconfig = '{ "compilerOptions": { "strict": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022", "allowImportingTsExtensions": true } }';
+  const published = await graphOf({
+    'tsconfig.json': tsconfig,
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*", "apps/*"] }',
+    'packages/lib/package.json': '{ "name": "@acme/lib", "version": "1.0.0", "exports": "./src/index.ts" }',
+    'packages/lib/src/index.ts': lib,
+    'apps/web/src/main.ts': app,
+  });
+  assert.deepEqual(published.edges.filter((edge) => edge.from === 'packages/lib/src/index.ts#invoke' && edge.evidence === 'bound'), []);
+  assert.ok(published.limitations.some((line) => line.startsWith(`${nestedManifestLimitation}["packages/lib/package.json"]`)),
+    published.limitations.join('\n'));
+
+  // 게시할 수 없는(private) workspace 패키지의 소비자는 스캔 안에 있으므로 닫힌 프로그램으로 본다.
+  const internal = await graphOf({
+    'tsconfig.json': tsconfig,
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*", "apps/*"] }',
+    'packages/lib/package.json': '{ "name": "@acme/lib", "private": true, "exports": "./src/index.ts" }',
+    'packages/lib/src/index.ts': lib,
+    'apps/web/src/main.ts': app,
+  });
+  assert.deepEqual(internal.edges.filter((edge) => edge.from === 'packages/lib/src/index.ts#invoke' && edge.evidence === 'bound')
+    .map((edge) => edge.to), ['packages/lib/src/index.ts#First.run']);
+
+  // 읽지 못하는 중첩 manifest는 판단할 수 없으므로 열린 쪽으로 본다.
+  const unreadable = await graphOf({
+    'tsconfig.json': tsconfig,
+    'package.json': '{ "name": "root", "private": true }',
+    'packages/lib/package.json': '{ not json',
+    'packages/lib/src/index.ts': lib,
+    'apps/web/src/main.ts': app,
+  });
+  assert.deepEqual(unreadable.edges.filter((edge) => edge.from === 'packages/lib/src/index.ts#invoke' && edge.evidence === 'bound'), []);
+  assert.ok(unreadable.limitations.some((line) => line.startsWith(`${nestedManifestLimitation}["packages/lib/package.json"]`)),
+    unreadable.limitations.join('\n'));
+});

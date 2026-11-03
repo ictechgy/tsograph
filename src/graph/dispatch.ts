@@ -61,6 +61,11 @@ export interface DispatchContext {
   /** 스캔 밖 코드가 내보낸 선언을 부를 수 있다고 볼지(공개 패키지·불완전 스캔) */
   readonly openProgram: boolean;
   /**
+   * 닫힌 프로그램 안에서 게시할 수 있는 중첩 workspace 패키지(또는 읽지 못한 중첩 manifest)에 속한 노드 파일이다.
+   * 그 파일의 내보낸 선언만 열리고, 속성 쓰기는 프로그램 전체에서 열린 쪽으로 본다.
+   */
+  readonly openFiles?: ReadonlySet<string>;
+  /**
    * 프레임워크가 불러와 내보내기를 부르는 파일(`isFrameworkFile`). 진입점 표식이 없어도(`export * from`) 넣는다 — 그 파일의
    * 내보내기와 재내보내기로 닿는 선언 전부가 열린 자리다(진입점 표식이 달린 파일은 정책이 따로 더한다).
    */
@@ -245,7 +250,7 @@ function boundCallableTargets(
     pathByFile: view.pathByFile,
     allPathByFile: view.allPathByFile,
     index: view.index,
-    openProgram: context.openProgram,
+    openProgram: context.openProgram || (context.openFiles?.size ?? 0) > 0,
   };
   const modeled = isNextCacheWrapperExpression(site.call.expression, modelContext);
   const callback = modeled ? delegateCallbackExpression(site.call.expression, modelContext, site.call) : undefined;
@@ -319,7 +324,7 @@ class OpenCallablePolicy implements FlowPolicy {
   constructor(context: DispatchContext, index: FlowIndex, files: ReadonlyMap<string, ts.SourceFile>) {
     this.context = context;
     this.index = index;
-    this.openProperties = context.openProgram;
+    this.openProperties = context.openProgram || (context.openFiles?.size ?? 0) > 0;
     this.pathByFile = new Map([...files].map(([path, sourceFile]) => [sourceFile, path]));
     const entries = context.store.entryRecords();
     this.entryPaths = new Set([...entries.map((entry) => entry.path), ...context.frameworkFiles]);
@@ -361,7 +366,7 @@ class OpenCallablePolicy implements FlowPolicy {
     if (declarationIds(declaration, path).some((id) => this.entryTargets.has(id))) return true;
     if (!this.isExported(declaration)) return false;
     const symbol = declarationSymbol(this.context.checker, declaration);
-    return this.context.openProgram || this.index.hasOpaqueImport || this.entryPaths.has(path)
+    return this.context.openProgram || this.context.openFiles?.has(path) === true || this.index.hasOpaqueImport || this.entryPaths.has(path)
       || (symbol !== undefined && this.openExports.has(symbol));
   }
 
