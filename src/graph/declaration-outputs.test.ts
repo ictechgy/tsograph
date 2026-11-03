@@ -11,6 +11,7 @@ import { test } from 'node:test';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
+import { DeclarationOutputMapper } from './declaration-outputs.ts';
 import type { CallGraph } from './graph-model.ts';
 
 /** 호출하는 앱과 호출되는 라이브러리 함수의 그래프 id다. */
@@ -153,6 +154,54 @@ test('프로젝트 밖 의존성(node_modules 실경로)의 선언은 산출물�
   try {
     const graph = await buildCallGraph(root, createNodeFileSystem());
     assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 파일들을 쓰고 그 절대 경로 목록을 돌려준다. */
+function writeFiles(root: string, files: Readonly<Record<string, string>>): string[] {
+  for (const [path, text] of Object.entries(files)) writeProjectFile(root, path, text);
+  return Object.keys(files).map((path) => join(root, path));
+}
+
+test('mapper: 쓸 수 없는 declaration map은 다른 근거로 넘어가고, 여러·원격 소스 map은 쓰지 않는다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-mapper-')));
+  try {
+    const scanned = writeFiles(root, { 'lib/src/a.ts': '', 'lib/src/b.ts': '', 'lib/src/c.ts': '', 'lib/src/d.ts': '' });
+    writeFiles(root, {
+      'lib/out/a.d.ts': '', 'lib/out/a.d.ts.map': '{ not json',
+      'lib/out/b.d.ts': '', 'lib/out/b.d.ts.map': '{"sources":["../src/b.ts","../src/c.ts"]}',
+      'lib/out/c.d.ts': '', 'lib/out/c.d.ts.map': '{"sources":["https://example.invalid/c.ts"]}',
+      'lib/out/d.d.ts': '', 'lib/out/d.d.ts.map': '[1]',
+    });
+    const mapper = new DeclarationOutputMapper(root, [], scanned);
+    for (const name of ['a', 'b', 'c', 'd']) assert.deepEqual(mapper.match(join(root, `lib/out/${name}.d.ts`)), { kind: 'unmapped' }, name);
+    // 같은 파일을 다시 물어도 같은 판정(캐시)이다.
+    assert.deepEqual(mapper.match(join(root, 'lib/out/a.d.ts')), { kind: 'unmapped' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: rootDir 없는 설정은 공통 소스 디렉터리로, .d.mts는 .mts로, 모호한 소스는 잇지 않는다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-mapper-')));
+  try {
+    const scanned = writeFiles(root, {
+      'pkg/src/nested/a.mts': '', 'pkg/src/b.ts': '', 'pkg/src/twin.ts': '', 'pkg/src/twin.tsx': '', 'pkg/src/only.js': '',
+    });
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { outDir: join(root, 'pkg/build') },
+      fileNames: [join(root, 'pkg/src/nested/a.mts'), join(root, 'pkg/src/b.ts'), join(root, 'pkg/src/types.d.ts')] };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/build/nested/a.d.mts')), { kind: 'source', fileName: join(root, 'pkg/src/nested/a.mts') });
+    assert.deepEqual(mapper.match(join(root, 'pkg/build/b.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/b.ts') });
+    assert.deepEqual(mapper.match(join(root, 'pkg/build/twin.d.ts')), { kind: 'unmapped' });
+    assert.deepEqual(mapper.match(join(root, 'pkg/build/only.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/only.js') });
+    assert.deepEqual(mapper.match(join(root, 'pkg/src/b.ts')), { kind: 'not-output' });
+    assert.deepEqual(mapper.match(join(root, '..', 'outside.d.ts')), { kind: 'not-output' });
+    // 내보내지 않는 설정과 진입 파일이 없는 설정은 산출물 루트를 만들지 않는다.
+    const silent = new DeclarationOutputMapper(root, [{ options: {}, fileNames: [] }, { options: { outDir: join(root, 'x') }, fileNames: [] }], scanned);
+    assert.deepEqual(silent.match(join(root, 'x/b.d.ts')), { kind: 'unmapped' });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
