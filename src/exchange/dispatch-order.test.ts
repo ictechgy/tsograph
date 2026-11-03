@@ -1,6 +1,7 @@
 /**
- * isthmus 공유 벡터 `conformance/http-dispatch.json`의 `dispatch.validate` 사례(생산자도 적용)로 `order` 검증기를
- * 검사한다. `dispatch.match`·`dispatch.shadow`는 소비자 전용이라 여기서 실행하지 않는다.
+ * isthmus 공유 벡터 `conformance/http-dispatch.json`의 `dispatch.validate` 사례로 `order` 검증기를 검사한다. 생산자 검증기는
+ * 소비자와 같은 판정을 해야 내보낸 순서를 잘못 버리지 않으므로 소비자 전용 validate 사례(끝 슬래시 strict 접두사)도 실행한다.
+ * `dispatch.match`·`dispatch.shadow`는 조인 판정이라 여기서 실행하지 않는다.
  */
 
 import assert from 'node:assert/strict';
@@ -24,8 +25,8 @@ const dispatchCases = (JSON.parse(readFileSync(fileURLToPath(new URL('../../conf
 
 test('isthmus dispatch.validate 사례: 제품 검증기가 소비자와 같이 판정한다', () => {
   const validate = dispatchCases.filter((entry) => entry.ruleId === 'dispatch.validate');
-  assert.ok(validate.length >= 18);
-  assert.ok(validate.every((entry) => entry.appliesTo.includes('producer')));
+  assert.ok(validate.length >= 22);
+  assert.ok(validate.every((entry) => entry.appliesTo.includes('producer') || entry.appliesTo.includes('consumer')));
   const failures = validate.filter((entry) => (dispatchOrderProblem(entry.input.document!) === undefined) !== entry.expect.valid);
   assert.deepEqual(failures.map((entry) => entry.id), []);
 });

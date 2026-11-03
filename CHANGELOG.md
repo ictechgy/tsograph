@@ -25,6 +25,10 @@
 
 ### Changed
 
+- 공유 적합성 벡터를 isthmus `c76e105c77d4abb4a0036f37cf899b0a7e0fb162`로 다시 반입했다(`http-dispatch.json`의 끝 슬래시 strict
+  catch-all 접두사 validate 사례). registration-order 문서의 생산자 검증기가 strict 접두사 `/a/`를 원본 `/a/{**}`와 묶지 못해
+  isthmus 0.14.0이 받는 순서를 버릴 수 있었으므로 isthmus `catchAllOriginalTemplates`와 같은 규칙으로 맞췄다.
+
 - 테스트: change 캡처가 필요한 테스트는 로컬 Git이 2.45 미만이면 이유를 남기고 건너뛴다(CI에서는 건너뛰지 않고 실패한다).
   README 요구 사항에 `change-impact`의 Git 2.45+ 요구를 적었다.
 - CI: Node 24·26에서도 `npm run verify`를 돌리고, `npm pack` tarball을 격리 prefix에 설치해 같은 CLI 계약을 검사한다
