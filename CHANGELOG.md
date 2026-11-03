@@ -19,6 +19,14 @@
   그래프 간선이 0개가 되던 문제를 고쳤다. 예산 밖 설정이 소유한 소스만 보류하고, 원인을 소유권 충돌(`config-conflict:`)이
   아니라 `graph-config: config-budget:`으로 알린다.
 
+### Changed
+
+- graph·routes·navigation·schema: 내장 TypeScript 5.9.3이 모르는 compiler 옵션이나 값(`target: "es2025"` 등)이 하나라도
+  있으면 설정 전체를 기본값으로 바꿔 `paths`·`include`가 사라지고 "could not be parsed"로 알리던 동작을 바꿨다. 그 옵션만
+  버리고(새 `target`·`lib` 값은 ESNext로 근사) 나머지를 쓰며, `compiler-options:`로 버린 알려진 옵션 이름·모르는 옵션 수와
+  내장 TypeScript 버전을 알린다. 사용자가 적은 모르는 옵션 이름은 싣지 않는다. `--tsconfig`로 고른 설정도 같은 규칙을 따른다.
+  JSON 구문 오류·읽지 못한 `extends`·`include` 형식 오류는 예전처럼 설정을 읽지 못한 것으로 본다.
+
 ## [0.11.0] - 2026-11-03
 
 - Refresh shared conformance vectors from isthmus `1d6683ab2cd4f7804370c85d4869501042bc3dec`; execute SQL relation cases directly from the hashed source vector. Document published versus candidate versions and feature-specific consumer requirements.

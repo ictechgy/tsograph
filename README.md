@@ -154,6 +154,10 @@ exchange fields and versions stay unchanged.
 
 - Node.js 22.18.0 or newer
 - isthmus-cli 0.10.0 or newer to join the documents (`npm install -g isthmus-cli`)
+- The analyzed project's own TypeScript is not used: tsograph bundles TypeScript 5.9.3 and reads compiler
+  configs with it. Option values that 5.9.3 does not know (for example a newer `target` or `lib`) are ignored one
+  option at a time, newer `target`/`lib` values are approximated with ESNext, and the rest of the config (`paths`,
+  `baseUrl`, `include`) is kept; `compiler-options:` names the ignored known options and counts unknown ones.
 
 ## Installation
 

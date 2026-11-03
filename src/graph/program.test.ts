@@ -58,8 +58,9 @@ test('tsconfig·jsconfig·설정 없음·깨진 설정을 구분한다', async (
   await withProject({ 'tsconfig.json': '{ "compilerOptions": ', 'a.ts': '' }, (root) => {
     assert.deepEqual(createGraphProgram(root, []).status, { configName: 'tsconfig.json', configUnreadable: true });
   });
+  // 알려진 옵션의 모르는 값은 그 옵션만 버리고 나머지 설정을 쓴다(내장 TypeScript보다 새 값일 수 있다).
   await withProject({ 'tsconfig.json': '{ "compilerOptions": { "module": "nonsense" } }' }, (root) => {
-    assert.deepEqual(createGraphProgram(root, []).status, { configName: 'tsconfig.json', configUnreadable: true });
+    assert.deepEqual(createGraphProgram(root, []).status, { configName: 'tsconfig.json', configUnreadable: false, ignoredCompilerOptions: ['module'] });
   });
 });
 

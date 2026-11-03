@@ -74,6 +74,9 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly conflictingConfigSources?: readonly string[];
   readonly conflictingConfigSourceCount?: number;
   readonly configOwnershipIncomplete?: boolean;
+  /** 내장 TypeScript가 모르는 값이라 버린 알려진 compiler 옵션 이름과, 모르는 옵션 이름 수다(이름은 싣지 않는다). */
+  readonly ignoredCompilerOptions?: readonly string[];
+  readonly unknownCompilerOptions?: number;
   /** 가장 가까운 설정이 128개 설정 예산 밖이라 import를 보류한 소스 수다. */
   readonly configBudgetSources?: number;
   readonly skippedLoaderEntries?: number;
@@ -533,8 +536,11 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
     configName === 'jsconfig.json' ? { allowJs: true } : undefined,
     path,
   );
-  // "include 결과 없음"(18003)은 호출자가 소스를 따로 넣으므로 문제가 아니다. 그 밖의 오류는 기본값으로 떨어진다.
-  const parseErrors = parsed.errors.filter(error => error.code !== 18003 && error.code !== 18002 && error.category === ts.DiagnosticCategory.Error);
+  // "include 결과 없음"(18003)은 호출자가 소스를 따로 넣으므로 문제가 아니다. 내장 TypeScript가 모르는 compiler 옵션이나
+  // 값(새 버전의 target·lib)은 TypeScript가 그 옵션만 버리고 나머지를 읽으므로 그대로 쓰고 한계로 알린다. 그 밖의 오류는 기본값으로 떨어진다.
+  const errors = parsed.errors.filter(error => error.code !== 18003 && error.code !== 18002 && error.category === ts.DiagnosticCategory.Error);
+  const ignoredOptions = ignoredCompilerOptions(errors);
+  const parseErrors = errors.filter(error => !ignoredOptions.diagnostics.has(error));
   // persistence는 루트 밖 extends를 읽지 않고 로컬 명시 alias만 보존하던 동작을 유지한다.
   // 부분 설정임을 알리며 frozen capture의 거부 기록은 이 fallback으로 지워지지 않는다.
   const partialConfined = confined && boundedReadFailed && parseErrors.every(error => error.code === 6053 || error.code === 5083);
@@ -544,10 +550,65 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
     }
     return { ...unreadableConfig(configName), path };
   }
-  return { options: parsed.options, fileNames: roots.admit(parsed.fileNames).map((file) => resolve(file)), path,
+  return { options: approximateUnsupportedValues(parsed.options, ignoredOptions.names), fileNames: roots.admit(parsed.fileNames).map((file) => resolve(file)), path,
     scoped: ['files', 'include', 'exclude'].some((key) => Object.hasOwn(parsed.raw as object, key)),
     references: parsed.projectReferences?.map((reference) => ts.resolveProjectReferencePath(reference)) ?? [],
-    status: { configName, configUnreadable: partialConfined, ...roots.gaps() } };
+    status: { configName, configUnreadable: partialConfined, ...roots.gaps(),
+      ...(ignoredOptions.names.size > 0 ? { ignoredCompilerOptions: [...ignoredOptions.names].sort() } : {}),
+      ...(ignoredOptions.unknown > 0 ? { unknownCompilerOptions: ignoredOptions.unknown } : {}) } };
+}
+
+/** TypeScript가 해당 옵션만 버리고 설정의 나머지를 읽는 진단 코드다(모르는 옵션 5023·5025, 형식이 틀린 값 5024, 목록 밖 값 6046). */
+const UNKNOWN_OPTION_CODES = new Set([5023, 5025]);
+const INVALID_VALUE_CODES = new Set([5024, 6046]);
+
+/**
+ * 옵션 하나에 국한되어 무시해도 되는 진단과, 값을 버린 알려진 옵션 이름·모르는 옵션 수를 고른다. 모르는 옵션 이름은
+ * 사용자가 적은 입력 원문이라 남기지 않는다. `include` 같은 설정 최상위 필드의 형식 오류는 옵션이 아니므로 고르지 않는다.
+ *
+ * @param errors 설정 parse 오류
+ * @returns 무시할 진단, 알려진 옵션 이름, 모르는 옵션 수
+ */
+function ignoredCompilerOptions(errors: readonly ts.Diagnostic[]): { diagnostics: Set<ts.Diagnostic>; names: Set<string>; unknown: number } {
+  const diagnostics = new Set<ts.Diagnostic>();
+  const names = new Set<string>();
+  let unknown = 0;
+  for (const error of errors) {
+    if (UNKNOWN_OPTION_CODES.has(error.code)) {
+      diagnostics.add(error);
+      unknown++;
+      continue;
+    }
+    if (!INVALID_VALUE_CODES.has(error.code)) continue;
+    const text = ts.flattenDiagnosticMessageText(error.messageText, ' ');
+    const name = /^Argument for '--([A-Za-z]+)' option/u.exec(text)?.[1] ?? /^Compiler option '([A-Za-z]+)' requires a value/u.exec(text)?.[1];
+    if (name === undefined || !isCompilerOptionName(name)) continue;
+    diagnostics.add(error);
+    names.add(name);
+  }
+  return { diagnostics, names, unknown };
+}
+
+/** TypeScript가 아는 compiler 옵션 이름인지 본다(공개 API로 변환해 "모르는 옵션" 진단이 없는지 확인한다). */
+function isCompilerOptionName(name: string): boolean {
+  const converted = ts.convertCompilerOptionsFromJson({ [name]: null }, '/');
+  return !converted.errors.some((error) => UNKNOWN_OPTION_CODES.has(error.code));
+}
+
+/**
+ * 내장 TypeScript보다 새 값이라 버려진 `target`·`lib`를 ESNext로 근사한다. 빠지면 TypeScript가 ES5 기본 lib를 써서
+ * `Promise`·`Map` 같은 내장 타입이 사라지기 때문이다. 다른 옵션은 버려진 채로 둔다.
+ *
+ * @param options parse한 옵션
+ * @param ignored 값을 버린 옵션 이름
+ * @returns 조정한 옵션
+ */
+function approximateUnsupportedValues(options: ts.CompilerOptions, ignored: ReadonlySet<string>): ts.CompilerOptions {
+  if (!ignored.has('target') && !ignored.has('lib')) return options;
+  const adjusted: ts.CompilerOptions = { ...options };
+  if (ignored.has('target') && adjusted.target === undefined) adjusted.target = ts.ScriptTarget.ESNext;
+  if (ignored.has('lib') && adjusted.lib !== undefined && !adjusted.lib.includes('lib.esnext.d.ts')) adjusted.lib = [...adjusted.lib, 'lib.esnext.d.ts'];
+  return adjusted;
 }
 
 /**
@@ -579,6 +640,14 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
     gaps.push(`config-conflict: ${status.conflictingConfigSourceCount} source(s) have different or ambiguous compiler-config ownership; `
       + `their imports were left unresolved instead of applying another project's aliases; ${affected} may be incomplete; `
       + `files: ${JSON.stringify(status.conflictingConfigSources ?? [])}; omitted: ${status.conflictingConfigSourceCount! - (status.conflictingConfigSources?.length ?? 0)}`);
+  }
+  const ignoredOptions = status.ignoredCompilerOptions ?? [];
+  const unknownOptions = status.unknownCompilerOptions ?? 0;
+  if (ignoredOptions.length > 0 || unknownOptions > 0) {
+    const parts = [...(ignoredOptions.length > 0 ? [ignoredOptions.join(', ')] : []), ...(unknownOptions > 0 ? [`${unknownOptions} unknown option(s)`] : [])];
+    gaps.push(`compiler-options: compiler config values that the bundled TypeScript ${ts.version} does not recognize were ignored (${parts.join('; ')}); `
+      + 'unsupported target/lib values use ESNext, and other options such as paths, baseUrl and include were kept; '
+      + `type resolution and ${affected} may differ from the project's TypeScript`);
   }
   if ((status.configBudgetSources ?? 0) > 0) {
     gaps.push(`config-budget: ${status.configBudgetSources} source(s) are owned by compiler configs beyond the ${MAX_OWNER_CONFIGS}-config budget; `
@@ -778,8 +847,12 @@ function ownershipStatus(selected: ProjectConfig, ownership: ConfigOwnership): P
   const statuses = ownership.configs.map(config => config.status);
   const outsideConfigRoots = statuses.reduce((sum, status) => sum + (status.outsideConfigRoots ?? 0), 0);
   const excludedConfigRoots = statuses.reduce((sum, status) => sum + (status.excludedConfigRoots ?? 0), 0);
+  const ignoredOptions = [...new Set(statuses.flatMap(status => status.ignoredCompilerOptions ?? []))].sort();
+  const unknownOptions = statuses.reduce((sum, status) => sum + (status.unknownCompilerOptions ?? 0), 0);
   return { ...selected.status,
     configUnreadable: statuses.some(status => status.configUnreadable),
+    ...(ignoredOptions.length > 0 ? { ignoredCompilerOptions: ignoredOptions } : {}),
+    ...(unknownOptions > 0 ? { unknownCompilerOptions: unknownOptions } : {}),
     ...(outsideConfigRoots > 0 ? { outsideConfigRoots } : {}),
     ...(excludedConfigRoots > 0 ? { excludedConfigRoots } : {}),
     ...(statuses.some(status => status.configRootsTruncated) ? { configRootsTruncated: true } : {}),
