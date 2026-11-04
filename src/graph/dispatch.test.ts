@@ -1578,3 +1578,34 @@ test('nested public package: exported dispatch in a published workspace package 
   assert.ok(unreadable.limitations.some((line) => line.startsWith(`${nestedManifestLimitation}["packages/lib/package.json"]`)),
     unreadable.limitations.join('\n'));
 });
+
+test('nested public package: a type-only package.json marker below the package does not close it', async () => {
+  // `src/esm/package.json`의 `{"type":"module"}`은 module 형식 표식일 뿐 패키지 경계가 아니다 — 위의 공개 manifest가 정한다.
+  const lib = ['function one() { return 1; }', 'export function apply(f: () => number) { return f(); }',
+    'export function selfTest() { return apply(one); }'].join('\n');
+  const tsconfig = '{ "compilerOptions": { "strict": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }';
+  const graph = await graphOf({
+    'tsconfig.json': tsconfig,
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*"] }',
+    'packages/lib/package.json': '{ "name": "@acme/lib", "version": "1.0.0", "exports": "./src/esm/index.ts" }',
+    'packages/lib/src/esm/package.json': '{ "type": "module" }',
+    'packages/lib/src/esm/index.ts': lib,
+  });
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'packages/lib/src/esm/index.ts#apply' && edge.evidence === 'bound'), []);
+  assert.ok(graph.limitations.some((line) => line.startsWith(`${nestedManifestLimitation}["packages/lib/package.json"]`)),
+    graph.limitations.join('\n'));
+});
+
+test('nested public package: a declaration re-exported by a public package from a private package stays open', async () => {
+  const tsconfig = '{ "compilerOptions": { "strict": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }';
+  const graph = await graphOf({
+    'tsconfig.json': tsconfig,
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*"] }',
+    'packages/lib/package.json': '{ "name": "@acme/lib", "version": "1.0.0", "exports": "./src/index.ts" }',
+    'packages/lib/src/index.ts': "export { apply } from '../../internal/src/index';",
+    'packages/internal/package.json': '{ "name": "@acme/internal", "private": true, "exports": "./src/index.ts" }',
+    'packages/internal/src/index.ts': ['function one() { return 1; }', 'export function apply(f: () => number) { return f(); }',
+      'export function selfTest() { return apply(one); }'].join('\n'),
+  });
+  assert.deepEqual(graph.edges.filter((edge) => edge.from === 'packages/internal/src/index.ts#apply' && edge.evidence === 'bound'), []);
+});

@@ -345,6 +345,17 @@ function readManifestObject(path: string): object | 'missing' | 'unreadable' {
   }
 }
 
+/**
+ * 패키지 경계가 아니라 하위 디렉터리의 module 형식만 정하는 manifest(`{"type":"module"}`)인지 본다. 이름·공개 진입점·
+ * `private`가 없으면 게시 단위를 정하지 않으므로, 열림 판정은 상위 manifest가 한다.
+ *
+ * @param manifest JSON 객체
+ * @returns 형식 표식뿐이면 true
+ */
+function isFormatMarkerManifest(manifest: object): boolean {
+  return !('name' in manifest) && !('private' in manifest) && !PUBLIC_ENTRY_FIELDS.some((field) => field in manifest);
+}
+
 /** 루트 아래 workspace 패키지가 연 노드 파일과, 그렇게 판정한 manifest의 프로젝트 기준 경로다. */
 interface NestedOpenPackages {
   readonly openFiles: ReadonlySet<string>;
@@ -367,7 +378,7 @@ function nestedOpenPackages(project: string, paths: Iterable<string>): NestedOpe
     const cached = byDirectory.get(directory);
     if (cached !== undefined) return cached;
     const manifest = readManifestObject(join(project, directory, 'package.json'));
-    const result = manifest === 'missing' ? openManifest(posix.dirname(directory))
+    const result = manifest === 'missing' || (manifest !== 'unreadable' && isFormatMarkerManifest(manifest)) ? openManifest(posix.dirname(directory))
       : manifest === 'unreadable' || (PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) && (manifest as { private?: unknown }).private !== true)
         ? posix.join(directory, 'package.json') : null;
     byDirectory.set(directory, result);

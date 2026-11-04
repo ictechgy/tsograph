@@ -329,12 +329,14 @@ class OpenCallablePolicy implements FlowPolicy {
     const entries = context.store.entryRecords();
     this.entryPaths = new Set([...entries.map((entry) => entry.path), ...context.frameworkFiles]);
     this.entryTargets = entryClosure(context.store, entries.map((entry) => entry.id));
-    const frameworkModules = [...this.entryPaths].flatMap((path) => {
+    const moduleSymbols = (paths: Iterable<string>) => [...paths].flatMap((path) => {
       const sourceFile = context.files.get(path);
       const module = sourceFile === undefined ? undefined : context.checker.getSymbolAtLocation(sourceFile);
       return module === undefined ? [] : [module];
     });
-    this.openExports = moduleExportClosure(context.checker, new Set([...index.openModules, ...frameworkModules]));
+    // 공개 workspace 패키지 파일의 내보내기는 그 파일에 선언이 없어도(다른 패키지에서 재내보낸 선언) 스캔 밖 소비자가 부를 수 있다.
+    this.openExports = moduleExportClosure(context.checker, new Set([...index.openModules, ...moduleSymbols(this.entryPaths),
+      ...moduleSymbols(context.openFiles ?? [])]));
   }
 
   /**
