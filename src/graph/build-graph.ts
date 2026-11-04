@@ -48,7 +48,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, resolutionOptionsIgnored, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 import { scopeIdOf } from './symbol-ids.ts';
 import { gitignoreSelectionLimitation } from '../scan/gitignore.ts';
@@ -183,7 +183,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
     || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
     || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true
     || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0 || (status.declarationOutputImports ?? 0) > 0
-    || (status.configBudgetSources ?? 0) > 0;
+    || (status.configBudgetSources ?? 0) > 0 || resolutionOptionsIgnored(status);
   const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;

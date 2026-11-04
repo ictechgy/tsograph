@@ -36,8 +36,10 @@
 
 - graph·routes·navigation·schema: 내장 TypeScript 5.9.3이 모르는 compiler 옵션이나 값(`target: "es2025"` 등)이 하나라도
   있으면 설정 전체를 기본값으로 바꿔 `paths`·`include`가 사라지고 "could not be parsed"로 알리던 동작을 바꿨다. 그 옵션만
-  버리고(새 `target`·`lib` 값은 ESNext로 근사) 나머지를 쓰며, `compiler-options:`로 버린 알려진 옵션 이름·모르는 옵션 수와
-  내장 TypeScript 버전을 알린다. 사용자가 적은 모르는 옵션 이름은 싣지 않는다. `--tsconfig`로 고른 설정도 같은 규칙을 따른다.
+  버리고(새 `target`·`lib` 값은 ESNext로, 새 `module`·`moduleResolution` 값은 짝이 Node 모드면 NodeNext, 아니면 ESNext·bundler로
+  근사) 나머지를 쓰며, `compiler-options:`로 버린 알려진 옵션 이름·모르는 옵션 수와 내장 TypeScript 버전을 알린다. 버린 값이
+  module 해석에 영향을 주면(`module`·`moduleResolution`·`baseUrl`·`paths`·`customConditions` 등) 스캔을 불완전으로 본다 — 예전처럼
+  닫힌 프로그램으로 bound를 증명하지 않는다. 사용자가 적은 모르는 옵션 이름은 싣지 않는다. `--tsconfig`로 고른 설정도 같은 규칙을 따른다.
   JSON 구문 오류·읽지 못한 `extends`·`include` 형식 오류는 예전처럼 설정을 읽지 못한 것으로 본다.
 
 ## [0.11.0] - 2026-11-03

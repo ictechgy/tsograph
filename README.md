@@ -159,8 +159,11 @@ exchange fields and versions stay unchanged.
   fails with exit 2). Other commands never run Git; they read `revision` from `.git` metadata files.
 - The analyzed project's own TypeScript is not used: tsograph bundles TypeScript 5.9.3 and reads compiler
   configs with it. Option values that 5.9.3 does not know (for example a newer `target` or `lib`) are ignored one
-  option at a time, newer `target`/`lib` values are approximated with ESNext, and the rest of the config (`paths`,
-  `baseUrl`, `include`) is kept; `compiler-options:` names the ignored known options and counts unknown ones.
+  option at a time, newer `target`/`lib` values are approximated with ESNext, newer `module`/`moduleResolution` values
+  with NodeNext (when the other of the pair is a Node mode) or ESNext with bundler resolution, and the rest of the config
+  is kept; `compiler-options:` names the ignored known options and counts unknown ones. When an ignored value affects
+  module resolution (`module`, `moduleResolution`, `baseUrl`, `paths`, `customConditions`, and similar), the scan is
+  treated as incomplete, so `bound` proofs and the effect inventory do not rely on the approximation.
 
 ## Installation
 

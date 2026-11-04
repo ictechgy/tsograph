@@ -596,18 +596,55 @@ function isCompilerOptionName(name: string): boolean {
 }
 
 /**
- * 내장 TypeScript보다 새 값이라 버려진 `target`·`lib`를 ESNext로 근사한다. 빠지면 TypeScript가 ES5 기본 lib를 써서
- * `Promise`·`Map` 같은 내장 타입이 사라지기 때문이다. 다른 옵션은 버려진 채로 둔다.
+ * 값을 버리면 module·타입 해석이 프로젝트의 TypeScript와 달라지는 옵션이다. 하나라도 버리면 해석 결과를 증명으로 쓰지 않도록
+ * 프로그램을 불완전으로 둔다({@link resolutionOptionsIgnored}).
+ */
+const RESOLUTION_OPTIONS: ReadonlySet<string> = new Set([
+  'module', 'moduleResolution', 'moduleSuffixes', 'customConditions', 'resolvePackageJsonExports', 'resolvePackageJsonImports',
+  'baseUrl', 'paths', 'rootDirs', 'allowImportingTsExtensions', 'allowArbitraryExtensions', 'preserveSymlinks', 'types', 'typeRoots',
+]);
+
+/**
+ * 설정 상태가 해석에 영향을 주는 옵션 값을 버렸는지 본다.
+ *
+ * @param status Program 설정 상태
+ * @returns 버렸으면 true
+ */
+export function resolutionOptionsIgnored(status: ProgramConfigStatus): boolean {
+  return (status.ignoredCompilerOptions ?? []).some((name) => RESOLUTION_OPTIONS.has(name));
+}
+
+/** Node16 계열 module 형식인지 본다(Node16·Node18·Node20·NodeNext). */
+function isNodeModuleKind(module: ts.ModuleKind | undefined): boolean {
+  return module !== undefined && module >= ts.ModuleKind.Node16 && module <= ts.ModuleKind.NodeNext;
+}
+
+/**
+ * 내장 TypeScript보다 새 값이라 버려진 옵션을 근사한다.
+ *
+ * - `target`·`lib`는 ESNext로 근사한다. 빠지면 TypeScript가 ES5 기본 lib를 써서 `Promise`·`Map` 같은 내장 타입이 사라진다.
+ * - `module`·`moduleResolution`은 남은 짝이 Node 해석이면 NodeNext, 아니면 설정이 없을 때의 기본({@link defaultOptions}:
+ *   ESNext·Bundler)으로 근사한다. 빠진 채로 두면 classic 해석으로 떨어져 workspace `exports`가 풀리지 않는다. 근사는 증명이
+ *   아니므로 호출자가 프로그램을 불완전으로 둔다.
+ *
+ * 다른 옵션은 버려진 채로 둔다.
  *
  * @param options parse한 옵션
  * @param ignored 값을 버린 옵션 이름
  * @returns 조정한 옵션
  */
 function approximateUnsupportedValues(options: ts.CompilerOptions, ignored: ReadonlySet<string>): ts.CompilerOptions {
-  if (!ignored.has('target') && !ignored.has('lib')) return options;
+  if (!['target', 'lib', 'module', 'moduleResolution'].some((name) => ignored.has(name))) return options;
   const adjusted: ts.CompilerOptions = { ...options };
   if (ignored.has('target') && adjusted.target === undefined) adjusted.target = ts.ScriptTarget.ESNext;
   if (ignored.has('lib') && adjusted.lib !== undefined && !adjusted.lib.includes('lib.esnext.d.ts')) adjusted.lib = [...adjusted.lib, 'lib.esnext.d.ts'];
+  if (ignored.has('moduleResolution') && adjusted.moduleResolution === undefined) {
+    adjusted.moduleResolution = isNodeModuleKind(adjusted.module) ? ts.ModuleResolutionKind.NodeNext : ts.ModuleResolutionKind.Bundler;
+  }
+  if (ignored.has('module') && adjusted.module === undefined) {
+    const nodeResolution = adjusted.moduleResolution === ts.ModuleResolutionKind.Node16 || adjusted.moduleResolution === ts.ModuleResolutionKind.NodeNext;
+    adjusted.module = nodeResolution ? ts.ModuleKind.NodeNext : ts.ModuleKind.ESNext;
+  }
   return adjusted;
 }
 
@@ -645,9 +682,16 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   const unknownOptions = status.unknownCompilerOptions ?? 0;
   if (ignoredOptions.length > 0 || unknownOptions > 0) {
     const parts = [...(ignoredOptions.length > 0 ? [ignoredOptions.join(', ')] : []), ...(unknownOptions > 0 ? [`${unknownOptions} unknown option(s)`] : [])];
+    const handling = [
+      ...(ignoredOptions.some((name) => name === 'target' || name === 'lib') ? ['unsupported target/lib values use ESNext'] : []),
+      ...(ignoredOptions.some((name) => name === 'module' || name === 'moduleResolution')
+        ? ['unsupported module/moduleResolution values were approximated (NodeNext when the remaining option is a Node mode, otherwise ESNext with bundler resolution)'] : []),
+      'the remaining options in the config were kept',
+    ];
     gaps.push(`compiler-options: compiler config values that the bundled TypeScript ${ts.version} does not recognize were ignored (${parts.join('; ')}); `
-      + 'unsupported target/lib values use ESNext, and other options such as paths, baseUrl and include were kept; '
-      + `type resolution and ${affected} may differ from the project's TypeScript`);
+      + `${handling.join('; ')}; `
+      + (resolutionOptionsIgnored(status) ? `module resolution may differ, so the scan is treated as incomplete and ${affected} may be incomplete`
+        : `type resolution and ${affected} may differ from the project's TypeScript`));
   }
   if ((status.configBudgetSources ?? 0) > 0) {
     gaps.push(`config-budget: ${status.configBudgetSources} source(s) are owned by compiler configs beyond the ${MAX_OWNER_CONFIGS}-config budget; `
