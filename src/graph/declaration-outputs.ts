@@ -10,8 +10,11 @@
  * 3. 같은 디렉터리·같은 이름의 JavaScript 구현(손으로 쓴 `legacy.d.ts` + `legacy.js`)
  *
  * 되짚은 소스가 이 스캔의 소스일 때만 잇는다. 근거가 없거나 스캔 밖 소스를 가리키면 잇지 않고 호출자가 limitation으로 센다.
+ * 걷기가 일부러 뺀 생성 출력(Prisma client 등)과 점 디렉터리(`.nuxt` 같은 프레임워크 생성 타입)의 선언은 빌드 산출물이 아니라
+ * 그 자체로 쓰는 선언이라 산출물로 보지 않는다(예전처럼 외부 선언으로 끝난다).
  */
 
+import { realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type ts from 'typescript';
@@ -56,19 +59,23 @@ export class DeclarationOutputMapper {
   readonly #scannedSources: ReadonlySet<string>;
   readonly #scannedDeclarations: ReadonlySet<string>;
   readonly #outputRoots: readonly OutputRoot[];
+  readonly #excludedDirectories: readonly string[];
   readonly #cache = new Map<string, DeclarationOutputMatch>();
 
   /**
    * @param root 프로젝트 경계 realpath
    * @param configs 이 계획이 읽은 compiler 설정들
    * @param scannedFiles 걷기가 고른 소스·선언 파일 절대 경로
+   * @param excludedDirectories 걷기가 생성 출력이라 일부러 뺀 디렉터리 절대 경로(Prisma client 출력 등)
    */
-  constructor(root: string, configs: readonly DeclarationOutputConfig[], scannedFiles: Iterable<string>) {
+  constructor(root: string, configs: readonly DeclarationOutputConfig[], scannedFiles: Iterable<string>,
+    excludedDirectories: Iterable<string> = []) {
     this.#root = resolve(root);
     const files = [...scannedFiles].map((path) => resolve(path));
     this.#scannedDeclarations = new Set(files.filter(isDeclarationFile));
     this.#scannedSources = new Set(files.filter((path) => !isDeclarationFile(path)));
     this.#outputRoots = configs.flatMap(outputRootOf);
+    this.#excludedDirectories = [...excludedDirectories].map((path) => resolve(path));
   }
 
   /**
@@ -86,9 +93,11 @@ export class DeclarationOutputMapper {
     return result;
   }
 
-  /** 캐시하지 않은 판정이다. */
-  #classify(absolute: string): DeclarationOutputMatch {
-    if (!isDeclarationFile(absolute) || !this.#isProjectFile(absolute)) return { kind: 'not-output' };
+  /** 캐시하지 않은 판정이다. `preserveSymlinks`가 남긴 `node_modules` 경로는 실제 경로로 판정한다. */
+  #classify(fileName: string): DeclarationOutputMatch {
+    if (!isDeclarationFile(fileName)) return { kind: 'not-output' };
+    const absolute = this.#projectPath(fileName);
+    if (absolute === undefined || this.#isGeneratedDeclaration(absolute)) return { kind: 'not-output' };
     const fromMap = this.#fromDeclarationMap(absolute);
     if (fromMap !== undefined) return fromMap;
     const fromOutput = uniqueSource(this.#outputRoots.flatMap((root) => this.#fromOutputRoot(absolute, root)));
@@ -99,11 +108,43 @@ export class DeclarationOutputMapper {
     return this.#scannedDeclarations.has(absolute) ? { kind: 'not-output' } : { kind: 'unmapped' };
   }
 
+  /**
+   * 프로젝트 경계 안이고 의존성 디렉터리(`node_modules`) 밖인 경로를 돌려준다. `preserveSymlinks`면 TypeScript가 workspace
+   * 패키지를 `node_modules/@scope/pkg/...` 경로 그대로 넘기므로, 그런 경로는 실제 경로를 풀어 다시 본다.
+   *
+   * @param absolute 선언 파일 절대 경로
+   * @returns 프로젝트 안 실제 경로, 아니면 undefined
+   */
+  #projectPath(absolute: string): string | undefined {
+    if (this.#isProjectFile(absolute)) return absolute;
+    const offset = relative(this.#root, absolute);
+    if (!offset.split(sep).includes('node_modules')) return undefined;
+    let real: string;
+    try {
+      real = realpathSync(absolute);
+    } catch {
+      return undefined;
+    }
+    return real !== absolute && this.#isProjectFile(real) ? real : undefined;
+  }
+
   /** 프로젝트 경계 안이고 의존성 디렉터리(`node_modules`) 밖인 실제 경로인지 본다. */
   #isProjectFile(absolute: string): boolean {
     const offset = relative(this.#root, absolute);
     if (offset === '' || isAbsolute(offset) || offset === '..' || offset.startsWith(`..${sep}`)) return false;
     return !offset.split(sep).includes('node_modules');
+  }
+
+  /**
+   * 걷기가 생성 출력이라 뺀 디렉터리나 점 디렉터리(`.nuxt`·`.svelte-kit` 같은 프레임워크 생성 타입) 아래 선언인지 본다.
+   * 이런 선언은 패키지 빌드 산출물이 아니라 그 자체로 쓰는 선언이다.
+   *
+   * @param absolute 프로젝트 안 선언 파일
+   * @returns 생성 선언이면 true
+   */
+  #isGeneratedDeclaration(absolute: string): boolean {
+    if (this.#excludedDirectories.some((directory) => isWithin(directory, absolute))) return true;
+    return relative(this.#root, absolute).split(sep).slice(0, -1).some((segment) => segment.startsWith('.'));
   }
 
   /**
@@ -158,6 +199,12 @@ function suffixOf(path: string): string {
   return SOURCE_EXTENSIONS.find(([suffix]) => path.endsWith(suffix))?.[0] ?? '.d.ts';
 }
 
+/** `path`가 `directory` 안(자신 제외)인지 본다. */
+function isWithin(directory: string, path: string): boolean {
+  const offset = relative(directory, path);
+  return offset !== '' && !isAbsolute(offset) && offset !== '..' && !offset.startsWith(`..${sep}`);
+}
+
 /** 후보가 정확히 하나일 때만 그 경로를 돌려준다. */
 function uniqueSource(candidates: readonly string[]): string | undefined {
   const unique = [...new Set(candidates)];
@@ -188,12 +235,16 @@ function singleMapSource(text: string): { readonly sourceRoot: string; readonly 
 
 /**
  * 설정이 선언을 내보내는 디렉터리와 그 소스 디렉터리를 구한다. `rootDir`이 없으면 TypeScript와 같이 composite면 설정 디렉터리,
- * 아니면 선언이 아닌 진입 파일의 공통 디렉터리를 쓴다.
+ * 아니면 선언이 아닌 진입 파일의 공통 디렉터리를 쓴다. 선언을 실제로 내는 설정(`declaration`·`composite`·`emitDeclarationOnly`)만
+ * 인정한다 — `outDir`만 있는 설정의 `dist/*.d.ts`는 번들러 같은 다른 도구가 다른 진입점에서 만든 것일 수 있어 같은 상대 경로의
+ * 소스로 되짚으면 잘못된 direct 간선이 된다.
  *
  * @param config compiler 설정
- * @returns 산출물 루트(내보내지 않는 설정이면 빈 목록)
+ * @returns 산출물 루트(선언을 내보내지 않는 설정이면 빈 목록)
  */
 function outputRootOf(config: DeclarationOutputConfig): OutputRoot[] {
+  const { declaration, composite, emitDeclarationOnly } = config.options;
+  if (declaration !== true && composite !== true && emitDeclarationOnly !== true) return [];
   const output = config.options.declarationDir ?? config.options.outDir;
   if (output === undefined) return [];
   const explicit = config.options.rootDir;

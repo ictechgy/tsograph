@@ -184,7 +184,7 @@ export function createGraphProgram(
   const boundaryTargets = new Map<string, string>();
   // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
   // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
-  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates);
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
   const unmappedDeclarationOutputs = new Map<string, string>();
   const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
     const match = declarationOutputs.match(resolved.resolvedFileName);
@@ -330,7 +330,7 @@ interface CompilerContext {
 export function* createGraphPrograms(root: string, sourcePaths: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): Generator<GraphProgram> {
   const entries = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
-  const declarationOutputs = new DeclarationOutputMapper(boundary.root, entries.ownership.configs, entries.candidates);
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, entries.ownership.configs, entries.candidates, boundary.excludedDirectories);
   const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root), declarationOutputs);
   const groups = new Map<string, { config: ProjectConfig; sources: Set<string> }>();
   for (const path of entries.candidates) {

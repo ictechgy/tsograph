@@ -190,7 +190,7 @@ test('mapper: rootDir 없는 설정은 공통 소스 디렉터리로, .d.mts는 
     const scanned = writeFiles(root, {
       'pkg/src/nested/a.mts': '', 'pkg/src/b.ts': '', 'pkg/src/twin.ts': '', 'pkg/src/twin.tsx': '', 'pkg/src/only.js': '',
     });
-    const config = { path: join(root, 'pkg/tsconfig.json'), options: { outDir: join(root, 'pkg/build') },
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/build') },
       fileNames: [join(root, 'pkg/src/nested/a.mts'), join(root, 'pkg/src/b.ts'), join(root, 'pkg/src/types.d.ts')] };
     const mapper = new DeclarationOutputMapper(root, [config], scanned);
     assert.deepEqual(mapper.match(join(root, 'pkg/build/nested/a.d.mts')), { kind: 'source', fileName: join(root, 'pkg/src/nested/a.mts') });
@@ -200,8 +200,136 @@ test('mapper: rootDir 없는 설정은 공통 소스 디렉터리로, .d.mts는 
     assert.deepEqual(mapper.match(join(root, 'pkg/src/b.ts')), { kind: 'not-output' });
     assert.deepEqual(mapper.match(join(root, '..', 'outside.d.ts')), { kind: 'not-output' });
     // 내보내지 않는 설정과 진입 파일이 없는 설정은 산출물 루트를 만들지 않는다.
-    const silent = new DeclarationOutputMapper(root, [{ options: {}, fileNames: [] }, { options: { outDir: join(root, 'x') }, fileNames: [] }], scanned);
+    const silent = new DeclarationOutputMapper(root, [{ options: {}, fileNames: [] }, { options: { declaration: true, outDir: join(root, 'x') }, fileNames: [] }], scanned);
     assert.deepEqual(silent.match(join(root, 'x/b.d.ts')), { kind: 'unmapped' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('선언을 내지 않는 설정(번들러가 dist를 만드는 tsup식 구성)의 outDir로는 되짚지 않는다', async () => {
+  // dist/index.d.ts는 번들러가 만든 것이고, 같은 상대 경로의 src/index.ts는 실제 라이브러리 진입점이 아니다(CLI helper).
+  const root = createWorkspace({
+    'tsconfig.json': '{ "files": [], "references": [{ "path": "packages/lib" }, { "path": "apps/web" }] }',
+    'packages/lib/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "outDir": "dist" }, "include": ["src"] }`,
+    'packages/lib/src/index.ts': '// CLI entry, not the library entry\nexport function helper() { return "cli"; }\n',
+    'packages/lib/src/lib/index.ts': 'export function helper() { return 1; }\n',
+    'apps/web/tsconfig.json': `{ "compilerOptions": { ${compilerOptions} }, "include": ["src"] }`,
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph), undefined);
+    assert.match(declarationOutputLimitation(graph) ?? '', /declaration-outputs: 1 import\(s\)/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('preserveSymlinks로 node_modules 경로가 남아도 realpath가 프로젝트 산출물이면 되짚는다', async () => {
+  const root = createWorkspace({
+    'tsconfig.json': '{ "files": [], "references": [{ "path": "packages/lib" }, { "path": "apps/web" }] }',
+    'packages/lib/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "preserveSymlinks": true, "composite": true, "outDir": "dist", `
+      + '"rootDir": "src" }, "include": ["src"] }',
+    'apps/web/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "preserveSymlinks": true }, "include": ["src"], `
+      + '"references": [{ "path": "../../packages/lib" }] }',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph)?.evidence, 'direct');
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('preserveSymlinks 경로가 다른 type-checking 문맥의 소스로 되짚히면 조용히 사라지지 않고 문맥 경계로 알린다', async () => {
+  const root = createWorkspace({
+    'tsconfig.json': '{ "files": [], "references": [{ "path": "packages/lib" }, { "path": "apps/web" }] }',
+    'packages/lib/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "composite": true, "outDir": "dist", "rootDir": "src" }, "include": ["src"] }`,
+    'apps/web/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "preserveSymlinks": true }, "include": ["src"], `
+      + '"references": [{ "path": "../../packages/lib" }] }',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph), undefined);
+    assert.ok(graph.limitations.some((line) => line.includes('config-context-boundary: 1 import(s)')), JSON.stringify(graph.limitations));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 걷기가 일부러 빼는 생성 선언을 import하는 프로젝트에서 bound 증명이 유지되는지 보는 소스다. */
+const boundProbe = 'function one() { return 1; }\nexport function apply(f: () => number) { return f(); }\nexport function main2() { return apply(one); }\n';
+
+/** 그래프에 `apply → one` bound 간선이 있는지 본다. */
+function hasBoundApply(graph: CallGraph, path: string): boolean {
+  return graph.edges.some((edge) => edge.from === `${path}#apply` && edge.to === `${path}#one` && edge.evidence === 'bound');
+}
+
+test('Prisma 생성 클라이언트(걷기가 뺀 출력 디렉터리)의 선언은 빌드 산출물로 세지 않는다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-prisma-')));
+  writeProjectFile(root, 'package.json', '{ "name": "app", "private": true }');
+  writeProjectFile(root, 'tsconfig.json', `{ "compilerOptions": { ${compilerOptions} }, "include": ["src"] }`);
+  writeProjectFile(root, 'prisma/schema.prisma',
+    'generator client {\n  provider = "prisma-client-js"\n  output   = "../src/generated/prisma"\n}\n'
+    + 'datasource db {\n  provider = "postgresql"\n  url      = env("DATABASE_URL")\n}\n');
+  writeProjectFile(root, 'src/generated/prisma/index.d.ts', 'export declare class PrismaClient { constructor(); }\n');
+  writeProjectFile(root, 'src/generated/prisma/index.js', 'export class PrismaClient {}\n');
+  writeProjectFile(root, 'src/main.ts', `import { PrismaClient } from './generated/prisma';\nexport function main() { return new PrismaClient(); }\n${boundProbe}`);
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(declarationOutputLimitation(graph), undefined);
+    assert.equal(hasBoundApply(graph, 'src/main.ts'), true, JSON.stringify(graph.limitations));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('점 디렉터리(.nuxt)의 프레임워크 생성 선언은 빌드 산출물로 세지 않는다', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-dot-')));
+  writeProjectFile(root, 'package.json', '{ "name": "app", "private": true }');
+  writeProjectFile(root, 'tsconfig.json',
+    `{ "compilerOptions": { ${compilerOptions}, "paths": { "#imports": ["./.nuxt/imports"] } }, "include": ["server"] }`);
+  writeProjectFile(root, '.nuxt/imports.d.ts', 'export declare function useRuntimeConfig(): Record<string, string>;\n');
+  writeProjectFile(root, 'server/api/hello.ts', `import { useRuntimeConfig } from '#imports';\nexport function handler() { return useRuntimeConfig(); }\n${boundProbe}`);
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(declarationOutputLimitation(graph), undefined);
+    assert.equal(hasBoundApply(graph, 'server/api/hello.ts'), true, JSON.stringify(graph.limitations));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: 스캔 밖 소스를 가리키는 declaration map은 다른 근거가 있어도 unmapped로 끝낸다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-mapper-')));
+  try {
+    const scanned = writeFiles(root, { 'pkg/src/a.ts': '' });
+    writeFiles(root, { 'pkg/out/a.d.ts': '', 'pkg/out/a.d.ts.map': '{"sources":["../../elsewhere/a.ts"]}' });
+    const config = { path: join(root, 'pkg/tsconfig.json'),
+      options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') }, fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/a.d.ts')), { kind: 'unmapped' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: 선언을 내지 않는 설정은 산출물 루트가 아니고, 제외·점 디렉터리 선언은 산출물이 아니다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-mapper-')));
+  try {
+    const scanned = writeFiles(root, { 'pkg/src/b.ts': '' });
+    const options = { outDir: join(root, 'pkg/build'), rootDir: join(root, 'pkg/src') };
+    const emitting = (extra: object) => new DeclarationOutputMapper(root, [{ options: { ...options, ...extra }, fileNames: scanned }], scanned);
+    assert.deepEqual(emitting({}).match(join(root, 'pkg/build/b.d.ts')), { kind: 'unmapped' });
+    for (const extra of [{ declaration: true }, { composite: true }, { emitDeclarationOnly: true }]) {
+      assert.deepEqual(emitting(extra).match(join(root, 'pkg/build/b.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/b.ts') }, JSON.stringify(extra));
+    }
+    const excluded = new DeclarationOutputMapper(root, [], scanned, new Set([join(root, 'src/generated')]));
+    assert.deepEqual(excluded.match(join(root, 'src/generated/client/index.d.ts')), { kind: 'not-output' });
+    assert.deepEqual(excluded.match(join(root, '.nuxt/imports.d.ts')), { kind: 'not-output' });
+    assert.deepEqual(excluded.match(join(root, 'apps/.svelte-kit/types/a.d.ts')), { kind: 'not-output' });
+    assert.deepEqual(excluded.match(join(root, 'src/generatedX/index.d.ts')), { kind: 'unmapped' });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
