@@ -460,6 +460,7 @@ class IndexCollector {
    * @param identifier 식별자
    */
   private visitIdentifier(identifier: ts.Identifier): void {
+    if (STRING_TIMER_NAMES.has(identifier.text) && this.escapesStringTimer(identifier)) this.index.hasOpaqueMutation = true;
     const parent = identifier.parent;
     if (ts.isPropertyAccessExpression(parent) && parent.name === identifier) {
       const member = this.checker.getSymbolAtLocation(identifier);
@@ -679,8 +680,7 @@ class IndexCollector {
    * @param node import·export 선언
    */
   private visitStaticModuleSpecifier(node: ts.ImportDeclaration | ts.ExportDeclaration): void {
-    const typeOnly = ts.isImportDeclaration(node) ? node.importClause?.isTypeOnly === true : node.isTypeOnly;
-    if (!typeOnly && node.moduleSpecifier !== undefined) this.visitEvaluatingSpecifier(node.moduleSpecifier);
+    if (!isTypeOnlyModuleDeclaration(node) && node.moduleSpecifier !== undefined) this.visitEvaluatingSpecifier(node.moduleSpecifier);
   }
 
   /**
@@ -697,16 +697,63 @@ class IndexCollector {
 
   /**
    * 문자열 handler를 받은 `setTimeout`·`setInterval`(브라우저는 문자열을 코드로 실행한다)인지 본다. 함수만 받는 호출은 열지 않는다.
+   * 이름은 식별자·속성·문자열 키(`g["setTimeout"]`)로 읽고, handler 타입이 문자열이거나 `any`·`unknown`이면 코드일 수 있다.
+   * 프로젝트 소스가 선언한 같은 이름의 함수·메서드(`cache.setTimeout(key, ms)`)는 timer가 아니다 — 그 본문은 따로 분석된다.
    *
    * @param callee 호출 대상 식
    * @param call 호출식
    * @returns 문자열 코드를 실행할 수 있으면 true
    */
   private evaluatesStringTimer(callee: ts.Expression, call: ts.CallExpression): boolean {
-    const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
-    if (name !== 'setTimeout' && name !== 'setInterval') return false;
+    const nameNode = timerNameNode(callee);
+    if (nameNode === undefined || !STRING_TIMER_NAMES.has(nameNode.text) || this.isProjectDeclared(nameNode)) return false;
     const handler = call.arguments[0];
-    return handler !== undefined && mayBeString(this.checker.getTypeAtLocation(handler));
+    return handler !== undefined && mayRunAsCode(this.checker.getTypeAtLocation(handler));
+  }
+
+  /**
+   * `setTimeout`·`setInterval` 이름이 호출 밖에서 값으로 쓰이는지 본다(`const later = setTimeout`, `run(setTimeout)`,
+   * `const { setTimeout: t } = globalThis`). 그 값으로 하는 호출은 이름으로 알아볼 수 없으므로 eval 별칭처럼 연다.
+   * 호출 대상·선언 이름·타입 위치·대입 대상·프로젝트가 선언한 같은 이름은 열지 않는다.
+   *
+   * @param identifier timer 이름 식별자
+   * @returns 값으로 새어 나가면 true
+   */
+  private escapesStringTimer(identifier: ts.Identifier): boolean {
+    const parent = identifier.parent;
+    if (ts.isTypeQueryNode(parent) || ts.isTypeReferenceNode(parent)) return false;
+    if (ts.isBindingElement(parent)) {
+      const key = parent.propertyName ?? parent.name;
+      return key === identifier && !this.isProjectDeclared(identifier);
+    }
+    const expression = ts.isPropertyAccessExpression(parent) && parent.name === identifier ? parent : identifier;
+    if (expression === identifier && !isReferencePosition(identifier)) return false;
+    const outer = climbWrappers(expression);
+    if (ts.isCallExpression(outer.parent) && outer.parent.expression === outer) return false;
+    if (ts.isBinaryExpression(outer.parent) && outer.parent.left === outer
+      && outer.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && outer.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      return false;
+    }
+    return !this.isProjectDeclared(identifier);
+  }
+
+  /**
+   * 이름이 프로젝트 소스(선언 파일·`node_modules` 밖)가 구현한 함수·메서드·값으로만 풀리는지 본다. 풀리지 않거나, lib·의존성
+   * 선언이나 구현 없는 선언(`declare function setTimeout`, 타입의 메서드 시그니처)이 하나라도 있으면 프로젝트 것이 아니다
+   * (전역 timer일 수 있다). 프로젝트 구현의 본문은 이 색인이 따로 본다.
+   *
+   * @param name 이름 노드
+   * @returns 프로젝트 구현이면 true
+   */
+  private isProjectDeclared(name: ts.Node): boolean {
+    let symbol = this.checker.getSymbolAtLocation(name);
+    if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = this.checker.getAliasedSymbol(symbol);
+    const declarations = symbol?.declarations ?? [];
+    return declarations.length > 0 && declarations.every((declaration) => {
+      const sourceFile = declaration.getSourceFile();
+      return !sourceFile.isDeclarationFile && !sourceFile.fileName.split(/[\\/]/u).includes('node_modules')
+        && isImplementedDeclaration(declaration);
+    });
   }
 
   /** legacy accessor member의 direct call과 alias call/apply/bind escape를 opaque로 표시한다. */
@@ -1160,13 +1207,6 @@ function isReferencePosition(identifier: ts.Identifier): boolean {
 }
 
 /**
- * 파일 패턴으로 모듈을 불러오는 번들러 API(`import.meta.glob`·`import.meta.globEager`·`require.context`)인지 본다.
- * 불러온 모듈의 내보내기가 어디로 가는지 알 수 없으므로 동적 import처럼 연다.
- *
- * @param callee 호출 대상 식(래퍼를 벗긴)
- * @returns 패턴 로더면 true
- */
-/**
  * 불러오는 것만으로 문자열·원격 코드를 실행할 수 있는 모듈 지정자인지 본다.
  *
  * @param text 지정자 문자열
@@ -1176,12 +1216,81 @@ function isEvaluatingModuleSpecifier(text: string): boolean {
   return text === 'vm' || text === 'node:vm' || /^(?:data|https?|blob):/iu.test(text);
 }
 
-/** 타입이 문자열일 수 있는지 본다(union 구성원 포함). */
-function mayBeString(type: ts.Type): boolean {
-  if (type.isUnion()) return type.types.some(mayBeString);
-  return (type.flags & ts.TypeFlags.StringLike) !== 0;
+/**
+ * 값 바인딩 없이 타입만 가져오는 import·re-export인지 본다(`import type …`, `import { type A, type B } from …`,
+ * `export { type A } from …`). 값 바인딩이 없으면 그 모듈의 함수(`vm.runInThisContext`)를 부를 수 없다. 기본·네임스페이스
+ * 바인딩이나 빈 목록(`import {} from 'vm'`)은 타입 전용이 아니다.
+ *
+ * @param node import·export 선언
+ * @returns 타입 전용이면 true
+ */
+function isTypeOnlyModuleDeclaration(node: ts.ImportDeclaration | ts.ExportDeclaration): boolean {
+  if (ts.isExportDeclaration(node)) {
+    if (node.isTypeOnly) return true;
+    const clause = node.exportClause;
+    return clause !== undefined && ts.isNamedExports(clause) && clause.elements.length > 0 && clause.elements.every((element) => element.isTypeOnly);
+  }
+  const clause = node.importClause;
+  if (clause === undefined) return false;
+  if (clause.isTypeOnly) return true;
+  const bindings = clause.namedBindings;
+  return clause.name === undefined && bindings !== undefined && ts.isNamedImports(bindings) && bindings.elements.length > 0
+    && bindings.elements.every((element) => element.isTypeOnly);
 }
 
+/**
+ * 구현을 가진 선언인지 본다 — 본문이 있는 함수·메서드·접근자, 초기값이 있는 변수·속성. ambient 문맥(`declare`·`declare global`)
+ * 안의 선언은 구현이 아니다.
+ *
+ * @param declaration 선언
+ * @returns 구현이면 true
+ */
+function isImplementedDeclaration(declaration: ts.Declaration): boolean {
+  const ambient = ts.findAncestor(declaration, (node) => ts.canHaveModifiers(node)
+    && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword));
+  if (ambient !== undefined) return false;
+  if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isFunctionExpression(declaration)
+    || ts.isArrowFunction(declaration) || ts.isGetAccessorDeclaration(declaration)) {
+    return declaration.body !== undefined;
+  }
+  if (ts.isVariableDeclaration(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertyAssignment(declaration)) {
+    return declaration.initializer !== undefined;
+  }
+  return false;
+}
+
+/** 문자열 handler를 코드로 실행할 수 있는 timer 이름이다. */
+const STRING_TIMER_NAMES: ReadonlySet<string> = new Set(['setTimeout', 'setInterval']);
+
+/**
+ * timer 호출 대상의 이름 노드다(식별자, 속성 이름, 문자열 리터럴 키).
+ *
+ * @param callee 래퍼를 벗긴 호출 대상
+ * @returns 이름 노드, 이름으로 읽을 수 없으면 undefined
+ */
+function timerNameNode(callee: ts.Expression): ts.Identifier | ts.StringLiteralLike | undefined {
+  if (ts.isIdentifier(callee)) return callee;
+  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.name)) return callee.name;
+  if (ts.isElementAccessExpression(callee)) {
+    const key = skipWrappers(callee.argumentExpression);
+    return ts.isStringLiteralLike(key) ? key : undefined;
+  }
+  return undefined;
+}
+
+/** handler 값이 문자열(코드)일 수 있는지 본다 — 문자열, `any`·`unknown`(무엇이든 될 수 있다), 그런 구성원을 가진 union. */
+function mayRunAsCode(type: ts.Type): boolean {
+  if (type.isUnion()) return type.types.some(mayRunAsCode);
+  return (type.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+}
+
+/**
+ * 파일 패턴으로 모듈을 불러오는 번들러 API(`import.meta.glob`·`import.meta.globEager`·`require.context`)인지 본다.
+ * 불러온 모듈의 내보내기가 어디로 가는지 알 수 없으므로 동적 import처럼 연다.
+ *
+ * @param callee 호출 대상 식(래퍼를 벗긴)
+ * @returns 패턴 로더면 true
+ */
 function isPatternModuleLoader(callee: ts.Expression): boolean {
   if (!ts.isPropertyAccessExpression(callee)) return false;
   const owner = callee.expression;

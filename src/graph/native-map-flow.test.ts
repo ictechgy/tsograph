@@ -591,3 +591,29 @@ test('function timers and unrelated imports keep the native Map proof', async ()
   });
   assert.deepEqual(boundTo(graph, 'read'), ['src/main.ts#First.run']);
 });
+
+test('string timers reached through any-typed handlers, aliases and string-keyed access close the native Map proof', async () => {
+  const patch = 'Map.prototype.get = function () { return () => new Second(); };';
+  const timer = 'declare function setTimeout(handler: string | (() => void), ms?: number): number;';
+  const cases: readonly [string, Record<string, string>][] = [
+    ['any-typed handler', { 'src/main.ts': mainWith([], timer, `const code: any = ${JSON.stringify(patch)};`, 'setTimeout(code, 0);') }],
+    ['unknown-typed handler', { 'src/main.ts': mainWith([], timer, `const code: unknown = ${JSON.stringify(patch)};`, '// @ts-expect-error unknown handler', 'setTimeout(code, 0);') }],
+    ['aliased timer', { 'src/main.ts': mainWith([], timer, 'const later = setTimeout;', `later(${JSON.stringify(patch)}, 0);`) }],
+    ['timer passed as a value', { 'src/main.ts': mainWith([], timer, 'function run(t: (h: string) => void) { t(' + JSON.stringify(patch) + '); }', 'run(setTimeout);') }],
+    ['string-keyed timer', { 'src/main.ts': mainWith([], 'declare const g: { setTimeout(handler: string, ms?: number): number };',
+      `g["setTimeout"](${JSON.stringify(patch)});`) }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
+});
+
+test('a project method named setTimeout and a type-only vm import keep the native Map proof', async () => {
+  const cache = await graphOf({
+    'src/main.ts': mainWith([], 'class Cache { setTimeout(key: string, ms: number) { return key.length + ms; } }',
+      'const cache = new Cache();', 'cache.setTimeout("k", 10);'),
+  });
+  assert.deepEqual(boundTo(cache, 'read'), ['src/main.ts#First.run']);
+  const typeOnly = await graphOf({
+    'src/main.ts': mainWith(['import { type Context } from "node:vm";'], 'export type Sandbox = Context;'),
+  });
+  assert.deepEqual(boundTo(typeOnly, 'read'), ['src/main.ts#First.run']);
+});

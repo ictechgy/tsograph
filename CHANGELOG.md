@@ -21,7 +21,10 @@
 - graph·reach·impact: native Map·constructor carrier가 기대는 mutation guard가 `with` 문(스크립트 JS), `vm`·`node:vm`
   import·require와 그 `runInThisContext`·`Script`, `data:`·`http(s):`·`blob:` 정적·동적 import, 문자열 타입 `setTimeout`·
   `setInterval` handler로 `Map.prototype`을 바꾸는 코드를 보지 못해 bound 간선이 남던 문제를 고쳤다. 이 자리가 있으면
-  증명을 닫아 candidate로 남긴다. README에 clean-view 증명이 발동하는 조건과 부수효과 import 가정을 적었다.
+  증명을 닫아 candidate로 남긴다. timer는 `any`·`unknown` handler, 별칭(`const later = setTimeout`)·값 전달, 문자열 키
+  (`g["setTimeout"]`)로 불러도 닫고, 프로젝트가 구현한 같은 이름의 메서드(`cache.setTimeout(key, ms)`)와 타입 전용 `vm`
+  import(`import { type Context } from "node:vm"`)는 열지 않는다. README에 clean-view 증명이 발동하는 조건과 부수효과 import
+  가정을 적었다.
 
 ### Changed
 

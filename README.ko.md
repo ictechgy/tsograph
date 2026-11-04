@@ -987,8 +987,10 @@ private 최상위 `const registry = new Map()`은 실제 TypeScript default libr
 mutation 범위는 분석한 파일 어디에도 다음이 없을 때만 깨끗하다: `Object`·`Reflect` mutator나 그 별칭,
 `eval`·`Function`·`Proxy`, 수신자가 `Object`·`Reflect`일 수 있는 계산 키 읽기(`any`·`unknown`·`Record<string, unknown>` 같은
 index signature 타입·`JSON.parse(…)[k]`·풀리지 않은 import를 거친 읽기), 객체 literal로 증명되지 않은 수신자의 속성 쓰기
-(예: `this.n = this.n + 1`), `with` 문, `vm`·`node:vm` import, `data:`·`http(s):`·`blob:` 모듈 지정자, 문자열 타입의
-`setTimeout`·`setInterval` handler. 하나만 있어도 프로그램 전체의 증명이 닫히므로 실제로는 작은 프로그램에만 적용되고
+(예: `this.n = this.n + 1`), `with` 문, 값 바인딩이 있는 `vm`·`node:vm` import(타입 전용 import는 제외),
+`data:`·`http(s):`·`blob:` 모듈 지정자, handler가 문자열일 수 있는(`string`·`any`·`unknown`) `setTimeout`·`setInterval` 호출
+(`g["setTimeout"]` 같은 문자열 키 포함), 호출 밖에서 값으로 쓴 `setTimeout`·`setInterval`(`const later = setTimeout`,
+`run(setTimeout)`). 프로젝트 소스가 구현한 같은 이름의 메서드는 timer가 아니다. 하나만 있어도 프로그램 전체의 증명이 닫히므로 실제로는 작은 프로그램에만 적용되고
 큰 프로그램은 `candidate` 간선을 유지한다. 프로젝트 밖 모듈의 부수효과 import는 내장 객체를 바꾸지 않는다고 가정한다.
 
 호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수와 익명 인라인

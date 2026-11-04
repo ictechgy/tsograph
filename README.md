@@ -1216,8 +1216,11 @@ The mutation view is clean only when no analyzed file has any of these: `Object`
 of them, `eval`/`Function`/`Proxy`, a computed-key read whose receiver may be `Object` or `Reflect` (a read through
 `any`, `unknown`, an index-signature type such as `Record<string, unknown>`, `JSON.parse(…)[k]`, or an unresolved
 import), property writes on receivers that are not proven object literals (for example `this.n = this.n + 1`),
-a `with` statement, a `vm`/`node:vm` import, a `data:`/`http(s):`/`blob:` module specifier, or a string-typed
-`setTimeout`/`setInterval` handler. One such site anywhere closes the proof for the whole program, so in practice
+a `with` statement, a `vm`/`node:vm` import with value bindings (type-only imports do not count), a
+`data:`/`http(s):`/`blob:` module specifier, a `setTimeout`/`setInterval` call (also through a string key such as
+`g["setTimeout"]`) whose handler may be a string (`string`, `any` or `unknown`), or a `setTimeout`/`setInterval` value used
+outside a call (`const later = setTimeout`, `run(setTimeout)`); a method of the same name implemented in the project's
+own sources is not a timer. One such site anywhere closes the proof for the whole program, so in practice
 it applies to small programs and larger programs keep `candidate` edges. Side-effect imports of modules outside the
 project are assumed not to replace built-ins.
 
