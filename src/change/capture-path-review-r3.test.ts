@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runCli } from '../cli/run-cli.ts';
 import { CaptureError, capture } from './capture.ts';
-import { gitFixture } from './git-fixture.test.ts';
+import { captureGitSkip, gitFixture } from './git-fixture.test.ts';
 
 /** 파일시스템에 invalid byte 이름을 만들지 않고 Git 원시 tree 객체를 조립한다. */
 function rawTreeFixture(names: readonly Buffer[]) {
@@ -18,7 +18,7 @@ function rawTreeFixture(names: readonly Buffer[]) {
 const invalidNames = () => [Buffer.concat([Buffer.from('f'), Buffer.from([0xff]), Buffer.from('.ts')]),
   Buffer.concat([Buffer.from('f'), Buffer.from([0xfe]), Buffer.from('.ts')]), Buffer.from('f\uFFFD.ts')];
 
-test('서로 다른 invalid Git 이름을 valid U+FFFD 이름으로 lossy 합치지 않고 캡처를 거부한다', () => {
+test('서로 다른 invalid Git 이름을 valid U+FFFD 이름으로 lossy 합치지 않고 캡처를 거부한다', { skip: captureGitSkip }, () => {
   const f = rawTreeFixture(invalidNames());
   try { assert.throws(() => capture(f.root, f.commit), (error: unknown) => error instanceof CaptureError && /UTF-8/u.test(error.message)); }
   finally { f.close(); }
@@ -36,7 +36,7 @@ test('invalid Git path의 change-impact 입력은 stdout 없는 코드2이며 �
   } finally { f.close(); }
 });
 
-test('valid U+FFFD와 첫 BOM 이름은 Git 객체·working-tree 모두 opaque identity로 보존한다', () => {
+test('valid U+FFFD와 첫 BOM 이름은 Git 객체·working-tree 모두 opaque identity로 보존한다', { skip: captureGitSkip }, () => {
   const f = rawTreeFixture([Buffer.from('f\uFFFD.ts'), Buffer.from('\uFEFFfirst.ts'), Buffer.from('first.ts')]);
   try {
     const committed = capture(f.root, f.commit);

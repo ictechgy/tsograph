@@ -9,6 +9,7 @@ import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runCli } from '../cli/run-cli.ts';
 import { capture, contentDigest, materialize } from './capture.ts';
 import { analyzeChange, changedFiles } from './impact.ts';
+import { captureGitSkip } from './git-fixture.test.ts';
 
 /** Git 저장소 하나를 만들고 검증 뒤 정리한다. */
 function fixture() {
@@ -23,7 +24,7 @@ function fixture() {
 }
 const common = { maxDepth: 128, maxReached: 100_000, dispatch: 'bound' as const, toolVersion: 'test', generatedAt: new Date('2026-10-22T00:00:00Z') };
 
-test('deleted symbol keeps old callers; current graph has no fabricated cross-revision edge', async () => {
+test('deleted symbol keeps old callers; current graph has no fabricated cross-revision edge', { skip: captureGitSkip }, async () => {
   const f = fixture();
   try {
     rmSync(join(f.root, 'value.ts'));
@@ -39,7 +40,7 @@ test('deleted symbol keeps old callers; current graph has no fabricated cross-re
   } finally { f.close(); }
 });
 
-test('body-only dirty edits change content identity; rename preserves both file seeds', async () => {
+test('body-only dirty edits change content identity; rename preserves both file seeds', { skip: captureGitSkip }, async () => {
   const f = fixture();
   try {
     const old = capture(f.root, 'HEAD');
@@ -55,7 +56,7 @@ test('body-only dirty edits change content identity; rename preserves both file 
   } finally { f.close(); }
 });
 
-test('explicit commit head excludes dirty edits and reports depth/output restrictions', async () => {
+test('explicit commit head excludes dirty edits and reports depth/output restrictions', { skip: captureGitSkip }, async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.root, 'value.ts'), 'export function value() { return 2; }\n');
@@ -70,7 +71,7 @@ test('explicit commit head excludes dirty edits and reports depth/output restric
   } finally { f.close(); }
 });
 
-test('unmapped config and empty change sets stay incomplete; capture is content based', async () => {
+test('unmapped config and empty change sets stay incomplete; capture is content based', { skip: captureGitSkip }, async () => {
   const f = fixture();
   try {
     const empty = await analyzeChange({ ...common, project: f.root, base: 'HEAD', head: 'HEAD' });
@@ -84,7 +85,7 @@ test('unmapped config and empty change sets stay incomplete; capture is content 
   } finally { f.close(); }
 });
 
-test('CLI preserves ID impact and rejects invalid change requests', async () => {
+test('CLI preserves ID impact and rejects invalid change requests', { skip: captureGitSkip }, async () => {
   const env = { fileSystem: createNodeFileSystem(), toolVersion: 'test', now: () => common.generatedAt };
   for (const args of [['change-impact', '--help'], ['help', 'change-impact']]) assert.equal((await runCli(args, env)).exitCode, 0);
   for (const args of [['change-impact'], ['change-impact', '--project', '.', '--base', 'HEAD', '--max-depth', '0'], ['change-impact', '--project', '.', '--base', 'HEAD', '--dispatch', 'bad']]) assert.equal((await runCli(args, env)).exitCode, 64);
@@ -100,7 +101,7 @@ test('CLI preserves ID impact and rejects invalid change requests', async () => 
   } finally { f.close(); }
 });
 
-test('configuration-only addition and deletion select both snapshot graphs', async () => {
+test('configuration-only addition and deletion select both snapshot graphs', { skip: captureGitSkip }, async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.root, 'tsconfig.json'), '{"compilerOptions":{}}');
@@ -114,7 +115,7 @@ test('configuration-only addition and deletion select both snapshot graphs', asy
   } finally { f.close(); }
 });
 
-test('uncaptured compiler configuration and source inputs refuse freshness claims', async () => {
+test('uncaptured compiler configuration and source inputs refuse freshness claims', { skip: captureGitSkip }, async () => {
   const f = fixture();
   const external = mkdtempSync(join(tmpdir(), 'tsograph-external-test-'));
   try {

@@ -9,6 +9,7 @@ import ts from 'typescript';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { createGraphPrograms, sourceConfigPlan } from './program.ts';
+import { captureGitSkip } from '../change/git-fixture.test.ts';
 import { extractClientRoutes } from '../routes/client/client-routes.ts';
 import { parseTypedClientModels } from '../routes/client/typed-client-model.ts';
 import { extractNavigationRoutes, parseRouterModels } from '../routes/navigation-routes.ts';
@@ -135,7 +136,7 @@ test('client/navigation/persistence 모두 소유 alias와 entry/dependency 구�
   });
 });
 
-test('실제 Git before/after는 각 시점의 패키지 소유 caller를 유지한다', async () => {
+test('실제 Git before/after는 각 시점의 패키지 소유 caller를 유지한다', { skip: captureGitSkip }, async () => {
   await fixture(apps, async root => {
     const git = (...args:string[]) => execFileSync('git',['-C',root,...args],{encoding:'utf8',windowsHide:true});
     git('init','-q'); git('config','user.name','Fixture'); git('config','user.email','fixture@example.invalid'); git('config','core.autocrlf','false'); git('add','.'); git('commit','-qm','fixture');

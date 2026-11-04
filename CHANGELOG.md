@@ -4,6 +4,42 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- graph·reach·impact: workspace 패키지가 `exports.types`로 프로젝트 안 빌드 산출물(`dist/index.d.ts`)을 가리키면
+  앱의 호출이 외부로 조용히 사라지던 문제를 고쳤다. declaration map, 산출물을 낸 설정의 `declarationDir`/`outDir`↔`rootDir`,
+  손으로 쓴 선언 옆 JavaScript 구현으로 스캔한 소스 하나를 증명할 때만 그 소스로 잇고, 근거가 없으면
+  `graph-config: declaration-outputs:`로 import 수와 산출물 경로를 알리며 프로그램을 열린 쪽(`incomplete-scan`)으로 본다.
+  `rootDir`·`declarationDir`·source map 같은 emit 전용 옵션은 더 이상 type-checking 문맥을 나누지 않는다.
+- graph·reach·impact: 공개 패키지 판정이 루트 `package.json`만 봐서, 루트가 private인 모노레포의 게시 가능한
+  하위 패키지가 내보낸 흐름을 bound로 닫던 문제를 고쳤다. 파일마다 루트 아래 가장 가까운 `package.json`이 공개 진입점을
+  선언하고 `"private": true`가 아니거나 읽을 수 없으면 그 파일의 내보낸 함수·클래스를 열고 속성 쓰기는 프로그램 전체에서
+  열린 쪽으로 본다(`bound-dispatch: nested package.json file(s) …`).
+- graph·reach·impact: 가장 가까운 compiler 설정이 128개를 넘는 모노레포에서 예산을 넘는 순간 모든 소스의 import를 막아
+  그래프 간선이 0개가 되던 문제를 고쳤다. 예산 밖 설정이 소유한 소스만 보류하고, 원인을 소유권 충돌(`config-conflict:`)이
+  아니라 `graph-config: config-budget:`으로 알린다.
+- graph·reach·impact: native Map·constructor carrier가 기대는 mutation guard가 `with` 문(스크립트 JS), `vm`·`node:vm`
+  import·require와 그 `runInThisContext`·`Script`, `data:`·`http(s):`·`blob:` 정적·동적 import, 문자열 타입 `setTimeout`·
+  `setInterval` handler로 `Map.prototype`을 바꾸는 코드를 보지 못해 bound 간선이 남던 문제를 고쳤다. 이 자리가 있으면
+  증명을 닫아 candidate로 남긴다. README에 clean-view 증명이 발동하는 조건과 부수효과 import 가정을 적었다.
+
+### Changed
+
+- 공유 적합성 벡터를 isthmus `c76e105c77d4abb4a0036f37cf899b0a7e0fb162`로 다시 반입했다(`http-dispatch.json`의 끝 슬래시 strict
+  catch-all 접두사 validate 사례). registration-order 문서의 생산자 검증기가 strict 접두사 `/a/`를 원본 `/a/{**}`와 묶지 못해
+  isthmus 0.14.0이 받는 순서를 버릴 수 있었으므로 isthmus `catchAllOriginalTemplates`와 같은 규칙으로 맞췄다.
+
+- 테스트: change 캡처가 필요한 테스트는 로컬 Git이 2.45 미만이면 이유를 남기고 건너뛴다(CI에서는 건너뛰지 않고 실패한다).
+  README 요구 사항에 `change-impact`의 Git 2.45+ 요구를 적었다.
+- CI: Node 24·26에서도 `npm run verify`를 돌리고, `npm pack` tarball을 격리 prefix에 설치해 같은 CLI 계약을 검사한다
+  (`TSOGRAPH_CLI`로 검사할 진입점을 바꿀 수 있다). 게시본 검증(provenance·발행 workflow)은 아니다.
+
+- graph·routes·navigation·schema: 내장 TypeScript 5.9.3이 모르는 compiler 옵션이나 값(`target: "es2025"` 등)이 하나라도
+  있으면 설정 전체를 기본값으로 바꿔 `paths`·`include`가 사라지고 "could not be parsed"로 알리던 동작을 바꿨다. 그 옵션만
+  버리고(새 `target`·`lib` 값은 ESNext로 근사) 나머지를 쓰며, `compiler-options:`로 버린 알려진 옵션 이름·모르는 옵션 수와
+  내장 TypeScript 버전을 알린다. 사용자가 적은 모르는 옵션 이름은 싣지 않는다. `--tsconfig`로 고른 설정도 같은 규칙을 따른다.
+  JSON 구문 오류·읽지 못한 `extends`·`include` 형식 오류는 예전처럼 설정을 읽지 못한 것으로 본다.
+
 ## [0.11.0] - 2026-11-03
 
 - Refresh shared conformance vectors from isthmus `1d6683ab2cd4f7804370c85d4869501042bc3dec`; execute SQL relation cases directly from the hashed source vector. Document published versus candidate versions and feature-specific consumer requirements.

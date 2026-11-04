@@ -11,9 +11,9 @@ import { delimiter, dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 
 import { CaptureError, capture, contentDigest } from './capture.ts';
-import { gitFixture as repository } from './git-fixture.test.ts';
+import { captureGitSkip, gitFixture as repository } from './git-fixture.test.ts';
 
-test('committed symlink entries are omitted instead of being read as source', () => {
+test('committed symlink entries are omitted instead of being read as source', { skip: captureGitSkip }, () => {
   const repo = repository();
   try {
     const commit = repo.commitTree([
@@ -29,7 +29,7 @@ test('committed symlink entries are omitted instead of being read as source', ()
   } finally { repo.close(); }
 });
 
-test('working-tree symlinks to files and directories are omitted and never followed', { skip: process.platform === 'win32' }, () => {
+test('working-tree symlinks to files and directories are omitted and never followed', { skip: process.platform === 'win32' || captureGitSkip }, () => {
   const repo = repository();
   try {
     writeFileSync(join(repo.root, 'main.ts'), 'export const main = 1;\n');
@@ -45,7 +45,7 @@ test('working-tree symlinks to files and directories are omitted and never follo
   } finally { repo.close(); }
 });
 
-test('reserved device names, trailing dots and Git metadata paths in a tree are rejected', () => {
+test('reserved device names, trailing dots and Git metadata paths in a tree are rejected', { skip: captureGitSkip }, () => {
   for (const name of ['con.ts', 'trailing.', '.git']) {
     const repo = repository();
     try {
@@ -100,7 +100,7 @@ function withPath<T>(entries: readonly string[], run: () => T): T {
 
 const unavailable = (error: unknown) => error instanceof CaptureError && /trusted Git executable unavailable/u.test(error.message);
 
-test('a git executable planted inside the project is never selected', { skip: process.platform === 'win32' }, () => {
+test('a git executable planted inside the project is never selected', { skip: process.platform === 'win32' || captureGitSkip }, () => {
   const repo = repository();
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-marker-')));
   try {
@@ -117,7 +117,7 @@ test('a git executable planted inside the project is never selected', { skip: pr
   }
 });
 
-test('relative PATH entries and the current directory are skipped even when they hold a git outside the project', { skip: process.platform === 'win32' }, () => {
+test('relative PATH entries and the current directory are skipped even when they hold a git outside the project', { skip: process.platform === 'win32' || captureGitSkip }, () => {
   const repo = repository();
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-capture-outside-')));
   const originalDirectory = process.cwd();

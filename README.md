@@ -11,7 +11,7 @@ Static facts for TypeScript/JavaScript (Node) services, emitted in the
 
 tsograph is the TypeScript/JavaScript member of a family of static-analysis CLIs
 (cartograph for Swift, kartograph for Kotlin, dartograph for Dart, gartograph for Go,
-rustograph for Rust, schemagraph for SQL). Each tool reports only what it observes in its
+rustograph for Rust, pythograph for Python, schemagraph for SQL). Each tool reports only what it observes in its
 own language; isthmus joins the documents.
 
 ## Status
@@ -38,7 +38,8 @@ isthmus-cli 0.9.0 and earlier reject `target: "http"` documents.
 
 ```sh
 tsograph routes --role client --project ./web --service example-api > calls.json
-tsograph impact --project ./web --roots-from affected-call-symbols.json
+# Impact on the symbols that make those calls (each fact keeps its enclosing graph id in symbol.usr)
+tsograph impact --project ./web $(jq -r '[.facts[].symbol.usr // empty] | unique[]' calls.json)
 ```
 
 Extracts global `fetch` (web and React Native), symbol-proven axios imports/`create` instances,
@@ -116,6 +117,12 @@ Imported dependencies can still enter the analyzed closure even when excluded as
 the nearest or explicitly referenced owner configuration: two apps with `baseUrl: "./src"` resolve their
 own aliases, including aliases inside an imported package. Compatible type-checking options share a
 Program; incompatible options use independent Programs and cross-context imports remain unresolved.
+Emit-only options (`rootDir`, `outDir`, `declarationDir`, `composite`, source-map and comment options) do not
+separate Programs. A workspace package whose `exports`/`types` points at build output inside the project
+(`packages/lib/dist/index.d.ts`) is followed back to its scanned source when a declaration map, the emitting
+config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
+directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
+source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
 use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript
@@ -148,6 +155,12 @@ exchange fields and versions stay unchanged.
 
 - Node.js 22.18.0 or newer
 - isthmus-cli 0.10.0 or newer to join the documents (`npm install -g isthmus-cli`)
+- Git 2.45 or newer for `tsograph change-impact` (it runs `git --no-lazy-fetch`; Ubuntu 24.04's default Git 2.43
+  fails with exit 2). Other commands never run Git; they read `revision` from `.git` metadata files.
+- The analyzed project's own TypeScript is not used: tsograph bundles TypeScript 5.9.3 and reads compiler
+  configs with it. Option values that 5.9.3 does not know (for example a newer `target` or `lib`) are ignored one
+  option at a time, newer `target`/`lib` values are approximated with ESNext, and the rest of the config (`paths`,
+  `baseUrl`, `include`) is kept; `compiler-options:` names the ignored known options and counts unknown ones.
 
 ## Installation
 
@@ -887,8 +900,8 @@ let `isthmus trace` follow a route to its tables and their database dependents
 
 ```sh
 tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
-tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
-tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph reach  (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 ```
 
 Builds the project's TypeScript/JavaScript call graph with the TypeScript compiler API (a
@@ -938,8 +951,8 @@ No traversal result is returned before complete EOF, counts and graphRevision va
 
 - `graph` writes a `tsograph-graph` v1 snapshot (tsograph's own format, not an isthmus input):
   `nodes` (`id`, `kind`, `location`, optional `entries`, optional `unresolvedCalls`), `edges`
-  (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `graphRevision`, and `revision`
-  when readable. The snapshot represents every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)):
+  (`from`, `to`, `kinds`, `evidence`), `statistics`, `limitations`, `limitationsByMode` (the exact limitations
+  of each `--dispatch` mode: `direct`, `bound`, `candidates`), `graphRevision`, and `revision` when readable. The snapshot represents every edge tier (see [Interface dispatch](#interface-dispatch-bound-and-candidate-edges)):
   a pair of symbols has at most one edge per evidence tier, and a weaker edge is omitted when stronger
   edges between the same pair already carry all of its kinds, because it cannot change any traversal
   in any mode. Node `unresolvedCalls` holds exact counts (not capped).
@@ -1196,6 +1209,15 @@ const aliases, and conditional unions can narrow key matches. Primitive kinds re
 Map, and `-0` matches `0`. Symbol/object/enum/call-derived keys are not guessed. Delete and clear do
 not remove possible values from this context-insensitive analysis, and iterator results remain opaque.
 
+The mutation view is clean only when no analyzed file has any of these: `Object`/`Reflect` mutators or aliases
+of them, `eval`/`Function`/`Proxy`, a computed-key read whose receiver may be `Object` or `Reflect` (a read through
+`any`, `unknown`, an index-signature type such as `Record<string, unknown>`, `JSON.parse(…)[k]`, or an unresolved
+import), property writes on receivers that are not proven object literals (for example `this.n = this.n + 1`),
+a `with` statement, a `vm`/`node:vm` import, a `data:`/`http(s):`/`blob:` module specifier, or a string-typed
+`setTimeout`/`setInterval` handler. One such site anywhere closes the proof for the whole program, so in practice
+it applies to small programs and larger programs keep `candidate` edges. Side-effect imports of modules outside the
+project are assumed not to replace built-ins.
+
 Callable values use the same flow engine: function declarations and function-valued initializers plus
 their observed assignments, closed callback parameters, direct invocations of anonymous inline
 callbacks, function and getter return values, constructor assignments/defaults, and safely readable
@@ -1245,7 +1267,11 @@ What `bound` guarantees, and what it does not:
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
   1 MiB), or an incomplete scan (skipped, oversized, unreadable, symlinked, or
   unsafely named files, or parse errors), additionally opens every exported function and class and every
-  non-private property; the document then says so under `bound-dispatch:`. An exported function whose
+  non-private property; the document then says so under `bound-dispatch:`. Below the root, each file uses its
+  nearest `package.json`: a workspace package that declares those fields and is not `"private": true` (or whose
+  manifest cannot be read) opens the exported functions and classes of its own files and, conservatively, every
+  non-private property in the program (`bound-dispatch: nested package.json file(s) …`); a private workspace
+  package cannot be published, so its consumers are the scanned workspace. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
   parameter value alone is never taken as the whole flow) unless a strict syntactic re-scan proves it
@@ -1349,6 +1375,12 @@ Only `route-handler` entries are reachable through the isthmus http join. `reach
 documents count the other entry kinds among their roots and reached symbols under
 `non-http-entries:`, so isthmus `trace` can report them as `non-http-entry` gaps instead of
 missing routes.
+
+Entry kinds outside this table are not marked, so they are neither roots for the isthmus join nor counted
+under `non-http-entries:`: `package.json` `bin`/`main`/`exports` targets, serverless handlers (AWS Lambda
+`handler`, Cloudflare Workers `fetch`/`scheduled`/`queue`), queue/event consumers (NestJS `@Cron`,
+`@MessagePattern`, `@EventPattern`, BullMQ processors), GraphQL resolvers, CLI scripts and test runners. Their
+callers still appear as graph edges, but an impact on them is not reported as a non-HTTP entry gap.
 
 `reach` and `impact --entry-points` additionally emit observed `symbol.entries` on roots and reached
 symbols, with locations for marked roots. isthmus-cli 0.12.0+ can report non-HTTP entry points
