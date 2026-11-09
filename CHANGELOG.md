@@ -18,6 +18,9 @@
 - graph·reach·impact: 가장 가까운 compiler 설정이 128개를 넘는 모노레포에서 예산을 넘는 순간 모든 소스의 import를 막아
   그래프 간선이 0개가 되던 문제를 고쳤다. 예산 밖 설정이 소유한 소스만 보류하고, 원인을 소유권 충돌(`config-conflict:`)이
   아니라 `graph-config: config-budget:`으로 알린다.
+- graph·reach·impact: solution형 루트의 `references`가 128개 예산을 넘어 소유권 계획이 불완전할 때, 그 때문에만 import를
+  보류한 소스를 소유권 충돌(`config-conflict:`)로 세던 문제를 고쳤다. 이제 `config-ownership:` 한계에
+  `; N source(s) were left unresolved`로 센다. 옵션이 실제로 다른 소유 설정이나 모호한 reference 소유자는 예전처럼 `config-conflict:`다.
 - graph·reach·impact: native Map·constructor carrier가 기대는 mutation guard가 `with` 문(스크립트 JS), `vm`·`node:vm`
   import·require와 그 `runInThisContext`·`Script`, `data:`·`http(s):`·`blob:` 정적·동적 import, 문자열 타입 `setTimeout`·
   `setInterval` handler로 `Map.prototype`을 바꾸는 코드를 보지 못해 bound 간선이 남던 문제를 고쳤다. 이 자리가 있으면

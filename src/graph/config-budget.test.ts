@@ -62,3 +62,17 @@ test('설정 예산 안의 workspace는 예산 limitation을 싣지 않는다', 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('solution형 root references가 128개를 넘으면 막힌 소스를 소유권 충돌이 아니라 config-ownership으로 센다', async () => {
+  const root = createChainedPackages(130);
+  const references = Array.from({ length: 130 }, (_, index) => ({ path: `packages/p${index + 1}` }));
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ files: [], references }));
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.ok(!graph.limitations.some((line) => line.startsWith('graph-config: config-conflict: ')), graph.limitations.join('\n'));
+    const ownership = graph.limitations.find((line) => line.startsWith('graph-config: config-ownership: '));
+    assert.match(ownership ?? '', /; \d+ source\(s\) were left unresolved$/u, graph.limitations.join('\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

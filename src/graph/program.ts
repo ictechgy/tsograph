@@ -74,6 +74,8 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly conflictingConfigSources?: readonly string[];
   readonly conflictingConfigSourceCount?: number;
   readonly configOwnershipIncomplete?: boolean;
+  /** 소유권 계획이 불완전해서만 import를 보류한 소스 수다(충돌이 아니라 config-ownership으로 알린다). */
+  readonly configOwnershipBlockedSources?: number;
   /** 내장 TypeScript가 모르는 값이라 버린 알려진 compiler 옵션 이름과, 모르는 옵션 이름 수다(이름은 싣지 않는다). */
   readonly ignoredCompilerOptions?: readonly string[];
   readonly unknownCompilerOptions?: number;
@@ -179,7 +181,9 @@ export function createGraphProgram(
   const conflicts = context === undefined ? ownership.blocked : ownership.ambiguous;
   const blocked = conflicts;
   // 예산 때문에 막은 소스는 소유권 충돌이 아니므로 config-conflict가 아니라 config-budget으로 따로 알린다.
-  const reportedConflicts = [...conflicts].filter((path) => !ownership.budgetBlocked.has(path));
+  // 소유권 계획이 불완전해서만 막은 소스도 충돌이 아니므로 config-ownership으로 따로 센다.
+  const heldByIncomplete = context === undefined ? ownership.incompleteBlocked : ownership.incompleteAmbiguous;
+  const reportedConflicts = [...conflicts].filter((path) => !ownership.budgetBlocked.has(path) && !heldByIncomplete.has(path));
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
@@ -274,6 +278,7 @@ export function createGraphProgram(
         ...(context === undefined ? {} : { compilerContexts: context.count, contextBoundaryImports: boundaryImports.size,
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
+        ...(heldByIncomplete.size > 0 ? { configOwnershipBlockedSources: heldByIncomplete.size } : {}),
         ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
           declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
             .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
@@ -698,7 +703,11 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
       + `their imports were left unresolved instead of applying another project's options; ${affected} may be incomplete `
       + '(analyze a smaller --project, or a package with --workspace)');
   }
-  if (status.configOwnershipIncomplete === true) gaps.push(`config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; ${affected} may be incomplete`);
+  if (status.configOwnershipIncomplete === true) {
+    const held = status.configOwnershipBlockedSources ?? 0;
+    gaps.push(`config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; ${affected} may be incomplete`
+      + (held > 0 ? `; ${held} source(s) were left unresolved` : ''));
+  }
   const outside = status.outsideConfigRoots ?? 0;
   if (outside > 0) {
     gaps.push(`${outside} include pattern(s) or files entr(ies) of ${status.configName} point outside the scanned root and were not used as root files; `
@@ -785,6 +794,13 @@ interface ConfigOwnership {
   readonly blocked: ReadonlySet<string>;
   /** 가장 가까운 설정이 128개 예산 밖이라 소유 설정을 읽지 못해 막은 소스다(blocked·ambiguous에도 들어 있다). */
   readonly budgetBlocked: ReadonlySet<string>;
+  /**
+   * 소유권 계획이 불완전해서만 막은 소스다(예: reference가 128개 예산을 넘음). 실제 소유권 충돌이 아니므로 config-conflict가 아니라
+   * config-ownership으로 센다(blocked·ambiguous에도 들어 있다).
+   */
+  readonly incompleteBlocked: ReadonlySet<string>;
+  /** {@link incompleteBlocked}의 ambiguous 판(문맥별 Program은 ambiguous를 충돌로 센다). */
+  readonly incompleteAmbiguous: ReadonlySet<string>;
   readonly referenceRoots: readonly string[];
   readonly incomplete: boolean;
   readonly owners: ReadonlyMap<string, ProjectConfig>;
@@ -802,6 +818,9 @@ function configOwnership(
   // 예산 때문에 읽지 못한 설정 경로다. 가장 가까운 설정이 여기 있는 소스만 막고, 예산 안 설정이 소유한 소스는 계속 분석한다.
   const budgetRefused = new Set<string>();
   const budgetBlocked = new Set<string>();
+  /** 실제 소유권 사유로 막은 소스다: blocked는 옵션이 다른 소유 설정, ambiguous는 모호한 reference 소유자. */
+  const blockConflicts = new Set<string>();
+  const ambiguityConflicts = new Set<string>();
   const ownersBySource = new Map<string, ProjectConfig>();
   let incomplete = selected.status.configRootsTruncated === true;
   const inside = (path: string) => {
@@ -867,16 +886,26 @@ function configOwnership(
     }
     const owner = nearestOwner;
     if (owner !== undefined) owners.push(owner);
-    if (owners.some((config) => config !== selected && (config.status.configUnreadable || resolutionOptionsKey(config.options) !== selectedKey))) blocked.add(source);
+    if (owners.some((config) => config !== selected && (config.status.configUnreadable || resolutionOptionsKey(config.options) !== selectedKey))) {
+      blocked.add(source);
+      blockConflicts.add(source);
+    }
     const referenceOwners = referenced.get(source) ?? [];
     const explicitOwners = referenceOwners.length === 0 ? (owner === undefined ? [] : [owner])
       : [...referenceOwners, ...(owner !== undefined && owner.fileNames.includes(source) ? [owner] : [])];
     const unique = new Map(explicitOwners.map(config => [resolutionOptionsKey(config.options), config]));
-    if (unique.size > 1 || explicitOwners.some(config => config !== selected && config.status.configUnreadable)) ambiguous.add(source);
+    if (unique.size > 1 || explicitOwners.some(config => config !== selected && config.status.configUnreadable)) {
+      ambiguous.add(source);
+      ambiguityConflicts.add(source);
+    }
     ownersBySource.set(source, unique.size === 1 ? [...unique.values()][0]! : selected);
   }
+  const heldOnlyByIncomplete = (conflicts: ReadonlySet<string>) =>
+    new Set(incomplete ? sources.filter((source) => !conflicts.has(source) && !budgetBlocked.has(source)) : []);
+  const incompleteBlocked = heldOnlyByIncomplete(blockConflicts);
+  const incompleteAmbiguous = heldOnlyByIncomplete(ambiguityConflicts);
   if (incomplete) sources.forEach((source) => { blocked.add(source); ambiguous.add(source); });
-  return { configs: [...new Set([selected, ...cache.values()])], blocked, budgetBlocked, referenceRoots: [...referenceRoots], incomplete,
+  return { configs: [...new Set([selected, ...cache.values()])], blocked, budgetBlocked, incompleteBlocked, incompleteAmbiguous, referenceRoots: [...referenceRoots], incomplete,
     owners: ownersBySource, ambiguous };
 }
 
