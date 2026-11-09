@@ -31,6 +31,7 @@
 
 ## 작업 규칙
 
+- 세션을 이어받으면 [HANDOFF.md](HANDOFF.md)에서 진행 상태와 다음 할 일을 보고, 실제 Git 상태·코드와 대조한다.
 - 시작 시 branch/status를 확인하고 기존 수정·미추적 파일을 보존한다. `main`에 직접 커밋하지 않는다
   (초기 골격 커밋만 예외였다). `feature/…`·`fix/…`·`refactor/…` 브랜치에서 작업한다.
 - 변경마다 PR을 만들고 PR마다 GLM 리뷰(`packet-ask`로 관련 diff와 필요한 문맥만 전달)를 받아
