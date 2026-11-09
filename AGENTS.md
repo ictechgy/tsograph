@@ -7,7 +7,7 @@
 
 - TypeScript CLI. npm 패키지 `tsograph`, 실행 명령 `tsograph`. Node `package.json#engines` 이상.
 - 정적 분석 CLI 가족(cartograph/Swift, kartograph/Kotlin, dartograph/Dart, gartograph/Go,
-  rustograph/Rust, schemagraph/SQL)의 TypeScript/JavaScript(Node) 생산자다. 조인·판정은
+  rustograph/Rust, pythograph/Python, schemagraph/SQL)의 TypeScript/JavaScript(Node) 생산자다. 조인·판정은
   [isthmus](https://github.com/ictechgy/isthmus)가 하고, tsograph는 **자기 언어에서 본 사실만** 낸다.
 - 출력 계약은 isthmus `docs/GRAPH-EXCHANGE.md`(bridge-facts v1)다. http v1 절은 isthmus-cli 0.10.0에 발행됐으므로
   계약 관련 변경 전에 그 문서를 먼저 읽고, 공유 계약과 다르게 결정한 부분은 README와 CHANGELOG에 남긴다.
@@ -31,6 +31,7 @@
 
 ## 작업 규칙
 
+- 세션을 이어받으면 [HANDOFF.md](HANDOFF.md)에서 진행 상태와 다음 할 일을 보고, 실제 Git 상태·코드와 대조한다.
 - 시작 시 branch/status를 확인하고 기존 수정·미추적 파일을 보존한다. `main`에 직접 커밋하지 않는다
   (초기 골격 커밋만 예외였다). `feature/…`·`fix/…`·`refactor/…` 브랜치에서 작업한다.
 - 변경마다 PR을 만들고 PR마다 GLM 리뷰(`packet-ask`로 관련 diff와 필요한 문맥만 전달)를 받아

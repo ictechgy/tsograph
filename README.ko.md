@@ -10,7 +10,7 @@ TypeScript/JavaScript(Node) 서비스의 정적 사실을
 [isthmus](https://github.com/ictechgy/isthmus) bridge-facts 교환 형식으로 낸다.
 
 tsograph는 정적 분석 CLI 가족(Swift의 cartograph, Kotlin의 kartograph, Dart의 dartograph,
-Go의 gartograph, Rust의 rustograph, SQL의 schemagraph)의 TypeScript/JavaScript 생산자다. 각 도구는
+Go의 gartograph, Rust의 rustograph, Python의 pythograph, SQL의 schemagraph)의 TypeScript/JavaScript 생산자다. 각 도구는
 자기 언어에서 본 것만 보고하고, 조인은 isthmus가 한다.
 
 ## 상태
@@ -36,7 +36,9 @@ HTTP v1 계약은 isthmus-cli **0.10.0**에 발행됐다. `check`(`--pairs` 포�
 
 ```sh
 tsograph routes --role client --project ./web --service example-api > calls.json
-tsograph impact --project ./web --roots-from affected-call-symbols.json
+# 그 호출을 하는 심볼(사실마다 감싸는 그래프 id를 symbol.usr에 싣는다)의 영향 범위.
+# id에 공백이 들어갈 수 있어 NUL로 구분해 넘긴다. -r은 id가 없으면 실행하지 않는다.
+jq -j '[.facts[].symbol.usr // empty] | unique[] | (. + "\u0000")' calls.json | xargs -0 -r tsograph impact --project ./web
 ```
 
 전역 `fetch`(웹·React Native), 심볼 provenance가 있는 axios import·`create` 인스턴스,
@@ -101,7 +103,13 @@ graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclu
 진입에서 제외됐어도 분석에 들어올 수 있다. 가까운 설정이나 명시 project reference의 소유 설정을 사용하므로 두 앱이
 각각 `baseUrl: "./src"`를 써도 각 앱 내부 별칭과 import한 패키지 내부 별칭을 올바른 위치에서 해석한다.
 같은 타입 의미는 하나의 Program을 쓰고 다른 의미는 독립 Program으로 분석한다. 문맥 간 import와 모호하거나 누락된
-소유권은 미해결로 남긴다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
+소유권은 미해결로 남긴다. 산출물만 정하는 옵션(`rootDir`·`outDir`·`declarationDir`·`composite`·source map·주석 옵션)은
+Program을 나누지 않는다. workspace 패키지의 `exports`·`types`가 프로젝트 안 빌드 산출물(`packages/lib/dist/index.d.ts`)을
+가리키면 declaration map, 그 산출물을 낸 설정의 `declarationDir`/`outDir`과 `rootDir`(composite면 설정 디렉터리, 아니면
+공통 소스 디렉터리), 손으로 쓴 선언 옆 같은 이름의 JavaScript 구현 중 하나가 스캔한 소스 하나를 가리킬 때 그 소스로
+되짚는다. 그렇지 않으면 호출은 외부로 남고 `graph-config: declaration-outputs:`가 import 수를 센다.
+`outDir`/`rootDir` 대응은 선언 파일을 그 설정이 냈다고 가정한다. export 이름은 대조하지 않으므로, 번들러가 그 설정의 `outDir`에
+배치가 다른 `.d.ts`를 덮어쓰고 같은 상대 경로에 다른 소스가 있으면 한계 없이 잘못된 `direct` 간선이 나온다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
 소유 문맥은 순차 처리하며 총 그룹 수 때문에 모든 의미 호출을 포기하지 않는다. 큰 계획에서는 새 AST를
 `ParseForTypeErrors`로 만들어 JS JSDoc 타입과 TS 타입 오류에 필요한 문서를 유지하고 TS 문서 전용 태그 AST만 생략한다.
 일반 Program API의 기본 문서 동작은 유지한다. 파일별 flow 색인을 whole/production view에 스트리밍하여 임시 맵의
@@ -127,6 +135,14 @@ navigation은 owned import·재내보내기·const 별칭을 거친 공유 route
 
 - Node.js 22.18.0 이상
 - 문서를 이으려면 isthmus-cli 0.10.0 이상(`npm install -g isthmus-cli`)
+- `tsograph change-impact`에는 Git 2.45 이상(`git --no-lazy-fetch`를 쓴다. Ubuntu 24.04 기본 Git 2.43에서는 코드 2로
+  실패한다). 다른 명령은 Git을 실행하지 않고 `.git` 메타데이터 파일에서 `revision`만 읽는다.
+- 분석 대상 프로젝트의 TypeScript는 쓰지 않는다. tsograph는 TypeScript 5.9.3을 내장해 compiler 설정을 읽는다.
+  5.9.3이 모르는 옵션 값(예: 더 새 `target`·`lib`)은 옵션 하나씩 버리고, 새 `target`·`lib` 값은 ESNext로, 새 `module`·
+  `moduleResolution` 값은 짝이 Node 모드면 NodeNext, 아니면 ESNext·bundler 해석으로 근사하며, 나머지 설정은 유지한다.
+  `compiler-options:`가 버린 알려진 옵션 이름과 모르는 옵션 수를 알린다. 버린 값이 module 해석에 영향을 주면(`module`·
+  `moduleResolution`·`baseUrl`·`paths`·`customConditions` 등) 스캔을 불완전으로 보아 `bound` 증명과 effect inventory가
+  근사에 기대지 않는다.
 
 ## 설치
 
@@ -710,8 +726,8 @@ isthmus check --pairs js-facts.json sql-facts.json
 
 ```sh
 tsograph graph  --project <root> [--tsconfig <file>] [--workspace <root>] [--generated-at <timestamp>] [--format json|ndjson]
-tsograph reach  (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
-tsograph impact (--project <root> | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--format json] <id>...
+tsograph reach  (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
+tsograph impact (--project <root> [--tsconfig <file>] [--workspace <root>] | --graph-file <snapshot.json>) [--max-depth <n>] [--max-reached <n>] [--dispatch direct|bound|candidates] [--entry-points] [--generated-at <timestamp>] [--format json] <id>...
 ```
 
 TypeScript 컴파일러 API로 프로젝트의 TypeScript/JavaScript 호출 그래프를 만든다(루트 `tsconfig.json`,
@@ -754,7 +770,8 @@ host에서는 무제한 읽기로 대체하지 않고 실패한다. 캡처된 pr
 
 - `graph`는 `tsograph-graph` v1 스냅샷(tsograph 자체 형식, isthmus 입력 아님)을 낸다: `nodes`(`id`·`kind`·
   `location`·선택 `entries`·선택 `unresolvedCalls`), `edges`(`from`·`to`·`kinds`·`evidence`), `statistics`,
-  `limitations`, `graphRevision`, 읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급을 나타낸다
+  `limitations`, `limitationsByMode`(`--dispatch` 모드 `direct`·`bound`·`candidates`별 정확한 limitation), `graphRevision`,
+  읽을 수 있으면 `revision`. 스냅샷은 모든 근거 등급을 나타낸다
   ([인터페이스 디스패치](#인터페이스-디스패치boundcandidate-간선) 참고): 심볼 쌍마다 근거 등급별 간선은 많아야 하나이고,
   같은 쌍의 더 강한 간선들이 종류를 모두 덮는 약한 간선은 어느 모드의 순회도 바꾸지 못하므로 뺀다. 노드
   `unresolvedCalls`는 상한 없는 정확한 수다.
@@ -970,6 +987,15 @@ private 최상위 `const registry = new Map()`은 실제 TypeScript default libr
 조건식 합집합만 키 일치를 좁힌다. Map은 primitive 종류를 구분하고 `-0`과 `0`을 같게 본다. symbol/object/enum/call
 유래 키는 추측하지 않는다. delete/clear 후에도 문맥 비민감 분석의 가능한 값은 보존하고 iterator 결과는 opaque다.
 
+mutation 범위는 분석한 파일 어디에도 다음이 없을 때만 깨끗하다: `Object`·`Reflect` mutator나 그 별칭,
+`eval`·`Function`·`Proxy`, 수신자가 `Object`·`Reflect`일 수 있는 계산 키 읽기(`any`·`unknown`·`Record<string, unknown>` 같은
+index signature 타입·`JSON.parse(…)[k]`·풀리지 않은 import를 거친 읽기), 객체 literal로 증명되지 않은 수신자의 속성 쓰기
+(예: `this.n = this.n + 1`), `with` 문, 값 바인딩이 있는 `vm`·`node:vm` import(타입 전용 import는 제외),
+`data:`·`http(s):`·`blob:` 모듈 지정자, handler가 문자열일 수 있는(`string`·`any`·`unknown`) `setTimeout`·`setInterval` 호출
+(`g["setTimeout"]` 같은 문자열 키 포함), 호출 밖에서 값으로 쓴 `setTimeout`·`setInterval`(`const later = setTimeout`,
+`run(setTimeout)`). 프로젝트 소스가 구현한 같은 이름의 메서드는 timer가 아니다. 하나만 있어도 프로그램 전체의 증명이 닫히므로 실제로는 작은 프로그램에만 적용되고
+큰 프로그램은 `candidate` 간선을 유지한다. 프로젝트 밖 모듈의 부수효과 import는 내장 객체를 바꾸지 않는다고 가정한다.
+
 호출 가능 값도 같은 흐름 엔진을 쓴다. 함수 선언·함수 값 초기화와 관찰한 대입, 닫힌 callback 매개변수와 익명 인라인
 callback의 직접 호출, 함수·getter 반환값, 생성자 대입·기본값, 안전하게 읽은 객체·클래스 메서드를 따라간다. 인라인
 callback은 직접 호출 인자이면서 본문이 하나인 닫힌 프로젝트 함수 선언에서만 연결한다. 이름 있는 함수 식,
@@ -1007,7 +1033,10 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
   `package.json`이 `main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`를 선언한 패키지(또는 1 MiB 안에서
   JSON 객체로 읽지 못하는 `package.json`)이거나 스캔이
   불완전하면(건너뛴·너무 큰·읽지 못한·symlink·금지 문자 이름 파일, 구문 오류) 모든 내보낸 함수·클래스와 비공개가 아닌 속성도
-  열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
+  열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 루트 아래 파일은 가장 가까운 `package.json`을 본다. 그 필드를
+  선언하고 `"private": true`가 아닌(또는 manifest를 읽지 못한) workspace 패키지는 자기 파일의 내보낸 함수·클래스를 열고,
+  보수적으로 프로그램 전체의 비공개가 아닌 속성을 연다(`bound-dispatch: nested package.json file(s) …`). private
+  workspace 패키지는 게시할 수 없어 소비자가 스캔한 workspace 안에 있다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
   프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다. 닫힌 쪽으로 실패한다: 색인된 호출
   위치가 없는 함수·생성자는 모름이다(기본 매개변수 값만으로 흐름 전체라고 보지 않는다). 단 엄격한 문법 재검사로 참조가
   전혀 없음을 증명하면 — 분석한 파일 전체에서 이름이나 별칭 지역 이름과 텍스트가 같은 식별자·`#이름`·문자열 리터럴 토큰이
@@ -1087,6 +1116,11 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
 isthmus http 조인으로 닿는 것은 `route-handler`뿐이다. `reach`·`impact` 문서는 root·도달 심볼 중 그 밖의
 진입점을 `non-http-entries:`로 세어, isthmus `trace`가 route 누락 대신 `non-http-entry` gap으로 보고할 수
 있게 한다.
+
+이 표 밖의 진입점 종류는 표시하지 않으므로 isthmus 조인의 root도 아니고 `non-http-entries:`에도 세지 않는다:
+`package.json`의 `bin`·`main`·`exports` 대상, serverless handler(AWS Lambda `handler`, Cloudflare Workers
+`fetch`·`scheduled`·`queue`), queue·event 소비자(NestJS `@Cron`·`@MessagePattern`·`@EventPattern`, BullMQ processor),
+GraphQL resolver, CLI 스크립트와 테스트 러너. 그 호출자는 그래프 간선으로 남지만, 그 영향은 비HTTP 진입점 gap으로 보고되지 않는다.
 
 `reach`·`impact --entry-points`는 root·도달 심볼에 관찰한 `symbol.entries`를 추가하고, 표시된 root의 위치도 싣는다.
 isthmus-cli 0.12.0 이상은 relation·심볼·파일 선택에서 비HTTP 진입점을 API 영향과 함께 보고한다. page 표식에는

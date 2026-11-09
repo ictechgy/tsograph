@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { runCli } from '../cli/run-cli.ts';
 import { ambientTypesFreeConfig } from '../cli/testing.test.ts';
+import { captureGitSkip } from '../change/git-fixture.test.ts';
 import { collectProjectFiles } from '../schema/project-files.ts';
 import { acceptsGitignoreEntry, GITIGNORE_LIMITS, GitignoreInputError, gitignoreEntryFilter, gitignoreSelectionLimitation, withGitignoreSelection } from './gitignore.ts';
 
@@ -174,7 +175,7 @@ test('Next 진입·navigation 등록도 ignore 정책을 공유하고 명시 모
   });
 });
 
-test('Git 변경 분석은 각 동결 캡처의 ignore 파일로 고르고 원본 작업 트리를 바꾸지 않는다', async () => {
+test('Git 변경 분석은 각 동결 캡처의 ignore 파일로 고르고 원본 작업 트리를 바꾸지 않는다', { skip: captureGitSkip }, async () => {
   await fixture({ '.gitignore': 'ignored.ts\n', 'package.json': '{"private":true}', 'tsconfig.json': ambientTypesFreeConfig,
     'kept.ts': 'export function kept() { return 1; }', 'ignored.ts': 'export function ignored() { return 1; }' }, async root => {
     const env = { ...process.env, GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };

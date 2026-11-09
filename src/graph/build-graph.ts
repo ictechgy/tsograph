@@ -10,7 +10,7 @@
  */
 
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, posix, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
 
@@ -48,7 +48,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, resolutionOptionsIgnored, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { TargetResolver } from './target-resolver.ts';
 import { scopeIdOf } from './symbol-ids.ts';
 import { gitignoreSelectionLimitation } from '../scan/gitignore.ts';
@@ -118,10 +118,12 @@ interface GraphCounts {
   readonly routeFactLimit: RouteFactLimitCause | undefined;
   /** bound의 열린 프로그램 판정 이유(없으면 닫힌 프로그램) */
   readonly openProgram: OpenProgramReason | undefined;
+  /** 닫힌 프로그램에서 일부 파일을 연 중첩 공개·판단 불가 manifest의 프로젝트 기준 경로 */
+  readonly openManifests: readonly string[];
 }
 
 /** AST·checker를 보유하지 않는 문맥별 호출 진단이다. */
-type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram'>;
+type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram' | 'openManifests'>;
 
 /** 직렬화할 DTO와 숫자 진단만 보존하여 끝난 Program을 해제할 수 있게 한다. */
 interface ContextGraphResult {
@@ -180,7 +182,8 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const configRootsIncomplete = (status.outsideConfigRoots ?? 0) > 0 || (status.excludedConfigRoots ?? 0) > 0
     || status.configRootsTruncated === true || (status.excludedSourceRoots ?? 0) > 0
     || (status.conflictingConfigSourceCount ?? 0) > 0 || status.configOwnershipIncomplete === true || (status.contextBoundaryImports ?? 0) > 0 || status.contextBudgetExceeded === true
-    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0;
+    || status.pnpLoaderOnly === true || (status.pnpIssues?.length ?? 0) > 0 || (status.declarationOutputImports ?? 0) > 0
+    || (status.configBudgetSources ?? 0) > 0 || resolutionOptionsIgnored(status);
   const coverageComplete = gitignoreLimitation === undefined && !compilerInputsIncomplete && !status.configUnreadable && !configRootsIncomplete && !walk.truncated && inputs.oversized === 0
     && walk.unreadableDirectories === 0 && walk.skippedSymlinks === 0 && walk.unsafeNames === 0 && unreadableSources === 0
     && deeplyNestedFiles.length === 0;
@@ -203,10 +206,14 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const openProgram = gitignoreLimitation !== undefined || compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
-  if (analysis.kind === 'full') resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, frameworkFiles });
+  const nested = openProgram === undefined ? nestedOpenPackages(project, files.keys()) : { openFiles: new Set<string>(), manifests: [] };
+  if (analysis.kind === 'full') {
+    resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, openFiles: nested.openFiles, frameworkFiles });
+  }
   const nodes = analysis.store.nodes();
   const counts: GraphCounts = {
     ...analysis, config: status, inputs, parseErrorFiles, deeplyNestedFiles, deeplyNestedInputs, unreadableSources, unmatchedCrons, openProgram,
+    openManifests: nested.manifests,
     cronConfigUnreadable: crons.unreadable,
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
@@ -219,7 +226,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
   const ownedIds = new Set(ownedNodes.map(node => node.id));
   results.push({ graph: { nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } },
-    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram } });
+    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram, openManifests: nested.manifests } });
   }
   return mergeContextGraphs(results);
 }
@@ -244,7 +251,7 @@ function mergeContextGraphs(contexts: readonly ContextGraphResult[]): CallGraph 
     }
   }
   const diagnostics: CallDiagnosticCounts = { calls, gaps: mergeContextGaps(contexts),
-    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined };
+    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined, openManifests: [] };
   const limits = (view: LimitationView): string[] => mergeContextLimitations(contexts, diagnostics, view);
   return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
     edges: edges.sort((a, b) => compareStrings(a.from, b.from) || compareStrings(a.to, b.to) || EDGE_EVIDENCE_ORDER.indexOf(a.evidence) - EDGE_EVIDENCE_ORDER.indexOf(b.evidence)),
@@ -272,7 +279,7 @@ function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
 function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const result = new Set(callLimitations(counts, view));
   const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
-  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership):/u;
+  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget):/u;
   for (const [index, { graph }] of contexts.entries()) {
     const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
     for (const line of lines) {
@@ -312,18 +319,80 @@ function openProgramReason(project: string, inputs: GraphInputs, parseErrors: nu
  * @returns 공개 패키지·판단 불가·비공개
  */
 function readManifestEntry(project: string): 'public-package' | 'unreadable-manifest' | 'private' {
-  const read = readBoundedFileBytes(join(project, 'package.json'), MAX_PACKAGE_JSON_BYTES, { noFollow: true });
-  // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한·링크·비일반 파일·상한)는 판단할 수 없다.
-  if (!read.ok) return read.reason === 'missing' ? 'private' : 'unreadable-manifest';
+  const manifest = readManifestObject(join(project, 'package.json'));
+  // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한·링크·비일반 파일·상한·JSON 아님)는 판단할 수 없다.
+  if (manifest === 'missing') return 'private';
+  if (manifest === 'unreadable') return 'unreadable-manifest';
+  return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
+}
+
+/**
+ * package.json을 JSON 객체로 읽는다. symlink·FIFO·장치·1 MiB 초과·JSON 객체가 아닌 내용은 판단할 수 없는 것으로 본다.
+ *
+ * @param path manifest 절대 경로
+ * @returns 객체, 없음, 또는 판단 불가
+ */
+function readManifestObject(path: string): object | 'missing' | 'unreadable' {
+  const read = readBoundedFileBytes(path, MAX_PACKAGE_JSON_BYTES, { noFollow: true });
+  if (!read.ok) return read.reason === 'missing' ? 'missing' : 'unreadable';
   try {
     // BOM을 지우지 않고 UTF-8로 읽는다. routes의 manifest 읽기처럼 BOM이 붙은 파일은 JSON으로 보지 않는다.
     const manifest: unknown = JSON.parse(read.bytes.toString('utf8'));
-    if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return 'unreadable-manifest';
-    return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
+    return typeof manifest !== 'object' || manifest === null || Array.isArray(manifest) ? 'unreadable' : manifest;
   } catch {
     // JSON이 아니면 공개 진입점을 알 수 없다 — 열린 쪽으로 본다.
-    return 'unreadable-manifest';
+    return 'unreadable';
   }
+}
+
+/**
+ * 패키지 경계가 아니라 하위 디렉터리의 module 형식만 정하는 manifest(`{"type":"module"}`)인지 본다. 이름·공개 진입점·
+ * `private`가 없으면 게시 단위를 정하지 않으므로, 열림 판정은 상위 manifest가 한다.
+ *
+ * @param manifest JSON 객체
+ * @returns 형식 표식뿐이면 true
+ */
+function isFormatMarkerManifest(manifest: object): boolean {
+  return !('name' in manifest) && !('private' in manifest) && !PUBLIC_ENTRY_FIELDS.some((field) => field in manifest);
+}
+
+/** 루트 아래 workspace 패키지가 연 노드 파일과, 그렇게 판정한 manifest의 프로젝트 기준 경로다. */
+interface NestedOpenPackages {
+  readonly openFiles: ReadonlySet<string>;
+  readonly manifests: readonly string[];
+}
+
+/**
+ * 노드 파일마다 루트 아래에서 가장 가까운 package.json을 보고, 게시할 수 있는 공개 패키지(공개 진입점 필드가 있고
+ * `"private": true`가 아님)이거나 읽을 수 없는 manifest에 속한 파일을 연다. 루트 manifest는 {@link readManifestEntry}가
+ * 프로그램 전체 기준으로 따로 본다. private workspace 패키지는 게시할 수 없어 소비자가 같은 workspace(스캔 안)에 있다.
+ *
+ * @param project 프로젝트 realpath
+ * @param paths 노드 파일의 프로젝트 기준 경로
+ * @returns 열린 파일과 근거 manifest
+ */
+function nestedOpenPackages(project: string, paths: Iterable<string>): NestedOpenPackages {
+  const byDirectory = new Map<string, string | null>();
+  const openManifest = (directory: string): string | null => {
+    if (directory === '.' || directory === '') return null;
+    const cached = byDirectory.get(directory);
+    if (cached !== undefined) return cached;
+    const manifest = readManifestObject(join(project, directory, 'package.json'));
+    const result = manifest === 'missing' || (manifest !== 'unreadable' && isFormatMarkerManifest(manifest)) ? openManifest(posix.dirname(directory))
+      : manifest === 'unreadable' || (PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) && (manifest as { private?: unknown }).private !== true)
+        ? posix.join(directory, 'package.json') : null;
+    byDirectory.set(directory, result);
+    return result;
+  };
+  const openFiles = new Set<string>();
+  const manifests = new Set<string>();
+  for (const path of paths) {
+    const manifest = openManifest(posix.dirname(path));
+    if (manifest === null) continue;
+    openFiles.add(path);
+    manifests.add(manifest);
+  }
+  return { openFiles, manifests: [...manifests].sort(compareStrings) };
 }
 
 /** 노드·간선 분석 결과다. */
@@ -746,7 +815,7 @@ function unresolvedCallLimitations(unresolved: Record<UnresolvedReason, number>)
  * @param view 관점
  * @returns limitation 목록
  */
-function dispatchLimitations({ calls, gaps, openProgram }: CallDiagnosticCounts, view: LimitationView): string[] {
+function dispatchLimitations({ calls, gaps, openProgram, openManifests }: CallDiagnosticCounts, view: LimitationView): string[] {
   if (view === 'direct') return [];
   const result: string[] = [];
   const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
@@ -763,6 +832,12 @@ function dispatchLimitations({ calls, gaps, openProgram }: CallDiagnosticCounts,
     result.push(hasInterfaceGaps
       ? `bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`
       : `bound-dispatch: ${reason}, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound`);
+  }
+  if (openProgram === undefined && openManifests.length > 0 && (hasInterfaceGaps || hasCallableGaps)) {
+    const shown = openManifests.slice(0, 10);
+    const omitted = openManifests.length > shown.length ? `; omitted: ${openManifests.length - shown.length}` : '';
+    result.push(`bound-dispatch: nested package.json file(s) declare public entry points or could not be read as a JSON object within 1 MiB: ${JSON.stringify(shown)}${omitted}; `
+      + 'exported functions and classes in those packages and non-private properties throughout the program are treated as reachable from unseen code and their flows are not bound');
   }
   if (calls.dispatch.overBudget > 0) {
     result.push(`dispatch-budget: ${calls.dispatch.overBudget} deferred interface/callable call(s) exceeded the flow-analysis budget (steps, nesting, or stack); their flows count as unknown and they are not bound`);

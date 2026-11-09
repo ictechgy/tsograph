@@ -56,3 +56,32 @@ export function gitFixture(root?: string): GitFixture {
   };
   return { root: directory, git, commitTree, close: () => rmSync(directory, { recursive: true, force: true }) };
 }
+
+/** change 캡처가 쓰는 `git --no-lazy-fetch`가 처음 들어온 Git 버전이다. */
+const MINIMUM_CAPTURE_GIT: readonly [number, number] = [2, 45];
+
+/**
+ * 실행 환경의 Git이 change 캡처를 지원하지 않으면 skip 이유를, 지원하면 false를 돌려준다.
+ *
+ * CI(`CI` 환경 변수)에서는 skip하지 않는다. CI의 Git이 낡았다면 캡처 테스트가 그 사실을 실패로 드러내야 하기 때문이다.
+ * 로컬의 낡은 Git(예: Ubuntu 24.04 기본 2.43)에서는 환경 탓 실패를 제품 회귀와 구분하도록 이유를 남기고 건너뛴다.
+ *
+ * @returns skip 이유 또는 false
+ */
+function captureGitSkipReason(): string | false {
+  if (process.env['CI'] !== undefined && process.env['CI'] !== '' && process.env['CI'] !== 'false') return false;
+  let version: string;
+  try {
+    version = execFileSync('git', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return 'git is not available; change capture needs Git 2.45+';
+  }
+  const match = /(\d+)\.(\d+)/u.exec(version);
+  if (match === null) return false;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  const supported = major > MINIMUM_CAPTURE_GIT[0] || (major === MINIMUM_CAPTURE_GIT[0] && minor >= MINIMUM_CAPTURE_GIT[1]);
+  return supported ? false : `change capture needs Git ${MINIMUM_CAPTURE_GIT.join('.')}+ (found ${major}.${minor}); set CI=1 to run anyway`;
+}
+
+/** Git 캡처가 필요한 테스트의 `skip` 옵션이다. 한 번만 확인한다. */
+export const captureGitSkip: string | false = captureGitSkipReason();

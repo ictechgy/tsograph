@@ -19,6 +19,7 @@ export interface OrderedFactShape {
   readonly location?: unknown;
   readonly symbol?: unknown;
   readonly catchAllPrefix?: unknown;
+  readonly trailingSlash?: unknown;
 }
 
 /** 검증에 쓰는 문서 모양이다. */
@@ -100,30 +101,35 @@ function effectiveService(fact: OrderedFactShape, document: OrderedDocumentShape
  */
 function catchAllPrefixProblem(document: OrderedDocumentShape): string | undefined {
   const originals = new Set(document.facts.filter((fact) => typeof fact.channel === 'string' && fact.channel.endsWith('{**}'))
-    .map((fact) => prefixKey(fact, originalPrefix(fact.channel as string))));
-  const orphan = document.facts.find((fact) => fact.catchAllPrefix === true && !originals.has(prefixKey(fact, fact.channel as string)));
+    .map((fact) => prefixKey(fact, fact.channel as string)));
+  const orphan = document.facts.find((fact) => fact.catchAllPrefix === true && typeof fact.channel === 'string'
+    && !originalTemplatesOf(fact.channel, fact.trailingSlash).some((original) => originals.has(prefixKey(fact, original))));
   return orphan === undefined ? undefined : 'catch-all-prefix-order-mismatch';
 }
 
 /**
- * `{**}` 원본 템플릿에서 접두사 템플릿을 만든다(루트 catch-all은 `/`).
+ * 접두사 decl이 가리킬 수 있는 `{**}` 원본 템플릿이다(isthmus `catchAllOriginalTemplates`와 같은 규칙). 루트 접두사 `/`는
+ * `/{**}`이다. 끝 슬래시를 엄격히 구분하는(`trailingSlash: "strict"`) 접두사 `/a/`는 기존 빈 세그먼트 표기 `/a//{**}`와
+ * 펼친 끝 슬래시를 원본과 묶은 `/a/{**}`를 모두 원본으로 받는다.
  *
- * @param channel 원본 템플릿
- * @returns 접두사 템플릿
+ * @param prefix 접두사 템플릿
+ * @param trailingSlash 접두사 decl의 끝 슬래시 정책
+ * @returns 원본 템플릿 후보
  */
-function originalPrefix(channel: string): string {
-  const prefix = channel.slice(0, -'/{**}'.length);
-  return prefix === '' ? '/' : prefix;
+function originalTemplatesOf(prefix: string, trailingSlash: unknown): readonly string[] {
+  if (prefix === '/') return ['/{**}'];
+  const original = `${prefix}/{**}`;
+  return trailingSlash === 'strict' && prefix.endsWith('/') ? [original, `${prefix.slice(0, -1)}/{**}`] : [original];
 }
 
 /**
- * 접두사 짝을 찾는 키(method·usr·접두사 템플릿·order)를 만든다.
+ * 접두사 짝을 찾는 키(method·usr·원본 `{**}` 템플릿·order)를 만든다.
  *
  * @param fact 사실
- * @param prefix 접두사 템플릿
+ * @param original 원본 템플릿
  * @returns 키 문자열
  */
-function prefixKey(fact: OrderedFactShape, prefix: string): string {
+function prefixKey(fact: OrderedFactShape, original: string): string {
   const usr = (fact.symbol as { usr?: unknown } | undefined)?.usr;
-  return JSON.stringify([fact.method, usr ?? null, prefix, fact.order ?? null]);
+  return JSON.stringify([fact.method, usr ?? null, original, fact.order ?? null]);
 }

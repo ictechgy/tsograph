@@ -14,11 +14,12 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { DeclarationOutputMapper } from './declaration-outputs.ts';
 import { ConfigRootBoundary, type ConfigRootGaps, type ScanBoundary } from './config-roots.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
@@ -73,7 +74,20 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly conflictingConfigSources?: readonly string[];
   readonly conflictingConfigSourceCount?: number;
   readonly configOwnershipIncomplete?: boolean;
+  /** 소유권 계획이 불완전해서만 import를 보류한 소스 수다(충돌이 아니라 config-ownership으로 알린다). */
+  readonly configOwnershipBlockedSources?: number;
+  /** 내장 TypeScript가 모르는 값이라 버린 알려진 compiler 옵션 이름과, 모르는 옵션 이름 수다(이름은 싣지 않는다). */
+  readonly ignoredCompilerOptions?: readonly string[];
+  readonly unknownCompilerOptions?: number;
+  /** 가장 가까운 설정이 128개 설정 예산 밖이라 import를 보류한 소스 수다. */
+  readonly configBudgetSources?: number;
   readonly skippedLoaderEntries?: number;
+  /**
+   * 프로젝트 안 선언 산출물(스캔이 건너뛴 `dist/*.d.ts` 등)로 해석됐지만 스캔한 소스로 되짚지 못한 import 수와
+   * 그 산출물의 프로젝트 기준 경로(최대 10개)다. 그 import를 거친 호출은 외부로 세어진다.
+   */
+  readonly declarationOutputImports?: number;
+  readonly declarationOutputFiles?: readonly string[];
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
@@ -166,8 +180,23 @@ export function createGraphProgram(
   // 소유권은 import를 미해결로 남긴다. 로더나 설정의 코드를 실행하지 않는다.
   const conflicts = context === undefined ? ownership.blocked : ownership.ambiguous;
   const blocked = conflicts;
+  // 예산 때문에 막은 소스는 소유권 충돌이 아니므로 config-conflict가 아니라 config-budget으로 따로 알린다.
+  // 소유권 계획이 불완전해서만 막은 소스도 충돌이 아니므로 config-ownership으로 따로 센다.
+  const heldByIncomplete = context === undefined ? ownership.incompleteBlocked : ownership.incompleteAmbiguous;
+  const reportedConflicts = [...conflicts].filter((path) => !ownership.budgetBlocked.has(path) && !heldByIncomplete.has(path));
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
+  // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
+  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
+  const unmappedDeclarationOutputs = new Map<string, string>();
+  const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
+    const match = declarationOutputs.match(resolved.resolvedFileName);
+    if (match.kind === 'unmapped') unmappedDeclarationOutputs.set(importKey, resolve(resolved.resolvedFileName));
+    if (match.kind !== 'source') return resolved;
+    return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
+      isExternalLibraryImport: false, resolvedUsingTsExtension: false };
+  };
   const choices = new Map<string, Map<string, ts.ResolvedModuleFull | undefined>>();
   const choiceModes = new Map<string, ts.ResolutionMode>();
   const resolveModule = (name: string, containingFile: string, mode?: ts.ResolutionMode, resolutionHost: ts.ModuleResolutionHost = host): ts.ResolvedModuleFull | undefined => {
@@ -180,8 +209,9 @@ export function createGraphProgram(
       if (text === undefined && resolutionHost.fileExists(file)) refused = true;
       return text;
     } };
-    const resolved = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
+    const found = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
     if (refused) return undefined;
+    const resolved = found === undefined ? undefined : redirectDeclarationOutput(found, `${absolute}\u0000${name}`);
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
     if (context !== undefined && resolved !== undefined && (ownership.ambiguous.has(resolve(resolved.resolvedFileName))
       || (target !== undefined && context.keys.get(target) !== contextKey))) {
@@ -242,11 +272,16 @@ export function createGraphProgram(
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
         ...ownershipStatus(config, ownership), ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
         ...(nonRoots.length > 0 ? { excludedSourceRoots: nonRoots.length, importedOutsideRoots } : {}),
-        ...(conflicts.size > 0 ? { conflictingConfigSourceCount: conflicts.size,
-          conflictingConfigSources: [...conflicts].map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(reportedConflicts.length > 0 ? { conflictingConfigSourceCount: reportedConflicts.length,
+          conflictingConfigSources: reportedConflicts.map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(ownership.budgetBlocked.size > 0 ? { configBudgetSources: ownership.budgetBlocked.size } : {}),
         ...(context === undefined ? {} : { compilerContexts: context.count, contextBoundaryImports: boundaryImports.size,
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
+        ...(heldByIncomplete.size > 0 ? { configOwnershipBlockedSources: heldByIncomplete.size } : {}),
+        ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
+          declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
+            .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
@@ -300,7 +335,8 @@ interface CompilerContext {
 export function* createGraphPrograms(root: string, sourcePaths: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): Generator<GraphProgram> {
   const entries = prepareProgramEntries(root, sourcePaths, explicitConfig, boundary);
-  const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root));
+  const declarationOutputs = new DeclarationOutputMapper(boundary.root, entries.ownership.configs, entries.candidates, boundary.excludedDirectories);
+  const keys = compilerContextKeys(entries, hasPnpScope(root, boundary.root), declarationOutputs);
   const groups = new Map<string, { config: ProjectConfig; sources: Set<string> }>();
   for (const path of entries.candidates) {
     const config = entries.ownership.owners.get(path) ?? entries.config;
@@ -320,19 +356,30 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.
  * 명시 types:[]와 전부 external-module인 유계 입력에서만 별칭이 다른 설정의 공유를 허용한다. */
-function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>, pnpScope = false): ReadonlyMap<ProjectConfig, string> {
+function compilerContextKeys(entries: ReturnType<typeof prepareProgramEntries>, pnpScope = false,
+  declarationOutputs?: DeclarationOutputMapper): ReadonlyMap<ProjectConfig, string> {
   const configs = [...new Set([entries.config, ...entries.ownership.owners.values()])];
   const keys = new Map<ProjectConfig, string>();
   for (const [index, config] of configs.entries()) {
     const sources = [...entries.ownership.owners].filter(([, owner]) => owner === config).map(([path]) => path);
     const isolated = configs.length > 1 && (pnpScope || config.options.types?.length !== 0
-      || sources.some(path => !isModuleOnly(path, config.options, entries.ownership.owners)));
+      || sources.some(path => !isModuleOnly(path, config.options, entries.ownership.owners, declarationOutputs)));
     keys.set(config, semanticOptionsKey(config.options) + (isolated ? `\u0000global-universe:${index}` : ''));
   }
   return keys;
 }
 
-function isModuleOnly(path: string, options: ts.CompilerOptions, owners: ReadonlyMap<string, ProjectConfig>): boolean {
+/**
+ * 소스가 전역 선언 없이 프로젝트 소유 파일만 import하는 module인지 본다. 선언 산출물은 되짚은 소스로 판정한다.
+ *
+ * @param path 소스 절대 경로
+ * @param options 소유 설정 옵션
+ * @param owners 소스별 소유 설정
+ * @param declarationOutputs 선언 산출물 역매핑(없으면 되짚지 않는다)
+ * @returns module 전용이면 true
+ */
+function isModuleOnly(path: string, options: ts.CompilerOptions, owners: ReadonlyMap<string, ProjectConfig>,
+  declarationOutputs?: DeclarationOutputMapper): boolean {
   const read = readBoundedConfigText(path, MAX_SOURCE_BYTES);
   if (!read.ok) return false;
   const source = parseWithinSyntaxDepth(() => ts.createSourceFile(path, read.text, ts.ScriptTarget.Latest, true));
@@ -353,7 +400,9 @@ function isModuleOnly(path: string, options: ts.CompilerOptions, owners: Readonl
   const modes: readonly ts.ResolutionMode[] = [undefined, ts.ModuleKind.ESNext, ts.ModuleKind.CommonJS];
   return ts.preProcessFile(read.text, true, true).importedFiles.every(imported => modes.every(mode => {
     const target = ts.resolveModuleName(imported.fileName, path, analysisOptions(options), host, undefined, undefined, mode).resolvedModule;
-    return target === undefined || owners.has(resolve(target.resolvedFileName));
+    if (target === undefined) return true;
+    const mapped = declarationOutputs?.match(target.resolvedFileName);
+    return owners.has(resolve(mapped?.kind === 'source' ? mapped.fileName : target.resolvedFileName));
   }));
 }
 
@@ -492,8 +541,11 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
     configName === 'jsconfig.json' ? { allowJs: true } : undefined,
     path,
   );
-  // "include 결과 없음"(18003)은 호출자가 소스를 따로 넣으므로 문제가 아니다. 그 밖의 오류는 기본값으로 떨어진다.
-  const parseErrors = parsed.errors.filter(error => error.code !== 18003 && error.code !== 18002 && error.category === ts.DiagnosticCategory.Error);
+  // "include 결과 없음"(18003)은 호출자가 소스를 따로 넣으므로 문제가 아니다. 내장 TypeScript가 모르는 compiler 옵션이나
+  // 값(새 버전의 target·lib)은 TypeScript가 그 옵션만 버리고 나머지를 읽으므로 그대로 쓰고 한계로 알린다. 그 밖의 오류는 기본값으로 떨어진다.
+  const errors = parsed.errors.filter(error => error.code !== 18003 && error.code !== 18002 && error.category === ts.DiagnosticCategory.Error);
+  const ignoredOptions = ignoredCompilerOptions(errors);
+  const parseErrors = errors.filter(error => !ignoredOptions.diagnostics.has(error));
   // persistence는 루트 밖 extends를 읽지 않고 로컬 명시 alias만 보존하던 동작을 유지한다.
   // 부분 설정임을 알리며 frozen capture의 거부 기록은 이 fallback으로 지워지지 않는다.
   const partialConfined = confined && boundedReadFailed && parseErrors.every(error => error.code === 6053 || error.code === 5083);
@@ -503,10 +555,102 @@ function readProjectConfig(root: string, boundary: ScanBoundary, explicitConfig?
     }
     return { ...unreadableConfig(configName), path };
   }
-  return { options: parsed.options, fileNames: roots.admit(parsed.fileNames).map((file) => resolve(file)), path,
+  return { options: approximateUnsupportedValues(parsed.options, ignoredOptions.names), fileNames: roots.admit(parsed.fileNames).map((file) => resolve(file)), path,
     scoped: ['files', 'include', 'exclude'].some((key) => Object.hasOwn(parsed.raw as object, key)),
     references: parsed.projectReferences?.map((reference) => ts.resolveProjectReferencePath(reference)) ?? [],
-    status: { configName, configUnreadable: partialConfined, ...roots.gaps() } };
+    status: { configName, configUnreadable: partialConfined, ...roots.gaps(),
+      ...(ignoredOptions.names.size > 0 ? { ignoredCompilerOptions: [...ignoredOptions.names].sort() } : {}),
+      ...(ignoredOptions.unknown > 0 ? { unknownCompilerOptions: ignoredOptions.unknown } : {}) } };
+}
+
+/** TypeScript가 해당 옵션만 버리고 설정의 나머지를 읽는 진단 코드다(모르는 옵션 5023·5025, 형식이 틀린 값 5024, 목록 밖 값 6046). */
+const UNKNOWN_OPTION_CODES = new Set([5023, 5025]);
+const INVALID_VALUE_CODES = new Set([5024, 6046]);
+
+/**
+ * 옵션 하나에 국한되어 무시해도 되는 진단과, 값을 버린 알려진 옵션 이름·모르는 옵션 수를 고른다. 모르는 옵션 이름은
+ * 사용자가 적은 입력 원문이라 남기지 않는다. `include` 같은 설정 최상위 필드의 형식 오류는 옵션이 아니므로 고르지 않는다.
+ *
+ * @param errors 설정 parse 오류
+ * @returns 무시할 진단, 알려진 옵션 이름, 모르는 옵션 수
+ */
+function ignoredCompilerOptions(errors: readonly ts.Diagnostic[]): { diagnostics: Set<ts.Diagnostic>; names: Set<string>; unknown: number } {
+  const diagnostics = new Set<ts.Diagnostic>();
+  const names = new Set<string>();
+  let unknown = 0;
+  for (const error of errors) {
+    if (UNKNOWN_OPTION_CODES.has(error.code)) {
+      diagnostics.add(error);
+      unknown++;
+      continue;
+    }
+    if (!INVALID_VALUE_CODES.has(error.code)) continue;
+    const text = ts.flattenDiagnosticMessageText(error.messageText, ' ');
+    const name = /^Argument for '--([A-Za-z]+)' option/u.exec(text)?.[1] ?? /^Compiler option '([A-Za-z]+)' requires a value/u.exec(text)?.[1];
+    if (name === undefined || !isCompilerOptionName(name)) continue;
+    diagnostics.add(error);
+    names.add(name);
+  }
+  return { diagnostics, names, unknown };
+}
+
+/** TypeScript가 아는 compiler 옵션 이름인지 본다(공개 API로 변환해 "모르는 옵션" 진단이 없는지 확인한다). */
+function isCompilerOptionName(name: string): boolean {
+  const converted = ts.convertCompilerOptionsFromJson({ [name]: null }, '/');
+  return !converted.errors.some((error) => UNKNOWN_OPTION_CODES.has(error.code));
+}
+
+/**
+ * 값을 버리면 module·타입 해석이 프로젝트의 TypeScript와 달라지는 옵션이다. 하나라도 버리면 해석 결과를 증명으로 쓰지 않도록
+ * 프로그램을 불완전으로 둔다({@link resolutionOptionsIgnored}).
+ */
+const RESOLUTION_OPTIONS: ReadonlySet<string> = new Set([
+  'module', 'moduleResolution', 'moduleSuffixes', 'customConditions', 'resolvePackageJsonExports', 'resolvePackageJsonImports',
+  'baseUrl', 'paths', 'rootDirs', 'allowImportingTsExtensions', 'allowArbitraryExtensions', 'preserveSymlinks', 'types', 'typeRoots',
+]);
+
+/**
+ * 설정 상태가 해석에 영향을 주는 옵션 값을 버렸는지 본다.
+ *
+ * @param status Program 설정 상태
+ * @returns 버렸으면 true
+ */
+export function resolutionOptionsIgnored(status: ProgramConfigStatus): boolean {
+  return (status.ignoredCompilerOptions ?? []).some((name) => RESOLUTION_OPTIONS.has(name));
+}
+
+/** Node16 계열 module 형식인지 본다(Node16·Node18·Node20·NodeNext). */
+function isNodeModuleKind(module: ts.ModuleKind | undefined): boolean {
+  return module !== undefined && module >= ts.ModuleKind.Node16 && module <= ts.ModuleKind.NodeNext;
+}
+
+/**
+ * 내장 TypeScript보다 새 값이라 버려진 옵션을 근사한다.
+ *
+ * - `target`·`lib`는 ESNext로 근사한다. 빠지면 TypeScript가 ES5 기본 lib를 써서 `Promise`·`Map` 같은 내장 타입이 사라진다.
+ * - `module`·`moduleResolution`은 남은 짝이 Node 해석이면 NodeNext, 아니면 설정이 없을 때의 기본({@link defaultOptions}:
+ *   ESNext·Bundler)으로 근사한다. 빠진 채로 두면 classic 해석으로 떨어져 workspace `exports`가 풀리지 않는다. 근사는 증명이
+ *   아니므로 호출자가 프로그램을 불완전으로 둔다.
+ *
+ * 다른 옵션은 버려진 채로 둔다.
+ *
+ * @param options parse한 옵션
+ * @param ignored 값을 버린 옵션 이름
+ * @returns 조정한 옵션
+ */
+function approximateUnsupportedValues(options: ts.CompilerOptions, ignored: ReadonlySet<string>): ts.CompilerOptions {
+  if (!['target', 'lib', 'module', 'moduleResolution'].some((name) => ignored.has(name))) return options;
+  const adjusted: ts.CompilerOptions = { ...options };
+  if (ignored.has('target') && adjusted.target === undefined) adjusted.target = ts.ScriptTarget.ESNext;
+  if (ignored.has('lib') && adjusted.lib !== undefined && !adjusted.lib.includes('lib.esnext.d.ts')) adjusted.lib = [...adjusted.lib, 'lib.esnext.d.ts'];
+  if (ignored.has('moduleResolution') && adjusted.moduleResolution === undefined) {
+    adjusted.moduleResolution = isNodeModuleKind(adjusted.module) ? ts.ModuleResolutionKind.NodeNext : ts.ModuleResolutionKind.Bundler;
+  }
+  if (ignored.has('module') && adjusted.module === undefined) {
+    const nodeResolution = adjusted.moduleResolution === ts.ModuleResolutionKind.Node16 || adjusted.moduleResolution === ts.ModuleResolutionKind.NodeNext;
+    adjusted.module = nodeResolution ? ts.ModuleKind.NodeNext : ts.ModuleKind.ESNext;
+  }
+  return adjusted;
 }
 
 /**
@@ -523,6 +667,12 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   if ((status.pnpIssues?.length ?? 0) > 0) gaps.push(`pnp-dependencies: static dependency inputs were refused (${status.pnpIssues!.join(', ')}); unresolved inputs may hide ${affected}; verify the static metadata, project boundary and ZIP budgets`);
   if ((status.contextBoundaryImports ?? 0) > 0) gaps.push(`config-context-boundary: ${status.contextBoundaryImports} import(s) cross separated type-checking contexts and remain unresolved; ${affected} may be incomplete`);
   if (status.contextBudgetExceeded === true) gaps.push(`config-context-budget: more than 16 type-checking contexts or 200000 source-context entries; imports remain unresolved and ${affected} may be incomplete`);
+  if ((status.declarationOutputImports ?? 0) > 0) {
+    gaps.push(`declaration-outputs: ${status.declarationOutputImports} import(s) resolve to declaration files inside the project that the scan does not `
+      + `analyze as sources (for example build output) and could not be mapped to a scanned source through a declaration map, `
+      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation; calls through them are counted as external and ${affected} `
+      + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
+  }
   if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loaders are never executed`);
   if ((status.excludedSourceRoots ?? 0) > 0) {
     gaps.push(`source-scope: ${status.excludedSourceRoots} scanned candidate(s) were not entry files selected by files/include/exclude or TypeScript sibling precedence; `
@@ -533,7 +683,31 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
       + `their imports were left unresolved instead of applying another project's aliases; ${affected} may be incomplete; `
       + `files: ${JSON.stringify(status.conflictingConfigSources ?? [])}; omitted: ${status.conflictingConfigSourceCount! - (status.conflictingConfigSources?.length ?? 0)}`);
   }
-  if (status.configOwnershipIncomplete === true) gaps.push(`config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; ${affected} may be incomplete`);
+  const ignoredOptions = status.ignoredCompilerOptions ?? [];
+  const unknownOptions = status.unknownCompilerOptions ?? 0;
+  if (ignoredOptions.length > 0 || unknownOptions > 0) {
+    const parts = [...(ignoredOptions.length > 0 ? [ignoredOptions.join(', ')] : []), ...(unknownOptions > 0 ? [`${unknownOptions} unknown option(s)`] : [])];
+    const handling = [
+      ...(ignoredOptions.some((name) => name === 'target' || name === 'lib') ? ['unsupported target/lib values use ESNext'] : []),
+      ...(ignoredOptions.some((name) => name === 'module' || name === 'moduleResolution')
+        ? ['unsupported module/moduleResolution values were approximated (NodeNext when the remaining option is a Node mode, otherwise ESNext with bundler resolution)'] : []),
+      'the remaining options in the config were kept',
+    ];
+    gaps.push(`compiler-options: compiler config values that the bundled TypeScript ${ts.version} does not recognize were ignored (${parts.join('; ')}); `
+      + `${handling.join('; ')}; `
+      + (resolutionOptionsIgnored(status) ? `module resolution may differ, so the scan is treated as incomplete and ${affected} may be incomplete`
+        : `type resolution and ${affected} may differ from the project's TypeScript`));
+  }
+  if ((status.configBudgetSources ?? 0) > 0) {
+    gaps.push(`config-budget: ${status.configBudgetSources} source(s) are owned by compiler configs beyond the ${MAX_OWNER_CONFIGS}-config budget; `
+      + `their imports were left unresolved instead of applying another project's options; ${affected} may be incomplete `
+      + '(analyze a smaller --project, or a package with --workspace)');
+  }
+  if (status.configOwnershipIncomplete === true) {
+    const held = status.configOwnershipBlockedSources ?? 0;
+    gaps.push(`config-ownership: referenced or nearest configs could not all be read within the scan boundary, 128-config budget and shared directory-entry budget; ${affected} may be incomplete`
+      + (held > 0 ? `; ${held} source(s) were left unresolved` : ''));
+  }
   const outside = status.outsideConfigRoots ?? 0;
   if (outside > 0) {
     gaps.push(`${outside} include pattern(s) or files entr(ies) of ${status.configName} point outside the scanned root and were not used as root files; `
@@ -563,6 +737,17 @@ function unreadableConfig(configName: string): ProjectConfig {
 }
 
 /**
+ * 산출물 위치·형식만 정하고 심볼 해석에는 영향을 주지 않는 옵션이다. 분석은 emit하지 않으므로 지운다.
+ * 남겨 두면 `rootDir`만 다른 workspace 패키지와 앱이 서로 다른 checker 문맥으로 갈려, 선언 산출물을 소스로
+ * 되짚어도 문맥 경계에서 import가 미해결로 남는다.
+ */
+const EMIT_ONLY_OPTIONS = [
+  'incremental', 'composite', 'tsBuildInfoFile', 'declaration', 'declarationMap', 'emitDeclarationOnly', 'plugins', 'outDir', 'outFile',
+  'rootDir', 'declarationDir', 'sourceMap', 'inlineSourceMap', 'inlineSources', 'sourceRoot', 'mapRoot', 'removeComments', 'newLine',
+  'emitBOM', 'noEmitOnError', 'stripInternal',
+] as const;
+
+/**
  * 분석용으로 옵션을 조정한다: emit·증분 빌드·플러그인을 끄고 JS를 허용한다.
  *
  * @param options 설정의 옵션
@@ -570,9 +755,7 @@ function unreadableConfig(configName: string): ProjectConfig {
  */
 function analysisOptions(options: ts.CompilerOptions): ts.CompilerOptions {
   const adjusted: ts.CompilerOptions = { ...options, noEmit: true, allowJs: true, checkJs: false, skipLibCheck: true };
-  for (const key of ['incremental', 'composite', 'tsBuildInfoFile', 'declaration', 'declarationMap', 'emitDeclarationOnly', 'plugins', 'outDir', 'outFile'] as const) {
-    delete adjusted[key];
-  }
+  for (const key of EMIT_ONLY_OPTIONS) delete adjusted[key];
   return adjusted;
 }
 
@@ -609,6 +792,15 @@ export function configImportIsBlocked(program: ts.Program, fileName: string): bo
 interface ConfigOwnership {
   readonly configs: readonly ProjectConfig[];
   readonly blocked: ReadonlySet<string>;
+  /** 가장 가까운 설정이 128개 예산 밖이라 소유 설정을 읽지 못해 막은 소스다(blocked·ambiguous에도 들어 있다). */
+  readonly budgetBlocked: ReadonlySet<string>;
+  /**
+   * 소유권 계획이 불완전해서만 막은 소스다(예: reference가 128개 예산을 넘음). 실제 소유권 충돌이 아니므로 config-conflict가 아니라
+   * config-ownership으로 센다(blocked·ambiguous에도 들어 있다).
+   */
+  readonly incompleteBlocked: ReadonlySet<string>;
+  /** {@link incompleteBlocked}의 ambiguous 판(문맥별 Program은 ambiguous를 충돌로 센다). */
+  readonly incompleteAmbiguous: ReadonlySet<string>;
   readonly referenceRoots: readonly string[];
   readonly incomplete: boolean;
   readonly owners: ReadonlyMap<string, ProjectConfig>;
@@ -623,6 +815,12 @@ function configOwnership(
   if (selected.path !== undefined) cache.set(resolve(selected.path), selected);
   const blocked = new Set<string>();
   const ambiguous = new Set<string>();
+  // 예산 때문에 읽지 못한 설정 경로다. 가장 가까운 설정이 여기 있는 소스만 막고, 예산 안 설정이 소유한 소스는 계속 분석한다.
+  const budgetRefused = new Set<string>();
+  const budgetBlocked = new Set<string>();
+  /** 실제 소유권 사유로 막은 소스다: blocked는 옵션이 다른 소유 설정, ambiguous는 모호한 reference 소유자. */
+  const blockConflicts = new Set<string>();
+  const ambiguityConflicts = new Set<string>();
   const ownersBySource = new Map<string, ProjectConfig>();
   let incomplete = selected.status.configRootsTruncated === true;
   const inside = (path: string) => {
@@ -632,7 +830,8 @@ function configOwnership(
   const read = (path: string): ProjectConfig | undefined => {
     const absolute = resolve(path);
     if (cache.has(absolute)) return cache.get(absolute);
-    if (!inside(absolute) || cache.size >= 128) { incomplete = true; return undefined; }
+    if (!inside(absolute)) { incomplete = true; return undefined; }
+    if (cache.size >= MAX_OWNER_CONFIGS) { budgetRefused.add(absolute); return undefined; }
     let config: ProjectConfig;
     try { config = readProjectConfig(dirname(absolute), boundary, absolute, confinedConfigs); }
     catch { config = unreadableConfig(basename(absolute)); incomplete = true; }
@@ -650,6 +849,8 @@ function configOwnership(
     visited.add(path);
     if (visited.size > 128) { incomplete = true; break; }
     const config = read(path);
+    // reference가 소유할 소스는 읽기 전에는 모른다. 예산 밖 reference도 예전처럼 전체를 불완전으로 본다.
+    if (config === undefined && budgetRefused.has(path)) incomplete = true;
     if (config === undefined || config.status.configUnreadable) { sources.forEach((source) => blocked.add(source)); continue; }
     for (const source of config.fileNames) {
       referenceRoots.add(source);
@@ -665,34 +866,66 @@ function configOwnership(
     if (!inside(directory)) return undefined;
     if (explicit && resolve(directory) === resolve(root)) { byDirectory.set(directory, selected); return selected; }
     const name = configNames.find((candidate) => existsSync(join(directory, candidate)));
-    const owner = name === undefined ? nearest(dirname(directory)) : read(join(directory, name));
+    const path = name === undefined ? undefined : join(directory, name);
+    const found = path === undefined ? nearest(dirname(directory)) : read(path);
+    // 예산 밖이라 읽지 못한 가장 가까운 설정은 상위 설정으로 대신하지 않는다(다른 프로젝트의 옵션·별칭을 적용하게 된다).
+    const owner = path !== undefined && found === undefined && budgetRefused.has(resolve(path)) ? budgetOwner : found;
     byDirectory.set(directory, owner);
     return owner;
   };
   const selectedKey = resolutionOptionsKey(selected.options);
   for (const source of new Set([...sources, ...selected.fileNames, ...referenceRoots])) {
     const owners = [...(referenced.get(source) ?? [])];
-    const owner = nearest(dirname(source));
+    const nearestOwner = nearest(dirname(source));
+    if (nearestOwner === budgetOwner) {
+      budgetBlocked.add(source);
+      blocked.add(source);
+      ambiguous.add(source);
+      ownersBySource.set(source, selected);
+      continue;
+    }
+    const owner = nearestOwner;
     if (owner !== undefined) owners.push(owner);
-    if (owners.some((config) => config !== selected && (config.status.configUnreadable || resolutionOptionsKey(config.options) !== selectedKey))) blocked.add(source);
+    if (owners.some((config) => config !== selected && (config.status.configUnreadable || resolutionOptionsKey(config.options) !== selectedKey))) {
+      blocked.add(source);
+      blockConflicts.add(source);
+    }
     const referenceOwners = referenced.get(source) ?? [];
     const explicitOwners = referenceOwners.length === 0 ? (owner === undefined ? [] : [owner])
       : [...referenceOwners, ...(owner !== undefined && owner.fileNames.includes(source) ? [owner] : [])];
     const unique = new Map(explicitOwners.map(config => [resolutionOptionsKey(config.options), config]));
-    if (unique.size > 1 || explicitOwners.some(config => config !== selected && config.status.configUnreadable)) ambiguous.add(source);
+    if (unique.size > 1 || explicitOwners.some(config => config !== selected && config.status.configUnreadable)) {
+      ambiguous.add(source);
+      ambiguityConflicts.add(source);
+    }
     ownersBySource.set(source, unique.size === 1 ? [...unique.values()][0]! : selected);
   }
+  const heldOnlyByIncomplete = (conflicts: ReadonlySet<string>) =>
+    new Set(incomplete ? sources.filter((source) => !conflicts.has(source) && !budgetBlocked.has(source)) : []);
+  const incompleteBlocked = heldOnlyByIncomplete(blockConflicts);
+  const incompleteAmbiguous = heldOnlyByIncomplete(ambiguityConflicts);
   if (incomplete) sources.forEach((source) => { blocked.add(source); ambiguous.add(source); });
-  return { configs: [...new Set([selected, ...cache.values()])], blocked, referenceRoots: [...referenceRoots], incomplete, owners: ownersBySource, ambiguous };
+  return { configs: [...new Set([selected, ...cache.values()])], blocked, budgetBlocked, incompleteBlocked, incompleteAmbiguous, referenceRoots: [...referenceRoots], incomplete,
+    owners: ownersBySource, ambiguous };
 }
+
+/** 한 계획이 읽는 compiler 설정 수의 상한이다. 큰 모노레포에서 설정 읽기 비용을 묶는다. */
+const MAX_OWNER_CONFIGS = 128;
+
+/** 가장 가까운 설정이 예산 밖이라 읽지 못했음을 나타내는 표식이다. 실제 설정으로 쓰지 않는다. */
+const budgetOwner: ProjectConfig = { options: {}, fileNames: [], status: { configName: undefined, configUnreadable: false } };
 
 /** 같은 의미 그룹의 대표 설정만 보고 다른 소유 설정의 준비 공백을 버리지 않는다. */
 function ownershipStatus(selected: ProjectConfig, ownership: ConfigOwnership): ProgramConfigStatus {
   const statuses = ownership.configs.map(config => config.status);
   const outsideConfigRoots = statuses.reduce((sum, status) => sum + (status.outsideConfigRoots ?? 0), 0);
   const excludedConfigRoots = statuses.reduce((sum, status) => sum + (status.excludedConfigRoots ?? 0), 0);
+  const ignoredOptions = [...new Set(statuses.flatMap(status => status.ignoredCompilerOptions ?? []))].sort();
+  const unknownOptions = statuses.reduce((sum, status) => sum + (status.unknownCompilerOptions ?? 0), 0);
   return { ...selected.status,
     configUnreadable: statuses.some(status => status.configUnreadable),
+    ...(ignoredOptions.length > 0 ? { ignoredCompilerOptions: ignoredOptions } : {}),
+    ...(unknownOptions > 0 ? { unknownCompilerOptions: unknownOptions } : {}),
     ...(outsideConfigRoots > 0 ? { outsideConfigRoots } : {}),
     ...(excludedConfigRoots > 0 ? { excludedConfigRoots } : {}),
     ...(statuses.some(status => status.configRootsTruncated) ? { configRootsTruncated: true } : {}),

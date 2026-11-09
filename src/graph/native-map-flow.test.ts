@@ -557,3 +557,63 @@ test('the 16 and 17 hop alias boundary keeps proven non-owners open and unproven
     assertClosedProof(await graphOf({ 'src/main.ts': mainWith([], ...chainOf('Reflect', hops), `link${hops}.set${setPatch}`) }), `${hops} hop Reflect`);
   }
 });
+
+test('with statements, vm evaluation, data/http module imports and string timers close the native Map proof', async () => {
+  // 모두 문자열로 받은 코드를 실행하거나 스코프 체인으로 쓰기 대상을 숨겨 Map.prototype.get을 바꿀 수 있다.
+  const patch = 'Map.prototype.get = function () { return () => new Second(); };';
+  const declarations = 'declare function require(name: string): any;';
+  const cases: readonly [string, Record<string, string>][] = [
+    ['with statement in a CommonJS JavaScript file', {
+      'tsconfig.json': '{ "compilerOptions": { "strict": true, "allowJs": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+      'src/patch.js': 'with (Map.prototype) { get = function () { return function () { return {}; }; }; }\nmodule.exports = {};\n',
+      'src/main.ts': mainWith([]),
+    }],
+    ['with statement in a script JavaScript file', {
+      'tsconfig.json': '{ "compilerOptions": { "strict": true, "allowJs": true, "types": [], "lib": ["es2022"], "module": "esnext", "moduleResolution": "bundler", "target": "es2022" } }',
+      'src/patch.js': 'var prototype = Map.prototype;\nwith (prototype) { get = function () { return function () { return {}; }; }; }\n',
+      'src/main.ts': mainWith([]),
+    }],
+    ['node:vm runInThisContext', { 'src/main.ts': mainWith(['import { runInThisContext } from "node:vm";'], `runInThisContext(${JSON.stringify(patch)});`) }],
+    ['vm Script instance', { 'src/main.ts': mainWith(['import * as vm from "vm";'], `new vm.Script(${JSON.stringify(patch)}).runInThisContext();`) }],
+    ['require("vm")', { 'src/main.ts': mainWith([], declarations, `require("vm").runInThisContext(${JSON.stringify(patch)});`) }],
+    ['static data: URL import', { 'src/main.ts': mainWith([`import ${JSON.stringify(`data:text/javascript,${patch}`)};`]) }],
+    ['dynamic https: URL import', { 'src/main.ts': mainWith([], 'void import("https://example.invalid/patch.js");') }],
+    ['string setTimeout', { 'src/main.ts': mainWith([], 'declare function setTimeout(handler: string | (() => void), ms?: number): number;', `setTimeout(${JSON.stringify(patch)}, 0);`) }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
+});
+
+test('function timers and unrelated imports keep the native Map proof', async () => {
+  const graph = await graphOf({
+    'src/main.ts': mainWith(['import { join } from "node:path";'],
+      'declare function setTimeout(handler: string | (() => void), ms?: number): number;',
+      'setTimeout(() => undefined, 0);', 'export const joined = join;'),
+  });
+  assert.deepEqual(boundTo(graph, 'read'), ['src/main.ts#First.run']);
+});
+
+test('string timers reached through any-typed handlers, aliases and string-keyed access close the native Map proof', async () => {
+  const patch = 'Map.prototype.get = function () { return () => new Second(); };';
+  const timer = 'declare function setTimeout(handler: string | (() => void), ms?: number): number;';
+  const cases: readonly [string, Record<string, string>][] = [
+    ['any-typed handler', { 'src/main.ts': mainWith([], timer, `const code: any = ${JSON.stringify(patch)};`, 'setTimeout(code, 0);') }],
+    ['unknown-typed handler', { 'src/main.ts': mainWith([], timer, `const code: unknown = ${JSON.stringify(patch)};`, '// @ts-expect-error unknown handler', 'setTimeout(code, 0);') }],
+    ['aliased timer', { 'src/main.ts': mainWith([], timer, 'const later = setTimeout;', `later(${JSON.stringify(patch)}, 0);`) }],
+    ['timer passed as a value', { 'src/main.ts': mainWith([], timer, 'function run(t: (h: string) => void) { t(' + JSON.stringify(patch) + '); }', 'run(setTimeout);') }],
+    ['string-keyed timer', { 'src/main.ts': mainWith([], 'declare const g: { setTimeout(handler: string, ms?: number): number };',
+      `g["setTimeout"](${JSON.stringify(patch)});`) }],
+  ];
+  assert.deepEqual(await stillOpenLabels(cases), []);
+});
+
+test('a project method named setTimeout and a type-only vm import keep the native Map proof', async () => {
+  const cache = await graphOf({
+    'src/main.ts': mainWith([], 'class Cache { setTimeout(key: string, ms: number) { return key.length + ms; } }',
+      'const cache = new Cache();', 'cache.setTimeout("k", 10);'),
+  });
+  assert.deepEqual(boundTo(cache, 'read'), ['src/main.ts#First.run']);
+  const typeOnly = await graphOf({
+    'src/main.ts': mainWith(['import { type Context } from "node:vm";'], 'export type Sandbox = Context;'),
+  });
+  assert.deepEqual(boundTo(typeOnly, 'read'), ['src/main.ts#First.run']);
+});
