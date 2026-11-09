@@ -107,7 +107,9 @@ graph·Next/Node/client routes·navigation·schema의 `files`·`include`·`exclu
 Program을 나누지 않는다. workspace 패키지의 `exports`·`types`가 프로젝트 안 빌드 산출물(`packages/lib/dist/index.d.ts`)을
 가리키면 declaration map, 그 산출물을 낸 설정의 `declarationDir`/`outDir`과 `rootDir`(composite면 설정 디렉터리, 아니면
 공통 소스 디렉터리), 손으로 쓴 선언 옆 같은 이름의 JavaScript 구현 중 하나가 스캔한 소스 하나를 가리킬 때 그 소스로
-되짚는다. 그렇지 않으면 호출은 외부로 남고 `graph-config: declaration-outputs:`가 import 수를 센다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
+되짚는다. 그렇지 않으면 호출은 외부로 남고 `graph-config: declaration-outputs:`가 import 수를 센다.
+`outDir`/`rootDir` 대응은 선언 파일을 그 설정이 냈다고 가정한다. export 이름은 대조하지 않으므로, 번들러가 그 설정의 `outDir`에
+배치가 다른 `.d.ts`를 덮어쓰고 같은 상대 경로에 다른 소스가 있으면 한계 없이 잘못된 `direct` 간선이 나온다. 준비 예산과 남은 한계는 [설정 범위](docs/CONFIG-SCOPE.md)에 있다.
 소유 문맥은 순차 처리하며 총 그룹 수 때문에 모든 의미 호출을 포기하지 않는다. 큰 계획에서는 새 AST를
 `ParseForTypeErrors`로 만들어 JS JSDoc 타입과 TS 타입 오류에 필요한 문서를 유지하고 TS 문서 전용 태그 AST만 생략한다.
 일반 Program API의 기본 문서 동작은 유지한다. 파일별 flow 색인을 whole/production view에 스트리밍하여 임시 맵의

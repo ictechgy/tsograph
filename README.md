@@ -124,6 +124,9 @@ separate Programs. A workspace package whose `exports`/`types` points at build o
 config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
 directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
 source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
+The `outDir`/`rootDir` mapping assumes the declaration file was emitted by that config: exported names are not
+compared, so a bundler that overwrites the config's `outDir` with differently laid-out `.d.ts` files while a
+different source sits at the same relative path yields a wrong `direct` edge without a limitation.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
 use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript
