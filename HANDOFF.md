@@ -3,13 +3,14 @@
 세션을 이어받을 때 먼저 읽는 진행 상태 문서다. 작업 규칙의 정본은 [AGENTS.md](AGENTS.md)이고, 여기 적힌 상태는
 실제 Git 상태·코드·검증 결과와 대조한 뒤 쓴다. 공통 규칙은 이 파일에 복제하지 않는다.
 
-## 현재 상태 (2026-11-09)
+## 현재 상태 (2026-11-10)
 
 - 발행본은 **0.11.0**이다. npm 게시(2026-11-03, `npm view tsograph version`으로 확인), 태그 `v0.11.0`, `package.json` 버전이 일치한다.
 - isthmus `compatibility.json`의 tsograph 핀은 이 날짜에 로컬 isthmus 체크아웃 기준으로 **0.10.0**이다. isthmus가 게시본을
   검증한 뒤 바꾸는 절차이므로 tsograph 저장소에서 고치지 않는다.
-- 열린 작업은 PR #57(브랜치 `ccr-37904670-hxdjsx`)이다. 2026-11-03 계열 9개 도구 검토의 tsograph 항목과 그 PR의 독립 리뷰
-  지적을 반영했다. 변경은 모두 CHANGELOG `[Unreleased]`에 있고 발행 전이다.
+- PR #57은 2026-11-09에 `main`으로 스쿼시 머지됐다(`9795858`). 2026-11-03 계열 9개 도구 검토의 tsograph 항목과 그 PR의
+  독립 리뷰 지적을 반영한 것이다. 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
+- `main` `9795858`의 CI 체크 6개가 모두 성공했다(2026-11-10 확인).
 
 ## PR #57에서 처리한 것
 
@@ -37,12 +38,12 @@
 | 테스트 시간 상한 완화 | CONTRIBUTING의 성능 게이트 유지 원칙. `scripts/run-tests.mjs`의 12분 상한은 CI job 15분 안에 build·CLI 검증 시간을 남기려는 값이다. |
 | 100줄 넘는 함수 리팩터 | 동작 이득 없이 수백 줄을 옮긴다. 별도 PR로 다룬다. |
 | npm provenance·발행 workflow | 레지스트리 권한과 trusted publisher 설정(비밀)이 필요하다. |
-| 선언 역매핑의 export 이름 대조 | 지금은 선언 emit 여부로만 거른다. 이름 대조는 산출물과 소스의 export 집합을 비교하는 별도 설계가 필요하다. |
+| 선언 역매핑의 export 이름 대조 | 지금은 선언 emit 여부로만 거른다. 이름 대조는 산출물과 소스의 export 집합을 비교하는 별도 설계가 필요하다. README에 이미 한계로 적혀 있다. 후속 후보다. |
 | firebase식 중첩 manifest 좁히기 | 과보수인지 확신할 근거가 없어 열린 쪽(보수)으로 두었다. |
 | 문맥이 다른 패키지 사이 산출물 import | 여전히 `config-context-boundary:`로 미해결이다. 문맥을 넘는 간선은 별도 설계다. |
 | routes·schema·navigation의 산출물 되짚기 | graph 문맥 Program에만 적용했다. |
 
-## 머지 뒤 다음 할 일
+## 다음 할 일 (PR #57 머지 이후)
 
 1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사)이 있으므로 마이너로 올린다.
    이전 릴리스 커밋(`chore(release): prepare tsograph 0.11.0`)처럼 `package.json`·`package-lock.json`·CHANGELOG를 함께 바꾼다.
@@ -53,7 +54,7 @@
 
 - **리뷰 방식**: AGENTS가 요구하는 GLM 리뷰(`packet-ask`)는 PR #57 작업 환경에 도구가 없어 실행하지 못했다. 대신 독립
   Claude 리뷰를 받았고, 지적을 코드·fixture로 확인하고 회귀 테스트(구현을 되돌리면 실패하는지 확인)를 붙여 반영했다.
-  다음 PR에서 GLM을 쓸 수 있으면 원래 절차로 돌아간다.
+  PR #57은 GLM 리뷰 없이 머지됐다. 다음 PR에서 GLM을 쓸 수 있으면 원래 절차로 돌아간다.
 - **로컬 Git 버전**: `change-impact`는 Git 2.45 이상이 필요하다. 낮은 Git(예: 2.43)에서는 change 캡처 테스트가 이유와 함께
   skip되므로 그 경로는 CI 결과로만 확인된다. CI에서는 skip하지 않고 실패한다.
 - **테스트 12분 상한**: `npm test`(`scripts/run-tests.mjs`)는 전체 suite를 12분에 끊고 "exceeded the 12-minute execution limit"로
