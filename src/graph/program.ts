@@ -195,12 +195,13 @@ export function createGraphProgram(
   // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다. 판정은 계획(설정·스캔 파일)에만 달려 있어 문맥들이 같은 mapper를 쓴다.
   const declarationOutputs = context?.declarationOutputs
     ?? new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
-  const unmappedDeclarationOutputs = new Map<string, string>();
-  const exportMismatchedDeclarationOutputs = new Set<string>();
+  // import 키(파일·지정자)별 마지막 미해결 판정이다. 같은 키를 모드마다 다시 해석해도 import 수와 export 불일치 내역이 같은 판정을 센다.
+  const unmappedDeclarationOutputs = new Map<string, { readonly path: string; readonly exportMismatch: boolean }>();
   const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
     const match = declarationOutputs.match(resolved.resolvedFileName);
-    if (match.kind === 'unmapped') unmappedDeclarationOutputs.set(importKey, resolve(resolved.resolvedFileName));
-    if (match.kind === 'unmapped' && match.exportMismatch === true) exportMismatchedDeclarationOutputs.add(importKey);
+    if (match.kind === 'unmapped') {
+      unmappedDeclarationOutputs.set(importKey, { path: resolve(resolved.resolvedFileName), exportMismatch: match.exportMismatch === true });
+    }
     if (match.kind !== 'source') return resolved;
     return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
       isExternalLibraryImport: false, resolvedUsingTsExtension: false };
@@ -275,6 +276,8 @@ export function createGraphProgram(
     const sources = new Set(sourcePaths.map((path) => resolve(path)));
     const deeplyNestedSources = new Set([...deeplyNested].filter((path) => sources.has(path)));
     const otherDeeplyNested = deeplyNested.size - deeplyNestedSources.size;
+    const unmappedOutputs = [...unmappedDeclarationOutputs.values()];
+    const exportMismatches = unmappedOutputs.filter((output) => output.exportMismatch).length;
     return {
       program, checker, deeplyNestedSources, excludedSources,
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
@@ -287,10 +290,10 @@ export function createGraphProgram(
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
         ...(heldByIncomplete.size > 0 ? { configOwnershipBlockedSources: heldByIncomplete.size } : {}),
-        ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
-          declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
+        ...(unmappedOutputs.length > 0 ? { declarationOutputImports: unmappedOutputs.length,
+          declarationOutputFiles: [...new Set(unmappedOutputs.map((output) => output.path))]
             .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
-        ...(exportMismatchedDeclarationOutputs.size > 0 ? { declarationOutputExportMismatches: exportMismatchedDeclarationOutputs.size } : {}),
+        ...(exportMismatches > 0 ? { declarationOutputExportMismatches: exportMismatches } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),

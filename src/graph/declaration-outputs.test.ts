@@ -676,3 +676,33 @@ test('mapper: 선언의 export * 대상이 의존성 패키지면 4 MiB 넘는 �
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('같은 import를 모드마다 다르게 해석하면 import 수와 export 불일치 내역이 마지막 판정 하나를 센다', async () => {
+  // main.mts의 값 import는 import 조건(dist/esm, 이름 불일치)으로, 같은 지정자의 require 모드 타입 import는 require 조건
+  // (dist/cjs, 근거 없음)으로 해석된다. import 키(파일·지정자)는 하나이므로 마지막 판정(dist/cjs)만 세고, 그 판정에 없는
+  // 불일치 내역을 붙이지 않는다.
+  const nodeNext = '"strict": true, "types": [], "lib": ["es2022"], "module": "nodenext", "moduleResolution": "nodenext", "target": "es2022"';
+  const root = createWorkspace({
+    'tsconfig.json': '{ "files": [], "references": [{ "path": "packages/lib" }, { "path": "apps/web" }] }',
+    'packages/lib/package.json': '{ "name": "@acme/lib", "private": true, "exports": { ".": { "import": { "types": "./dist/esm/index.d.ts" }, '
+      + '"require": { "types": "./dist/cjs/index.d.ts" } } } }',
+    'packages/lib/tsconfig.json': `{ "compilerOptions": { ${nodeNext}, "composite": true, "declaration": true, "outDir": "dist/esm", "rootDir": "src" }, "include": ["src"] }`,
+    'packages/lib/src/index.ts': 'export function helper() { return 1; }\nexport interface Options { readonly verbose: boolean }\n',
+    'packages/lib/dist/esm/index.d.ts': 'export declare function helper(): number;\nexport declare function extra(): void;\nexport interface Options { readonly verbose: boolean }\n',
+    'packages/lib/dist/cjs/index.d.ts': 'export declare function helper(): number;\nexport interface Options { readonly verbose: boolean }\n',
+    'apps/web/tsconfig.json': `{ "compilerOptions": { ${nodeNext} }, "include": ["src"], "references": [{ "path": "../../packages/lib" }] }`,
+    // 기본 fixture의 main.ts import는 이 사례와 무관하므로 지운다.
+    'apps/web/src/main.ts': 'export const unrelated = 1;\n',
+    'apps/web/src/main.mts': 'import { helper } from "@acme/lib";\nimport type { Options } from "@acme/lib" with { "resolution-mode": "require" };\n'
+      + 'export function main(options?: Options) { return helper(); }\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /declaration-outputs: 1 import\(s\)/u);
+    assert.match(line, /files: \["packages\/lib\/dist\/cjs\/index\.d\.ts"\]/u);
+    assert.doesNotMatch(line, /of them reach a source through declarationDir\/outDir/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
