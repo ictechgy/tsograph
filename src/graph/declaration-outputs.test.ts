@@ -491,3 +491,45 @@ test('mapper: declaration map과 같은 이름 JavaScript 형제는 export 이�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** 자기 이름으로 자신을 import하는 단일 패키지의 호출자 id다. */
+const selfCallerId = 'src/app.ts#main';
+
+/**
+ * 선언을 내는 설정(`declaration: true`, `outDir`, `rootDir: src`)의 단일 패키지가 `exports.types`로 자기 산출물을 가리키고
+ * `src/app.ts`가 패키지 이름으로 자신을 import하는 프로젝트를 만든다. `outDir`이 `lib`면 걷기가 빼지 않아 산출물 `.js`도 스캔한다.
+ *
+ * @param outDir 산출물 디렉터리 이름
+ * @param files 시나리오별 파일(상대 경로 → 내용)
+ * @param extraOptions 설정에 더할 compiler 옵션 JSON 조각
+ * @returns 프로젝트 realpath
+ */
+function createSelfReferencingPackage(outDir: string, files: Readonly<Record<string, string>>, extraOptions = ''): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-self-')));
+  writeProjectFile(root, 'package.json',
+    `{ "name": "pkg", "private": true, "exports": { ".": { "types": "./${outDir}/index.d.ts", "default": "./${outDir}/index.js" } } }`);
+  writeProjectFile(root, 'tsconfig.json', `{ "compilerOptions": { ${compilerOptions}, "declaration": true, "outDir": "${outDir}", "rootDir": "src"${extraOptions} }, "include": ["src"] }`);
+  writeProjectFile(root, 'src/app.ts', 'import { helper } from "pkg";\nexport function main() { return helper(); }\n');
+  for (const [path, text] of Object.entries(files)) writeProjectFile(root, path, text);
+  return root;
+}
+
+test('outDir lib의 선언 이름이 맞지 않으면 같은 이름 빌드 출력 lib/index.js로 넘어가지 않고 불일치로 센다', async () => {
+  // 번들러가 lib/index.d.ts와 lib/index.js를 다른 진입점에서 다시 만들었다. lib는 걷기가 빼지 않아 lib/index.js도 스캔한 소스다.
+  const root = createSelfReferencingPackage('lib', {
+    'src/index.ts': 'export function helper() { return 1; }\n',
+    'lib/index.d.ts': 'export declare function helper(): number;\nexport declare function format(value: number): string;\n',
+    'lib/index.js': 'export function helper() { return 1; }\nexport function format(value) { return String(value); }\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+    assert.deepEqual(calls.map((edge) => edge.to), [], JSON.stringify(calls));
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /^graph-config: declaration-outputs: 1 import\(s\)/u);
+    assert.match(line, exportMismatchClause(1));
+    assert.match(line, /files: \["lib\/index\.d\.ts"\]/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

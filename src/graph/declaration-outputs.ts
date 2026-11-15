@@ -12,7 +12,8 @@
  *
  * 1과 3은 export 이름을 대조하지 않는다. declaration map은 emit한 도구가 그 선언의 소스를 직접 적은 기록이고, 같은 이름 형제는
  * TypeScript 자신이 `x.d.ts`를 `x.js`의 타입으로 짝짓는 규칙이다. 손으로 쓴 선언과 CommonJS 구현은 구문 이름 표로 다 읽지 못해
- * 대조하면 맞는 간선까지 잃는다. 배치만 보고 출처를 가정하는 2만 번들러 덮어쓰기에 틀린다.
+ * 대조하면 맞는 간선까지 잃는다. 배치만 보고 출처를 가정하는 2만 번들러 덮어쓰기에 틀린다. 2가 소스를 하나 찾았는데 이름이 맞지
+ * 않으면 3으로 넘어가지 않는다. 산출물 루트 안의 같은 이름 `.js`는 빌드 출력이기 때문이다.
  *
  * 되짚은 소스가 이 스캔의 소스일 때만 잇는다. 근거가 없거나 스캔 밖 소스를 가리키면 잇지 않고 호출자가 limitation으로 센다.
  * 걷기가 일부러 뺀 생성 출력(Prisma client 등)과 점 디렉터리(`.nuxt` 같은 프레임워크 생성 타입)의 선언은 빌드 산출물이 아니라
@@ -111,12 +112,13 @@ export class DeclarationOutputMapper {
     if (absolute === undefined || this.#isGeneratedDeclaration(absolute)) return { kind: 'not-output' };
     const fromMap = this.#fromDeclarationMap(absolute);
     if (fromMap !== undefined) return fromMap;
+    // export 이름이 맞지 않은 산출물 경로 대응은 같은 이름 JavaScript 형제로 넘어가지 않는다. 선언을 내는 설정의 산출물 루트
+    // (`lib`·`esm`처럼 걷기가 빼지 않는 이름일 수 있다) 안에서 선언 옆 `.js`는 그 설정이나 덮어쓴 번들러의 빌드 출력이라, 그리로 이으면
+    // 간선이 한계 없이 컴파일 결과로 옮겨 간다. 스캔한 선언이어도 조용히 프로젝트 선언으로 돌리지 않고 불일치로 알린다.
     const fromOutput = this.#fromOutputRoots(absolute);
-    if (fromOutput?.kind === 'source') return fromOutput;
+    if (fromOutput !== undefined) return fromOutput;
     const sibling = this.#sourceFor(absolute.slice(0, -suffixOf(absolute).length), suffixOf(absolute), true);
     if (sibling !== undefined) return { kind: 'source', fileName: sibling };
-    // export 이름이 맞지 않은 산출물 경로 대응은 스캔한 선언이어도 조용히 프로젝트 선언으로 돌리지 않고 알린다.
-    if (fromOutput !== undefined) return fromOutput;
     // 프로젝트가 직접 쓰고 스캔한 선언(`src/types.d.ts`)은 그 자체가 프로젝트의 선언이다. 산출물로 세지 않는다.
     return this.#scannedDeclarations.has(absolute) ? { kind: 'not-output' } : { kind: 'unmapped' };
   }
