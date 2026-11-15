@@ -23,6 +23,17 @@ module import뿐 아니라 triple-slash로 다른 문맥 소스를 읽는 경로
 문맥을 나눈 client 분석은 다른 문맥에서의 receiver 변경을 배제하지 않아 알려진 client 요청을 보수적으로 dynamic으로 둔다.
 Node server 문맥 사이의 전역 등록 순서는 증명하지 않는다.
 
+workspace 패키지의 `exports`·`types`가 가리키는 프로젝트 안 선언 산출물은 declaration map, 산출물을 낸(선언을 내는) 설정의
+`declarationDir`/`outDir`↔`rootDir`, 손으로 쓴 선언 옆 같은 이름의 JavaScript 구현 중 하나가 스캔한 소스 하나를 가리킬 때만 그 소스로
+되짚는다. `outDir`/`rootDir` 대응은 배치만 보는 추론이므로 선언의 export 이름(값·타입·`default`·`export =`·`export *`가 끌어오는 이름)이
+모두 그 소스에도 있을 때만 잇는다. 역매핑은 module 해석 중이라 checker가 없으므로, 이름 표는 TypeScript 파서로 최상위 export 문장을
+읽어 만들고 `export *`는 그 설정의 module 해석(파일의 module 형식에 맞는 모드, 4 MiB bounded reader)으로 표 하나당 최대 1,024개 파일까지
+따라간다. JavaScript 소스는 CommonJS 내보내기(`exports.x`·`module.exports`·`Object.defineProperty(exports, …)`)와 최상위 JSDoc
+`@typedef`·`@callback`도 이름으로 본다. 읽기·구문 깊이 실패, 해석하지 못한 상대 `export *`, 파일 예산 초과는 맞다는 증명이 아니므로
+잇지 않는다. 해석하지 못한 bare `export *`는 소스에도 같은 지정자가 있을 때만 상쇄한다. 잇지 않은 import는
+`graph-config: declaration-outputs:`에 export 불일치 수와 함께 세고 스캔을 불완전으로 본다. 같은 이름을 내보내는 다른 구현은 이름으로
+구별하지 못한다. declaration map과 같은 이름 형제 근거는 이름을 대조하지 않으며 오래된 `.d.ts.map`은 그대로 믿는다.
+
 `files`/`include`/`exclude`는 진입 파일 선택이다. 제외된 파일도 정적 import/require 의존성이면 분석에 들어올 수
 있다. schema는 기존 전체 파일 스캔 대신 이 entry/closure를 사용하므로 제외된 독립 파일의 사실 수가 줄 수 있다.
 필요한 독립 파일을 포함하려면 소유 설정의 include/files를 명시한다. 제외 수를 완전성의 증거로 사용하지 않는다.
@@ -52,4 +63,5 @@ bound/candidate dispatch는 이 부분 경로에서 인증하지 않으며 모�
 
 회귀는 두 앱 baseUrl, cross-package 반환 타입의 내부 alias, strict/target/JSX/lib/types 분리, 같은 디렉터리의
 서로 다른 reference, 중복/누락/순환 reference, include/dependency closure, typed dynamic sink, server 문맥,
-실제 Git before/after, frozen 외부 extends, 예산 초과를 합성 fixture로 검증한다. 사내 앱을 재실행한 결과는 아니다.
+실제 Git before/after, frozen 외부 extends, 예산 초과, 선언 산출물의 export 이름 불일치(번들러 덮어쓰기)·부분집합·재내보내기를
+합성 fixture로 검증한다. 사내 앱을 재실행한 결과는 아니다.

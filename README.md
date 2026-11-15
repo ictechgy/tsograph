@@ -124,9 +124,15 @@ separate Programs. A workspace package whose `exports`/`types` points at build o
 config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
 directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
 source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
-The `outDir`/`rootDir` mapping assumes the declaration file was emitted by that config: exported names are not
-compared, so a bundler that overwrites the config's `outDir` with differently laid-out `.d.ts` files while a
-different source sits at the same relative path yields a wrong `direct` edge without a limitation.
+The `outDir`/`rootDir` mapping is inferred from layout alone, so it links only when every name the declaration
+exports (values and types, `default`, `export =`, and names pulled in through `export *`) is also exported by that
+source. When a name is missing or the names cannot be read, the import is not linked and is counted under
+`graph-config: declaration-outputs:` (`N of them reach a source through declarationDir/outDir and rootDir that does not
+export every name …`), so a bundler that overwrites the config's `outDir` with differently laid-out `.d.ts` files is
+reported instead of producing a wrong `direct` edge. Names cannot tell same-named implementations apart: a different
+source that exports every declared name is still linked. Declaration maps (the emitter's record of the source) and
+same-name JavaScript siblings (TypeScript's own `x.d.ts`/`x.js` pairing) are not name-checked, so a stale `.d.ts.map`
+left beside an overwritten declaration is still trusted.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
 use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript

@@ -88,6 +88,11 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
    */
   readonly declarationOutputImports?: number;
   readonly declarationOutputFiles?: readonly string[];
+  /**
+   * {@link declarationOutputImports} 중 `declarationDir`/`outDir` ↔ `rootDir` 경로의 소스가 선언의 export 이름을 모두 내보내지 않거나
+   * 이름을 확정하지 못해 잇지 않은 import 수다(번들러가 산출물 디렉터리를 다른 배치로 덮어쓴 경우 등).
+   */
+  readonly declarationOutputExportMismatches?: number;
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
@@ -190,9 +195,11 @@ export function createGraphProgram(
   // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
   const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
   const unmappedDeclarationOutputs = new Map<string, string>();
+  const exportMismatchedDeclarationOutputs = new Set<string>();
   const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
     const match = declarationOutputs.match(resolved.resolvedFileName);
     if (match.kind === 'unmapped') unmappedDeclarationOutputs.set(importKey, resolve(resolved.resolvedFileName));
+    if (match.kind === 'unmapped' && match.exportMismatch === true) exportMismatchedDeclarationOutputs.add(importKey);
     if (match.kind !== 'source') return resolved;
     return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
       isExternalLibraryImport: false, resolvedUsingTsExtension: false };
@@ -282,6 +289,7 @@ export function createGraphProgram(
         ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
           declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
             .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(exportMismatchedDeclarationOutputs.size > 0 ? { declarationOutputExportMismatches: exportMismatchedDeclarationOutputs.size } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
@@ -670,7 +678,11 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   if ((status.declarationOutputImports ?? 0) > 0) {
     gaps.push(`declaration-outputs: ${status.declarationOutputImports} import(s) resolve to declaration files inside the project that the scan does not `
       + `analyze as sources (for example build output) and could not be mapped to a scanned source through a declaration map, `
-      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation; calls through them are counted as external and ${affected} `
+      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation`
+      + ((status.declarationOutputExportMismatches ?? 0) > 0 ? `; ${status.declarationOutputExportMismatches} of them reach a source through `
+        + `declarationDir/outDir and rootDir that does not export every name the declaration exports (or whose names could not be compared), `
+        + `so the declaration is not assumed to be emitted from it` : '')
+      + `; calls through them are counted as external and ${affected} `
       + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
   }
   if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loaders are never executed`);

@@ -190,6 +190,8 @@ test('mapper: rootDir 없는 설정은 공통 소스 디렉터리로, .d.mts는 
     const scanned = writeFiles(root, {
       'pkg/src/nested/a.mts': '', 'pkg/src/b.ts': '', 'pkg/src/twin.ts': '', 'pkg/src/twin.tsx': '', 'pkg/src/only.js': '',
     });
+    // mapper는 TypeScript가 실제로 해석한(존재하는) 선언만 받는다. export 이름 대조가 읽을 수 있게 산출물도 둔다.
+    writeFiles(root, { 'pkg/build/nested/a.d.mts': '', 'pkg/build/b.d.ts': '', 'pkg/build/twin.d.ts': '', 'pkg/build/only.d.ts': '' });
     const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/build') },
       fileNames: [join(root, 'pkg/src/nested/a.mts'), join(root, 'pkg/src/b.ts'), join(root, 'pkg/src/types.d.ts')] };
     const mapper = new DeclarationOutputMapper(root, [config], scanned);
@@ -319,6 +321,7 @@ test('mapper: 선언을 내지 않는 설정은 산출물 루트가 아니고, �
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-mapper-')));
   try {
     const scanned = writeFiles(root, { 'pkg/src/b.ts': '' });
+    writeFiles(root, { 'pkg/build/b.d.ts': '' });
     const options = { outDir: join(root, 'pkg/build'), rootDir: join(root, 'pkg/src') };
     const emitting = (extra: object) => new DeclarationOutputMapper(root, [{ options: { ...options, ...extra }, fileNames: scanned }], scanned);
     assert.deepEqual(emitting({}).match(join(root, 'pkg/build/b.d.ts')), { kind: 'unmapped' });
@@ -330,6 +333,160 @@ test('mapper: 선언을 내지 않는 설정은 산출물 루트가 아니고, �
     assert.deepEqual(excluded.match(join(root, '.nuxt/imports.d.ts')), { kind: 'not-output' });
     assert.deepEqual(excluded.match(join(root, 'apps/.svelte-kit/types/a.d.ts')), { kind: 'not-output' });
     assert.deepEqual(excluded.match(join(root, 'src/generatedX/index.d.ts')), { kind: 'unmapped' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 선언과 같은 상대 경로의 소스 export 이름이 다를 때 limitation 문장에 붙는 내역이다. */
+function exportMismatchClause(count: number): RegExp {
+  return new RegExp(`; ${count} of them reach a source through declarationDir/outDir and rootDir that does not export every name`, 'u');
+}
+
+/** 선언을 내는 설정(`declaration: true`, `outDir: dist`, `rootDir: src`)을 쓰는 project reference workspace의 설정 파일이다. */
+const emittingReferences = {
+  'tsconfig.json': '{ "files": [], "references": [{ "path": "packages/lib" }, { "path": "apps/web" }] }',
+  'packages/lib/tsconfig.json': `{ "compilerOptions": { ${compilerOptions}, "composite": true, "declaration": true, "outDir": "dist", "rootDir": "src" }, "include": ["src"] }`,
+  'apps/web/tsconfig.json': `{ "compilerOptions": { ${compilerOptions} }, "include": ["src"], "references": [{ "path": "../../packages/lib" }] }`,
+};
+
+test('번들러가 outDir을 다른 진입점의 선언으로 덮어쓰면 같은 상대 경로 소스로 잇지 않고 limitation으로 센다', async () => {
+  // dist/index.d.ts는 번들러가 src/lib/index.ts 진입점에서 만든 것이다. 같은 상대 경로의 src/index.ts는 CLI 진입점이라
+  // 같은 이름 helper를 내보내도 다른 함수이고, 선언의 format은 내보내지 않는다. 이름이 맞지 않으므로 잇지 않는다.
+  const root = createWorkspace({
+    ...emittingReferences,
+    'packages/lib/src/index.ts': '// CLI entry, not the library entry\nexport function helper() { return 2; }\nexport function runCli() { return helper(); }\n',
+    'packages/lib/src/lib/index.ts': 'export function helper() { return 1; }\nexport function format(value: number) { return String(value); }\n',
+    'packages/lib/dist/index.d.ts': 'export declare function helper(): number;\nexport declare function format(value: number): string;\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph), undefined, JSON.stringify(graph.edges.filter((edge) => edge.from === callerId)));
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /^graph-config: declaration-outputs: 1 import\(s\) resolve to declaration files inside the project/u);
+    assert.match(line, exportMismatchClause(1));
+    assert.match(line, /files: \["packages\/lib\/dist\/index\.d\.ts"\]/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('선언 export 이름이 소스 export 이름의 부분집합이면(stripInternal 등) outDir/rootDir로 잇는다', async () => {
+  const root = createWorkspace({
+    ...emittingReferences,
+    'packages/lib/src/index.ts': 'export function helper() { return 1; }\n/** @internal */\nexport function internalHelper() { return 2; }\nexport interface Options { readonly verbose: boolean }\n',
+    'packages/lib/dist/index.d.ts': 'export declare function helper(): number;\nexport interface Options {\n    readonly verbose: boolean;\n}\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph)?.evidence, 'direct');
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 재내보내기로 이름을 모으는 라이브러리 진입점이다. 소스와 선언 산출물이 같은 모양이다. */
+const reexportingLibrary = {
+  'packages/lib/src/index.ts': 'export * from "./helpers";\nexport { format as formatValue } from "./format";\nexport type { Options } from "./types";\n',
+  'packages/lib/src/helpers.ts': 'export function helper() { return 1; }\n',
+  'packages/lib/src/format.ts': 'export function format(value: number) { return String(value); }\n',
+  'packages/lib/src/types.ts': 'export interface Options { readonly verbose: boolean }\n',
+  'packages/lib/dist/index.d.ts': 'export * from "./helpers";\nexport { format as formatValue } from "./format";\nexport type { Options } from "./types";\n',
+  'packages/lib/dist/helpers.d.ts': 'export declare function helper(): number;\n',
+  'packages/lib/dist/format.d.ts': 'export declare function format(value: number): string;\n',
+  'packages/lib/dist/types.d.ts': 'export interface Options {\n    readonly verbose: boolean;\n}\n',
+};
+
+test('재내보내기(export *, export { as }, export type)로 모은 이름이 맞으면 잇는다', async () => {
+  const root = createWorkspace({ ...emittingReferences, ...reexportingLibrary });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const edge = graph.edges.find((candidate) => candidate.from === callerId && candidate.to === 'packages/lib/src/helpers.ts#helper');
+    assert.equal(edge?.evidence, 'direct', JSON.stringify(graph.edges.filter((candidate) => candidate.from === callerId)));
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('선언의 export *가 소스에 없는 이름을 끌어오면 잇지 않고 limitation으로 센다', async () => {
+  // 번들러가 다른 배치로 덮어쓴 dist/helpers.d.ts에는 소스 src/helpers.ts에 없는 legacyHelper가 있다.
+  const root = createWorkspace({
+    ...emittingReferences, ...reexportingLibrary,
+    'packages/lib/dist/helpers.d.ts': 'export declare function helper(): number;\nexport declare function legacyHelper(): number;\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(graph.edges.find((candidate) => candidate.from === callerId && candidate.to.startsWith('packages/lib/')), undefined);
+    // 앱의 import(dist/index.d.ts)와, 잇지 않은 그 선언이 다시 읽는 dist/helpers.d.ts의 export *가 모두 불일치로 센다.
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /declaration-outputs: 2 import\(s\)/u);
+    assert.match(line, exportMismatchClause(2));
+    assert.match(line, /files: \["packages\/lib\/dist\/helpers\.d\.ts","packages\/lib\/dist\/index\.d\.ts"\]/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 내보내지 않으면 export 불일치로 unmapped다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-exports-')));
+  try {
+    const scanned = writeFiles(root, {
+      'pkg/src/match.ts': 'export function a() {}\nexport const b = 1, { c } = { c: 2 };\nexport default class {}\n',
+      'pkg/src/mismatch.ts': 'export function a() {}\n',
+      'pkg/src/equals.ts': 'function main() {}\nexport = main;\n',
+      'pkg/src/local.ts': 'function a() {}\nexport { a as renamed };\nexport import Alias = Space.Inner;\nnamespace Space { export const Inner = 1; }\n',
+      'pkg/src/cjs.js': '/** @typedef {{ x: number }} Point */\nexports.foo = function () { return 1; };\nmodule.exports.bar = 2;\n'
+        + 'Object.defineProperty(exports, "baz", { value: 3 });\n/** @callback Visit @param {number} n */\n',
+      'pkg/src/object.js': 'function a() {}\nmodule.exports = { a, b: 1, c() {} };\n',
+      'pkg/src/bare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
+      'pkg/src/missing.ts': 'export * from "./absent";\nexport function own() {}\n',
+      'pkg/src/otherbare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
+    });
+    writeFiles(root, {
+      'pkg/out/match.d.ts': 'export declare function a(): void;\nexport declare const b = 1, c: number;\ndeclare const _default: {};\nexport default _default;\n',
+      'pkg/out/mismatch.d.ts': 'export declare function a(): void;\nexport declare function extra(): void;\n',
+      'pkg/out/equals.d.ts': 'declare function main(): void;\nexport = main;\n',
+      'pkg/out/local.d.ts': 'declare function a(): void;\nexport { a as renamed };\nexport import Alias = Space.Inner;\ndeclare namespace Space { const Inner = 1; }\n',
+      'pkg/out/cjs.d.ts': 'export function foo(): number;\nexport const bar: 2;\nexport const baz: 3;\nexport type Point = { x: number };\nexport type Visit = (n: number) => any;\n',
+      'pkg/out/object.d.ts': 'export function a(): void;\nexport declare let b: number;\nexport function c(): void;\n',
+      // 해석하지 못한 bare export *는 소스에도 같은 지정자가 있을 때만 같은 이름을 낸다고 본다.
+      'pkg/out/bare.d.ts': 'export * from "@not-installed/shared";\nexport declare function own(): void;\n',
+      // 해석하지 못한 상대 export *는 이름을 확정하지 못하므로 잇지 않는다.
+      'pkg/out/missing.d.ts': 'export * from "./absent";\nexport declare function own(): void;\n',
+      // 소스에 없는 bare export *는 선언이 소스에 없는 이름을 낼 수 있으므로 잇지 않는다.
+      'pkg/out/otherbare.d.ts': 'export * from "@not-installed/other";\nexport declare function own(): void;\n',
+    });
+    const config = { path: join(root, 'pkg/tsconfig.json'),
+      options: { declaration: true, allowJs: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') }, fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    for (const name of ['match', 'equals', 'local', 'bare']) {
+      assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.ts`) }, name);
+    }
+    for (const name of ['cjs', 'object']) {
+      assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.js`) }, name);
+    }
+    for (const name of ['mismatch', 'missing', 'otherbare']) {
+      assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'unmapped', exportMismatch: true }, name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: declaration map과 같은 이름 JavaScript 형제는 export 이름을 대조하지 않는다(기존 근거 유지)', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-exports-')));
+  try {
+    const scanned = writeFiles(root, { 'pkg/src/a.ts': 'export function a() {}\n', 'lib/legacy.js': 'module.exports = function legacy() {};\n' });
+    writeFiles(root, {
+      'pkg/out/a.d.ts': 'export declare function different(): void;\n', 'pkg/out/a.d.ts.map': '{"sources":["../src/a.ts"]}',
+      'lib/legacy.d.ts': 'export declare function legacy(): void;\n',
+    });
+    const config = { options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') }, fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/a.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/a.ts') });
+    assert.deepEqual(mapper.match(join(root, 'lib/legacy.d.ts')), { kind: 'source', fileName: join(root, 'lib/legacy.js') });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
