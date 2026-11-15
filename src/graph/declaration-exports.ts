@@ -90,6 +90,15 @@ export interface ExportTable {
   readonly includesJavaScript: boolean;
 }
 
+/**
+ * 한 설정의 `export *` 해석 옵션과 TypeScript 해석 캐시다. 캐시는 (디렉터리, 지정자, 모드)별 해석 결과와 package.json 조회
+ * (파일 module 형식 판정)를 함께 담아, 같은 barrel을 `export *`하는 선언이 많아도 해석을 반복하지 않는다.
+ */
+interface ResolutionContext {
+  readonly options: ts.CompilerOptions;
+  readonly cache: ts.ModuleResolutionCache;
+}
+
 /** 폐쇄를 걸으며 채우는 이름 표다({@link ExportTable}의 쓰기 가능한 모양). */
 interface TableDraft {
   readonly names: Set<string>;
@@ -135,10 +144,14 @@ function sourceFrameKey(key: string, declarationDirectory: string, sourceDirecto
   return PATH_STAR_KEY + resolve(sourceDirectory, relative(declarationDirectory, key.slice(PATH_STAR_KEY.length)));
 }
 
-/** 파일별 export 이름 표를 읽는다. 같은 설정·같은 파일은 한 번만 파싱하고 해석한다. */
+/**
+ * 파일별 export 이름 표를 읽는다. 같은 설정·같은 파일은 한 번만 파싱하고 해석하며, 해석과 package.json 조회는 설정마다
+ * TypeScript 해석 캐시를 공유한다.
+ */
 export class ExportTableReader {
   readonly #root: string;
   readonly #host: ts.ModuleResolutionHost = { ...ts.sys, readFile: readBoundedSource };
+  readonly #resolutions = new WeakMap<ts.CompilerOptions, ResolutionContext>();
   readonly #local = new WeakMap<ts.CompilerOptions, Map<string, LocalExports | undefined>>();
   readonly #tables = new WeakMap<ts.CompilerOptions, Map<string, ExportTable>>();
 
@@ -222,7 +235,7 @@ export class ExportTableReader {
     if (kind === ts.ScriptKind.JS || kind === ts.ScriptKind.JSX) return { kind: 'javascript' };
     const read = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
     if (!read.ok) return undefined;
-    const impliedNodeFormat = ts.getImpliedNodeFormatForFile(fileName, undefined, this.#host, options);
+    const impliedNodeFormat = ts.getImpliedNodeFormatForFile(fileName, this.#resolution(options).cache.getPackageJsonInfoCache(), this.#host, options);
     const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(fileName, read.text,
       { languageVersion: ts.ScriptTarget.Latest, impliedNodeFormat }, true, kind));
     if (sourceFile === TOO_DEEP) return undefined;
@@ -248,12 +261,33 @@ export class ExportTableReader {
    */
   #resolveStar(specifier: string, containingFile: string, options: ts.CompilerOptions, mode: ts.ResolutionMode): StarExport {
     const key = isRelativeSpecifier(specifier) ? PATH_STAR_KEY + resolve(dirname(containingFile), specifier) : PACKAGE_STAR_KEY + specifier;
-    const resolved = ts.resolveModuleName(specifier, containingFile, { ...options, allowJs: true }, this.#host, undefined, undefined, mode)
-      .resolvedModule;
+    const resolution = this.#resolution(options);
+    const resolved = ts.resolveModuleName(specifier, containingFile, resolution.options, this.#host, resolution.cache, undefined, mode).resolvedModule;
     if (resolved === undefined) return { key };
     const target = resolve(resolved.resolvedFileName);
     return resolved.isExternalLibraryImport === true || !isWithin(this.#root, target) ? { key, external: target } : { key, local: target };
   }
+
+  /**
+   * 설정의 해석 옵션과 캐시를 돌려준다. JavaScript 대상도 해석해야 소스 쪽 JavaScript 재내보내기를 표시할 수 있으므로 `allowJs`를
+   * 켠다. 캐시는 그 옵션 객체 하나와만 쓴다(TypeScript 캐시는 옵션이 바뀌면 결과를 공유할 수 없다).
+   *
+   * @param options 산출물을 낸 설정의 compiler 옵션
+   * @returns 해석 옵션과 캐시
+   */
+  #resolution(options: ts.CompilerOptions): ResolutionContext {
+    const cached = this.#resolutions.get(options);
+    if (cached !== undefined) return cached;
+    const resolutionOptions = { ...options, allowJs: true };
+    const context = { options: resolutionOptions, cache: ts.createModuleResolutionCache(this.#root, canonicalFileName, resolutionOptions) };
+    this.#resolutions.set(options, context);
+    return context;
+  }
+}
+
+/** TypeScript 해석 캐시의 경로 키다. 대소문자를 구분하지 않는 파일 시스템에서는 소문자로 맞춘다. */
+function canonicalFileName(fileName: string): string {
+  return ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase();
 }
 
 /**

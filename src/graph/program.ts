@@ -192,8 +192,9 @@ export function createGraphProgram(
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
-  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
-  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
+  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다. 판정은 계획(설정·스캔 파일)에만 달려 있어 문맥들이 같은 mapper를 쓴다.
+  const declarationOutputs = context?.declarationOutputs
+    ?? new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
   const unmappedDeclarationOutputs = new Map<string, string>();
   const exportMismatchedDeclarationOutputs = new Set<string>();
   const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
@@ -337,6 +338,11 @@ interface CompilerContext {
   readonly ownedSources: ReadonlySet<string>;
   readonly count: number;
   readonly compactDocumentation: boolean;
+  /**
+   * 문맥 분리 판정과 모든 문맥이 함께 쓰는 선언 산출물 역매핑이다. 판정은 계획의 설정·스캔 파일에만 달려 있으므로 문맥마다
+   * 다시 만들면 같은 export 이름 폐쇄를 문맥 수만큼 다시 파싱·해석할 뿐이다.
+   */
+  readonly declarationOutputs: DeclarationOutputMapper;
 }
 
 /** 같은 타입 의미는 한 checker를 쓰고, 다른 의미는 순차 Program으로 분리해 Node/Symbol을 교환하지 않는다. */
@@ -359,7 +365,7 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
   // 오류를 보존하는 JSDoc 모드로 문서 전용 AST의 보유 비용을 줄인다.
   const compactDocumentation = groups.size > 16 || (groups.size > 1 && groups.size * entries.candidates.length > 200_000);
   for (const group of groups.values()) yield createGraphProgram(root, sourcePaths, ts.createProgram, explicitConfig, boundary,
-    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, compactDocumentation });
+    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, compactDocumentation, declarationOutputs });
 }
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.
