@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
+import ts from 'typescript';
+
 import { createNodeFileSystem } from '../cli/file-system.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { DeclarationOutputMapper } from './declaration-outputs.ts';
@@ -440,6 +442,7 @@ test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 
       'pkg/src/bare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
       'pkg/src/missing.ts': 'export * from "./absent";\nexport function own() {}\n',
       'pkg/src/otherbare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
+      'pkg/src/stray.ts': 'export function own() {}\n',
     });
     writeFiles(root, {
       'pkg/out/match.d.ts': 'export declare function a(): void;\nexport declare const b = 1, c: number;\ndeclare const _default: {};\nexport default _default;\n',
@@ -448,18 +451,20 @@ test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 
       'pkg/out/local.d.ts': 'declare function a(): void;\nexport { a as renamed };\nexport import Alias = Space.Inner;\ndeclare namespace Space { const Inner = 1; }\n',
       // 해석하지 못한 bare export *는 소스에도 같은 지정자가 있을 때만 같은 이름을 낸다고 본다.
       'pkg/out/bare.d.ts': 'export * from "@not-installed/shared";\nexport declare function own(): void;\n',
-      // 해석하지 못한 상대 export *는 이름을 확정하지 못하므로 잇지 않는다.
+      // 해석하지 못한 상대 export *는 tsc가 지정자를 쓴 그대로 옮기므로 소스의 같은 위치에 같은 지정자가 있으면 상쇄한다.
       'pkg/out/missing.d.ts': 'export * from "./absent";\nexport declare function own(): void;\n',
+      // 소스에 없는 상대 export *는 이 소스에서 나온 선언이 아니라는 증거다.
+      'pkg/out/stray.d.ts': 'export * from "./absent";\nexport declare function own(): void;\n',
       // 소스에 없는 bare export *는 선언이 소스에 없는 이름을 낼 수 있으므로 잇지 않는다.
       'pkg/out/otherbare.d.ts': 'export * from "@not-installed/other";\nexport declare function own(): void;\n',
     });
     const config = { path: join(root, 'pkg/tsconfig.json'),
       options: { declaration: true, allowJs: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') }, fileNames: scanned };
     const mapper = new DeclarationOutputMapper(root, [config], scanned);
-    for (const name of ['match', 'equals', 'local', 'bare']) {
+    for (const name of ['match', 'equals', 'local', 'bare', 'missing']) {
       assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.ts`) }, name);
     }
-    for (const name of ['mismatch', 'missing', 'otherbare']) {
+    for (const name of ['mismatch', 'stray', 'otherbare']) {
       assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'unmapped', exportMismatch: true }, name);
     }
   } finally {
@@ -595,6 +600,78 @@ test('TypeScript 소스가 export *로 CommonJS 모듈을 다시 내보내도 �
     const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
     assert.deepEqual(calls.map((edge) => `${edge.to}:${edge.evidence}`), ['src/index.ts#own:direct'], JSON.stringify(calls));
     assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tsc가 outDir로 복사하지 않은 손으로 쓴 src/types.d.ts를 export *해도 소스로 잇는다', async () => {
+  // 실제 tsc emit: lib/index.d.ts는 `export * from "./types"`를 그대로 두지만 lib/types.d.ts는 만들지 않는다. 같은 위치의 같은
+  // 지정자라 상쇄하고, 이름이 맞으니 lib/index.js(빌드 출력)가 아니라 src/index.ts로 잇는다.
+  const root = createSelfReferencingPackage('lib', {
+    'src/index.ts': 'export * from "./types";\nexport function helper() { return 1; }\n',
+    'src/types.d.ts': 'export interface Options { readonly verbose: boolean }\n',
+    'lib/index.d.ts': 'export * from "./types";\nexport declare function helper(): number;\n',
+    'lib/index.js': 'export * from "./types";\nexport function helper() { return 1; }\n',
+    'lib/app.d.ts': 'export declare function main(): number;\n',
+    'lib/app.js': 'import { helper } from "pkg";\nexport function main() { return helper(); }\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+    assert.deepEqual(calls.map((edge) => `${edge.to}:${edge.evidence}`), ['src/index.ts#helper:direct'], JSON.stringify(calls));
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('export * from 의존성 패키지는 그 패키지 폐쇄가 깨져 있어도 같은 대상이면 소스로 잇는다', async () => {
+  // dep의 선언 폐쇄에는 해석하지 못하는 상대 재내보내기가 있다. 소스와 선언이 같은 파일로 해석하므로 따라가지 않고 상쇄한다.
+  // (의존성 이름이 패키지 자기 이름 pkg와 같으면 자기 참조로 해석되므로 다른 이름을 쓴다.)
+  const root = createSelfReferencingPackage('dist', {
+    'node_modules/dep/package.json': '{ "name": "dep", "types": "./index.d.ts" }',
+    'node_modules/dep/index.d.ts': 'export * from "./missing";\nexport declare const fromPackage: 1;\n',
+    'src/index.ts': 'export * from "dep";\nexport function helper() { return 1; }\n',
+    'dist/index.d.ts': 'export * from "dep";\nexport declare function helper(): number;\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+    assert.deepEqual(calls.map((edge) => `${edge.to}:${edge.evidence}`), ['src/index.ts#helper:direct'], JSON.stringify(calls));
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: 선언의 export * 대상이 의존성 패키지면 4 MiB 넘는 파일·예산을 넘는 폐쇄를 읽지 않고 해석한 대상으로 비교한다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-external-star-')));
+  try {
+    // big은 1,100개 모듈 barrel이라 따라가면 표 하나의 예산(1,024개 파일)을 넘고, 4 MiB를 넘는 생성 선언도 있다.
+    const barrel = Array.from({ length: 1100 }, (_, index) => `export * from "./m${index}";`).join('\n');
+    writeFiles(root, Object.fromEntries(Array.from({ length: 1100 },
+      (_, index) => [`node_modules/big/m${index}.d.ts`, `export declare const m${index}: ${index};\n`])));
+    writeFiles(root, {
+      'node_modules/big/package.json': '{ "name": "big", "types": "./index.d.ts" }',
+      'node_modules/big/index.d.ts': `export * from "./huge";\n${barrel}\n`,
+      'node_modules/big/huge.d.ts': `export declare const huge: 1;\n${'/'.repeat(4 * 1024 * 1024 + 1)}\n`,
+      'node_modules/other/package.json': '{ "name": "other", "types": "./index.d.ts" }',
+      'node_modules/other/index.d.ts': 'export declare const other: 1;\n',
+      'pkg/out/same.d.ts': 'export * from "big";\nexport declare function own(): void;\n',
+      'pkg/out/alias.d.ts': 'export * from "big/index.js";\nexport declare function own(): void;\n',
+      'pkg/out/different.d.ts': 'export * from "other";\nexport declare function own(): void;\n',
+    });
+    const scanned = writeFiles(root, Object.fromEntries(['same', 'alias', 'different']
+      .map((name) => [`pkg/src/${name}.ts`, 'export * from "big";\nexport function own() {}\n'])));
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src'),
+      module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler }, fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    // 지정자가 달라도(big/index.js) 같은 외부 파일로 해석하면 같은 재내보내기다.
+    for (const name of ['same', 'alias']) {
+      assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.ts`) }, name);
+    }
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/different.d.ts')), { kind: 'unmapped', exportMismatch: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

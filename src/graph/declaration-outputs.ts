@@ -73,7 +73,7 @@ export class DeclarationOutputMapper {
   readonly #outputRoots: readonly OutputRoot[];
   readonly #excludedDirectories: readonly string[];
   readonly #cache = new Map<string, DeclarationOutputMatch>();
-  readonly #exports = new ExportTableReader();
+  readonly #exports: ExportTableReader;
 
   /**
    * @param root 프로젝트 경계 realpath
@@ -84,6 +84,7 @@ export class DeclarationOutputMapper {
   constructor(root: string, configs: readonly DeclarationOutputConfig[], scannedFiles: Iterable<string>,
     excludedDirectories: Iterable<string> = []) {
     this.#root = resolve(root);
+    this.#exports = new ExportTableReader(this.#root);
     const files = [...scannedFiles].map((path) => resolve(path));
     this.#scannedDeclarations = new Set(files.filter(isDeclarationFile));
     this.#scannedSources = new Set(files.filter((path) => !isDeclarationFile(path)));

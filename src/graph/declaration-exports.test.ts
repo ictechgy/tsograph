@@ -1,12 +1,12 @@
 /**
  * 선언 산출물 역매핑이 쓰는 export 이름 표가 tsc 선언 emit의 이름을 소스와 같은 방식으로 읽는지, 확정하지 못한 표를 맞는다고
- * 보지 않는지 검증한다.
+ * 보지 않는지, 따라가지 않는 `export *`를 같은 위치의 지정자나 외부 대상 표지로 비교하는지 검증한다.
  */
 
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 
 import ts from 'typescript';
@@ -23,9 +23,14 @@ function createProject(files: Readonly<Record<string, string>>): string {
   return root;
 }
 
-/** 이름 표를 비교하기 쉬운 정렬 배열로 바꾼다. */
+/** 위치 키의 경로를 표 루트 디렉터리 기준 상대 경로로 보여 준다. */
+function showKey(table: ExportTable, key: string): string {
+  return key.startsWith('path:') ? `path:${relative(table.directory, key.slice('path:'.length)).replaceAll('\\', '/')}` : key;
+}
+
+/** 이름 표를 비교하기 쉬운 정렬 배열로 바꾼다. 이름을 읽지 않은 `export *`는 위치 키로 보인다. */
 function plain(table: ExportTable) {
-  return { names: [...table.names].sort(), unresolvedPackages: [...table.unresolvedPackages].sort(), complete: table.complete };
+  return { names: [...table.names].sort(), opaque: [...table.opaqueStars.keys()].map((key) => showKey(table, key)).sort(), complete: table.complete };
 }
 
 /** 번들러 해석 옵션이다. */
@@ -44,9 +49,9 @@ test('ES module·TypeScript 문법의 export 이름을 값·타입 구분 없이
     'b.ts': 'export const b = 1;\n',
   });
   try {
-    assert.deepEqual(plain(new ExportTableReader().table(join(root, 'a.ts'), options)), {
+    assert.deepEqual(plain(new ExportTableReader(root).table(join(root, 'a.ts'), options)), {
       names: ['Alias', 'C', 'E', 'I', 'M', 'N', 'Renamed', 'T', 'TypeOnly', 'd', 'default', 'first', 'ns', 'string export', 'third'],
-      unresolvedPackages: [], complete: true,
+      opaque: [], complete: true,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -63,10 +68,12 @@ test('export *는 대상 이름을 default와 export = 없이 보태고, 순환�
     'assigned.d.ts': 'declare function f(): void;\nexport = f;\n',
   });
   try {
-    const reader = new ExportTableReader();
-    assert.deepEqual(plain(reader.table(join(root, 'index.d.ts'), options)),
-      { names: ['Shape', 'a', 'cycle', 'default'], unresolvedPackages: [], complete: true });
-    assert.deepEqual(plain(reader.table(join(root, 'equals.d.ts'), options)), { names: [], unresolvedPackages: [], complete: true });
+    const reader = new ExportTableReader(root);
+    const index = reader.table(join(root, 'index.d.ts'), options);
+    assert.deepEqual(plain(index), { names: ['Shape', 'a', 'cycle', 'default'], opaque: [], complete: true });
+    // 따라간 재내보내기도 위치 키로 남는다(상대 키는 지정자를 쓴 그대로다).
+    assert.deepEqual([...index.starKeys].map((key) => showKey(index, key)).sort(), ['path:a', 'path:a.js', 'path:cycle', 'path:index', 'path:types']);
+    assert.deepEqual(plain(reader.table(join(root, 'equals.d.ts'), options)), { names: [], opaque: [], complete: true });
     // 같은 설정·같은 파일은 캐시한 같은 표다.
     assert.equal(reader.table(join(root, 'index.d.ts'), options), reader.table(join(root, 'index.d.ts'), options));
   } finally {
@@ -87,10 +94,10 @@ test('Node 모드 해석은 파일의 module 형식에 맞는 모드로 export *
   });
   try {
     const nodeNext: ts.CompilerOptions = { module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext };
-    const reader = new ExportTableReader();
-    assert.deepEqual(plain(reader.table(join(root, 'esm/index.d.ts'), nodeNext)), { names: ['a', 'own'], unresolvedPackages: [], complete: true });
-    assert.equal(reader.table(join(root, 'esm/extensionless.d.ts'), nodeNext).complete, false);
-    assert.deepEqual(plain(reader.table(join(root, 'cjs/extensionless.d.ts'), nodeNext)), { names: ['a'], unresolvedPackages: [], complete: true });
+    const reader = new ExportTableReader(root);
+    assert.deepEqual(plain(reader.table(join(root, 'esm/index.d.ts'), nodeNext)), { names: ['a', 'own'], opaque: [], complete: true });
+    assert.deepEqual(plain(reader.table(join(root, 'esm/extensionless.d.ts'), nodeNext)), { names: [], opaque: ['path:a'], complete: true });
+    assert.deepEqual(plain(reader.table(join(root, 'cjs/extensionless.d.ts'), nodeNext)), { names: ['a'], opaque: [], complete: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -107,52 +114,72 @@ test('JavaScript 모듈은 이름을 구문으로 정하지 않고 폐쇄에 Jav
     'reexport.d.ts': 'export * from "./esm.mjs";\nexport declare const own: 1;\n',
   });
   try {
-    const reader = new ExportTableReader();
+    const reader = new ExportTableReader(root);
     for (const name of ['cjs.cjs', 'esm.mjs', 'jsx.jsx']) {
-      assert.deepEqual(javaScriptView(reader.table(join(root, name), options)), { names: [], complete: true, includesJavaScript: true }, name);
+      const table = reader.table(join(root, name), options);
+      assert.deepEqual({ ...plain(table), javaScript: table.includesJavaScript }, { names: [], opaque: [], complete: true, javaScript: true }, name);
     }
-    assert.deepEqual(javaScriptView(reader.table(join(root, 'tsx.tsx'), options)), { names: ['view'], complete: true, includesJavaScript: false });
-    // export *가 닿은 JavaScript 대상은 이름을 모르는 대상이다. 소스 쪽에서는 대조를 끄고, 선언 쪽에서는 표를 확정하지 않는다.
-    assert.deepEqual(javaScriptView(reader.table(join(root, 'reexport.ts'), { ...options, allowJs: true })),
-      { names: ['own'], complete: false, includesJavaScript: true });
-    assert.deepEqual(javaScriptView(reader.table(join(root, 'reexport.d.ts'), options)), { names: ['own'], complete: false, includesJavaScript: true });
+    const tsx = reader.table(join(root, 'tsx.tsx'), options);
+    assert.deepEqual({ ...plain(tsx), javaScript: tsx.includesJavaScript }, { names: ['view'], opaque: [], complete: true, javaScript: false });
+    // export *가 닿은 JavaScript 대상은 이름을 읽지 않은 재내보내기다. 소스 쪽에서는 대조를 끄는 표시도 남긴다.
+    const source = reader.table(join(root, 'reexport.ts'), { ...options, allowJs: true });
+    assert.deepEqual({ ...plain(source), javaScript: source.includesJavaScript }, { names: ['own'], opaque: ['path:cjs.cjs'], complete: true, javaScript: true });
+    const declaration = reader.table(join(root, 'reexport.d.ts'), options);
+    assert.deepEqual({ ...plain(declaration), javaScript: declaration.includesJavaScript },
+      { names: ['own'], opaque: ['path:esm.mjs'], complete: true, javaScript: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-/** JavaScript 표시와 확정 여부를 비교하기 쉬운 모양으로 바꾼다. */
-function javaScriptView(table: ExportTable) {
-  return { names: [...table.names].sort(), complete: table.complete, includesJavaScript: table.includesJavaScript };
-}
 
 test('TypeScript 파일의 CommonJS 모양 할당과 JSDoc은 export가 아니다', () => {
   const root = createProject({ 'a.ts': '/** @typedef {number} Count */\nexports.a = 1;\nmodule.exports = { b: 1 };\n' });
   try {
-    assert.deepEqual(plain(new ExportTableReader().table(join(root, 'a.ts'), options)), { names: [], unresolvedPackages: [], complete: true });
+    assert.deepEqual(plain(new ExportTableReader(root).table(join(root, 'a.ts'), options)), { names: [], opaque: [], complete: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('읽지 못한 파일, 스크립트가 아닌 대상, 구문 깊이 초과, 해석하지 못한 상대·절대 export *는 표를 확정하지 않는다', () => {
+test('표 루트를 읽지 못하거나 구문 깊이를 넘으면 표를 확정하지 않고, 읽지 못한·해석하지 못한 export * 대상은 위치로만 남긴다', () => {
   const root = createProject({
     'json.ts': 'export * from "./data.json";\n',
     'data.json': '{}',
     'deep.ts': `export const deep = ${'('.repeat(500)}1${')'.repeat(500)};\n`,
+    'nested.ts': 'export * from "./deep";\nexport const kept = 1;\n',
     'relative.ts': 'export * from "../outside-missing";\nexport const kept = 1;\n',
     'absolute.ts': 'export * from "/definitely/missing/module";\n',
     'bare.ts': 'export * from "@not-installed/pkg";\nexport * from "@not-installed/pkg";\n',
   });
   try {
-    const reader = new ExportTableReader();
-    const optionsWithJson = { ...options, resolveJsonModule: true };
+    const reader = new ExportTableReader(root);
     assert.equal(reader.table(join(root, 'missing.ts'), options).complete, false);
-    assert.equal(reader.table(join(root, 'json.ts'), optionsWithJson).complete, false);
     assert.equal(reader.table(join(root, 'deep.ts'), options).complete, false);
-    assert.deepEqual(plain(reader.table(join(root, 'relative.ts'), options)), { names: ['kept'], unresolvedPackages: [], complete: false });
-    assert.equal(reader.table(join(root, 'absolute.ts'), options).complete, false);
-    assert.deepEqual(plain(reader.table(join(root, 'bare.ts'), options)), { names: [], unresolvedPackages: ['@not-installed/pkg'], complete: true });
+    assert.deepEqual(plain(reader.table(join(root, 'json.ts'), { ...options, resolveJsonModule: true })),
+      { names: [], opaque: ['path:data.json'], complete: true });
+    assert.deepEqual(plain(reader.table(join(root, 'nested.ts'), options)), { names: ['kept'], opaque: ['path:deep'], complete: true });
+    assert.deepEqual(plain(reader.table(join(root, 'relative.ts'), options)), { names: ['kept'], opaque: ['path:../outside-missing'], complete: true });
+    assert.deepEqual([...reader.table(join(root, 'absolute.ts'), options).opaqueStars.keys()], ['path:/definitely/missing/module']);
+    assert.deepEqual(plain(reader.table(join(root, 'bare.ts'), options)), { names: [], opaque: ['package:@not-installed/pkg'], complete: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('node_modules·프로젝트 밖 export * 대상은 따라가지 않고 해석한 경로를 표지로 남긴다', () => {
+  // pkg의 폐쇄에는 깨진 상대 재내보내기와 4 MiB를 넘는 생성 선언이 있다. 따라갔다면 표를 확정하지 못했을 것이다.
+  const root = createProject({
+    'inner/node_modules/pkg/package.json': '{ "name": "pkg", "types": "./index.d.ts" }',
+    'inner/node_modules/pkg/index.d.ts': 'export * from "./missing";\nexport * from "./huge";\nexport declare const fromPackage: 1;\n',
+    'inner/node_modules/pkg/huge.d.ts': `export declare const huge: 1;\n${'/'.repeat(4 * 1024 * 1024 + 1)}\n`,
+    'outside/shared.d.ts': 'export declare const shared: 1;\n',
+    'inner/src.ts': 'export * from "pkg";\nexport * from "../outside/shared";\nexport const own = 1;\n',
+  });
+  try {
+    const table = new ExportTableReader(join(root, 'inner')).table(join(root, 'inner/src.ts'), options);
+    assert.deepEqual(plain(table), { names: ['own'], opaque: ['package:pkg', 'path:../outside/shared'], complete: true });
+    assert.deepEqual([...table.externalTargets].map((path) => relative(root, path).replaceAll('\\', '/')).sort(),
+      ['inner/node_modules/pkg/index.d.ts', 'outside/shared.d.ts']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -164,7 +191,7 @@ test('export * 폐쇄가 1,024개 파일을 넘으면 표를 확정하지 않는
   files['chain/m1025.d.ts'] = 'export declare const last: number;\n';
   const root = createProject(files);
   try {
-    const table = new ExportTableReader().table(join(root, 'chain/m0.d.ts'), options);
+    const table = new ExportTableReader(root).table(join(root, 'chain/m0.d.ts'), options);
     assert.equal(table.complete, false);
     assert.equal(table.names.has('v1023'), true);
     assert.equal(table.names.has('last'), false);
@@ -173,17 +200,53 @@ test('export * 폐쇄가 1,024개 파일을 넘으면 표를 확정하지 않는
   }
 });
 
-test('판정: 확정한 선언 이름이 모두 소스에 있고 선언의 미해결 bare export *를 소스도 가질 때만 맞는다', () => {
-  const table = (names: readonly string[], unresolvedPackages: readonly string[] = [], complete = true, includesJavaScript = false): ExportTable =>
-    ({ names: new Set(names), unresolvedPackages: new Set(unresolvedPackages), complete, includesJavaScript });
+/** 판정 테스트용 표의 선택 항목이다. */
+interface TableParts {
+  readonly directory?: string;
+  readonly starKeys?: readonly string[];
+  readonly opaque?: Readonly<Record<string, string | undefined>>;
+  readonly externals?: readonly string[];
+  readonly complete?: boolean;
+  readonly includesJavaScript?: boolean;
+}
+
+/** 판정 테스트용 이름 표를 만든다. */
+function table(names: readonly string[], parts: TableParts = {}): ExportTable {
+  const opaque = Object.entries(parts.opaque ?? {});
+  return {
+    names: new Set(names), directory: parts.directory ?? '/project/src',
+    starKeys: new Set([...(parts.starKeys ?? []), ...opaque.map(([key]) => key)]), opaqueStars: new Map(opaque),
+    externalTargets: new Set(parts.externals ?? []), complete: parts.complete ?? true, includesJavaScript: parts.includesJavaScript ?? false,
+  };
+}
+
+test('판정: 확정한 선언 이름이 모두 소스에 있을 때만 맞는다', () => {
   assert.equal(declarationExportsCovered(table(['a']), table(['a', 'b'])), true);
-  assert.equal(declarationExportsCovered(table([]), table([], [], false)), true);
+  assert.equal(declarationExportsCovered(table([]), table([], { complete: false })), true);
   assert.equal(declarationExportsCovered(table(['a', 'c']), table(['a', 'b'])), false);
-  assert.equal(declarationExportsCovered(table(['a'], [], false), table(['a'])), false);
-  assert.equal(declarationExportsCovered(table(['a'], ['pkg']), table(['a'], ['pkg'])), true);
-  assert.equal(declarationExportsCovered(table(['a'], ['pkg']), table(['a'], ['other'])), false);
+  assert.equal(declarationExportsCovered(table(['a'], { complete: false }), table(['a'])), false);
   // 소스 폐쇄에 JavaScript가 있으면 선언 표가 불완전하거나 이름이 달라도 대조하지 않는다.
-  assert.equal(declarationExportsCovered(table(['a', 'c'], ['pkg'], false), table([], [], true, true)), true);
-  // 선언 쪽 JavaScript 표시는 판정을 너그럽게 하지 않는다(그 대상은 이미 불완전으로 셌다).
-  assert.equal(declarationExportsCovered(table(['c'], [], true, true), table(['a'])), false);
+  assert.equal(declarationExportsCovered(table(['a', 'c'], { complete: false }), table([], { includesJavaScript: true })), true);
+  // 선언 쪽 JavaScript 표시는 판정을 너그럽게 하지 않는다(그 재내보내기는 위치로 비교한다).
+  assert.equal(declarationExportsCovered(table(['c'], { includesJavaScript: true }), table(['a'])), false);
+});
+
+test('판정: 이름을 읽지 않은 선언 export *는 소스의 같은 위치 같은 지정자나 같은 외부 대상이 있을 때만 상쇄한다', () => {
+  const declaration = (opaque: Readonly<Record<string, string | undefined>>) => table(['own'], { directory: '/project/dist', opaque });
+  // tsc가 복사하지 않은 손으로 쓴 src/types.d.ts: 선언 쪽은 해석하지 못하고 소스 쪽은 해석해 따라갔다.
+  assert.equal(declarationExportsCovered(declaration({ 'path:/project/dist/types': undefined }),
+    table(['own', 'Options'], { starKeys: ['path:/project/src/types'] })), true);
+  assert.equal(declarationExportsCovered(declaration({ 'path:/project/dist/types': undefined }),
+    table(['own'], { starKeys: ['path:/project/src/other'] })), false);
+  // 같은 상대 위치여야 한다(다른 디렉터리의 같은 지정자 문자열은 다른 모듈이다).
+  assert.equal(declarationExportsCovered(declaration({ 'path:/project/dist/nested/types': undefined }),
+    table(['own'], { starKeys: ['path:/project/src/types'] })), false);
+  assert.equal(declarationExportsCovered(declaration({ 'package:pkg': undefined }), table(['own'], { starKeys: ['package:pkg'] })), true);
+  assert.equal(declarationExportsCovered(declaration({ 'package:pkg': undefined }), table(['own'], { starKeys: ['package:other'] })), false);
+  // 외부 대상은 지정자가 달라도 같은 파일로 해석했으면 같다.
+  const external = '/project/node_modules/pkg/index.d.ts';
+  assert.equal(declarationExportsCovered(declaration({ 'package:pkg/index.js': external }),
+    table(['own'], { opaque: { 'package:pkg': external }, externals: [external] })), true);
+  assert.equal(declarationExportsCovered(declaration({ 'package:pkg/index.js': external }),
+    table(['own'], { opaque: { 'package:pkg': '/project/node_modules/pkg/other.d.ts' }, externals: ['/project/node_modules/pkg/other.d.ts'] })), false);
 });
