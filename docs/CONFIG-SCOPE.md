@@ -25,14 +25,25 @@ Node server 문맥 사이의 전역 등록 순서는 증명하지 않는다.
 
 workspace 패키지의 `exports`·`types`가 가리키는 프로젝트 안 선언 산출물은 declaration map, 산출물을 낸(선언을 내는) 설정의
 `declarationDir`/`outDir`↔`rootDir`, 손으로 쓴 선언 옆 같은 이름의 JavaScript 구현 중 하나가 스캔한 소스 하나를 가리킬 때만 그 소스로
-되짚는다. `outDir`/`rootDir` 대응은 배치만 보는 추론이므로 선언의 export 이름(값·타입·`default`·`export =`·`export *`가 끌어오는 이름)이
-모두 그 소스에도 있을 때만 잇는다. 역매핑은 module 해석 중이라 checker가 없으므로, 이름 표는 TypeScript 파서로 최상위 export 문장을
-읽어 만들고 `export *`는 그 설정의 module 해석(파일의 module 형식에 맞는 모드, 4 MiB bounded reader)으로 표 하나당 최대 1,024개 파일까지
-따라간다. JavaScript 소스는 CommonJS 내보내기(`exports.x`·`module.exports`·`Object.defineProperty(exports, …)`)와 최상위 JSDoc
-`@typedef`·`@callback`도 이름으로 본다. 읽기·구문 깊이 실패, 해석하지 못한 상대 `export *`, 파일 예산 초과는 맞다는 증명이 아니므로
-잇지 않는다. 해석하지 못한 bare `export *`는 소스에도 같은 지정자가 있을 때만 상쇄한다. 잇지 않은 import는
-`graph-config: declaration-outputs:`에 export 불일치 수와 함께 세고 스캔을 불완전으로 본다. 같은 이름을 내보내는 다른 구현은 이름으로
-구별하지 못한다. declaration map과 같은 이름 형제 근거는 이름을 대조하지 않으며 오래된 `.d.ts.map`은 그대로 믿는다.
+되짚는다. `outDir`/`rootDir` 대응은 배치만 보는 추론이므로 TypeScript 소스면 선언의 export 이름(값·타입·`default`·`export =`·`export *`가
+끌어오는 이름)이 모두 그 소스에도 있을 때만 잇는다. 역매핑은 module 해석 중이라 checker가 없으므로, 이름 표는 TypeScript 파서로 최상위
+export 문장만 읽어 만든다. `export *`는 그 설정의 module 해석(파일의 module 형식에 맞는 모드, 4 MiB bounded reader, 설정별 TypeScript 해석
+캐시)으로 프로젝트 안 대상만 표 하나당 최대 1,024개 파일까지 따라간다. tsc는 지정자를 쓴 그대로 옮기므로 따라가지 않는 대상은 위치로
+비교한다. 따라가지 않는 대상(읽지 않는 `node_modules`·프로젝트 밖 대상, 해석하지 못한 대상(tsc가 `outDir`로 복사하지 않는 손으로 쓴
+`src/types.d.ts`), 읽지 못한 대상, JavaScript 대상)은 소스의 같은 상대 위치에 같은 지정자가 있을 때 맞고, 외부 대상은 소스가 같은 파일을
+다시 내보낼 때도 맞는다(지정자가 달라도 같은 파일이면 같다). 선언 파일 읽기·구문 깊이 실패와 파일 예산 초과는 맞다는 증명이 아니므로 잇지 않는다.
+
+JavaScript 소스는 대조하지 않는다. tsc는 CommonJS 내보내기와 JSDoc 타입의 이름을 checker로 정해(`const api = { helper };
+module.exports = api`, `module.exports = create()`, `var x = exports.x = …`, `if`·`try`·IIFE 안의 `exports.x`, 조건부
+`module.exports = require(…)`) 최상위 구문만 보는 표는 맞는 소스를 틀렸다고 판정하기 때문이다. 소스 폐쇄에 JavaScript 모듈이 있으면
+(소스 자신이나 `export *` 대상) 예전처럼 잇는다. 잇지 않은 import는 `graph-config: declaration-outputs:`에 export 불일치 수와 함께 세고
+스캔을 불완전으로 본다. 이름이 맞지 않은 선언은 옆의 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도 돌리지 않는다.
+
+남은 한계: 같은 이름을 모두 내보내는 다른 구현은 이름으로 구별하지 못하고, export 이름이 없는 선언(`export {}`, `declare global`만 있음)은
+그 위치의 어느 소스와도 맞으며, 이름의 종류(값·타입)를 구별하지 않아 타입 전용 이름도 같은 이름의 값으로 맞는다. 대응 소스가
+JavaScript인 덮어쓴 선언은 알아채지 못한다. declaration map과 같은 이름 형제 근거는 이름을 대조하지 않으며 오래된 `.d.ts.map`은 그대로
+믿는다. 이름이 맞지 않은 선언을 import하는 설정은 위 문맥 공유 검사에서 소유 파일 밖 선언을 읽는 것으로 보여 따로 문맥을 받을 수 있고,
+그 경계를 넘는 import는 `config-context-boundary:`로 센다.
 
 `files`/`include`/`exclude`는 진입 파일 선택이다. 제외된 파일도 정적 import/require 의존성이면 분석에 들어올 수
 있다. schema는 기존 전체 파일 스캔 대신 이 entry/closure를 사용하므로 제외된 독립 파일의 사실 수가 줄 수 있다.
@@ -63,5 +74,6 @@ bound/candidate dispatch는 이 부분 경로에서 인증하지 않으며 모�
 
 회귀는 두 앱 baseUrl, cross-package 반환 타입의 내부 alias, strict/target/JSX/lib/types 분리, 같은 디렉터리의
 서로 다른 reference, 중복/누락/순환 reference, include/dependency closure, typed dynamic sink, server 문맥,
-실제 Git before/after, frozen 외부 extends, 예산 초과, 선언 산출물의 export 이름 불일치(번들러 덮어쓰기)·부분집합·재내보내기를
-합성 fixture로 검증한다. 사내 앱을 재실행한 결과는 아니다.
+실제 Git before/after, frozen 외부 extends, 예산 초과, 선언 산출물의 export 이름 불일치(번들러 덮어쓰기, `lib` 산출물 루트의
+빌드 출력 형제)·부분집합·재내보내기·CommonJS 소스 모양·손으로 쓴 `src/*.d.ts` 재내보내기·의존성 `export *`를 합성 fixture로 검증한다.
+사내 앱을 재실행한 결과는 아니다.

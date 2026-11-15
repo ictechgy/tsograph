@@ -13,12 +13,19 @@
   `rootDir`·`declarationDir`·source map 같은 emit 전용 옵션은 더 이상 type-checking 문맥을 나누지 않는다.
 - graph·reach·impact·Node routes: 선언 산출물의 `declarationDir`/`outDir`↔`rootDir` 역매핑이 선언 파일을 그 설정이 냈다고 가정해, 번들러가
   같은 `outDir`을 배치가 다른 `.d.ts`로 덮어쓰고 같은 상대 경로에 다른 소스가 있으면 한계 없이 잘못된 `direct` 간선을 내던 문제를
-  고쳤다. 이 경로로 잇기 전에 선언이 내보내는 이름(값·타입, `default`, `export =`, `export *`가 끌어오는 이름)이 모두 그 소스의
-  export에도 있는지 TypeScript 파서로 대조하고, 빠진 이름이 있거나 이름을 확정하지 못하면 잇지 않는다. **간선을 줄이는 변경**이지만
-  줄어든 연결은 모두 기존 `graph-config: declaration-outputs:` import 수에 들어가고(`N of them reach a source through
-  declarationDir/outDir and rootDir that does not export every name …`) 프로그램을 열린 쪽(`incomplete-scan`)으로 보므로 조용히
-  사라지지 않는다. declaration map과 손으로 쓴 선언 옆 JavaScript 구현 근거는 이름을 대조하지 않는다(emit 기록과 TypeScript 자신의
-  짝짓기라서다). 같은 이름을 모두 내보내는 다른 소스는 이름만으로 구별하지 못해 여전히 잇는다.
+  고쳤다. 이 경로로 잇기 전에 선언이 내보내는 이름(값·타입, `default`, `export =`, `export *`가 끌어오는 이름)이 모두 그 TypeScript
+  소스의 export에도 있는지 TypeScript 파서로 대조하고, 빠진 이름이 있거나 선언 이름을 확정하지 못하면(선언 파일 읽기·구문 깊이 실패,
+  `export *` 폐쇄 1,024개 파일 초과) 잇지 않는다. 이름이 맞지 않은 선언은 옆의 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도
+  돌리지 않는다. **간선을 줄이는 변경**이지만 이 대조가 잇지 않은 연결은 모두 기존 `graph-config: declaration-outputs:` import 수에
+  들어가고(`N of them reach a source through declarationDir/outDir and rootDir that does not export every name …`) 프로그램을 열린
+  쪽(`incomplete-scan`)으로 본다. `export *`는 프로젝트 안 대상만 따라간다. 따라가지 않는 대상(읽지 않는 `node_modules`·프로젝트 밖 대상,
+  해석·읽기에 실패한 대상, JavaScript 대상)은 소스의 같은 상대 위치에 같은 지정자가 있으면 맞고(tsc는 지정자를 쓴 그대로 옮기고 손으로 쓴
+  `src/*.d.ts`를 `outDir`로 복사하지 않는다), 외부 대상은 소스가 같은 파일을 다시 내보내도 맞는다. 소스 폐쇄에 JavaScript 모듈이 있으면(CommonJS 소스, `export *`로 다시
+  내보낸 JavaScript) tsc가 이름을 checker로 정하므로 대조하지 않고 예전처럼 잇는다. declaration map과 손으로 쓴 선언 옆 JavaScript 구현
+  근거도 이름을 대조하지 않는다(emit 기록과 TypeScript 자신의 짝짓기라서다). 남은 통과 사례: 같은 이름을 모두 내보내는 다른 소스,
+  export 이름이 없는 선언(`export {}`, `declare global`만 있음), 같은 이름의 값이 있는 타입 전용 이름(종류를 구별하지 않는다), JavaScript
+  소스를 덮어쓴 선언. 이름이 맞지 않은 선언을 import하는 설정은 문맥 공유 검사에서 프로젝트 밖 선언을 읽는 것으로 보여 따로 type-checking
+  문맥을 받을 수 있고, 그 경계를 넘는 import는 `config-context-boundary:`로 센다.
 - graph·reach·impact: 공개 패키지 판정이 루트 `package.json`만 봐서, 루트가 private인 모노레포의 게시 가능한
   하위 패키지가 내보낸 흐름을 bound로 닫던 문제를 고쳤다. 파일마다 루트 아래 가장 가까운 `package.json`이 공개 진입점을
   선언하고 `"private": true`가 아니거나 읽을 수 없으면 그 파일의 내보낸 함수·클래스를 열고 속성 쓰기는 프로그램 전체에서

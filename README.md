@@ -124,15 +124,27 @@ separate Programs. A workspace package whose `exports`/`types` points at build o
 config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
 directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
 source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
-The `outDir`/`rootDir` mapping is inferred from layout alone, so it links only when every name the declaration
-exports (values and types, `default`, `export =`, and names pulled in through `export *`) is also exported by that
-source. When a name is missing or the names cannot be read, the import is not linked and is counted under
-`graph-config: declaration-outputs:` (`N of them reach a source through declarationDir/outDir and rootDir that does not
-export every name …`), so a bundler that overwrites the config's `outDir` with differently laid-out `.d.ts` files is
-reported instead of producing a wrong `direct` edge. Names cannot tell same-named implementations apart: a different
-source that exports every declared name is still linked. Declaration maps (the emitter's record of the source) and
-same-name JavaScript siblings (TypeScript's own `x.d.ts`/`x.js` pairing) are not name-checked, so a stale `.d.ts.map`
-left beside an overwritten declaration is still trusted.
+The `outDir`/`rootDir` mapping is inferred from layout alone, so for a TypeScript source it links only when every
+name the declaration exports (values and types, `default`, `export =`, and names pulled in through `export *`) is
+also exported by that source. When a name is missing or the declaration's names cannot be read (unreadable or too
+deeply nested declaration, more than 1,024 files in its `export *` closure), the import is not linked, is not
+redirected to the same-name `.js` beside the declaration (that file is the output root's build output), and is
+counted under `graph-config: declaration-outputs:` (`N of them reach a source through declarationDir/outDir and
+rootDir that does not export every name …`). A bundler that overwrites the config's `outDir` with differently laid-out
+`.d.ts` files is therefore reported instead of producing a wrong `direct` edge. `export *` is followed only inside the
+project. A target it does not follow (under `node_modules` or outside the project, which is never read; unresolved;
+unreadable; or JavaScript) matches when the source has the same specifier at the same relative position, because tsc
+copies specifiers verbatim and does not copy hand-written `src/*.d.ts` into `outDir`; an external target also matches
+when the source re-exports the same resolved file. When the
+source's closure contains a JavaScript module (a CommonJS source, or JavaScript re-exported through `export *`), tsc
+derives the names with the checker, so names are not compared and the link is kept as before. Remaining pass cases:
+a different source that exports every declared name, a declaration without export names (`export {}` or only
+`declare global`), a type-only name covered by a same-named value (kinds are not distinguished), and an overwritten
+declaration whose mapped source is JavaScript. Declaration maps (the emitter's record of the source) and same-name
+JavaScript siblings of hand-written declarations (TypeScript's own `x.d.ts`/`x.js` pairing) are not name-checked, so
+a stale `.d.ts.map` left beside an overwritten declaration is still trusted. A config that imports a mismatched
+declaration also reads a declaration outside its owned files for context sharing, so it may get its own type-checking
+context; imports across that boundary are counted under `config-context-boundary:`.
 Ambiguous/missing ownership remains incomplete. See [configuration scope](docs/CONFIG-SCOPE.md) for bounds.
 Ownership contexts run sequentially; their total count no longer disables all semantic calls. Large schedules
 use fresh TypeScript ASTs with `ParseForTypeErrors`: JavaScript JSDoc types and type-error-relevant TypeScript
