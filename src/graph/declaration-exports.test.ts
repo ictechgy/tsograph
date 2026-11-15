@@ -96,31 +96,35 @@ test('Node 모드 해석은 파일의 module 형식에 맞는 모드로 export *
   }
 });
 
-test('JavaScript의 CommonJS 내보내기와 최상위 JSDoc 타입 이름을 모은다', () => {
+test('JavaScript 모듈은 이름을 구문으로 정하지 않고 폐쇄에 JavaScript가 있다고 표시한다', () => {
+  // tsc는 CommonJS·JSDoc export 이름을 checker로 정한다. 구문 표는 그 이름을 다 읽지 못하므로 읽지 않는다.
   const root = createProject({
-    'cjs.cjs': [
-      'exports.a = 1;', 'exports["b"] = 2;', 'module.exports.c = 3;', 'module.exports["d"] = 4;', 'exports[name] = 5;',
-      'module.exports = exports = { e, "f": 1, 2: 2, g() {}, [computed]: 1, ...spread };', 'Object.defineProperty(exports, "h", {});',
-      'Object.defineProperty(module.exports, "i", {});', 'Object.defineProperty(other, "j", {});', 'Object.defineProperty(exports, key, {});',
-      'Reflect.defineProperty(exports, "k", {});', 'Object.freeze(exports);', 'defineProperty(exports, "l");', 'other.m = 1;', 'module.other = 1;',
-      'exports = 1;', 'call();', '/** @typedef {number} Count */', '/** @callback Done */',
-    ].join('\n'),
-    'assign.mjs': 'module.exports = function main() {};\n',
+    'cjs.cjs': 'const api = { helper() {} };\nmodule.exports = api;\n',
+    'esm.mjs': 'export const view = 1;\n',
     'jsx.jsx': 'export const view = 1;\n',
     'tsx.tsx': 'export const view = 1;\n',
+    'reexport.ts': 'export * from "./cjs.cjs";\nexport const own = 1;\n',
+    'reexport.d.ts': 'export * from "./esm.mjs";\nexport declare const own: 1;\n',
   });
   try {
     const reader = new ExportTableReader();
-    assert.deepEqual(plain(reader.table(join(root, 'cjs.cjs'), options)), {
-      names: ['2', 'Count', 'Done', 'a', 'b', 'c', 'd', 'e', 'export=', 'f', 'g', 'h', 'i'], unresolvedPackages: [], complete: true,
-    });
-    assert.deepEqual(plain(reader.table(join(root, 'assign.mjs'), options)).names, ['export=']);
-    assert.deepEqual(plain(reader.table(join(root, 'jsx.jsx'), options)).names, ['view']);
-    assert.deepEqual(plain(reader.table(join(root, 'tsx.tsx'), options)).names, ['view']);
+    for (const name of ['cjs.cjs', 'esm.mjs', 'jsx.jsx']) {
+      assert.deepEqual(javaScriptView(reader.table(join(root, name), options)), { names: [], complete: true, includesJavaScript: true }, name);
+    }
+    assert.deepEqual(javaScriptView(reader.table(join(root, 'tsx.tsx'), options)), { names: ['view'], complete: true, includesJavaScript: false });
+    // export *가 닿은 JavaScript 대상은 이름을 모르는 대상이다. 소스 쪽에서는 대조를 끄고, 선언 쪽에서는 표를 확정하지 않는다.
+    assert.deepEqual(javaScriptView(reader.table(join(root, 'reexport.ts'), { ...options, allowJs: true })),
+      { names: ['own'], complete: false, includesJavaScript: true });
+    assert.deepEqual(javaScriptView(reader.table(join(root, 'reexport.d.ts'), options)), { names: ['own'], complete: false, includesJavaScript: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** JavaScript 표시와 확정 여부를 비교하기 쉬운 모양으로 바꾼다. */
+function javaScriptView(table: ExportTable) {
+  return { names: [...table.names].sort(), complete: table.complete, includesJavaScript: table.includesJavaScript };
+}
 
 test('TypeScript 파일의 CommonJS 모양 할당과 JSDoc은 export가 아니다', () => {
   const root = createProject({ 'a.ts': '/** @typedef {number} Count */\nexports.a = 1;\nmodule.exports = { b: 1 };\n' });
@@ -170,12 +174,16 @@ test('export * 폐쇄가 1,024개 파일을 넘으면 표를 확정하지 않는
 });
 
 test('판정: 확정한 선언 이름이 모두 소스에 있고 선언의 미해결 bare export *를 소스도 가질 때만 맞는다', () => {
-  const table = (names: readonly string[], unresolvedPackages: readonly string[] = [], complete = true): ExportTable =>
-    ({ names: new Set(names), unresolvedPackages: new Set(unresolvedPackages), complete });
+  const table = (names: readonly string[], unresolvedPackages: readonly string[] = [], complete = true, includesJavaScript = false): ExportTable =>
+    ({ names: new Set(names), unresolvedPackages: new Set(unresolvedPackages), complete, includesJavaScript });
   assert.equal(declarationExportsCovered(table(['a']), table(['a', 'b'])), true);
   assert.equal(declarationExportsCovered(table([]), table([], [], false)), true);
   assert.equal(declarationExportsCovered(table(['a', 'c']), table(['a', 'b'])), false);
   assert.equal(declarationExportsCovered(table(['a'], [], false), table(['a'])), false);
   assert.equal(declarationExportsCovered(table(['a'], ['pkg']), table(['a'], ['pkg'])), true);
   assert.equal(declarationExportsCovered(table(['a'], ['pkg']), table(['a'], ['other'])), false);
+  // 소스 폐쇄에 JavaScript가 있으면 선언 표가 불완전하거나 이름이 달라도 대조하지 않는다.
+  assert.equal(declarationExportsCovered(table(['a', 'c'], ['pkg'], false), table([], [], true, true)), true);
+  // 선언 쪽 JavaScript 표시는 판정을 너그럽게 하지 않는다(그 대상은 이미 불완전으로 셌다).
+  assert.equal(declarationExportsCovered(table(['c'], [], true, true), table(['a'])), false);
 });

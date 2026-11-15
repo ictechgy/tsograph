@@ -12,6 +12,11 @@
  *
  * 이름 표를 확정하지 못하면(읽기·구문 실패, 해석하지 못한 상대 `export *`, 파일 예산 초과) 맞는다고 증명하지 못한 것이므로
  * 호출자는 잇지 않고 limitation으로 센다. 같은 이름을 내보내는 다른 구현은 이름만으로 구별하지 못한다.
+ *
+ * JavaScript 모듈의 export 이름은 구문으로 정하지 않는다. tsc는 CommonJS 내보내기와 JSDoc 타입을 checker로 읽어
+ * (`const api = { helper }; module.exports = api`의 `helper`, `var x = exports.x = …`, `if`·`try`·함수 안의 `exports.x`, 조건부
+ * `module.exports = require(…)`의 `export =`) 선언에 옮기므로, 최상위 문장만 보는 표는 맞는 소스를 틀렸다고 판정한다. 그래서
+ * 소스 쪽 폐쇄에 JavaScript 모듈이 있으면 대조하지 않고 맞는다고 본다(같은 이름 형제 경로와 같은 이유, 예전 동작 유지).
  */
 
 import { isAbsolute, resolve } from 'node:path';
@@ -31,11 +36,17 @@ const EXPORT_EQUALS = 'export=';
 /** `export *`가 옮기지 않는 이름이다(ES module 규칙의 `default`, 그리고 `export =`). */
 const NOT_STAR_EXPORTED: ReadonlySet<string> = new Set(['default', EXPORT_EQUALS]);
 
-/** 파일 하나의 최상위 export 이름과, 따라가야 할 `export *` 지정자다. */
-interface LocalExports {
-  readonly names: readonly string[];
-  readonly stars: readonly { readonly specifier: string; readonly mode: ts.ResolutionMode }[];
-}
+/**
+ * 파일 하나를 읽은 결과다. TypeScript 문법 파일은 최상위 export 이름과 따라가야 할 `export *` 지정자를 담는다. JavaScript 파일은
+ * export 이름을 checker가 정하므로 이름 없이 종류만 표시한다.
+ */
+type LocalExports =
+  | {
+    readonly kind: 'typescript';
+    readonly names: readonly string[];
+    readonly stars: readonly { readonly specifier: string; readonly mode: ts.ResolutionMode }[];
+  }
+  | { readonly kind: 'javascript' };
 
 /** 모듈의 export 이름 표다. */
 export interface ExportTable {
@@ -43,19 +54,29 @@ export interface ExportTable {
   readonly names: ReadonlySet<string>;
   /** 해석하지 못한 bare 지정자(`export * from "pkg"`)다. 같은 패키지 안의 같은 지정자는 같은 모듈이라 서로 상쇄할 수 있다. */
   readonly unresolvedPackages: ReadonlySet<string>;
-  /** 이름을 모두 확정했는지다. 읽기·구문 실패, 해석하지 못한 상대 `export *`, 파일 예산 초과면 false다. */
+  /**
+   * 이름을 모두 확정했는지다. 읽기·구문 실패, 해석하지 못한 상대 `export *`, `export *`가 닿은 JavaScript 모듈, 파일 예산 초과면
+   * false다.
+   */
   readonly complete: boolean;
+  /**
+   * 폐쇄(자신 또는 `export *` 대상)에 JavaScript 모듈이 있는지다. 그 export 이름은 tsc가 checker로 정해 구문 표가 빠뜨리므로,
+   * 소스 쪽 표에서 true면 이름을 대조하지 않는다.
+   */
+  readonly includesJavaScript: boolean;
 }
 
 /**
- * 선언의 export 이름이 소스 export 이름과 맞는지 판정한다. 선언 이름 표를 확정했고, 선언의 모든 이름이 소스에 있고,
- * 선언이 해석하지 못한 bare `export *`를 소스도 같은 지정자로 가질 때만 맞는다고 본다.
+ * 선언의 export 이름이 소스 export 이름과 맞는지 판정한다. 소스 폐쇄에 JavaScript 모듈이 있으면 이름을 구문으로 다 알 수 없으므로
+ * 대조하지 않고 맞는다고 본다. 그 밖에는 선언 이름 표를 확정했고, 선언의 모든 이름이 소스에 있고, 선언이 해석하지 못한 bare
+ * `export *`를 소스도 같은 지정자로 가질 때만 맞는다고 본다.
  *
  * @param declaration 선언 산출물의 이름 표
  * @param source 역매핑한 소스의 이름 표
  * @returns 맞으면 true
  */
 export function declarationExportsCovered(declaration: ExportTable, source: ExportTable): boolean {
+  if (source.includesJavaScript) return true;
   if (!declaration.complete) return false;
   for (const specifier of declaration.unresolvedPackages) if (!source.unresolvedPackages.has(specifier)) return false;
   for (const name of declaration.names) if (!source.names.has(name)) return false;
@@ -91,6 +112,7 @@ export class ExportTableReader {
     const names = new Set<string>();
     const unresolvedPackages = new Set<string>();
     let complete = true;
+    let includesJavaScript = false;
     const visited = new Set<string>();
     const queue: { readonly file: string; readonly star: boolean }[] = [{ file: fileName, star: false }];
     for (let index = 0; index < queue.length; index++) {
@@ -106,6 +128,12 @@ export class ExportTableReader {
         complete = false;
         continue;
       }
+      if (local.kind === 'javascript') {
+        // 소스 쪽에서는 대조를 끄는 표시이고, 선언 쪽에서는 이름을 모르는 대상이다(선언 루트는 항상 `.d.ts`다).
+        includesJavaScript = true;
+        if (star) complete = false;
+        continue;
+      }
       for (const name of local.names) if (!star || !NOT_STAR_EXPORTED.has(name)) names.add(name);
       for (const { specifier, mode } of local.stars) {
         const target = this.#resolve(specifier, file, options, mode);
@@ -114,7 +142,7 @@ export class ExportTableReader {
         else unresolvedPackages.add(specifier);
       }
     }
-    return { names, unresolvedPackages, complete };
+    return { names, unresolvedPackages, complete, includesJavaScript };
   }
 
   /** 파일 하나의 최상위 export를 읽는다. 읽지 못하거나 구문 깊이 상한을 넘으면 undefined다. */
@@ -129,6 +157,7 @@ export class ExportTableReader {
 
   /**
    * 파일을 파싱해 최상위 export 이름과 `export *` 지정자를 모은다. 해석 모드는 TypeScript처럼 파일의 module 형식에서 정한다.
+   * JavaScript 파일은 이름을 구문으로 정하지 않으므로 읽지 않고 종류만 돌려준다.
    *
    * @param fileName 파일 절대 경로
    * @param options compiler 옵션
@@ -137,24 +166,21 @@ export class ExportTableReader {
   #parseExports(fileName: string, options: ts.CompilerOptions): LocalExports | undefined {
     const kind = scriptKindOf(fileName);
     if (kind === undefined) return undefined;
+    if (kind === ts.ScriptKind.JS || kind === ts.ScriptKind.JSX) return { kind: 'javascript' };
     const read = readBoundedConfigText(fileName, MAX_SOURCE_BYTES);
     if (!read.ok) return undefined;
     const impliedNodeFormat = ts.getImpliedNodeFormatForFile(fileName, undefined, this.#host, options);
     const sourceFile = parseWithinSyntaxDepth(() => ts.createSourceFile(fileName, read.text,
       { languageVersion: ts.ScriptTarget.Latest, impliedNodeFormat }, true, kind));
     if (sourceFile === TOO_DEEP) return undefined;
-    const javaScript = kind === ts.ScriptKind.JS || kind === ts.ScriptKind.JSX;
-    const names = sourceFile.statements.flatMap((statement) => [
-      ...statementExportNames(statement), ...(javaScript ? commonJsExportNames(statement) : []),
-    ]);
-    if (javaScript) names.push(...jsDocTypeNames(sourceFile));
+    const names = sourceFile.statements.flatMap(statementExportNames);
     const stars = sourceFile.statements.flatMap((statement) => {
       if (!ts.isExportDeclaration(statement) || statement.exportClause !== undefined) return [];
       const specifier = statement.moduleSpecifier;
       if (specifier === undefined || !ts.isStringLiteralLike(specifier)) return [];
       return [{ specifier: specifier.text, mode: ts.getModeForUsageLocation(sourceFile, specifier, options) }];
     });
-    return { names, stars };
+    return { kind: 'typescript', names, stars };
   }
 
   /** `export *` 지정자를 같은 bounded host로 해석한다. 해석 결과는 파일 경로다. */
@@ -217,88 +243,6 @@ function statementExportNames(statement: ts.Statement): string[] {
 function bindingNames(name: ts.BindingName): string[] {
   if (ts.isIdentifier(name)) return [name.text];
   return name.elements.flatMap((element) => (ts.isOmittedExpression(element) ? [] : bindingNames(element.name)));
-}
-
-/**
- * JavaScript의 CommonJS 내보내기 이름이다. tsc는 `exports.x =`·`module.exports.x =`·`Object.defineProperty(exports, "x", …)`를
- * `export … x`로, `module.exports = { a, b }`를 각 속성으로, 그 밖의 `module.exports = …`를 `export =`로 옮긴다. 객체 리터럴은
- * 두 형태를 모두 보탠다(소스 쪽 이름이 많으면 판정이 너그러워질 뿐 잘못 막지 않는다).
- *
- * @param statement 최상위 문장
- * @returns 내보낸 이름
- */
-function commonJsExportNames(statement: ts.Statement): string[] {
-  if (!ts.isExpressionStatement(statement)) return [];
-  if (ts.isCallExpression(statement.expression)) return definePropertyName(statement.expression);
-  // `module.exports = exports = …`·`exports.a = exports.b = …` 같은 연쇄 할당은 왼쪽을 모두 보고, 값은 맨 오른쪽 식이다.
-  const targets: ts.Expression[] = [];
-  let value: ts.Expression = statement.expression;
-  while (ts.isBinaryExpression(value) && value.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-    targets.push(value.left);
-    value = value.right;
-  }
-  const assigned = value;
-  return targets.flatMap((target) => {
-    const member = commonJsMemberName(target);
-    if (member !== undefined) return [member];
-    if (!isModuleExports(target)) return [];
-    return [EXPORT_EQUALS, ...(ts.isObjectLiteralExpression(assigned) ? objectLiteralNames(assigned) : [])];
-  });
-}
-
-/** `Object.defineProperty(exports, "x", …)`의 `x`다. */
-function definePropertyName(call: ts.CallExpression): string[] {
-  const callee = call.expression;
-  if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression) || callee.expression.text !== 'Object'
-    || callee.name.text !== 'defineProperty') return [];
-  const [owner, key] = call.arguments;
-  if (owner === undefined || key === undefined || !ts.isStringLiteralLike(key)) return [];
-  return isExportsObject(owner) ? [key.text] : [];
-}
-
-/** `exports.x`·`exports["x"]`·`module.exports.x`의 `x`다. */
-function commonJsMemberName(target: ts.Expression): string | undefined {
-  if (ts.isPropertyAccessExpression(target) && isExportsObject(target.expression)) return target.name.text;
-  if (ts.isElementAccessExpression(target) && isExportsObject(target.expression) && ts.isStringLiteralLike(target.argumentExpression)) {
-    return target.argumentExpression.text;
-  }
-  return undefined;
-}
-
-/** `exports` 또는 `module.exports`인지 본다. */
-function isExportsObject(expression: ts.Expression): boolean {
-  return (ts.isIdentifier(expression) && expression.text === 'exports') || isModuleExports(expression);
-}
-
-/** `module.exports`인지 본다. */
-function isModuleExports(expression: ts.Expression): boolean {
-  return ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)
-    && expression.expression.text === 'module' && expression.name.text === 'exports';
-}
-
-/** 객체 리터럴의 정적 속성 이름이다(계산된 이름과 전개는 건너뛴다). */
-function objectLiteralNames(literal: ts.ObjectLiteralExpression): string[] {
-  return literal.properties.flatMap((property) => {
-    const name = property.name;
-    if (name === undefined) return [];
-    return ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name) ? [name.text] : [];
-  });
-}
-
-/**
- * JavaScript module의 최상위 JSDoc `@typedef`·`@callback` 이름이다. tsc는 이것을 `export type`으로 옮긴다. 공개 API는 노드의
- * 마지막 JSDoc 주석만 돌려주므로 파서가 붙인 주석 목록을 읽는다. 그 목록이 없으면 이름을 보태지 않는다(판정이 엄격해질 뿐
- * 잘못 잇지 않는다).
- *
- * @param sourceFile 파싱한 JavaScript 파일
- * @returns 타입 이름
- */
-function jsDocTypeNames(sourceFile: ts.SourceFile): string[] {
-  const owners: readonly ts.Node[] = [...sourceFile.statements, sourceFile.endOfFileToken];
-  return owners.flatMap((owner) => ((owner as ts.Node & { readonly jsDoc?: readonly ts.JSDoc[] }).jsDoc ?? [])
-    .flatMap((comment) => comment.tags ?? [])
-    .flatMap((tag) => ((ts.isJSDocTypedefTag(tag) || ts.isJSDocCallbackTag(tag)) && tag.name !== undefined && ts.isIdentifier(tag.name)
-      ? [tag.name.text] : [])));
 }
 
 /** 선언에 특정 수정자가 있는지 본다. */

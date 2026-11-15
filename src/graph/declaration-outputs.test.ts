@@ -437,9 +437,6 @@ test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 
       'pkg/src/mismatch.ts': 'export function a() {}\n',
       'pkg/src/equals.ts': 'function main() {}\nexport = main;\n',
       'pkg/src/local.ts': 'function a() {}\nexport { a as renamed };\nexport import Alias = Space.Inner;\nnamespace Space { export const Inner = 1; }\n',
-      'pkg/src/cjs.js': '/** @typedef {{ x: number }} Point */\nexports.foo = function () { return 1; };\nmodule.exports.bar = 2;\n'
-        + 'Object.defineProperty(exports, "baz", { value: 3 });\n/** @callback Visit @param {number} n */\n',
-      'pkg/src/object.js': 'function a() {}\nmodule.exports = { a, b: 1, c() {} };\n',
       'pkg/src/bare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
       'pkg/src/missing.ts': 'export * from "./absent";\nexport function own() {}\n',
       'pkg/src/otherbare.ts': 'export * from "@not-installed/shared";\nexport function own() {}\n',
@@ -449,8 +446,6 @@ test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 
       'pkg/out/mismatch.d.ts': 'export declare function a(): void;\nexport declare function extra(): void;\n',
       'pkg/out/equals.d.ts': 'declare function main(): void;\nexport = main;\n',
       'pkg/out/local.d.ts': 'declare function a(): void;\nexport { a as renamed };\nexport import Alias = Space.Inner;\ndeclare namespace Space { const Inner = 1; }\n',
-      'pkg/out/cjs.d.ts': 'export function foo(): number;\nexport const bar: 2;\nexport const baz: 3;\nexport type Point = { x: number };\nexport type Visit = (n: number) => any;\n',
-      'pkg/out/object.d.ts': 'export function a(): void;\nexport declare let b: number;\nexport function c(): void;\n',
       // 해석하지 못한 bare export *는 소스에도 같은 지정자가 있을 때만 같은 이름을 낸다고 본다.
       'pkg/out/bare.d.ts': 'export * from "@not-installed/shared";\nexport declare function own(): void;\n',
       // 해석하지 못한 상대 export *는 이름을 확정하지 못하므로 잇지 않는다.
@@ -463,9 +458,6 @@ test('mapper: outDir/rootDir 경로의 소스가 선언 export 이름을 모두 
     const mapper = new DeclarationOutputMapper(root, [config], scanned);
     for (const name of ['match', 'equals', 'local', 'bare']) {
       assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.ts`) }, name);
-    }
-    for (const name of ['cjs', 'object']) {
-      assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.js`) }, name);
     }
     for (const name of ['mismatch', 'missing', 'otherbare']) {
       assert.deepEqual(mapper.match(join(root, `pkg/out/${name}.d.ts`)), { kind: 'unmapped', exportMismatch: true }, name);
@@ -529,6 +521,80 @@ test('outDir lib의 선언 이름이 맞지 않으면 같은 이름 빌드 출�
     assert.match(line, /^graph-config: declaration-outputs: 1 import\(s\)/u);
     assert.match(line, exportMismatchClause(1));
     assert.match(line, /files: \["lib\/index\.d\.ts"\]/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * CommonJS 소스 모양과 실제 tsc 5.9 선언 emit(`declaration`·`allowJs`)이다. 선언 이름은 checker가 정해 최상위 구문만 보는 표에는
+ * 없다. 모두 소스로 이어야 한다.
+ */
+const commonJsShapes: Readonly<Record<string, readonly [source: string, declaration: string]>> = {
+  objectAlias: ['function helper() { return 1; }\nconst api = { helper };\nmodule.exports = api;\n', 'export function helper(): number;\n'],
+  factoryCall: ['function helper() { return 1; }\nfunction create() { return { helper }; }\nmodule.exports = create();\n',
+    'export function helper(): number;\n'],
+  propertyAlias: ['function helper() { return 1; }\nconst api = {};\napi.helper = helper;\nmodule.exports = api;\n',
+    'export function helper(): number;\n'],
+  chainedVar: ['var helper = exports.helper = function () { return 1; };\n', 'export function helper(): number;\n'],
+  insideIf: ['function helper() { return 1; }\nif (typeof globalThis === "object") { exports.helper = helper; }\n',
+    'export function helper(): number;\n'],
+  insideTry: ['function helper() { return 1; }\ntry { exports.helper = helper; } catch (error) { }\n', 'export function helper(): number;\n'],
+  insideIife: ['(function () {\n  function helper() { return 1; }\n  exports.helper = helper;\n})();\n', 'export function helper(): number;\n'],
+  selfAlias: ['function helper() { return 1; }\nconst self = module.exports;\nself.helper = helper;\n', 'export function helper(): number;\n'],
+  voidExpression: ['function helper() { return 1; }\nvoid (exports.helper = helper);\n', 'export function helper(): number;\n'],
+  conditionalRequire: ['if (typeof globalThis === "object") {\n  module.exports = require("./prod");\n} else {\n  module.exports = require("./dev");\n}\n',
+    'declare const _exports: typeof import("./prod") | typeof import("./dev");\nexport = _exports;\n'],
+  typedefInDeclarationList: ['function helper() { return 1; }\nconst x = 1, /** @typedef {{ v: number }} Shape */ y = 2;\nexports.helper = helper;\n',
+    'export type Shape = {\n    v: number;\n};\nexport function helper(): number;\n'],
+};
+
+test('mapper: JavaScript 소스는 export 이름을 대조하지 않고 outDir/rootDir로 잇는다(CommonJS 모양)', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-commonjs-')));
+  try {
+    const entries = Object.entries(commonJsShapes);
+    const scanned = writeFiles(root, Object.fromEntries(entries.map(([name, [source]]) => [`pkg/src/${name}.js`, source])));
+    writeFiles(root, Object.fromEntries(entries.map(([name, [, declaration]]) => [`pkg/dist/${name}.d.ts`, declaration])));
+    const config = { path: join(root, 'pkg/tsconfig.json'),
+      options: { declaration: true, allowJs: true, outDir: join(root, 'pkg/dist'), rootDir: join(root, 'pkg/src') }, fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    for (const [name] of entries) {
+      assert.deepEqual(mapper.match(join(root, `pkg/dist/${name}.d.ts`)), { kind: 'source', fileName: join(root, `pkg/src/${name}.js`) }, name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const name of ['objectAlias', 'factoryCall', 'insideIf', 'insideTry', 'insideIife'] as const) {
+  test(`CommonJS 소스(${name})로 가는 outDir/rootDir 간선을 이름 대조로 잃지 않는다`, async () => {
+    const [source, declaration] = commonJsShapes[name]!;
+    const root = createSelfReferencingPackage('dist', { 'src/index.js': source, 'dist/index.d.ts': declaration }, ', "allowJs": true');
+    try {
+      const graph = await buildCallGraph(root, createNodeFileSystem());
+      const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+      assert.deepEqual(calls.map((edge) => edge.to), ['src/index.js#helper'], JSON.stringify(calls));
+      assert.equal(declarationOutputLimitation(graph), undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('TypeScript 소스가 export *로 CommonJS 모듈을 다시 내보내도 그 이름 때문에 잇지 않는 일은 없다', async () => {
+  // tsc는 src/legacy.js에서 dist/legacy.d.ts의 helper를 checker로 읽어 낸다. 소스 쪽 export *가 닿은 JavaScript는 대조를 끈다.
+  const root = createSelfReferencingPackage('dist', {
+    'src/index.ts': 'export * from "./legacy";\nexport function own() { return 2; }\n',
+    'src/legacy.js': commonJsShapes.chainedVar![0],
+    'src/app.ts': 'import { own } from "pkg";\nexport function main() { return own(); }\n',
+    'dist/index.d.ts': 'export * from "./legacy";\nexport declare function own(): number;\n',
+    'dist/legacy.d.ts': commonJsShapes.chainedVar![1],
+  }, ', "allowJs": true');
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+    assert.deepEqual(calls.map((edge) => `${edge.to}:${edge.evidence}`), ['src/index.ts#own:direct'], JSON.stringify(calls));
+    assert.equal(declarationOutputLimitation(graph), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -7,7 +7,8 @@
  *
  * 1. declaration map(`*.d.ts.map`)의 단일 `sources` 항목
  * 2. 산출물을 낸 설정의 `declarationDir`/`outDir` ↔ `rootDir`(composite면 설정 디렉터리, 아니면 공통 소스 디렉터리) 역매핑.
- *    배치만 보는 추론이라 선언의 export 이름이 모두 그 소스에도 있을 때만 잇는다(`declaration-exports.ts`).
+ *    배치만 보는 추론이라 선언의 export 이름이 모두 그 소스에도 있을 때만 잇는다(`declaration-exports.ts`). 소스 폐쇄에
+ *    JavaScript 모듈이 있으면 export 이름을 checker가 정하므로 대조하지 않는다.
  * 3. 같은 디렉터리·같은 이름의 JavaScript 구현(손으로 쓴 `legacy.d.ts` + `legacy.js`)
  *
  * 1과 3은 export 이름을 대조하지 않는다. declaration map은 emit한 도구가 그 선언의 소스를 직접 적은 기록이고, 같은 이름 형제는
