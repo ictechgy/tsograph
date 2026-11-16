@@ -706,3 +706,61 @@ test('같은 import를 모드마다 다르게 해석하면 import 수와 export 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('mapper: 소스 쪽만 4 MiB를 넘어 읽지 못한 생성 모듈을 export *해도 선언이 따라가 읽은 이름 때문에 잇지 않는 일은 없다', () => {
+  // 실제 tsc emit에서 src/generated.ts(4.4 MB)는 읽기 상한을 넘고 dist/generated.d.ts(3.9 MB)는 넘지 않는다. main은 잇는다.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-unread-source-')));
+  try {
+    const scanned = writeFiles(root, {
+      'pkg/src/index.ts': 'export * from "./generated";\nexport function helper() { return 1; }\n',
+      'pkg/src/generated.ts': `export function generated0() { return 0; }\n${'/'.repeat(4 * 1024 * 1024 + 1)}\n`,
+    });
+    writeFiles(root, {
+      'pkg/out/index.d.ts': 'export * from "./generated";\nexport declare function helper(): number;\n',
+      'pkg/out/generated.d.ts': 'export declare function generated0(): number;\n',
+    });
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') },
+      fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/index.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/index.ts') });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('체크아웃에 없는 생성 소스를 export *해도 남아 있는 그 선언의 이름 때문에 잇지 않는 일은 없다', async () => {
+  // src/generated.ts는 빌드 때 만들어지고 커밋되지 않았지만 dist/generated.d.ts는 남아 있다. 소스 쪽 재내보내기는 해석하지 못한다.
+  const root = createSelfReferencingPackage('dist', {
+    'src/index.ts': 'export * from "./generated";\nexport function helper() { return 1; }\n',
+    'dist/index.d.ts': 'export * from "./generated";\nexport declare function helper(): number;\n',
+    'dist/generated.d.ts': 'export declare function generated0(): number;\n',
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const calls = graph.edges.filter((edge) => edge.from === selfCallerId);
+    assert.deepEqual(calls.map((edge) => `${edge.to}:${edge.evidence}`), ['src/index.ts#helper:direct'], JSON.stringify(calls));
+    assert.equal(declarationOutputLimitation(graph), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mapper: 프로젝트 안 barrel이 1,024개 파일을 넘어도 같은 배치면 잇고, 예산 밖 위치가 소스에 없으면 잇지 않는다', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-budget-')));
+  try {
+    const stars = (count: number) => Array.from({ length: count }, (_, index) => `export * from "./barrel/m${index}";`).join('\n');
+    const modules = (side: 'src' | 'out') => Object.fromEntries(Array.from({ length: 1100 }, (_, index) => side === 'src'
+      ? [`pkg/src/barrel/m${index}.ts`, `export function m${index}() { return ${index}; }\n`]
+      : [`pkg/out/barrel/m${index}.d.ts`, `export declare function m${index}(): number;\n`]));
+    const scanned = writeFiles(root, { ...modules('src'), 'pkg/src/same.ts': `${stars(1100)}\n`, 'pkg/src/narrow.ts': `${stars(1000)}\n` });
+    // 선언 쪽 narrow는 소스에 없는 m1000~m1099를 다시 내보낸다. 그 위치는 예산(1,024개 파일) 밖이라 이름은 읽지 않았다.
+    writeFiles(root, { ...modules('out'), 'pkg/out/same.d.ts': `${stars(1100)}\n`, 'pkg/out/narrow.d.ts': `${stars(1100)}\n` });
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') },
+      fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/same.d.ts')), { kind: 'source', fileName: join(root, 'pkg/src/same.ts') });
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/narrow.d.ts')), { kind: 'unmapped', exportMismatch: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

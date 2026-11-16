@@ -14,10 +14,14 @@
  * 같은 지정자는 같은 재내보내기다. 해석하지 못한 대상(tsc가 `outDir`로 복사하지 않는 손으로 쓴 `src/types.d.ts` 등), 읽지 못한
  * 대상, JavaScript 대상은 소스에도 같은 위치의 같은 지정자가 있을 때만 상쇄한다. `node_modules`나 프로젝트 밖으로 해석한 대상은
  * 패키지 폐쇄(4 MiB 넘는 생성 선언, 깨진 상대 재내보내기, 예산을 넘는 barrel)를 읽지 않고 해석한 파일 경로를 불투명한 표지로
- * 비교한다(같은 지정자도 같다고 본다).
+ * 비교한다(같은 지정자도 같다고 본다). 표 하나가 1,024개 파일을 넘으면 남은 `export *` 대상도 위치로만 남긴다.
  *
- * 선언 이름 표를 확정하지 못하면(선언 파일 읽기·구문 실패, 파일 예산 초과) 맞는다고 증명하지 못한 것이므로 호출자는 잇지 않고
- * limitation으로 센다. 같은 이름을 내보내는 다른 구현은 이름만으로 구별하지 못한다.
+ * 이름을 읽지 못한 재내보내기는 소스 쪽에도 생긴다(4 MiB를 넘는 생성 소스와 4 MiB 안의 그 선언, 체크아웃에 없는 생성 소스와 남아 있는
+ * 선언). 그 대상의 이름은 소스 표에 없으므로, 소스 쪽에 해석·읽기에 실패했거나 예산 밖인 프로젝트 안 `export *`가 있으면 위치 비교만
+ * 하고 이름은 대조하지 않는다(외부 대상은 양쪽 모두 읽지 않으므로 해당하지 않는다).
+ *
+ * 선언 이름 표를 확정하지 못하면(선언 파일 읽기·구문 실패) 맞는다고 증명하지 못한 것이므로 호출자는 잇지 않고 limitation으로 센다.
+ * 같은 이름을 내보내는 다른 구현은 이름만으로 구별하지 못한다.
  *
  * JavaScript 모듈의 export 이름은 구문으로 정하지 않는다. tsc는 CommonJS 내보내기와 JSDoc 타입을 checker로 읽어
  * (`const api = { helper }; module.exports = api`의 `helper`, `var x = exports.x = …`, `if`·`try`·함수 안의 `exports.x`, 조건부
@@ -33,7 +37,7 @@ import { readBoundedConfigText } from './bounded-config-reader.ts';
 import { MAX_SOURCE_BYTES } from '../schema/project-reader.ts';
 import { parseWithinSyntaxDepth, TOO_DEEP } from '../schema/syntax-depth.ts';
 
-/** export 이름 표 하나가 `export *`로 따라가 읽는 최대 파일 수다. 큰 barrel 패키지도 담되 끝없는 폐쇄는 막는다. */
+/** export 이름 표 하나가 `export *`로 따라가 읽는 최대 파일 수다. 큰 barrel 패키지도 담되 끝없는 폐쇄는 막고, 넘는 대상은 위치로 비교한다. */
 const MAX_EXPORT_TABLE_FILES = 1024;
 
 /** `export =`(CommonJS 내보내기 할당)를 나타내는 이름이다. 식별자가 될 수 없는 문자열이라 실제 이름과 겹치지 않는다. */
@@ -42,15 +46,24 @@ const EXPORT_EQUALS = 'export=';
 /** `export *`가 옮기지 않는 이름이다(ES module 규칙의 `default`, 그리고 `export =`). */
 const NOT_STAR_EXPORTED: ReadonlySet<string> = new Set(['default', EXPORT_EQUALS]);
 
-/** 상대·절대 지정자 `export *`의 위치 키 접두사다. 뒤는 지정자가 가리키는 절대 경로(쓴 그대로, 확장자 보정 없음)다. */
+/**
+ * 상대 지정자(`./`·`../`) `export *`의 위치 키 접두사다. 뒤는 지정자가 가리키는 절대 경로(쓴 그대로, 확장자 보정 없음)이고, 비교할 때
+ * 선언 루트 기준 상대 위치를 소스 루트 기준으로 옮긴다.
+ */
 const PATH_STAR_KEY = 'path:';
 
 /** bare 지정자 `export *`의 위치 키 접두사다. 같은 패키지 안의 같은 bare 지정자는 같은 모듈이다. */
 const PACKAGE_STAR_KEY = 'package:';
 
+/**
+ * 절대 경로 지정자 `export *`의 위치 키 접두사다. tsc는 절대 지정자도 쓴 그대로 옮기므로 선언과 소스에서 같은 파일을 가리킨다. 그래서
+ * 상대 키처럼 `outDir`↔`rootDir`로 옮기지 않고 지정자 그대로 비교한다(옮기면 두 루트 깊이가 다를 때 다른 경로가 된다).
+ */
+const ABSOLUTE_STAR_KEY = 'absolute:';
+
 /** 해석까지 마친 `export *` 하나다. */
 interface StarExport {
-  /** 표끼리 비교하는 위치 키({@link PATH_STAR_KEY}·{@link PACKAGE_STAR_KEY})다. */
+  /** 표끼리 비교하는 위치 키({@link PATH_STAR_KEY}·{@link PACKAGE_STAR_KEY}·{@link ABSOLUTE_STAR_KEY})다. */
   readonly key: string;
   /** 따라가 이름을 읽을 프로젝트 안 대상 파일이다. */
   readonly local?: string;
@@ -76,12 +89,15 @@ export interface ExportTable {
   readonly starKeys: ReadonlySet<string>;
   /**
    * 이름을 읽지 않은 `export *`의 위치 키와, 외부로 해석했다면 그 대상 경로다. 해석하지 못한 대상, 읽지 못한 대상,
-   * JavaScript 대상, 외부 대상이 들어간다.
+   * JavaScript 대상, 파일 예산 밖 대상, 외부 대상이 들어간다.
    */
   readonly opaqueStars: ReadonlyMap<string, string | undefined>;
   /** 따라가지 않은 외부 `export *` 대상 경로다. */
   readonly externalTargets: ReadonlySet<string>;
-  /** 이름을 모두 확정했는지다. 표 루트 파일을 읽지 못했거나 구문 깊이를 넘었거나 파일 예산을 넘으면 false다. */
+  /**
+   * 표 루트 파일의 이름을 읽었는지다. 표 루트 파일을 읽지 못했거나 구문 깊이를 넘으면 false다. 읽지 못한 `export *` 대상과 파일 예산
+   * 밖 대상은 {@link opaqueStars}에 위치로 남는다.
+   */
   readonly complete: boolean;
   /**
    * 폐쇄(자신 또는 `export *` 대상)에 JavaScript 모듈이 있는지다. 그 export 이름은 tsc가 checker로 정해 구문 표가 빠뜨리므로,
@@ -112,8 +128,9 @@ interface TableDraft {
 
 /**
  * 선언의 export 이름이 소스 export 이름과 맞는지 판정한다. 소스 폐쇄에 JavaScript 모듈이 있으면 이름을 구문으로 다 알 수 없으므로
- * 대조하지 않고 맞는다고 본다. 그 밖에는 선언 이름 표를 확정했고, 이름을 읽지 않은 선언의 `export *`마다 소스에 같은 위치의
- * 같은 지정자나 같은 외부 대상이 있고, 선언의 모든 이름이 소스에 있을 때만 맞는다고 본다.
+ * 대조하지 않고 맞는다고 본다. 그 밖에는 선언 루트 파일을 읽었고, 이름을 읽지 않은 선언의 `export *`마다 소스에 같은 위치의
+ * 같은 지정자나 같은 외부 대상이 있어야 한다. 소스 쪽에 이름을 읽지 못한 프로젝트 안 `export *`가 있으면 거기까지만 보고 맞는다고
+ * 보며, 없으면 선언의 모든 이름이 소스에 있을 때만 맞는다고 본다.
  *
  * @param declaration 선언 산출물의 이름 표
  * @param source 역매핑한 소스의 이름 표
@@ -126,8 +143,22 @@ export function declarationExportsCovered(declaration: ExportTable, source: Expo
     const sameSpecifier = source.starKeys.has(sourceFrameKey(key, declaration.directory, source.directory));
     if (!sameSpecifier && (external === undefined || !source.externalTargets.has(external))) return false;
   }
+  if (hasUnreadProjectStar(source)) return true;
   for (const name of declaration.names) if (!source.names.has(name)) return false;
   return true;
+}
+
+/**
+ * 표에 이름을 읽지 못한 프로젝트 안 `export *`(해석·읽기 실패, JavaScript, 파일 예산 밖)가 있는지 본다. 소스 쪽에서 그 대상의 이름은
+ * 표에 없으므로, 선언 쪽이 같은 위치에서 따라가 읽은 이름과 대조하면 맞는 소스를 틀렸다고 판정한다. 외부 대상은 양쪽 모두 읽지 않으므로
+ * 세지 않는다.
+ *
+ * @param table 이름 표
+ * @returns 그런 재내보내기가 있으면 true
+ */
+function hasUnreadProjectStar(table: ExportTable): boolean {
+  for (const external of table.opaqueStars.values()) if (external === undefined) return true;
+  return false;
 }
 
 /**
@@ -188,7 +219,7 @@ export class ExportTableReader {
       const { file, key } = queue[index]!;
       if (visited.has(file)) continue;
       if (visited.size >= MAX_EXPORT_TABLE_FILES) {
-        table.complete = false;
+        recordUnvisitedStars(table, queue.slice(index), visited);
         break;
       }
       visited.add(file);
@@ -260,7 +291,7 @@ export class ExportTableReader {
    * @returns 위치 키와 대상
    */
   #resolveStar(specifier: string, containingFile: string, options: ts.CompilerOptions, mode: ts.ResolutionMode): StarExport {
-    const key = isRelativeSpecifier(specifier) ? PATH_STAR_KEY + resolve(dirname(containingFile), specifier) : PACKAGE_STAR_KEY + specifier;
+    const key = starKey(specifier, containingFile);
     const resolution = this.#resolution(options);
     const resolved = ts.resolveModuleName(specifier, containingFile, resolution.options, this.#host, resolution.cache, undefined, mode).resolvedModule;
     if (resolved === undefined) return { key };
@@ -307,6 +338,34 @@ function recordUnreadModule(table: TableDraft, local: LocalExports | undefined, 
   if (!table.opaqueStars.has(key)) table.opaqueStars.set(key, undefined);
 }
 
+/**
+ * 파일 예산을 넘어 읽지 않은 `export *` 대상을 위치로만 남긴다. 선언 쪽에서는 소스의 같은 위치와 비교하고, 소스 쪽에서는 이름을 읽지
+ * 못한 재내보내기라 이름 대조를 끈다. 그래서 양쪽의 큰 barrel이 같은 배치면 예산과 무관하게 맞는다.
+ *
+ * @param table 채우는 표
+ * @param pending 아직 방문하지 않은 대기열 항목
+ * @param visited 이미 읽은 파일
+ */
+function recordUnvisitedStars(table: TableDraft, pending: readonly { readonly file: string; readonly key?: string }[],
+  visited: ReadonlySet<string>): void {
+  for (const { file, key } of pending) {
+    if (key !== undefined && !visited.has(file) && !table.opaqueStars.has(key)) table.opaqueStars.set(key, undefined);
+  }
+}
+
+/**
+ * `export *` 지정자의 위치 키를 만든다. 상대 지정자는 지정자를 쓴 파일 기준으로 가리키는 경로, 절대 지정자와 bare 지정자는 지정자
+ * 그대로다.
+ *
+ * @param specifier 지정자
+ * @param containingFile 지정자를 쓴 파일
+ * @returns 위치 키
+ */
+function starKey(specifier: string, containingFile: string): string {
+  if (isRelativeSpecifier(specifier)) return PATH_STAR_KEY + resolve(dirname(containingFile), specifier);
+  return (isAbsolute(specifier) ? ABSOLUTE_STAR_KEY : PACKAGE_STAR_KEY) + specifier;
+}
+
 /** `path`가 `directory` 안(자신 제외)인지 본다. */
 function isWithin(directory: string, path: string): boolean {
   const offset = relative(directory, path);
@@ -319,9 +378,9 @@ function readBoundedSource(fileName: string): string | undefined {
   return read.ok ? read.text : undefined;
 }
 
-/** 상대·절대 경로 지정자인지 본다. 그런 지정자의 위치 키는 지정자를 쓴 파일 기준으로 가리키는 경로다. */
+/** 상대 경로 지정자인지 본다. 그런 지정자의 위치 키는 지정자를 쓴 파일 기준으로 가리키는 경로다. */
 function isRelativeSpecifier(specifier: string): boolean {
-  return specifier.startsWith('./') || specifier.startsWith('../') || specifier === '.' || specifier === '..' || isAbsolute(specifier);
+  return specifier.startsWith('./') || specifier.startsWith('../') || specifier === '.' || specifier === '..';
 }
 
 /** 확장자로 파싱 종류를 고른다. 스크립트가 아닌 파일(JSON 등)은 undefined다. */

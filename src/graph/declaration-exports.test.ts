@@ -159,7 +159,8 @@ test('표 루트를 읽지 못하거나 구문 깊이를 넘으면 표를 확정
       { names: [], opaque: ['path:data.json'], complete: true });
     assert.deepEqual(plain(reader.table(join(root, 'nested.ts'), options)), { names: ['kept'], opaque: ['path:deep'], complete: true });
     assert.deepEqual(plain(reader.table(join(root, 'relative.ts'), options)), { names: ['kept'], opaque: ['path:../outside-missing'], complete: true });
-    assert.deepEqual([...reader.table(join(root, 'absolute.ts'), options).opaqueStars.keys()], ['path:/definitely/missing/module']);
+    // 절대 지정자는 위치를 옮기지 않고 지정자 그대로 비교한다.
+    assert.deepEqual([...reader.table(join(root, 'absolute.ts'), options).opaqueStars.keys()], ['absolute:/definitely/missing/module']);
     assert.deepEqual(plain(reader.table(join(root, 'bare.ts'), options)), { names: [], opaque: ['package:@not-installed/pkg'], complete: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -185,16 +186,17 @@ test('node_modules·프로젝트 밖 export * 대상은 따라가지 않고 해�
   }
 });
 
-test('export * 폐쇄가 1,024개 파일을 넘으면 표를 확정하지 않는다', () => {
+test('export * 폐쇄가 1,024개 파일을 넘으면 남은 대상을 읽지 않고 위치로만 남긴다', () => {
   const files: Record<string, string> = {};
   for (let index = 0; index <= 1024; index++) files[`chain/m${index}.d.ts`] = `export * from "./m${index + 1}";\nexport declare const v${index}: number;\n`;
   files['chain/m1025.d.ts'] = 'export declare const last: number;\n';
   const root = createProject(files);
   try {
     const table = new ExportTableReader(root).table(join(root, 'chain/m0.d.ts'), options);
-    assert.equal(table.complete, false);
+    assert.equal(table.complete, true);
     assert.equal(table.names.has('v1023'), true);
-    assert.equal(table.names.has('last'), false);
+    assert.equal(table.names.has('v1024'), false);
+    assert.deepEqual(plain(table).opaque, ['path:m1024']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -249,4 +251,26 @@ test('판정: 이름을 읽지 않은 선언 export *는 소스의 같은 위치
     table(['own'], { opaque: { 'package:pkg': external }, externals: [external] })), true);
   assert.equal(declarationExportsCovered(declaration({ 'package:pkg/index.js': external }),
     table(['own'], { opaque: { 'package:pkg': '/project/node_modules/pkg/other.d.ts' }, externals: ['/project/node_modules/pkg/other.d.ts'] })), false);
+});
+
+test('판정: 소스 쪽에 이름을 읽지 못한 프로젝트 안 export *가 있으면 위치만 비교하고 이름은 대조하지 않는다', () => {
+  // 4 MiB를 넘는 생성 소스(또는 체크아웃에 없는 생성 소스)는 소스 쪽에서 읽지 못했고, 4 MiB 안의 그 선언은 선언 쪽에서 따라가 읽었다.
+  const declaration = (opaque: Readonly<Record<string, string | undefined>> = {}) =>
+    table(['helper', 'generated0'], { directory: '/project/dist', starKeys: ['path:/project/dist/generated'], opaque });
+  const unreadSource = table(['helper'], { opaque: { 'path:/project/src/generated': undefined } });
+  assert.equal(declarationExportsCovered(declaration(), unreadSource), true);
+  // 위치 비교는 그대로 한다(소스에 없는 재내보내기는 이 소스에서 나온 선언이 아니라는 증거다).
+  assert.equal(declarationExportsCovered(declaration({ 'path:/project/dist/stray': undefined }), unreadSource), false);
+  // 외부 대상은 양쪽 모두 읽지 않으므로 이름 대조를 끄지 않는다.
+  const external = '/project/node_modules/dep/index.d.ts';
+  assert.equal(declarationExportsCovered(declaration(), table(['helper'], { opaque: { 'package:dep': external }, externals: [external] })), false);
+  // 선언 루트를 읽지 못한 표는 여전히 맞다고 보지 않는다.
+  assert.equal(declarationExportsCovered(table([], { complete: false }), unreadSource), false);
+});
+
+test('판정: 절대 지정자 위치 키는 outDir↔rootDir로 옮기지 않는다', () => {
+  // 선언 루트와 소스 루트의 깊이가 달라도(declarationDir types/esm, rootDir src) 같은 절대 지정자는 같은 재내보내기다.
+  const declaration = table(['own'], { directory: '/project/types/esm', opaque: { 'absolute:/shared/types': undefined } });
+  assert.equal(declarationExportsCovered(declaration, table(['own'], { starKeys: ['absolute:/shared/types'] })), true);
+  assert.equal(declarationExportsCovered(declaration, table(['own'], { starKeys: ['absolute:/shared/other'] })), false);
 });
