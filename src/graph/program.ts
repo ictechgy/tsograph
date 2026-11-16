@@ -88,6 +88,11 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
    */
   readonly declarationOutputImports?: number;
   readonly declarationOutputFiles?: readonly string[];
+  /**
+   * {@link declarationOutputImports} 중 `declarationDir`/`outDir` ↔ `rootDir` 경로의 소스가 선언의 export 이름을 모두 내보내지 않거나
+   * 이름을 확정하지 못해 잇지 않은 import 수다(번들러가 산출물 디렉터리를 다른 배치로 덮어쓴 경우 등).
+   */
+  readonly declarationOutputExportMismatches?: number;
   /** 읽은 설정 파일 이름(`tsconfig.json`·`jsconfig.json`) 또는 undefined(기본값 사용) */
   readonly configName: string | undefined;
   /** 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). */
@@ -187,12 +192,16 @@ export function createGraphProgram(
   const boundaryImports = new Set<string>();
   const boundaryTargets = new Map<string, string>();
   // workspace 패키지의 `exports.types`가 가리키는 빌드 산출물은 근거가 있을 때만 같은 패키지 소스로 되짚는다.
-  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다.
-  const declarationOutputs = new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
-  const unmappedDeclarationOutputs = new Map<string, string>();
+  // 되짚은 소스에도 아래 문맥 경계 검사를 그대로 적용한다. 판정은 계획(설정·스캔 파일)에만 달려 있어 문맥들이 같은 mapper를 쓴다.
+  const declarationOutputs = context?.declarationOutputs
+    ?? new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
+  // import 키(파일·지정자)별 마지막 미해결 판정이다. 같은 키를 모드마다 다시 해석해도 import 수와 export 불일치 내역이 같은 판정을 센다.
+  const unmappedDeclarationOutputs = new Map<string, { readonly path: string; readonly exportMismatch: boolean }>();
   const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
     const match = declarationOutputs.match(resolved.resolvedFileName);
-    if (match.kind === 'unmapped') unmappedDeclarationOutputs.set(importKey, resolve(resolved.resolvedFileName));
+    if (match.kind === 'unmapped') {
+      unmappedDeclarationOutputs.set(importKey, { path: resolve(resolved.resolvedFileName), exportMismatch: match.exportMismatch === true });
+    }
     if (match.kind !== 'source') return resolved;
     return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
       isExternalLibraryImport: false, resolvedUsingTsExtension: false };
@@ -267,6 +276,8 @@ export function createGraphProgram(
     const sources = new Set(sourcePaths.map((path) => resolve(path)));
     const deeplyNestedSources = new Set([...deeplyNested].filter((path) => sources.has(path)));
     const otherDeeplyNested = deeplyNested.size - deeplyNestedSources.size;
+    const unmappedOutputs = [...unmappedDeclarationOutputs.values()];
+    const exportMismatches = unmappedOutputs.filter((output) => output.exportMismatch).length;
     return {
       program, checker, deeplyNestedSources, excludedSources,
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
@@ -279,9 +290,10 @@ export function createGraphProgram(
           ...(context.compactDocumentation ? { compactDocumentation: true } : {}) }),
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
         ...(heldByIncomplete.size > 0 ? { configOwnershipBlockedSources: heldByIncomplete.size } : {}),
-        ...(unmappedDeclarationOutputs.size > 0 ? { declarationOutputImports: unmappedDeclarationOutputs.size,
-          declarationOutputFiles: [...new Set(unmappedDeclarationOutputs.values())]
+        ...(unmappedOutputs.length > 0 ? { declarationOutputImports: unmappedOutputs.length,
+          declarationOutputFiles: [...new Set(unmappedOutputs.map((output) => output.path))]
             .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+        ...(exportMismatches > 0 ? { declarationOutputExportMismatches: exportMismatches } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
@@ -329,6 +341,11 @@ interface CompilerContext {
   readonly ownedSources: ReadonlySet<string>;
   readonly count: number;
   readonly compactDocumentation: boolean;
+  /**
+   * 문맥 분리 판정과 모든 문맥이 함께 쓰는 선언 산출물 역매핑이다. 판정은 계획의 설정·스캔 파일에만 달려 있으므로 문맥마다
+   * 다시 만들면 같은 export 이름 폐쇄를 문맥 수만큼 다시 파싱·해석할 뿐이다.
+   */
+  readonly declarationOutputs: DeclarationOutputMapper;
 }
 
 /** 같은 타입 의미는 한 checker를 쓰고, 다른 의미는 순차 Program으로 분리해 Node/Symbol을 교환하지 않는다. */
@@ -351,7 +368,7 @@ export function* createGraphPrograms(root: string, sourcePaths: readonly string[
   // 오류를 보존하는 JSDoc 모드로 문서 전용 AST의 보유 비용을 줄인다.
   const compactDocumentation = groups.size > 16 || (groups.size > 1 && groups.size * entries.candidates.length > 200_000);
   for (const group of groups.values()) yield createGraphProgram(root, sourcePaths, ts.createProgram, explicitConfig, boundary,
-    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, compactDocumentation });
+    { entries, keys, config: group.config, ownedSources: group.sources, count: groups.size, compactDocumentation, declarationOutputs });
 }
 
 /** 같은 옵션이라도 global/ambient source universe가 다르면 checker를 합치지 않는다.
@@ -670,7 +687,11 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
   if ((status.declarationOutputImports ?? 0) > 0) {
     gaps.push(`declaration-outputs: ${status.declarationOutputImports} import(s) resolve to declaration files inside the project that the scan does not `
       + `analyze as sources (for example build output) and could not be mapped to a scanned source through a declaration map, `
-      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation; calls through them are counted as external and ${affected} `
+      + `declarationDir/outDir and rootDir, or a sibling JavaScript implementation`
+      + ((status.declarationOutputExportMismatches ?? 0) > 0 ? `; ${status.declarationOutputExportMismatches} of them reach a source through `
+        + `declarationDir/outDir and rootDir that does not export every name the declaration exports (or whose names could not be compared), `
+        + `so the declaration is not assumed to be emitted from it` : '')
+      + `; calls through them are counted as external and ${affected} `
       + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
   }
   if ((status.skippedLoaderEntries ?? 0) > 0) gaps.push(`source-scope: ${status.skippedLoaderEntries} PnP loader file(s) were excluded from source entries; loaders are never executed`);

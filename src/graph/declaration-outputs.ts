@@ -6,8 +6,15 @@
  * 정한다(추측하지 않는다).
  *
  * 1. declaration map(`*.d.ts.map`)의 단일 `sources` 항목
- * 2. 산출물을 낸 설정의 `declarationDir`/`outDir` ↔ `rootDir`(composite면 설정 디렉터리, 아니면 공통 소스 디렉터리) 역매핑
+ * 2. 산출물을 낸 설정의 `declarationDir`/`outDir` ↔ `rootDir`(composite면 설정 디렉터리, 아니면 공통 소스 디렉터리) 역매핑.
+ *    배치만 보는 추론이라 선언의 export 이름이 모두 그 소스에도 있을 때만 잇는다(`declaration-exports.ts`). 소스 폐쇄에
+ *    JavaScript 모듈이 있으면 export 이름을 checker가 정하므로 대조하지 않는다.
  * 3. 같은 디렉터리·같은 이름의 JavaScript 구현(손으로 쓴 `legacy.d.ts` + `legacy.js`)
+ *
+ * 1과 3은 export 이름을 대조하지 않는다. declaration map은 emit한 도구가 그 선언의 소스를 직접 적은 기록이고, 같은 이름 형제는
+ * TypeScript 자신이 `x.d.ts`를 `x.js`의 타입으로 짝짓는 규칙이다. 손으로 쓴 선언과 CommonJS 구현은 구문 이름 표로 다 읽지 못해
+ * 대조하면 맞는 간선까지 잃는다. 배치만 보고 출처를 가정하는 2만 번들러 덮어쓰기에 틀린다. 2가 소스를 하나 찾았는데 이름이 맞지
+ * 않으면 3으로 넘어가지 않는다. 산출물 루트 안의 같은 이름 `.js`는 빌드 출력이기 때문이다.
  *
  * 되짚은 소스가 이 스캔의 소스일 때만 잇는다. 근거가 없거나 스캔 밖 소스를 가리키면 잇지 않고 호출자가 limitation으로 센다.
  * 걷기가 일부러 뺀 생성 출력(Prisma client 등)과 점 디렉터리(`.nuxt` 같은 프레임워크 생성 타입)의 선언은 빌드 산출물이 아니라
@@ -20,6 +27,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type ts from 'typescript';
 
 import { readBoundedConfigText } from './bounded-config-reader.ts';
+import { declarationExportsCovered, ExportTableReader } from './declaration-exports.ts';
 
 /** declaration map 하나에 허용하는 최대 byte 수다. 산출물 메타데이터라 작다. */
 const MAX_DECLARATION_MAP_BYTES = 1024 * 1024;
@@ -35,8 +43,11 @@ const SOURCE_EXTENSIONS: readonly (readonly [suffix: string, typeScript: readonl
 export type DeclarationOutputMatch =
   /** 스캔한 소스 하나로 되짚었다. */
   | { readonly kind: 'source'; readonly fileName: string }
-  /** 프로젝트 안 산출물이지만 스캔한 소스로 되짚을 근거가 없다. */
-  | { readonly kind: 'unmapped' }
+  /**
+   * 프로젝트 안 산출물이지만 스캔한 소스로 되짚을 근거가 없다. `exportMismatch`는 `outDir`/`rootDir` 경로의 소스가 선언의
+   * export 이름을 모두 내보내지 않거나 이름을 확정하지 못해 잇지 않았다는 뜻이다.
+   */
+  | { readonly kind: 'unmapped'; readonly exportMismatch?: true }
   /** 프로젝트 밖·의존성 선언이거나 프로젝트가 직접 쓴 선언이라 산출물로 보지 않는다. */
   | { readonly kind: 'not-output' };
 
@@ -47,10 +58,11 @@ export interface DeclarationOutputConfig {
   readonly fileNames: readonly string[];
 }
 
-/** 산출물 디렉터리와 그 산출물을 낸 소스 디렉터리 한 쌍이다. */
+/** 산출물 디렉터리와 그 산출물을 낸 소스 디렉터리 한 쌍, 그리고 export 이름을 읽을 때 쓸 그 설정의 옵션이다. */
 interface OutputRoot {
   readonly outputDirectory: string;
   readonly sourceDirectory: string;
+  readonly options: ts.CompilerOptions;
 }
 
 /** 선언 산출물을 스캔한 소스로 되짚는다. 같은 파일은 한 번만 판정한다. */
@@ -61,6 +73,7 @@ export class DeclarationOutputMapper {
   readonly #outputRoots: readonly OutputRoot[];
   readonly #excludedDirectories: readonly string[];
   readonly #cache = new Map<string, DeclarationOutputMatch>();
+  readonly #exports: ExportTableReader;
 
   /**
    * @param root 프로젝트 경계 realpath
@@ -71,6 +84,7 @@ export class DeclarationOutputMapper {
   constructor(root: string, configs: readonly DeclarationOutputConfig[], scannedFiles: Iterable<string>,
     excludedDirectories: Iterable<string> = []) {
     this.#root = resolve(root);
+    this.#exports = new ExportTableReader(this.#root);
     const files = [...scannedFiles].map((path) => resolve(path));
     this.#scannedDeclarations = new Set(files.filter(isDeclarationFile));
     this.#scannedSources = new Set(files.filter((path) => !isDeclarationFile(path)));
@@ -100,12 +114,31 @@ export class DeclarationOutputMapper {
     if (absolute === undefined || this.#isGeneratedDeclaration(absolute)) return { kind: 'not-output' };
     const fromMap = this.#fromDeclarationMap(absolute);
     if (fromMap !== undefined) return fromMap;
-    const fromOutput = uniqueSource(this.#outputRoots.flatMap((root) => this.#fromOutputRoot(absolute, root)));
-    if (fromOutput !== undefined) return { kind: 'source', fileName: fromOutput };
+    // export 이름이 맞지 않은 산출물 경로 대응은 같은 이름 JavaScript 형제로 넘어가지 않는다. 선언을 내는 설정의 산출물 루트
+    // (`lib`·`esm`처럼 걷기가 빼지 않는 이름일 수 있다) 안에서 선언 옆 `.js`는 그 설정이나 덮어쓴 번들러의 빌드 출력이라, 그리로 이으면
+    // 간선이 한계 없이 컴파일 결과로 옮겨 간다. 스캔한 선언이어도 조용히 프로젝트 선언으로 돌리지 않고 불일치로 알린다.
+    const fromOutput = this.#fromOutputRoots(absolute);
+    if (fromOutput !== undefined) return fromOutput;
     const sibling = this.#sourceFor(absolute.slice(0, -suffixOf(absolute).length), suffixOf(absolute), true);
     if (sibling !== undefined) return { kind: 'source', fileName: sibling };
     // 프로젝트가 직접 쓰고 스캔한 선언(`src/types.d.ts`)은 그 자체가 프로젝트의 선언이다. 산출물로 세지 않는다.
     return this.#scannedDeclarations.has(absolute) ? { kind: 'not-output' } : { kind: 'unmapped' };
+  }
+
+  /**
+   * 산출물 루트 역매핑으로 소스 하나를 정하고 export 이름을 대조한다. 같은 소스를 가리킨 설정 중 하나라도 선언 이름이 모두
+   * 소스에 있다고 확인하면 잇는다(어느 설정이 냈는지는 모른다). 후보가 없거나 여럿이면 이 근거를 쓰지 않는다.
+   *
+   * @param absolute 선언 파일
+   * @returns 되짚은 소스, export 불일치로 잇지 않은 판정, 또는 이 근거가 없으면 undefined
+   */
+  #fromOutputRoots(absolute: string): DeclarationOutputMatch | undefined {
+    const candidates = this.#outputRoots.flatMap((root) => this.#fromOutputRoot(absolute, root).map((fileName) => ({ fileName, root })));
+    const fileName = uniqueSource(candidates.map((candidate) => candidate.fileName));
+    if (fileName === undefined) return undefined;
+    const covered = candidates.some(({ root }) => declarationExportsCovered(
+      this.#exports.table(absolute, root.options), this.#exports.table(fileName, root.options)));
+    return covered ? { kind: 'source', fileName } : { kind: 'unmapped', exportMismatch: true };
   }
 
   /**
@@ -250,7 +283,7 @@ function outputRootOf(config: DeclarationOutputConfig): OutputRoot[] {
   const explicit = config.options.rootDir;
   const source = explicit ?? (config.options.composite === true && config.path !== undefined ? dirname(config.path)
     : commonDirectory(config.fileNames.filter((path) => !isDeclarationFile(path))));
-  return source === undefined ? [] : [{ outputDirectory: resolve(output), sourceDirectory: resolve(source) }];
+  return source === undefined ? [] : [{ outputDirectory: resolve(output), sourceDirectory: resolve(source), options: config.options }];
 }
 
 /** 파일들의 가장 깊은 공통 디렉터리다. 파일이 없으면 undefined다. */

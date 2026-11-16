@@ -3,7 +3,7 @@
 세션을 이어받을 때 먼저 읽는 진행 상태 문서다. 작업 규칙의 정본은 [AGENTS.md](AGENTS.md)이고, 여기 적힌 상태는
 실제 Git 상태·코드·검증 결과와 대조한 뒤 쓴다. 공통 규칙은 이 파일에 복제하지 않는다.
 
-## 현재 상태 (2026-11-10)
+## 현재 상태 (2026-11-15)
 
 - 발행본은 **0.11.0**이다. npm 게시(2026-11-03, `npm view tsograph version`으로 확인), 태그 `v0.11.0`, `package.json` 버전이 일치한다.
 - isthmus `compatibility.json`의 tsograph 핀은 이 날짜에 로컬 isthmus 체크아웃 기준으로 **0.10.0**이다. isthmus가 게시본을
@@ -11,6 +11,91 @@
 - PR #57은 2026-11-09에 `main`으로 스쿼시 머지됐다(`9795858`). 2026-11-03 계열 9개 도구 검토의 tsograph 항목과 그 PR의
   독립 리뷰 지적을 반영한 것이다. 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
 - `main` `9795858`의 CI 체크 6개가 모두 성공했다(2026-11-10 확인).
+- 2026-11-15: 브랜치 `ccr-37904670-hxdjsx`(`origin/main` `13971a4` 기준)에 PR #57 후속인 **선언 역매핑 export 이름 대조**를
+  커밋했고(PR #59), 같은 날 그 PR의 독립 리뷰(B1·B2·S1·S2·S3·nit)를 반영해 커밋을 더했다. 그 head `f0bda2b`는 push되어 CI 6개가
+  모두 성공했고, 델타 재리뷰는 MERGEABLE에 should-fix 하나(S-1)를 남겼다. 2026-11-16에 S-1과 nit 둘을 고친 커밋(`2e98e81`, `bda1897`)과
+  이 HANDOFF 갱신을 더했다. 그 head `1ff6757`도 push됐고 세 번째 델타 재리뷰가 MERGEABLE에 should-fix 하나(S-2)를 남겨, 같은 날
+  `8dc4148`(수정)·`585d009`(문서)와 이 HANDOFF 갱신을 더했다. 아직 push 전이다. 변경은 CHANGELOG `[Unreleased]`에 있다.
+
+## 선언 역매핑 export 이름 대조 (2026-11-15, PR #57 후속, PR #59)
+
+- `declarationDir`/`outDir`↔`rootDir` 경로로 잇기 전에 선언의 export 이름(값·타입·`default`·`export =`·`export *`가 끌어오는 이름)이
+  모두 그 TypeScript 소스에도 있는지 본다(`src/graph/declaration-exports.ts`). 역매핑은 module 해석 hook 안이라 checker가 없어서
+  TypeScript 파서로 최상위 export 문장만 읽고, `export *`는 그 설정의 module 해석(파일 module 형식에 맞는 모드, 4 MiB bounded reader,
+  설정별 `ts.createModuleResolutionCache`)으로 프로젝트 안 대상만 표 하나당 1,024개 파일까지 따라간다.
+- 따라가지 않는 `export *` 대상(읽지 않는 `node_modules`·프로젝트 밖 대상, 해석·읽기 실패, JavaScript, 파일 예산 밖)은 위치 키로 비교한다.
+  소스의 같은 상대 위치에 같은 지정자가 있으면 맞고(tsc는 지정자를 쓴 그대로 옮기고 손으로 쓴 `src/*.d.ts`를 `outDir`로 복사하지 않는다),
+  외부 대상은 같은 파일로 해석하면 지정자가 달라도 맞는다. 절대 지정자는 `absolute:` 키로 쓴 그대로 비교한다.
+- 소스 쪽에 이름을 읽지 못한 경로 `export *`(해석하지 못한 상대·절대 지정자, 해석했지만 읽지 못한 프로젝트 안 대상, JavaScript 대상, 예산 밖
+  대상)가 있으면 선언의 불투명 위치 비교까지만 하고 이름은 대조하지 않는다(재리뷰 S-1, `ExportTable.unreadPathStars`). 해석하지 못한 bare
+  지정자는 선언 쪽도 똑같이 해석하지 못하므로 우회를 켜지 않는다(재리뷰 S-2, 판정이 설치 상태에 달리지 않게).
+- 소스 폐쇄(자신이나 `export *` 대상)에 JavaScript가 있으면 대조하지 않고 잇는다. tsc가 CommonJS·JSDoc 이름을 checker로 정해 구문 표가
+  맞는 소스를 틀렸다고 판정하기 때문이다(리뷰 B2의 option a). CommonJS·JSDoc 구문 이름 읽기(비공개 `jsDoc` 속성 사용 포함)는 지웠다.
+- 빠진 이름이 있거나 선언 파일 자체를 읽지 못하면(읽기·구문 깊이 실패) 잇지 않고 기존
+  `graph-config: declaration-outputs:`에 센다. 문장에 `N of them reach a source through declarationDir/outDir and rootDir that does not
+  export every name …`가 붙는다(`ProgramConfigStatus.declarationOutputExportMismatches`). 불일치 선언은 옆의 같은 이름 `.js`(산출물
+  루트의 빌드 출력)로 돌리지 않는다. import 수·파일 목록·불일치 수는 import 키별 마지막 판정 하나에서 센다.
+- declaration map과 손으로 쓴 선언 옆 같은 이름 JavaScript 형제는 이름을 대조하지 않는다. 남은 통과 사례(README·CONFIG-SCOPE에 적음):
+  같은 이름을 모두 내보내는 다른 소스, export 이름 없는 선언, 종류를 구별하지 않는 이름, JavaScript 소스나 읽지 못한 프로젝트 안
+  `export *`가 있는 소스를 덮어쓴 선언, 오래된 `.d.ts.map`.
+  불일치 선언을 import하는 설정은 문맥 공유 검사(`isModuleOnly`)에서 소유 파일 밖 선언을 읽는 것으로 보여 문맥이 나뉠 수 있다.
+- mapper 하나를 문맥 분리 판정과 모든 문맥이 함께 쓴다(`CompilerContext.declarationOutputs`).
+
+### PR #59 독립 리뷰 반영 (2026-11-15)
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| B1 불일치 선언이 같은 이름 빌드 출력 `lib/index.js`로 조용히 이어짐 | 고침(`19c3e9e`) | outDir `lib` + 스캔되는 `lib/index.js` 끝까지 테스트, 수정 전 실패 |
+| B2 CommonJS 소스의 맞는 간선을 잃음 | option a로 고침(`017fda2`) | 실제 tsc emit 11개 모양 mapper 테스트, 5개 모양 끝까지, TS의 CommonJS 재내보내기, 수정 전 7개 실패 |
+| S1 `export *` 폐쇄가 손으로 쓴 `src/*.d.ts`·의존성 폐쇄에서 불완전 | 고침(`34f3c19`) | 손으로 쓴 types, 깨진 의존성 폐쇄, 4 MiB·1,100개 barrel 의존성, 다른 지정자 같은 대상, 수정 전 4개 실패 |
+| S2 문맥마다 재파싱·해석 캐시 없음 | 고침(`68af192`) | 출력 바이트 동일 확인, 측정은 아래 |
+| S3 문서·PR 설명 부정확 | 고침(`8c519dd`) | — |
+| nit `.jsDoc` 비공개 속성 | B2에서 그 코드를 지워 해당 없음 | — |
+| nit Set/Map 불일치 | 고침(`de8ec65`) | `.mts` import/require 모드 사례, 수정 전 실패 |
+| nit `isModuleOnly` 부작용·남은 통과 사례 문서화 | 고침(`8c519dd`) | — |
+| 재리뷰 S-1 소스 쪽만 읽지 못한 `export *` 대상 때문에 맞는 간선을 잃음(main 대비 좁힘) | 간단한 쪽으로 고침(`2e98e81`, 문서 `bda1897`) | 4 MiB를 넘는 생성 소스(mapper), 체크아웃에 없는 생성 소스(끝까지), 판정 단위, 실제 tsc emit 두 사례가 main과 같음, 수정 전 실패 |
+| 재리뷰 nit 프로젝트 안 barrel 1,024개 초과 시 잇지 않음 | 고침(`2e98e81`): 남은 대상을 위치로 남김 | 양쪽 1,100개 barrel 일치·예산 밖 위치 불일치, 예산 단위 테스트 |
+| 재리뷰 nit 절대 지정자를 상대처럼 옮김 | 고침(`2e98e81`): `absolute:` 키 | 키 생성·판정 단위 테스트 |
+| 3차 재리뷰 S-2 해석하지 못한 bare `export *`가 소스 쪽 우회를 켜 판정이 설치 상태에 달림 | 고침(`8dc4148`, 문서 `585d009`): 우회 조건에서 해석하지 못한 bare 지정자 제외 | 재리뷰 재현(mapper, `1ff6757`에서 실패), 표시 값, 판정 단위 |
+| 3차 재리뷰 nit 우회가 거칠어 선언 파일에 직접 쓴 이름까지 대조하지 않음 | 남은 한계로 문서화(`585d009`) | — |
+
+- 성능(합성: 300개 선언이 같은 500파일 barrel을 `export *`, 공유 4코어 load 5~6에서 다시 잼): mapper 하나 CPU 3.84 s → 0.30 s,
+  graph 전체 wall 11.3~11.5 s → 3.8~4.7 s(CPU 11.3~11.6 → 4.0~4.4 s, main 2.9~3.1 s). 파일별 해석 memo(`34f3c19`, 이 시점 4.5~4.7 s)가
+  대부분이고 해석 캐시·mapper 공유가 나머지다. 네 분석기의 출력은 바이트 단위로 같다. 측정 도구는 커밋하지 않았다.
+- 재리뷰 S-1의 정밀한 쪽(선언 이름마다 거쳐 온 `export *` 위치 사슬을 기록해 소스가 읽지 못한 위치를 지나온 이름만 면제)은 하지 않았다.
+  간단한 쪽은 그런 소스를 덮어쓴 번들러 선언을 이름으로 알아채지 못하고(위치 비교는 한다), 선언 파일에 직접 쓴 이름도 대조하지 않는다.
+  반례 corpus가 생기면 정밀한 쪽을 검토한다.
+- 하지 않은 것: B2 option b(JavaScript 열린 표). 별칭·인자 전달·연쇄 할당 등 탈출 경로를 모두 닫아야 건전한데 반례 corpus가 없다.
+  그래서 JavaScript 소스를 덮어쓴 번들러 선언은 예전처럼 알아채지 못한다. 선언 산출물 import 수를 모드별로 세는 것도 기존 의미를 바꾸므로
+  하지 않았다.
+- 검증(2026-11-16, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션으로 load 10~24):
+  - `npm run typecheck` 통과, `npm run verify:cli` 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64`).
+  - `npm test`: 12분 상한 초과로 종료 2(끊기 전 보고된 최상위 315개 중 실패 1개: `schema-command` 힙 사례, 부하). 같은 인자를 상한 없이
+    돌린 전체 suite(18분 57초): 1,787개 중 1,762 통과·23 skip·2 실패. 실패는 `dispatch.test.ts` 600모듈 메모 사례(부하 중 38초, 단독
+    재실행 3.5초 통과)와 `relation-facts.test.ts` `chmod 000` 사례(root 환경, `runuser -u nobody`로 통과). 커버리지 라인 98.68%·분기
+    91.59%·함수 98.21%(90% 게이트 통과), `declaration-exports.ts` 100/97.87/100, `declaration-outputs.ts` 100/94.92/100.
+  - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `d418e9e` 트리에 돌린 결과는 `d418e9e` 분석기 결과와 바이트 단위로
+    같다. 새 트리(같은 위치의 worktree)와 비교한 차이는 모두 바뀐 다섯 파일 안이다: 노드 10,097 → 10,128, 간선 14,614 → 14,679(바뀐 파일을
+    건드리지 않는 간선 변화 0), `bound-dispatch` 738 → 740, `unresolved-calls` 4,544 → 4,550(indirect 3,515 → 3,521), external 호출
+    25,722 → 25,836. 실제 저장소 경로에서 돌린 결과는 worktree 결과와 노드·간선·통계가 같고, worktree의 `node_modules` symlink 때문에 생기는
+    `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄만 다르다.
+  - isthmus `scripts/conformance-drift.mjs tsograph=…`: 모든 벡터 current.
+  - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI).
+- 재리뷰 S-1 반영 검증(2026-11-16, 같은 환경, load 6~16):
+  - `npm run typecheck`·`npm run verify:cli` 통과. 선언 집중 테스트 49/49 통과. 새 회귀 테스트 6개는 `f0bda2b` 구현에서 실패했고, 이름 대조
+    우회·예산 밖 위치 기록·절대 키를 하나씩 되돌리면 각각 실패한다. 재리뷰의 두 사례를 실제 tsc emit으로 다시 만들어 main·`f0bda2b`·새 head에
+    돌렸다(main·새 head는 `src/index.ts#helper` direct, `f0bda2b`는 간선 없음+한계).
+  - 상한 없는 전체 suite(19분 13초): 1,792개 중 1,766 통과·23 skip·3 실패. 실패 셋은 `schema-command` 힙 사례(부하 중 61초 timeout),
+    `dispatch` 600모듈 사례(33초), `relation-facts` `chmod 000` 사례(root)이고 앞 둘은 단독 재실행, 셋째는 `runuser -u nobody`로 통과했다.
+    커버리지 라인 98.68%·분기 91.60%·함수 98.21%, `declaration-exports.ts` 100/98.00/100. 12분 상한 `npm test`는 앞 회차에서 부하로 상한을
+    넘었으므로 이번에는 상한 없는 실행만 했다.
+  - 자기 분석: 새 분석기를 `f0bda2b` 트리에 돌린 결과는 `f0bda2b` 분석기 결과와 stdout·stderr 모두 바이트 단위로 같다. 새 트리와의 차이는
+    바뀐 세 파일(`declaration-exports.ts`와 두 테스트) 안뿐이다: 노드 10,128 → 10,144, 간선 14,679 → 14,709(바뀐 파일을 건드리지 않는 변화 0),
+    `unresolved-calls` 4,550 → 4,553(indirect 3,521 → 3,524), external 호출 25,836 → 25,888. 새 limitation 종류는 없다.
+- 3차 재리뷰 S-2 반영 검증(2026-11-16): `npm run typecheck`·`npm run verify:cli` 통과, 선언 집중 테스트 51/51 통과. 재현 테스트는 `1ff6757`
+  구현에서 실패한다. 재리뷰가 전체 suite는 필요 없다고 해 돌리지 않았다. 자기 분석: 새 분석기를 `1ff6757` 트리에 돌린 결과는 `1ff6757` 분석기
+  결과와 바이트 단위로 같고, 새 트리와의 차이는 바뀐 세 파일 안뿐이다(노드 10,144 → 10,147, 간선 14,709 → 14,717, `unresolved-calls` 4,553 →
+  4,555(indirect +2), external 호출 25,888 → 25,907, 바뀐 파일을 건드리지 않는 변화 0).
 
 ## PR #57에서 처리한 것
 
@@ -38,13 +123,13 @@
 | 테스트 시간 상한 완화 | CONTRIBUTING의 성능 게이트 유지 원칙. `scripts/run-tests.mjs`의 12분 상한은 CI job 15분 안에 build·CLI 검증 시간을 남기려는 값이다. |
 | 100줄 넘는 함수 리팩터 | 동작 이득 없이 수백 줄을 옮긴다. 별도 PR로 다룬다. |
 | npm provenance·발행 workflow | 레지스트리 권한과 trusted publisher 설정(비밀)이 필요하다. |
-| 선언 역매핑의 export 이름 대조 | 지금은 선언 emit 여부로만 거른다. 이름 대조는 산출물과 소스의 export 집합을 비교하는 별도 설계가 필요하다. README에 이미 한계로 적혀 있다. 후속 후보다. |
 | firebase식 중첩 manifest 좁히기 | 과보수인지 확신할 근거가 없어 열린 쪽(보수)으로 두었다. |
 | 문맥이 다른 패키지 사이 산출물 import | 여전히 `config-context-boundary:`로 미해결이다. 문맥을 넘는 간선은 별도 설계다. |
 | routes·schema·navigation의 산출물 되짚기 | graph 문맥 Program에만 적용했다. |
 
 ## 다음 할 일 (PR #57 머지 이후)
 
+0. 브랜치 `ccr-37904670-hxdjsx`(PR #59)의 리뷰 반영 커밋을 push하고 CI(특히 전체 `npm test`·Git 2.45 경로)와 재리뷰를 받는다.
 1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사)이 있으므로 마이너로 올린다.
    이전 릴리스 커밋(`chore(release): prepare tsograph 0.11.0`)처럼 `package.json`·`package-lock.json`·CHANGELOG를 함께 바꾼다.
 2. isthmus에 게시본 검증과 `compatibility.json` 핀 갱신을 요청한다(isthmus 저장소의 일).
@@ -54,7 +139,9 @@
 
 - **리뷰 방식**: AGENTS가 요구하는 GLM 리뷰(`packet-ask`)는 PR #57 작업 환경에 도구가 없어 실행하지 못했다. 대신 독립
   Claude 리뷰를 받았고, 지적을 코드·fixture로 확인하고 회귀 테스트(구현을 되돌리면 실패하는지 확인)를 붙여 반영했다.
-  PR #57은 GLM 리뷰 없이 머지됐다. 다음 PR에서 GLM을 쓸 수 있으면 원래 절차로 돌아간다.
+  PR #57은 GLM 리뷰 없이 머지됐다. 다음 PR에서 GLM을 쓸 수 있으면 원래 절차로 돌아간다. 2026-11-15 export 이름 대조 작업
+  환경과 같은 날 PR #59 리뷰 반영 환경에도 `packet-ask`가 없어 GLM 리뷰를 실행하지 못했다(독립 Claude 리뷰 지적을 실제 tsc
+  emit으로 재현한 뒤 반영했다).
 - **로컬 Git 버전**: `change-impact`는 Git 2.45 이상이 필요하다. 낮은 Git(예: 2.43)에서는 change 캡처 테스트가 이유와 함께
   skip되므로 그 경로는 CI 결과로만 확인된다. CI에서는 skip하지 않고 실패한다.
 - **테스트 12분 상한**: `npm test`(`scripts/run-tests.mjs`)는 전체 suite를 12분에 끊고 "exceeded the 12-minute execution limit"로
