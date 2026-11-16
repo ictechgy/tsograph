@@ -109,15 +109,18 @@ Program을 나누지 않는다. workspace 패키지의 `exports`·`types`가 프
 공통 소스 디렉터리), 손으로 쓴 선언 옆 같은 이름의 JavaScript 구현 중 하나가 스캔한 소스 하나를 가리킬 때 그 소스로
 되짚는다. 그렇지 않으면 호출은 외부로 남고 `graph-config: declaration-outputs:`가 import 수를 센다.
 `outDir`/`rootDir` 대응은 배치만 보는 추론이라, TypeScript 소스면 선언이 내보내는 이름(값·타입, `default`, `export =`, `export *`가
-끌어오는 이름)이 모두 그 소스의 export에도 있을 때만 잇는다. 이름이 빠졌거나 선언 이름을 읽지 못하면(선언 파일 읽기·구문 깊이 실패,
-`export *` 폐쇄 1,024개 파일 초과) 잇지 않고, 선언 옆 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도 돌리지 않으며
+끌어오는 이름)이 모두 그 소스의 export에도 있을 때만 잇는다. 이름이 빠졌거나 선언 파일 자체를 읽지 못하면(읽기·구문 깊이 실패)
+잇지 않고, 선언 옆 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도 돌리지 않으며
 `graph-config: declaration-outputs:`에 센다(`N of them reach a source through declarationDir/outDir and rootDir that does not export every
 name …`). 그래서 번들러가 그 설정의 `outDir`에 배치가 다른 `.d.ts`를 덮어써도 잘못된 `direct` 간선 대신 한계로 알린다. `export *`는
-프로젝트 안 대상만 따라간다. 따라가지 않는 대상(읽지 않는 `node_modules`·프로젝트 밖 대상, 해석·읽기에 실패한 대상, JavaScript 대상)은
-소스의 같은 상대 위치에 같은 지정자가 있으면 맞는다(tsc는 지정자를 쓴 그대로 옮기고 손으로 쓴 `src/*.d.ts`를 `outDir`로 복사하지
-않는다). 외부 대상은 소스가 같은 파일을 다시 내보내도 맞는다. 소스 폐쇄에 JavaScript 모듈이 있으면(CommonJS 소스, `export *`로 다시 내보낸 JavaScript) tsc가 이름을 checker로
+프로젝트 안 대상만 표 하나당 1,024개 파일까지 따라간다. 따라가지 않는 대상(읽지 않는 `node_modules`·프로젝트 밖 대상, 해석·읽기에 실패한
+대상, JavaScript 대상, 예산 밖 대상)은 소스의 같은 상대 위치에 같은 지정자가 있으면 맞는다(tsc는 지정자를 쓴 그대로 옮기고 손으로 쓴
+`src/*.d.ts`를 `outDir`로 복사하지 않는다). 외부 대상은 소스가 같은 파일을 다시 내보내도 맞고, 절대 지정자는 쓴 그대로 비교한다. 소스
+쪽에 이름을 읽지 못한 프로젝트 안 `export *`가 있으면(4 MiB 읽기 상한을 넘는 생성 소스와 그보다 작은 선언, 체크아웃에 없는 생성 소스와
+남아 있는 선언, 예산 밖 barrel) 선언 쪽이 소스 쪽에서 읽지 못한 이름을 읽었을 수 있으므로 위치만 비교하고 이름은 대조하지 않는다. 소스 폐쇄에 JavaScript 모듈이 있으면(CommonJS 소스, `export *`로 다시 내보낸 JavaScript) tsc가 이름을 checker로
 정하므로 대조하지 않고 예전처럼 잇는다. 남은 통과 사례: 선언 이름을 모두 내보내는 다른 소스, export 이름이 없는 선언(`export {}`,
-`declare global`만 있음), 같은 이름의 값이 있는 타입 전용 이름(종류를 구별하지 않는다), 대응 소스가 JavaScript인 덮어쓴 선언.
+`declare global`만 있음), 같은 이름의 값이 있는 타입 전용 이름(종류를 구별하지 않는다), 대응 소스가 JavaScript이거나 읽지 못한 프로젝트 안
+`export *`가 있는 덮어쓴 선언.
 declaration map(emit한 도구가 적은 소스 기록)과 손으로 쓴 선언 옆 같은 이름 JavaScript 형제(TypeScript 자신의 `x.d.ts`/`x.js` 짝짓기)는
 이름을 대조하지 않으므로, 덮어쓴 선언 옆에 남은 오래된 `.d.ts.map`은 그대로 믿는다. 이름이 맞지 않은 선언을 import하는 설정은 문맥
 공유 검사에서 소유 파일 밖 선언을 읽는 것으로 보여 따로 type-checking 문맥을 받을 수 있고, 그 경계를 넘는 import는

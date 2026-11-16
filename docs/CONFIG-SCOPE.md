@@ -30,8 +30,12 @@ workspace 패키지의 `exports`·`types`가 가리키는 프로젝트 안 선�
 export 문장만 읽어 만든다. `export *`는 그 설정의 module 해석(파일의 module 형식에 맞는 모드, 4 MiB bounded reader, 설정별 TypeScript 해석
 캐시)으로 프로젝트 안 대상만 표 하나당 최대 1,024개 파일까지 따라간다. tsc는 지정자를 쓴 그대로 옮기므로 따라가지 않는 대상은 위치로
 비교한다. 따라가지 않는 대상(읽지 않는 `node_modules`·프로젝트 밖 대상, 해석하지 못한 대상(tsc가 `outDir`로 복사하지 않는 손으로 쓴
-`src/types.d.ts`), 읽지 못한 대상, JavaScript 대상)은 소스의 같은 상대 위치에 같은 지정자가 있을 때 맞고, 외부 대상은 소스가 같은 파일을
-다시 내보낼 때도 맞는다(지정자가 달라도 같은 파일이면 같다). 선언 파일 읽기·구문 깊이 실패와 파일 예산 초과는 맞다는 증명이 아니므로 잇지 않는다.
+`src/types.d.ts`), 읽지 못한 대상, JavaScript 대상, 파일 예산 밖 대상)은 소스의 같은 상대 위치에 같은 지정자가 있을 때 맞고, 외부 대상은
+소스가 같은 파일을 다시 내보낼 때도 맞는다(지정자가 달라도 같은 파일이면 같다). 상대 지정자는 선언 루트 기준 위치를 소스 루트 기준으로
+옮겨 비교하고, 절대 지정자는 두 쪽에서 같은 파일을 가리키므로 쓴 그대로 비교한다. 소스 쪽에도 이름을 읽지 못한 프로젝트 안 `export *`가
+있을 수 있다(4 MiB 읽기 상한을 넘는 생성 소스와 그보다 작은 선언, 체크아웃에 없는 생성 소스와 남아 있는 선언, 예산 밖 barrel). 그러면
+선언 쪽이 같은 위치에서 읽은 이름이 소스 표에 없으므로 위치만 비교하고 이름은 대조하지 않는다. 선언 파일 자체의 읽기·구문 깊이 실패는
+맞다는 증명이 아니므로 잇지 않는다.
 
 JavaScript 소스는 대조하지 않는다. tsc는 CommonJS 내보내기와 JSDoc 타입의 이름을 checker로 정해(`const api = { helper };
 module.exports = api`, `module.exports = create()`, `var x = exports.x = …`, `if`·`try`·IIFE 안의 `exports.x`, 조건부
@@ -41,7 +45,7 @@ module.exports = api`, `module.exports = create()`, `var x = exports.x = …`, `
 
 남은 한계: 같은 이름을 모두 내보내는 다른 구현은 이름으로 구별하지 못하고, export 이름이 없는 선언(`export {}`, `declare global`만 있음)은
 그 위치의 어느 소스와도 맞으며, 이름의 종류(값·타입)를 구별하지 않아 타입 전용 이름도 같은 이름의 값으로 맞는다. 대응 소스가
-JavaScript인 덮어쓴 선언은 알아채지 못한다. declaration map과 같은 이름 형제 근거는 이름을 대조하지 않으며 오래된 `.d.ts.map`은 그대로
+JavaScript이거나 읽지 못한 프로젝트 안 `export *`가 있는 덮어쓴 선언은 위치가 맞으면 알아채지 못한다. declaration map과 같은 이름 형제 근거는 이름을 대조하지 않으며 오래된 `.d.ts.map`은 그대로
 믿는다. 이름이 맞지 않은 선언을 import하는 설정은 위 문맥 공유 검사에서 소유 파일 밖 선언을 읽는 것으로 보여 따로 문맥을 받을 수 있고,
 그 경계를 넘는 import는 `config-context-boundary:`로 센다.
 
@@ -75,5 +79,6 @@ bound/candidate dispatch는 이 부분 경로에서 인증하지 않으며 모�
 회귀는 두 앱 baseUrl, cross-package 반환 타입의 내부 alias, strict/target/JSX/lib/types 분리, 같은 디렉터리의
 서로 다른 reference, 중복/누락/순환 reference, include/dependency closure, typed dynamic sink, server 문맥,
 실제 Git before/after, frozen 외부 extends, 예산 초과, 선언 산출물의 export 이름 불일치(번들러 덮어쓰기, `lib` 산출물 루트의
-빌드 출력 형제)·부분집합·재내보내기·CommonJS 소스 모양·손으로 쓴 `src/*.d.ts` 재내보내기·의존성 `export *`를 합성 fixture로 검증한다.
+빌드 출력 형제)·부분집합·재내보내기·CommonJS 소스 모양·손으로 쓴 `src/*.d.ts` 재내보내기·의존성 `export *`·소스 쪽에서 읽지 못한
+생성 모듈·예산을 넘는 프로젝트 안 barrel을 합성 fixture로 검증한다.
 사내 앱을 재실행한 결과는 아니다.
