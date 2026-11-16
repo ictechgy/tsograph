@@ -136,15 +136,20 @@ project, up to 1,024 files per table. A target it does not follow (under `node_m
 is never read; unresolved; unreadable; JavaScript; or beyond the file budget) matches when the source has the same
 specifier at the same relative position, because tsc copies specifiers verbatim and does not copy hand-written
 `src/*.d.ts` into `outDir`; an external target also matches when the source re-exports the same resolved file, and an
-absolute specifier is compared as written. When the source itself has an in-project `export *` whose names it could
-not read (a generated source over the 4 MiB read limit next to a smaller declaration, a generated source missing from
-the checkout while its declaration remains, or a barrel beyond the budget), only these positions are compared and names
-are not, because the declaration side may have read names the source side could not. When the
+absolute specifier is compared as written. When the source itself has a path `export *` whose names it could not
+read (an unresolved relative or absolute specifier, such as a generated source missing from the checkout while its
+declaration remains; an in-project target that resolves but cannot be read, such as a generated source over the 4 MiB
+read limit next to a smaller declaration; a JavaScript target; or a target beyond the budget), only these positions are
+compared and names are not, because the declaration side may have read names the source side could not. One such
+re-export turns off name comparison for the whole declaration, including names it declares directly. An unresolved
+bare specifier (`export * from "not-installed-dep"`) does not turn it off: the declaration side resolves it with the
+same options in the same package and cannot read it either, so the result does not depend on install state. When the
 source's closure contains a JavaScript module (a CommonJS source, or JavaScript re-exported through `export *`), tsc
 derives the names with the checker, so names are not compared and the link is kept as before. Remaining pass cases:
 a different source that exports every declared name, a declaration without export names (`export {}` or only
 `declare global`), a type-only name covered by a same-named value (kinds are not distinguished), an overwritten
-declaration whose mapped source is JavaScript, and one whose source has an in-project `export *` it could not read. Declaration maps (the emitter's record of the source) and same-name
+declaration whose mapped source is JavaScript, and one whose source has such an unread path `export *` (when the
+positions match). Declaration maps (the emitter's record of the source) and same-name
 JavaScript siblings of hand-written declarations (TypeScript's own `x.d.ts`/`x.js` pairing) are not name-checked, so
 a stale `.d.ts.map` left beside an overwritten declaration is still trusted. A config that imports a mismatched
 declaration also reads a declaration outside its owned files for context sharing, so it may get its own type-checking
