@@ -162,6 +162,9 @@ test('표 루트를 읽지 못하거나 구문 깊이를 넘으면 표를 확정
     // 절대 지정자는 위치를 옮기지 않고 지정자 그대로 비교한다.
     assert.deepEqual([...reader.table(join(root, 'absolute.ts'), options).opaqueStars.keys()], ['absolute:/definitely/missing/module']);
     assert.deepEqual(plain(reader.table(join(root, 'bare.ts'), options)), { names: [], opaque: ['package:@not-installed/pkg'], complete: true });
+    // 소스 쪽 이름 대조를 끄는 표시: 경로 지정자의 해석·읽기 실패는 켜고, 해석하지 못한 bare 지정자는 켜지 않는다.
+    assert.deepEqual(['nested.ts', 'relative.ts', 'absolute.ts', 'json.ts', 'bare.ts']
+      .map((name) => reader.table(join(root, name), { ...options, resolveJsonModule: true }).unreadPathStars), [true, true, true, true, false]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -179,6 +182,8 @@ test('node_modules·프로젝트 밖 export * 대상은 따라가지 않고 해�
   try {
     const table = new ExportTableReader(join(root, 'inner')).table(join(root, 'inner/src.ts'), options);
     assert.deepEqual(plain(table), { names: ['own'], opaque: ['package:pkg', 'path:../outside/shared'], complete: true });
+    // 외부 대상은 양쪽 모두 읽지 않으므로 소스 쪽 이름 대조를 끄지 않는다.
+    assert.equal(table.unreadPathStars, false);
     assert.deepEqual([...table.externalTargets].map((path) => relative(root, path).replaceAll('\\', '/')).sort(),
       ['inner/node_modules/pkg/index.d.ts', 'outside/shared.d.ts']);
   } finally {
@@ -197,6 +202,7 @@ test('export * 폐쇄가 1,024개 파일을 넘으면 남은 대상을 읽지 �
     assert.equal(table.names.has('v1023'), true);
     assert.equal(table.names.has('v1024'), false);
     assert.deepEqual(plain(table).opaque, ['path:m1024']);
+    assert.equal(table.unreadPathStars, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -210,6 +216,7 @@ interface TableParts {
   readonly externals?: readonly string[];
   readonly complete?: boolean;
   readonly includesJavaScript?: boolean;
+  readonly unreadPathStars?: boolean;
 }
 
 /** 판정 테스트용 이름 표를 만든다. */
@@ -219,6 +226,7 @@ function table(names: readonly string[], parts: TableParts = {}): ExportTable {
     names: new Set(names), directory: parts.directory ?? '/project/src',
     starKeys: new Set([...(parts.starKeys ?? []), ...opaque.map(([key]) => key)]), opaqueStars: new Map(opaque),
     externalTargets: new Set(parts.externals ?? []), complete: parts.complete ?? true, includesJavaScript: parts.includesJavaScript ?? false,
+    unreadPathStars: parts.unreadPathStars ?? false,
   };
 }
 
@@ -257,7 +265,7 @@ test('판정: 소스 쪽에 이름을 읽지 못한 프로젝트 안 export *가
   // 4 MiB를 넘는 생성 소스(또는 체크아웃에 없는 생성 소스)는 소스 쪽에서 읽지 못했고, 4 MiB 안의 그 선언은 선언 쪽에서 따라가 읽었다.
   const declaration = (opaque: Readonly<Record<string, string | undefined>> = {}) =>
     table(['helper', 'generated0'], { directory: '/project/dist', starKeys: ['path:/project/dist/generated'], opaque });
-  const unreadSource = table(['helper'], { opaque: { 'path:/project/src/generated': undefined } });
+  const unreadSource = table(['helper'], { opaque: { 'path:/project/src/generated': undefined }, unreadPathStars: true });
   assert.equal(declarationExportsCovered(declaration(), unreadSource), true);
   // 위치 비교는 그대로 한다(소스에 없는 재내보내기는 이 소스에서 나온 선언이 아니라는 증거다).
   assert.equal(declarationExportsCovered(declaration({ 'path:/project/dist/stray': undefined }), unreadSource), false);
@@ -273,4 +281,12 @@ test('판정: 절대 지정자 위치 키는 outDir↔rootDir로 옮기지 않�
   const declaration = table(['own'], { directory: '/project/types/esm', opaque: { 'absolute:/shared/types': undefined } });
   assert.equal(declarationExportsCovered(declaration, table(['own'], { starKeys: ['absolute:/shared/types'] })), true);
   assert.equal(declarationExportsCovered(declaration, table(['own'], { starKeys: ['absolute:/shared/other'] })), false);
+});
+
+test('판정: 소스와 선언이 똑같이 해석하지 못한 bare export *는 이름 대조를 끄지 않는다', () => {
+  // 같은 설정·같은 패키지라 선언 쪽도 "not-installed-dep"를 해석하지 못한다. 설치 여부와 무관하게 덮어쓴 선언의 format을 잡아야 한다.
+  const source = table(['helper'], { opaque: { 'package:not-installed-dep': undefined } });
+  const declaration = (names: readonly string[]) => table(names, { directory: '/project/dist', opaque: { 'package:not-installed-dep': undefined } });
+  assert.equal(declarationExportsCovered(declaration(['helper', 'format']), source), false);
+  assert.equal(declarationExportsCovered(declaration(['helper']), source), true);
 });

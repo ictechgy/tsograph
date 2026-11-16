@@ -17,8 +17,9 @@
  * 비교한다(같은 지정자도 같다고 본다). 표 하나가 1,024개 파일을 넘으면 남은 `export *` 대상도 위치로만 남긴다.
  *
  * 이름을 읽지 못한 재내보내기는 소스 쪽에도 생긴다(4 MiB를 넘는 생성 소스와 4 MiB 안의 그 선언, 체크아웃에 없는 생성 소스와 남아 있는
- * 선언). 그 대상의 이름은 소스 표에 없으므로, 소스 쪽에 해석·읽기에 실패했거나 예산 밖인 프로젝트 안 `export *`가 있으면 위치 비교만
- * 하고 이름은 대조하지 않는다(외부 대상은 양쪽 모두 읽지 않으므로 해당하지 않는다).
+ * 선언). 그 대상의 이름은 소스 표에 없으므로, 소스 쪽에 이름을 읽지 못한 경로 `export *`(해석하지 못한 상대·절대 지정자, 해석했지만
+ * 읽지 못한 프로젝트 안 대상, JavaScript 대상, 예산 밖 대상)가 있으면 위치 비교만 하고 이름은 대조하지 않는다. 해석하지 못한 bare 지정자와
+ * 외부 대상은 선언 쪽도 같은 설정·같은 패키지에서 똑같이 해석하지 못하거나 읽지 않으므로 해당하지 않는다.
  *
  * 선언 이름 표를 확정하지 못하면(선언 파일 읽기·구문 실패) 맞는다고 증명하지 못한 것이므로 호출자는 잇지 않고 limitation으로 센다.
  * 같은 이름을 내보내는 다른 구현은 이름만으로 구별하지 못한다.
@@ -104,6 +105,13 @@ export interface ExportTable {
    * 소스 쪽 표에서 true면 이름을 대조하지 않는다.
    */
   readonly includesJavaScript: boolean;
+  /**
+   * 이름을 읽지 못한 경로 `export *`가 있는지다. 해석하지 못한 상대·절대 지정자, 해석했지만 읽지 못한(4 MiB 초과·구문 깊이·스크립트가
+   * 아닌) 프로젝트 안 대상, JavaScript 대상, 파일 예산 밖 대상이다. 해석하지 못한 bare 지정자와 외부 대상은 넣지 않는다. 같은 설정·같은
+   * 패키지라 선언 쪽도 똑같이 해석하지 못하거나 읽지 않으므로 소스 쪽만 이름을 모르는 비대칭이 없다. 소스 쪽 표에서 true면 이름을
+   * 대조하지 않는다.
+   */
+  readonly unreadPathStars: boolean;
 }
 
 /**
@@ -124,13 +132,14 @@ interface TableDraft {
   readonly externalTargets: Set<string>;
   complete: boolean;
   includesJavaScript: boolean;
+  unreadPathStars: boolean;
 }
 
 /**
  * 선언의 export 이름이 소스 export 이름과 맞는지 판정한다. 소스 폐쇄에 JavaScript 모듈이 있으면 이름을 구문으로 다 알 수 없으므로
  * 대조하지 않고 맞는다고 본다. 그 밖에는 선언 루트 파일을 읽었고, 이름을 읽지 않은 선언의 `export *`마다 소스에 같은 위치의
- * 같은 지정자나 같은 외부 대상이 있어야 한다. 소스 쪽에 이름을 읽지 못한 프로젝트 안 `export *`가 있으면 거기까지만 보고 맞는다고
- * 보며, 없으면 선언의 모든 이름이 소스에 있을 때만 맞는다고 본다.
+ * 같은 지정자나 같은 외부 대상이 있어야 한다. 소스 쪽에 이름을 읽지 못한 경로 `export *`({@link ExportTable.unreadPathStars})가 있으면
+ * 거기까지만 보고 맞는다고 보며, 없으면 선언의 모든 이름이 소스에 있을 때만 맞는다고 본다.
  *
  * @param declaration 선언 산출물의 이름 표
  * @param source 역매핑한 소스의 이름 표
@@ -143,22 +152,9 @@ export function declarationExportsCovered(declaration: ExportTable, source: Expo
     const sameSpecifier = source.starKeys.has(sourceFrameKey(key, declaration.directory, source.directory));
     if (!sameSpecifier && (external === undefined || !source.externalTargets.has(external))) return false;
   }
-  if (hasUnreadProjectStar(source)) return true;
+  if (source.unreadPathStars) return true;
   for (const name of declaration.names) if (!source.names.has(name)) return false;
   return true;
-}
-
-/**
- * 표에 이름을 읽지 못한 프로젝트 안 `export *`(해석·읽기 실패, JavaScript, 파일 예산 밖)가 있는지 본다. 소스 쪽에서 그 대상의 이름은
- * 표에 없으므로, 선언 쪽이 같은 위치에서 따라가 읽은 이름과 대조하면 맞는 소스를 틀렸다고 판정한다. 외부 대상은 양쪽 모두 읽지 않으므로
- * 세지 않는다.
- *
- * @param table 이름 표
- * @returns 그런 재내보내기가 있으면 true
- */
-function hasUnreadProjectStar(table: ExportTable): boolean {
-  for (const external of table.opaqueStars.values()) if (external === undefined) return true;
-  return false;
 }
 
 /**
@@ -212,7 +208,7 @@ export class ExportTableReader {
   /** `export *` 폐쇄를 너비 우선으로 걸으며 이름을 모은다. 순환은 방문 집합이 끊는다. */
   #closure(fileName: string, options: ts.CompilerOptions): ExportTable {
     const table: TableDraft = { names: new Set(), directory: dirname(fileName), starKeys: new Set(), opaqueStars: new Map(),
-      externalTargets: new Set(), complete: true, includesJavaScript: false };
+      externalTargets: new Set(), complete: true, includesJavaScript: false, unreadPathStars: false };
     const visited = new Set<string>();
     const queue: { readonly file: string; readonly key?: string }[] = [{ file: fileName }];
     for (let index = 0; index < queue.length; index++) {
@@ -237,6 +233,8 @@ export class ExportTableReader {
         }
         table.opaqueStars.set(star.key, star.external);
         if (star.external !== undefined) table.externalTargets.add(star.external);
+        // 해석하지 못한 경로 지정자는 소스 쪽만 대상이 없을 수 있다(체크아웃에 없는 생성 소스). bare 지정자는 양쪽이 똑같이 해석하지 못한다.
+        else if (!star.key.startsWith(PACKAGE_STAR_KEY)) table.unreadPathStars = true;
       }
     }
     return table;
@@ -335,6 +333,8 @@ function recordUnreadModule(table: TableDraft, local: LocalExports | undefined, 
     if (local === undefined) table.complete = false;
     return;
   }
+  // 해석은 했으나 읽지 못한 대상이다(bare 지정자가 paths로 프로젝트 안 파일에 닿은 경우도 포함). 크기 상한처럼 한쪽만 읽힐 수 있다.
+  table.unreadPathStars = true;
   if (!table.opaqueStars.has(key)) table.opaqueStars.set(key, undefined);
 }
 
@@ -349,7 +349,9 @@ function recordUnreadModule(table: TableDraft, local: LocalExports | undefined, 
 function recordUnvisitedStars(table: TableDraft, pending: readonly { readonly file: string; readonly key?: string }[],
   visited: ReadonlySet<string>): void {
   for (const { file, key } of pending) {
-    if (key !== undefined && !visited.has(file) && !table.opaqueStars.has(key)) table.opaqueStars.set(key, undefined);
+    if (key === undefined || visited.has(file)) continue;
+    table.unreadPathStars = true;
+    if (!table.opaqueStars.has(key)) table.opaqueStars.set(key, undefined);
   }
 }
 

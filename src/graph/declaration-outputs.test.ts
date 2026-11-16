@@ -764,3 +764,20 @@ test('mapper: 프로젝트 안 barrel이 1,024개 파일을 넘어도 같은 배
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('mapper: 해석하지 못한 bare export *는 설치 여부와 무관하게 덮어쓴 선언의 이름 불일치를 가리지 않는다', () => {
+  // 소스와 덮어쓴 선언이 모두 설치되지 않은 의존성을 export *한다. 선언에만 있는 format 때문에 잇지 않아야 한다(설치했을 때와 같다).
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tsograph-declaration-bare-star-')));
+  try {
+    const scanned = writeFiles(root, { 'pkg/src/index.ts': 'export * from "not-installed-dep";\nexport function helper() { return 1; }\n' });
+    writeFiles(root, {
+      'pkg/out/index.d.ts': 'export * from "not-installed-dep";\nexport declare function helper(): number;\nexport declare function format(value: number): string;\n',
+    });
+    const config = { path: join(root, 'pkg/tsconfig.json'), options: { declaration: true, outDir: join(root, 'pkg/out'), rootDir: join(root, 'pkg/src') },
+      fileNames: scanned };
+    const mapper = new DeclarationOutputMapper(root, [config], scanned);
+    assert.deepEqual(mapper.match(join(root, 'pkg/out/index.d.ts')), { kind: 'unmapped', exportMismatch: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
