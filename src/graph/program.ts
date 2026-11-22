@@ -103,21 +103,22 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly configName: string | undefined;
   /**
    * 설정 파일을 읽거나 해석하지 못했는지 여부다(이때 기본 옵션을 쓴다). 소유권 계획을 합친 상태에서는 대표 설정이 아닌 소유 설정을
-   * 하나라도 읽지 못했어도 참이다({@link otherUnreadableConfigs}).
+   * 하나라도 읽지 못했어도 참이다({@link unreadableConfigPaths}).
    */
   readonly configUnreadable: boolean;
   /**
-   * 합친 상태에서 대표 설정이 아닌 소유 설정 중 읽지 못한 것의 파일 이름(설정마다 하나, 이름 순)이다. 문장은 대표 설정 자신
-   * ({@link representativeConfigUnreadable})과 이 설정들을 나눠 말한다. 없으면 싣지 않는다.
+   * 소유권 계획에서 읽지 못한 설정 전부의 프로젝트 기준 POSIX 경로(경로 순)다. 같은 이름(`tsconfig.json`)의 설정을 구별하려고 이름이 아니라
+   * 경로를 쓰고, 대표 설정과 상관없이 같은 목록이라 문맥이 나뉘어도 문장 하나로 합쳐진다. 대표 설정이 아닌 설정을 하나라도 읽지 못했을
+   * 때만 싣는다(대표 설정만 읽지 못했으면 {@link configName}의 기존 문장으로 충분하다).
    */
-  readonly otherUnreadableConfigs?: readonly string[];
-  /** {@link otherUnreadableConfigs}가 있을 때 대표 설정 자신도 읽지 못했는지다. */
+  readonly unreadableConfigPaths?: readonly string[];
+  /** {@link unreadableConfigPaths}가 있을 때 대표 설정 자신도 읽지 못했는지다. */
   readonly representativeConfigUnreadable?: boolean;
   /**
-   * 설정 루트 공백(밖을 가리키는 include, 건너뛰는 디렉터리의 루트, 열거 상한)을 낸 설정의 파일 이름(중복 없이 이름 순)이다. 합친 계수가
-   * 대표 설정 이름만으로 설명되지 않을 때만 싣고, 문장은 대표 설정 이름 대신 이 이름을 쓴다.
+   * 설정 루트 공백(밖을 가리키는 include, 건너뛰는 디렉터리의 루트, 열거 상한)을 낸 설정의 프로젝트 기준 POSIX 경로(경로 순)다. 그 공백을
+   * 프로젝트 루트의 대표 설정 하나만 냈으면(경로가 파일 이름과 같다) 싣지 않고, 문장은 예전처럼 대표 설정 이름을 쓴다.
    */
-  readonly configRootGapNames?: ConfigRootGapNames;
+  readonly configRootGapPaths?: ConfigRootGapPaths;
   /** compiler host가 크기 상한 때문에 읽지 못한 고유 입력 수다. */
   readonly oversizedCompilerInputs?: number;
   /**
@@ -303,7 +304,7 @@ export function createGraphProgram(
     return {
       program, checker, deeplyNestedSources, excludedSources,
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
-        ...ownershipStatus(config, ownership), ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
+        ...ownershipStatus(boundary.root, config, ownership), ...(oversized.size > 0 ? { oversizedCompilerInputs: oversized.size } : {}),
         ...(nonRoots.length > 0 ? { excludedSourceRoots: nonRoots.length, importedOutsideRoots } : {}),
         ...(reportedConflicts.length > 0 ? { conflictingConfigSourceCount: reportedConflicts.length,
           conflictingConfigSources: reportedConflicts.map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
@@ -475,7 +476,7 @@ function isModuleOnly(path: string, options: ts.CompilerOptions, owners: Readonl
 export function selectSourceEntryFiles(root: string, candidates: readonly string[], explicitConfig?: string,
   boundary: ScanBoundary = { root, excludedDirectories: new Set() }): { files: ReadonlySet<string>; status: ProgramConfigStatus } {
   const { config, ownership, rootNames } = prepareProgramEntries(root, candidates, explicitConfig, boundary);
-  return { files: new Set(rootNames.map(sourceEntryKey)), status: { ...ownershipStatus(config, ownership),
+  return { files: new Set(rootNames.map(sourceEntryKey)), status: { ...ownershipStatus(boundary.root, config, ownership),
     ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
   } };
 }
@@ -486,7 +487,7 @@ export function sourceConfigPlan(root: string, sources: readonly string[]) {
   const { config, ownership, rootNames } = entries;
   const keys = compilerContextKeys(entries, hasPnpScope(root));
   const optionsFor = (path: string) => analysisOptions(ownership.owners.get(resolve(path))?.options ?? config.options);
-  const status: ProgramConfigStatus = { ...ownershipStatus(config, ownership),
+  const status: ProgramConfigStatus = { ...ownershipStatus(root, config, ownership),
     ...(ownership.ambiguous.size > 0 ? { conflictingConfigSourceCount: ownership.ambiguous.size } : {}),
     ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}) };
   const unreadableConfigs = ownership.configs.filter(config => config.status.configUnreadable).length;
@@ -553,8 +554,8 @@ function limitSyntaxDepth(host: ts.CompilerHost, onTooDeep: (fileName: string) =
   };
 }
 
-/** 설정 루트 공백의 종류별로 그 공백을 낸 설정의 파일 이름이다({@link ProgramConfigStatus.configRootGapNames}). */
-interface ConfigRootGapNames {
+/** 설정 루트 공백의 종류별로 그 공백을 낸 설정의 프로젝트 기준 경로다({@link ProgramConfigStatus.configRootGapPaths}). */
+interface ConfigRootGapPaths {
   readonly outside?: readonly string[];
   readonly excluded?: readonly string[];
   readonly truncated?: readonly string[];
@@ -912,7 +913,7 @@ function configOwnership(
     if (cache.size >= MAX_OWNER_CONFIGS) { budgetRefused.add(absolute); return undefined; }
     let config: ProjectConfig;
     try { config = readProjectConfig(dirname(absolute), boundary, absolute, confinedConfigs); }
-    catch { config = unreadableConfig(basename(absolute)); incomplete = true; }
+    catch { config = { ...unreadableConfig(basename(absolute)), path: absolute }; incomplete = true; }
     cache.set(absolute, config);
     if (config.status.configRootsTruncated) incomplete = true;
     return config;
@@ -994,23 +995,29 @@ const MAX_OWNER_CONFIGS = 128;
 const budgetOwner: ProjectConfig = { options: {}, fileNames: [], status: { configName: undefined, configUnreadable: false } };
 
 /**
- * 같은 의미 그룹의 대표 설정만 보고 다른 소유 설정의 준비 공백을 버리지 않는다. 다른 설정에서 온 공백은 그 설정의 이름을 함께 남겨,
- * 문장이 대표 설정(루트 설정이 없으면 이름 없는 기본값)의 이름으로 다른 설정의 실패를 말하지 않게 한다.
+ * 같은 의미 그룹의 대표 설정만 보고 다른 소유 설정의 준비 공백을 버리지 않는다. 다른 설정에서 온 공백은 그 설정의 프로젝트 기준 경로를
+ * 함께 남겨, 문장이 대표 설정(루트 설정이 없으면 이름 없는 기본값)의 이름으로 다른 설정의 실패를 말하지 않게 한다. 대표 설정인지는 이름이
+ * 아니라 설정 자체로 가린다(루트와 중첩 설정이 모두 `tsconfig.json`일 수 있다).
+ *
+ * @param root 프로젝트(스캔 경계) 루트
+ * @param selected 문맥의 대표 설정
+ * @param ownership 소유권 계획
+ * @returns 합친 설정 상태
  */
-function ownershipStatus(selected: ProjectConfig, ownership: ConfigOwnership): ProgramConfigStatus {
+function ownershipStatus(root: string, selected: ProjectConfig, ownership: ConfigOwnership): ProgramConfigStatus {
   const statuses = ownership.configs.map(config => config.status);
   const outsideConfigRoots = statuses.reduce((sum, status) => sum + (status.outsideConfigRoots ?? 0), 0);
   const excludedConfigRoots = statuses.reduce((sum, status) => sum + (status.excludedConfigRoots ?? 0), 0);
   const ignoredOptions = [...new Set(statuses.flatMap(status => status.ignoredCompilerOptions ?? []))].sort();
+  const unreadable = ownership.configs.filter(config => config.status.configUnreadable);
   const unknownOptions = statuses.reduce((sum, status) => sum + (status.unknownCompilerOptions ?? 0), 0);
-  // 읽지 못한 설정은 언제나 파일 이름을 갖는다(이름 없는 상태는 설정 파일이 없을 때의 기본값뿐이다).
-  const otherUnreadable = ownership.configs.filter(config => config !== selected && config.status.configUnreadable)
-    .map(config => config.status.configName!).sort();
-  const rootGapNames = configRootGapNames(statuses, selected.status.configName);
+  const rootGapPaths = configRootGapPaths(root, selected, ownership.configs);
   return { ...selected.status,
-    configUnreadable: statuses.some(status => status.configUnreadable),
-    ...(otherUnreadable.length > 0 ? { otherUnreadableConfigs: otherUnreadable, representativeConfigUnreadable: selected.status.configUnreadable } : {}),
-    ...(rootGapNames === undefined ? {} : { configRootGapNames: rootGapNames }),
+    configUnreadable: unreadable.length > 0,
+    ...(unreadable.some(config => config !== selected)
+      ? { unreadableConfigPaths: unreadable.map(config => configPath(root, config)).sort(), representativeConfigUnreadable: selected.status.configUnreadable }
+      : {}),
+    ...(rootGapPaths === undefined ? {} : { configRootGapPaths: rootGapPaths }),
     ...(ignoredOptions.length > 0 ? { ignoredCompilerOptions: ignoredOptions } : {}),
     ...(unknownOptions > 0 ? { unknownCompilerOptions: unknownOptions } : {}),
     ...(outsideConfigRoots > 0 ? { outsideConfigRoots } : {}),
@@ -1020,54 +1027,73 @@ function ownershipStatus(selected: ProjectConfig, ownership: ConfigOwnership): P
 }
 
 /**
- * 설정 루트 공백마다 그 공백을 낸 설정의 파일 이름을 모은다. 대표 설정 이름 하나로 설명되는 종류는 빼고, 모두 빠지면 undefined다.
+ * 설정 파일의 프로젝트 기준 POSIX 경로다. 소유권 계획에서 읽은 설정은 모두 경계 안 파일이라 경로가 있다. 경로가 없는 것은 설정 파일이
+ * 없을 때의 기본값뿐이고 그런 설정은 읽기 실패나 루트 공백을 내지 않지만, 그 가정이 깨져도 분석을 멈추지 않도록 이름으로 대신한다.
  *
- * @param statuses 소유 설정들의 상태
- * @param representativeName 대표 설정의 파일 이름(설정이 없으면 undefined)
- * @returns 종류별 설정 이름
+ * @param root 프로젝트(스캔 경계) 루트
+ * @param config 설정
+ * @returns 프로젝트 기준 경로
  */
-function configRootGapNames(statuses: readonly ProgramConfigStatus[], representativeName: string | undefined): ConfigRootGapNames | undefined {
-  const namesWhere = (has: (status: ProgramConfigStatus) => boolean): readonly string[] | undefined => {
-    const names = [...new Set(statuses.filter(has).flatMap(status => status.configName === undefined ? [] : [status.configName]))].sort();
-    return names.length === 0 || (names.length === 1 && names[0] === representativeName) ? undefined : names;
+function configPath(root: string, config: ProjectConfig): string {
+  return config.path === undefined ? config.status.configName ?? 'compiler config' : relative(root, config.path).replaceAll('\\', '/');
+}
+
+/**
+ * 설정 루트 공백마다 그 공백을 낸 설정의 프로젝트 기준 경로를 모은다. 프로젝트 루트의 대표 설정 하나만 낸 종류는 예전 문장(설정 이름)으로
+ * 충분하므로 빼고, 모두 빠지면 undefined다.
+ *
+ * @param root 프로젝트(스캔 경계) 루트
+ * @param selected 문맥의 대표 설정
+ * @param configs 소유권 계획의 설정
+ * @returns 종류별 설정 경로
+ */
+function configRootGapPaths(root: string, selected: ProjectConfig, configs: readonly ProjectConfig[]): ConfigRootGapPaths | undefined {
+  const pathsWhere = (has: (status: ProgramConfigStatus) => boolean): readonly string[] | undefined => {
+    const owners = configs.filter(config => has(config.status));
+    const paths = [...new Set(owners.map(config => configPath(root, config)))].sort();
+    const onlyRootRepresentative = owners.length === 1 && owners[0] === selected && paths[0] === selected.status.configName;
+    return owners.length === 0 || onlyRootRepresentative ? undefined : paths;
   };
-  const outside = namesWhere(status => (status.outsideConfigRoots ?? 0) > 0);
-  const excluded = namesWhere(status => (status.excludedConfigRoots ?? 0) > 0);
-  const truncated = namesWhere(status => status.configRootsTruncated === true);
+  const outside = pathsWhere(status => (status.outsideConfigRoots ?? 0) > 0);
+  const excluded = pathsWhere(status => (status.excludedConfigRoots ?? 0) > 0);
+  const truncated = pathsWhere(status => status.configRootsTruncated === true);
   if (outside === undefined && excluded === undefined && truncated === undefined) return undefined;
   return { ...(outside === undefined ? {} : { outside }), ...(excluded === undefined ? {} : { excluded }), ...(truncated === undefined ? {} : { truncated }) };
 }
 
 /**
- * 설정 루트 공백 문장이 말할 설정 이름이다. 그 공백을 낸 설정 이름을 남겼으면 그것을, 아니면 대표 설정 이름을 쓴다.
+ * 설정 루트 공백 문장이 말할 설정이다. 그 공백을 낸 설정의 경로를 남겼으면 그것을, 아니면 프로젝트 루트 대표 설정의 이름을 쓴다.
  *
  * @param status Program 설정 상태
  * @param gap 공백 종류
- * @returns 설정 파일 이름(여럿이면 쉼표로 잇는다)
+ * @returns 설정 경로(여럿이면 쉼표로 잇는다) 또는 설정 이름
  */
-function configRootGapSubject(status: ProgramConfigStatus, gap: keyof ConfigRootGapNames): string | undefined {
-  return status.configRootGapNames?.[gap]?.join(', ') ?? status.configName;
+function configRootGapSubject(status: ProgramConfigStatus, gap: keyof ConfigRootGapPaths): string {
+  // 경로를 남기지 않은 공백은 대표 설정 파일이 낸 것이라 이름이 있다.
+  return status.configRootGapPaths?.[gap]?.join(', ') ?? status.configName!;
 }
 
 /**
- * 읽지 못한 compiler 설정의 원인 문장이다. 대표 설정 자신을 읽지 못했으면 기본 옵션을 썼다고 알리고(기존 문장), 합친 상태의 다른 소유
- * 설정을 읽지 못했으면 그 설정의 수와 이름을 따로 알린다. 대표 설정 이름으로 다른 설정의 실패를 말하면 잘 읽은 설정(설정이 없으면
- * `undefined`)을 읽지 못했다고 하게 된다. 다른 설정이 소유한 소스는 import를 미해결로 남기거나(소유권 충돌) 기본 옵션을 쓰므로
- * 어느 쪽인지 단정하지 않는다. 접두사는 호출자가 붙인다.
+ * 읽지 못한 compiler 설정의 원인 문장이다. 대표 설정 자신을 읽지 못했으면 기본 옵션을 썼다고 알리고(기존 문장), 대표 설정이 아닌 소유
+ * 설정도 읽지 못했으면 프로젝트에서 읽지 못한 설정 전부를 `config-unreadable:`로 경로와 함께 알린다. 대표 설정 이름으로 다른 설정의
+ * 실패를 말하면 잘 읽은 설정(설정이 없으면 `undefined`)을 읽지 못했다고 하게 되고, 이름만으로는 같은 이름의 설정을 구별하지 못한다. 목록은
+ * 대표 설정과 상관없이 같으므로 문맥이 나뉘어도 같은 문장이 되어 하나로 합쳐진다. 그 설정이 소유한 소스는 import를 미해결로 남기거나
+ * (소유권 충돌) 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다. 접두사는 호출자가 붙인다.
  *
  * @param status Program 설정 상태
  * @returns 원인 문장(읽지 못한 설정이 없으면 빈 목록)
  */
 export function configParseGaps(status: ProgramConfigStatus): string[] {
   if (!status.configUnreadable) return [];
-  const others = status.otherUnreadableConfigs ?? [];
+  const paths = status.unreadableConfigPaths;
   const gaps: string[] = [];
-  if (others.length === 0 || status.representativeConfigUnreadable === true) {
+  if (paths === undefined || status.representativeConfigUnreadable === true) {
     gaps.push(`${status.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
   }
-  if (others.length > 0) {
-    gaps.push(`${others.length} other compiler config(s) (${[...new Set(others)].join(', ')}) could not be parsed, `
-      + 'so path aliases and imports in the sources they own may not resolve');
+  if (paths !== undefined) {
+    const shown = paths.slice(0, 10);
+    gaps.push(`config-unreadable: ${paths.length} compiler config(s) in the project could not be parsed, so path aliases and imports in the `
+      + `sources they own may not resolve; files: ${JSON.stringify(shown)}; omitted: ${paths.length - shown.length}`);
   }
   return gaps;
 }

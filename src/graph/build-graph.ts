@@ -292,7 +292,7 @@ function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
 function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const result = new Set(callLimitations(counts, view));
   const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|type-only-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
-  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget):/u;
+  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget|unreadable):/u;
   for (const [index, { graph }] of contexts.entries()) {
     const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
     for (const line of lines) {

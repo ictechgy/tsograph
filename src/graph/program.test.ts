@@ -1002,9 +1002,12 @@ function typesPackage(directory: string, name: string, declaration: string): Rec
   };
 }
 
-/** `graph-config:`·coverage 한계가 함께 쓰는 '경계 밖 설정 루트' 원인 문장이다. */
-function outsideRootsGap(count: number, affected: string): string {
-  return `${count} include pattern(s) or files entr(ies) of tsconfig.json point outside the scanned root and were not used as root files; `
+/**
+ * `graph-config:`·coverage 한계가 함께 쓰는 '경계 밖 설정 루트' 원인 문장이다. 공백을 낸 설정이 스캔 경계 루트의 대표 설정이 아니면
+ * 문장은 그 설정의 경계 기준 경로를 쓴다(`--workspace`로 넓힌 경계에서는 `app/tsconfig.json`).
+ */
+function outsideRootsGap(count: number, affected: string, config = 'tsconfig.json'): string {
+  return `${count} include pattern(s) or files entr(ies) of ${config} point outside the scanned root and were not used as root files; `
     + `type resolution and ${affected} may be incomplete (analyze a root that contains them)`;
 }
 
@@ -1171,7 +1174,7 @@ test('경계 밖을 가리키는 include·files는 열거하지 않고 세며 --
       assert.ok(graph.limitations.includes(`graph-config: ${outsideRootsGap(4, 'calls')}`), graph.limitations.join('\n'));
       assert.ok(graph.limitations.some((line) => line.includes('incomplete(coverage)')));
       const workspace = await buildCallGraph(app, createNodeFileSystem(), { workspace: root });
-      assert.ok(workspace.limitations.includes(`graph-config: ${outsideRootsGap(2, 'calls')}`), workspace.limitations.join('\n'));
+      assert.ok(workspace.limitations.includes(`graph-config: ${outsideRootsGap(2, 'calls', 'app/tsconfig.json')}`), workspace.limitations.join('\n'));
       assert.deepEqual(outsideListings, []);
     } finally {
       t.mock.restoreAll();
