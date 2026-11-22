@@ -12,8 +12,8 @@
   머지됐다. `main` `cea6584`의 CI 체크 6개가 모두 성공했다(2026-11-22 `gh api …/check-runs`로 확인). 세 PR의 변경은 모두 CHANGELOG
   `[Unreleased]`에 있고 아직 발행하지 않았다.
 - 2026-11-22 4회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `cea6584`에서 다시 시작해 limitation 문장 정확성 세 가지(아래 절)를
-  PR #61(head `4939c2a` push됨)로 올렸다. 독립 리뷰 지적(아래 "PR #61 리뷰 반영")을 반영한 커밋 `b6d4052`·`f826ac0`·`6e67a71`과 문서 커밋은
-  push 전이다(조정자가 올린다).
+  PR #61로 올렸다. 첫 리뷰 반영(`b6d4052`·`f826ac0`·`6e67a71`·`11ee842`)까지 push됐고, 델타 리뷰(아래 "PR #61 델타 리뷰 반영") 반영 커밋
+  `e02ecbb`와 문서 커밋은 push 전이다(조정자가 올린다).
 
 ## limitation 문장 정확성: 타입 전용 export 별칭·산출물끼리의 import·합친 설정 이름 (2026-11-22, 4회차)
 
@@ -48,29 +48,34 @@
 3. **합친 설정 상태의 이름** (`e5343c2`, `program.ts`·`build-graph.ts`·`routes/node/node-project.ts`): `ownershipStatus`가 읽지 못함·밖 include·
    건너뛴 루트·열거 상한을 모든 소유 설정에서 모으면서 문장은 대표 설정 이름을 썼다. 루트 설정이 없으면 `graph-config: undefined could not be
    parsed; …`(routes server·client도 같다), 루트 `tsconfig.json`을 잘 읽었어도 중첩 `jsconfig.json`을 읽지 못하면 거짓 `tsconfig.json could
-   not be parsed; default compiler options were used`, 밖 include는 `… of undefined point outside …`가 나왔다. 대표 설정 자신을 읽지 못했을
-   때만 예전 문장을 내고, 다른 소유 설정을 하나라도 읽지 못하면 프로젝트에서 읽지 못한 설정 전부를 `config-unreadable: N compiler config(s) in
-   the project could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<경로>]; omitted: M` 한 줄로
-   알린다(리뷰 반영 `b6d4052`; 첫 커밋은 `N other compiler config(s) (<이름>)`을 문맥마다 냈다). 목록은 대표 설정과 상관없어 문맥마다 같은
-   문장이라 graph는 전역 줄(`globalInputs`)로, routes는 문장 합치기로 하나만 남는다. 그 소스가 막히는지(소유권 충돌)는 그 설정이 nearest
-   소유자인지, reference로만 닿는지, plan 루트 설정인지와 문맥 모드에 따라 달라 단정하지 않았다. 루트 공백 문장은 공백을 낸 설정의 프로젝트(스캔
-   경계) 기준 경로를 쓰고, 스캔 루트의 대표 설정 하나만 냈으면(설정 자체로 비교하고 경로가 파일 이름과 같을 때) 상태에 싣지 않아 기존 상태
-   `deepEqual` 테스트와 출력이 그대로다. `--workspace`로 경계를 넓히면 프로젝트 설정의 공백도 `app/tsconfig.json`처럼 경로로 말한다(기존 테스트
-   기대값 하나를 바꿨다). 문장 함수는 `configParseGaps` 하나로 graph와 Node routes가 같이 쓴다.
+   not be parsed; default compiler options were used`, 밖 include는 `… of undefined point outside …`가 나왔다.
+   - 최종 규칙(델타 리뷰 반영 `e02ecbb`): 읽지 못한 설정을 문맥의 대표 설정이 아니라 소유권 계획의 **주 설정**(`ConfigOwnership.main`: 루트
+     설정, `--tsconfig`로 고른 설정, 없으면 기본값) 기준으로 나눈다. 주 설정을 읽지 못했을 때만 예전 문장(스캔 루트 밖이면 경로)을 내고,
+     나머지는 모두 `config-unreadable: N compiler config(s) under the scanned root could not be parsed, so path aliases and imports in the sources
+     they own may not resolve; files: [<경로>]; omitted: M` 한 줄에 적는다(주 설정은 다시 적지 않는다). 두 문장 모두 계획 기준이라 문맥과
+     상관없이 같고, graph는 접두사(`graph-config:`, Next 진입 범위 `route-coverage:` …)와 상관없이 문맥 표시 없이 하나로 합치며(`globalInputs`),
+     routes는 문장 합치기로 하나만 남는다. 표시 이름은 실제 경로(스캔 루트 안일 때) 기준이라 symlink 디렉터리로 다시 읽은 같은 파일은 한 번만
+     센다. 그 소스가 막히는지(소유권 충돌)는 nearest 소유자인지, reference로만 닿는지, 문맥 모드에 따라 달라 단정하지 않았다.
+   - 경과: 첫 커밋 `e5343c2`는 `N other compiler config(s) (<이름>)`을 문맥마다 냈고, `b6d4052`는 경로·한 줄로 바꿨지만 대표 문장을 문맥의
+     대표 설정 기준으로 남겨 fx15(루트 읽음, 소스가 `sub/`에만 있고 `sub/tsconfig.json`만 깨짐)에서 `tsconfig.json could not be parsed`(거짓)만
+     나오고 `sub/tsconfig.json`은 이름이 없었다(델타 리뷰 B1).
+   - 루트 공백 문장은 공백을 낸 설정의 스캔 루트 기준 경로를 쓰고, 스캔 루트의 대표 설정 하나만 냈으면(설정 자체로 비교하고 경로가 파일 이름과
+     같을 때) 상태에 싣지 않아 기존 상태 `deepEqual` 테스트와 출력이 그대로다. `--workspace`로 경계를 넓히면 프로젝트 설정의 공백도
+     `app/tsconfig.json`처럼 경로로 말한다(기존 테스트 기대값 하나를 바꿨다). 문장 함수는 `configParseGaps` 하나로 graph와 Node routes가 같이 쓴다.
    - 재현: typeorm 얕은 clone(`d5b143d`, 의존성 미설치라 `@tsconfig/node20`·`@docusaurus/tsconfig` extends를 못 읽음, 읽지 못한 설정 3개)
      `graph` → 루트 문맥 `undefined could not be parsed`, 잘 읽은 `playground`·`packages/codemod` 문맥에도 `tsconfig.json could not be parsed`.
-     새 분석기: `config-unreadable: 3 compiler config(s) in the project could not be parsed, …; files: ["docs/tsconfig.json",
-     "packages/legacy-naming-strategies/tsconfig.json","packages/typeorm/tsconfig.json"]` 한 줄, 대표를 읽지 못한 세 문맥은 예전 문장을 그대로
-     낸다(`route-call-coverage:`도 같다). 합성 재현: 설정 없는 루트 +
+     새 분석기: `config-unreadable: 3 compiler config(s) under the scanned root could not be parsed, …; files: ["docs/tsconfig.json",
+     "packages/legacy-naming-strategies/tsconfig.json","packages/typeorm/tsconfig.json"]` 한 줄만 남는다(주 설정은 설정 없음이라 기본 옵션 문장이
+     없다. `route-call-coverage:`도 같다). 합성 재현: 설정 없는 루트 +
      읽지 못한 `a/tsconfig.json` + 설정 없는 `b/app.ts`(Express)에서 graph·routes server·client 모두 `undefined` 문장, 루트 `tsconfig.json` +
      중첩 `jsconfig.json`의 건너뛴 `files` 항목은 graph·schema(`persistence-config:`)가 `of tsconfig.json`이라고 썼다.
-   - 테스트 `src/graph/config-status-names.test.ts`(8개, graph·routes server·client): 위 세 모양, 같은 이름 설정 둘을 읽지 못함(한 줄, 경로 둘),
-     대표·중첩 모두 읽지 못함, 루트와 같은 이름의 중첩 `tsconfig.json`이 밖을 가리킴(두 문맥 모두 `packages/a/tsconfig.json`), 중첩
-     `jsconfig.json`의 건너뛴 `files` 항목, 루트 설정 자신의 공백은 이름 그대로(보호 테스트). 리뷰 반영 전 코드(`4939c2a`)에서 보호 테스트를 뺀
-     7개가 실패한다. 변이(리뷰 반영 뒤): 경로 대신 이름을 쓰면 7개, 대표 판정을 설정 자체로만 하면 3개, 전역 줄 정규식을 빼면 4개, 전역 줄을
-     대표 설정만 읽지 못해도 내면 이 파일과 `program.test.ts`에서 4개, 대표 문장 조건을 항상 참으로 하면 2개, 대표 판정 없이 늘 경로를 쓰면
-     5개(`program.test.ts` 상태 `deepEqual` 포함)가 실패한다. 대표 판정을 경로 비교로만 하는 변이는 출력이 같다(스캔 루트에서 파일 이름과 같은
-     경로는 그 설정 하나뿐이다).
+   - 테스트 `src/graph/config-status-names.test.ts`(15개, graph·routes server·client): 위 세 모양, 같은 이름 설정 둘 읽기 실패(한 줄, 경로 둘),
+     주 설정·중첩 설정 모두 읽기 실패(주 설정 문장 하나 + 주 설정을 뺀 목록), 루트와 같은 이름 중첩 `tsconfig.json`의 밖 include, 중첩
+     `jsconfig.json`의 건너뛴 `files`, 루트 설정 자신의 공백은 이름 그대로(보호), fx15·fx16(유일한 소스의 중첩 설정만 깨짐, 루트 설정 있음·없음),
+     fx01(루트·중첩 소스, 목록 한 줄만), fx18(Next, `route-coverage:` 목록도 한 번), fx11(symlink 중복), fx17(주 설정만 깨짐), fx10(`--workspace`).
+     `11ee842`에 이 파일을 돌리면 루트 공백 네 개(보호 포함)를 뺀 11개가 실패한다. 변이(`e02ecbb` 뒤): 대표 설정을 주 설정으로 쓰면 10개,
+     graph 접두사만 합치면 1개(fx18), 주 설정 문장을 문맥마다 내면 2개, realpath를 빼면 1개(fx11), 목록에서 주 설정을 빼지 않으면 2개,
+     예전 "in the project" 문구면 10개가 실패한다. 첫 리뷰 반영 때 변이(경로 대신 이름 7개, 늘 경로 5개 등)는 루트 공백 쪽 그대로다.
 - 적대 입력(수정 전후 비교, 노드·간선이 바뀐 사례 없음): 타입 쪽 — const enum(해석 실패 유지), interface+function·interface+class 병합(간선 유지),
   `import type`으로 가져온 class를 `export { }`(기존 alias 간선 유지, 아래 남긴 것), JSDoc `@callback`, 외부 패키지·ambient `.d.ts`·`declare
   function`(외부라 세지 않음 유지), `export * as ns`(노드 대상 없음 유지). 산출물 쪽 — 스캔한 `src/shim.d.ts`가 산출물을 다시 내보냄(소스 import로
@@ -86,22 +91,26 @@
   node-express-boilerplate는 stdout·stderr 바이트가 같다. 리뷰 반영 뒤 다시 잰 `routes --role server|client`(`generatedAt`만 빼고 비교)는 typeorm
   client만 위 문장이 바뀌고 나머지 일곱은 같다. 첫 커밋 때 적은 "routes도 바이트가 같다"는 `routes`가 받지 않는 `--generated-at`을 넘겨 두 쪽
   출력이 모두 비어 있던 잘못된 비교였다. `schema`(`generatedAt` 제외)는 네 저장소 모두 같다.
-- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어, load 10~30). 리뷰 반영 뒤 다시 돌렸다.
-  - `npx tsc --noEmit` 통과. 관련 16개 파일 집중 실행 319개 중 313 통과·5 skip·1 실패였고, 실패는 `--workspace` 기대값이 의도대로
-    `app/tsconfig.json`이 된 것이라 기대값을 고친 뒤 통과했다.
-  - 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(18분 34초, load 13~16): 1,816개 중 1,792 통과·23 skip·1 실패. 실패는
-    `relation-facts`의 `chmod 000` 사례(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.69%·분기 91.64%·함수 98.22%, `export-nodes.ts`
-    100/100/100, `program.ts` 100/97.06/99.21, `build-graph.ts` 99.70/94.47/97.06. 첫 커밋 때 실행(1,812개, 27분 48초, load 20~30)은 부하로
-    `schema-command` 힙 사례·`dispatch` 600모듈 사례도 실패했고 둘 다 단독 재실행으로 통과했다. 12분 상한 `npm test`는 부하로 상한 안에 들지 못하는
-    시간이라 돌리지 않았다.
+- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어). 델타 리뷰 반영(`e02ecbb`) 뒤 다시 돌렸다.
+  - `npx tsc --noEmit` 통과.
+  - 리뷰어 fixture 21개(`scratchpad/r4d-fx`, 실행은 `r4d-tools/run.sh`와 같은 인자, graph·routes server·client): `4939c2a`·`11ee842`·새 head에서
+    노드·간선·`graphRevision`·종료 코드가 21/21 같다. 문장 변화는 위 델타 리뷰 표대로다(fx02는 예전과 같고, fx04는 문맥별 `tsconfig.json could
+    not be parsed` 열두 줄이 목록 한 줄로 바뀐다).
+  - 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(13분 2초): 1,823개 중 1,798 통과·23 skip·2 실패. 실패는 `dispatch` 600모듈
+    메모 사례(부하; 단독 재실행 통과)와 `relation-facts`의 `chmod 000` 사례(root 컨테이너, 기존 환경 문제)다. 커버리지 라인 98.69%·분기 91.64%·
+    함수 98.22%, `export-nodes.ts` 100/100/100, `program.ts` 100/97.18/99.21, `build-graph.ts` 99.70/94.49/97.06. 그 전 실행에서 상태 `deepEqual`
+    테스트 두 개(`program.test.ts`)가 새 `unreadableConfigs` 필드 때문에 실패해, 주 설정이 곧 대표 설정이고 스캔 루트에 있으며 그것만 깨졌을 때는
+    필드를 싣지 않게 고쳤다(같은 문장이 나온다). 12분 상한 `npm test`는 돌리지 않았다.
   - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
   - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus 체크아웃의 conformance는 `origin/main`
     `30285f9`와 같다).
-  - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `cea6584` worktree에 돌린 결과는 `cea6584` 분석기 결과와 stdout·stderr
-    모두 바이트 단위로 같다(노드 10,174, 간선 14,761). 이 head 트리(실제 저장소 경로)에서 새 분석기와 `4939c2a` 분석기의 출력도 바이트가 같다
-    (자기 분석에는 새 문장이 나오지 않는다). `cea6584` 트리와의 차이는 바뀐 여덟 파일 안뿐이다(노드 10,174 → 10,265, 간선 14,761 → 14,914,
-    bound 간선 710 → 721·호출 740 → 742, `unresolved-calls` 4,555 → 4,557(parameter +2), 바뀐 파일을 건드리지 않는 노드·간선 변화 0). 두 번
-    돌려 바이트가 같다. worktree의 `node_modules` symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄은 경로 차이다.
+  - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `cea6584` worktree에 돌린 결과는 `cea6584` 분석기 결과와, 이 head 트리에
+    돌린 결과는 `11ee842` 분석기 결과와 stdout·stderr 바이트가 같다(자기 분석에는 새 문장이 나오지 않는다). `cea6584` 트리와의 차이는 바뀐 여덟
+    파일 안뿐이다(노드 10,174 → 10,290, 간선 14,761 → 14,963, bound 간선 710 → 728·호출 740 → 743, `unresolved-calls` 4,555 → 4,558, 바뀐 파일을
+    건드리지 않는 노드·간선 변화 0). 두 번 돌려 바이트가 같다.
+  - corpus(`cea6584`·`11ee842`·새 head): graph는 rxjs·yaml(`11ee842`와 같음)과 typeorm(`11ee842` 대비 문맥별 `tsconfig.json could not be parsed`
+    세 줄이 사라지고 목록 문구가 "under the scanned root")만 바뀌고 노드·간선·통계·`graphRevision`·stderr는 같다. 나머지 열두 대상은 바이트가
+    같다. `routes`(`generatedAt` 제외)는 typeorm client만 같은 식으로 바뀌고 `schema`는 네 저장소 모두 같다.
   - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
     재실행(스크래치 디렉터리 권한을 넓히지 않으려고 하지 않았다).
 
@@ -116,8 +125,22 @@
 | 의존성을 설치하지 않은 typeorm 저장소는 간선 0개 | 읽지 못한 extends 설정 3개가 소유권 계획을 불완전으로 만들어 모든 소스의 import를 보류하는 기존 보수 규칙이다. limitation은 사실대로 알린다(이번 수정으로 이름도 맞다). |
 | GLM 리뷰 | 이 환경에 `packet-ask`가 없다. |
 | 산출물 import가 모두 스캔하지 않는 파일에서 나와도 `declaration-outputs:`가 "calls through them are counted as external"을 말하고 스캔을 불완전으로 본다 | 전체 수로 판정하는 기존 동작이다. 그런 경우를 완전한 스캔으로 바꾸면 bound 간선이 늘 수 있어 반례 corpus가 필요하다(리뷰 nit 3, 후속). routes 문장도 이 고정 구절은 `calls`라고 말한다. |
-| 대표 설정을 읽지 못한 문맥의 `<이름> could not be parsed; default compiler options were used`는 중첩 설정이어도 파일 이름만 쓴다 | 리뷰가 기존 문장을 유지하라고 했다. 같은 프로젝트의 `config-unreadable:` 줄이 경로를 준다. |
+| 소유권 계획은 설정을 `resolve()` 경로로 캐시해, symlink 디렉터리나 대소문자만 다른 경로로 참조한 같은 설정 파일을 두 설정으로 다룬다 | 이번에는 문장의 표시 이름만 실제 경로로 합쳤다(델타 리뷰 N1). 소유권 판정 자체를 realpath로 바꾸는 것은 충돌·문맥 분리 판정이 바뀌는 일이라 하지 않았다. |
 | 설정 루트 공백 문장은 문맥마다 같은 합계를 `compiler-context:` 표시와 함께 반복한다 | 기존 구조다. 이번에는 이름·경로만 고쳤다. |
+
+### PR #61 델타 리뷰 반영 (2026-11-22, `4939c2a..11ee842` 리뷰)
+
+리뷰어 fixture 21개(`r4d-fx`, 생성기 `r4d-tools/mkfx.sh`)를 `4939c2a`·`11ee842`·새 head에 돌렸다. 노드·간선·`graphRevision`·종료 코드는 21개
+모두 세 빌드에서 같다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| B1 blocker: 문맥의 대표 설정 기준이라 fx15·fx16에서 `tsconfig.json could not be parsed`(거짓, 루트 설정 탓)만 나오고 `sub/tsconfig.json`은 이름이 없음, fx01은 routes에서 실패한 설정이 둘처럼 읽힘 | 고침(`e02ecbb`): 계획의 주 설정만 예전 문장, 나머지는 모두 목록 | fx15·fx16·fx01 테스트(graph·server·client), `11ee842`에서 실패. 대표 설정을 주 설정으로 쓰는 변이에서 10개 실패 |
+| S1: Next 진입 범위의 `route-coverage: config-unreadable:`이 graph에서 문맥마다 반복(fx18) | 고침(`e02ecbb`): 접두사와 상관없이 전역 줄로 합침 | fx18 테스트, graph 접두사만 보는 변이에서 실패 |
+| N1: symlink로 다시 참조한 같은 파일을 둘로 셈(fx11) | 고침(`e02ecbb`): 실제 경로 표시 이름으로 한 번 | symlink 테스트, realpath를 빼면 실패. 소유권 판정 자체는 남긴 것(위 표) |
+| N2: 주 설정만 읽지 못하면 목록에 주 설정을 다시 적음(fx17) | 고침(`e02ecbb`) | fx17 테스트, 목록에서 주 설정을 빼지 않으면 2개 실패 |
+| N3: `--workspace` 목록에 프로젝트 밖 설정이 있는데 "in the project"(fx10) | 고침(`e02ecbb`): "under the scanned root" | `--workspace` 테스트 |
+| N4: 문서가 중립 절을 graph·Node routes만 말함 | 고침(문서 커밋): client `requests`, navigation `screen registrations`까지 | — |
 
 ### PR #61 리뷰 반영 (2026-11-22)
 

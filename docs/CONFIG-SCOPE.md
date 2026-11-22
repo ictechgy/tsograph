@@ -8,10 +8,13 @@ schema와 change-impact가 같은 파일 소유권 계획을 사용한다. Next 
 명시적으로 파일을 소유하면 그 설정을 사용하되 가까운 설정도 같은 파일을 진입 파일로 고르면 두 소유권을 비교한다.
 서로 다른 유효 옵션의 설정이 같은 파일을 소유하거나
 설정을 읽지 못하면 임의 선택을 확정하지 않는다. `extends`는 TypeScript의 bounded JSON 해석을 사용한다.
-문맥의 대표 설정 자신을 읽지 못하면 `<설정 이름> could not be parsed; default compiler options were used, …`로 알린다. 다른 소유 설정을
-하나라도 읽지 못하면 프로젝트에서 읽지 못한 설정 전부를 `config-unreadable: N compiler config(s) in the project could not be parsed, … files:
-[<프로젝트 기준 경로>]; omitted: M` 한 줄로 알린다. 같은 이름(`tsconfig.json`)의 루트·중첩 설정을 구별하려고 경로를 쓰고, 문맥과 상관없는
-목록이라 문맥이 나뉘어도 한 줄로 합쳐진다. 그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다.
+읽지 못한 설정은 type-checking 문맥의 대표 설정이 아니라 소유권 계획의 주 설정(루트 설정, `--tsconfig`로 고른 설정)을 기준으로 나눈다. 주
+설정을 읽지 못하면 `<설정 이름> could not be parsed; default compiler options were used, …`(스캔 루트 밖이면 경로)로, 그 밖의 소유 설정을
+하나라도 읽지 못하면 그 설정 전부를 `config-unreadable: N compiler config(s) under the scanned root could not be parsed, … files: [<스캔 루트
+기준 경로>]; omitted: M` 한 줄로 알린다(주 설정은 다시 적지 않는다). 그래서 읽지 못한 설정은 모두 이름이 나오고, 잘 읽은 설정을 읽지 못했다고
+하는 문장은 없다. 같은 이름(`tsconfig.json`)의 루트·중첩 설정을 구별하려고 경로를 쓰고, symlink 디렉터리나 대소문자만 다른 경로로 다시 읽은
+같은 파일은 실제 경로로 한 번만 센다. 두 문장 모두 계획 기준이라 문맥이 나뉘어도, graph가 Next 진입 범위 문장(`route-coverage:`)을 함께 실어도
+한 번씩만 나온다. 그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다.
 include가 루트 밖을 가리키는 등 설정 루트 공백은 스캔 루트의 대표 설정이 낸 것이면 예전처럼 설정 파일 이름으로, 아니면 그 공백을 낸 설정의
 프로젝트 기준 경로로 알린다(대표 설정 이름이나 설정이 없을 때의 `undefined`가 아니다). 대표 설정인지는 이름이 아니라 설정 자체로 가린다.
 실행 코드, loader, PnP 스크립트, compiler plugin을 실행하지 않는다.
@@ -51,8 +54,8 @@ module.exports = api`, `module.exports = create()`, `var x = exports.x = …`, `
 (소스 자신이나 `export *` 대상) 예전처럼 잇는다. 잇지 않은 import는 `graph-config: declaration-outputs:`에 export 불일치 수와 함께 세고
 스캔을 불완전으로 본다. 이름이 맞지 않은 선언은 옆의 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도 돌리지 않는다.
 import 수에는 산출물 선언끼리의 import처럼 스캔이 소스로 분석하지 않는 파일이 한 import도 들어 있다. 그 파일들에서는 호출·route 등록을
-뽑지 않으므로 문장이 그 수를 따로 말하고(`N of them are made by files that are not analyzed as sources either …, so no <calls·route
-registrations> are taken from those files`), `files:`
+뽑지 않으므로 문장이 그 수를 따로 말하고(`N of them are made by files that are not analyzed as sources either …, so no <결과> are taken
+from those files`; 결과는 graph `calls`, routes server `route registrations`, client `requests`, navigation `screen registrations`), `files:`
 표본(최대 10개, 경로 순)은 스캔한 소스가 import한 산출물을 먼저 고른다. 스캔 불완전 판정은 예전처럼 전체 import 수로 한다.
 
 남은 한계: 같은 이름을 모두 내보내는 다른 구현은 이름으로 구별하지 못하고, export 이름이 없는 선언(`export {}`, `declare global`만 있음)은

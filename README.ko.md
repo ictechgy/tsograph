@@ -110,7 +110,8 @@ Program을 나누지 않는다. workspace 패키지의 `exports`·`types`가 프
 되짚는다. 그렇지 않으면 호출은 외부로 남고 `graph-config: declaration-outputs:`가 import 수를 센다.
 이 수에는 스캔이 소스로 분석하지 않는 파일(빌드 산출물 선언끼리, 스캔하지 않은 빌드 출력 JavaScript)이 한 import도 들어 있다. 그런
 import가 있으면 문장이 그 수를 따로 말한다(`N of them are made by files that are not analyzed as sources either …, so no calls are taken
-from those files`; Node routes는 `route registrations`). 그 파일들에서는 아무것도 뽑지 않기 때문이다. `files:` 목록(최대 10개, 경로 순)은 스캔한 소스가 import한 선언을 다른 빌드 산출물에서만 닿는
+from those files`; `routes --role server`는 `route registrations`, `--role client`는 `requests`, `navigation`은 `screen registrations`).
+그 파일들에서는 아무것도 뽑지 않기 때문이다. `files:` 목록(최대 10개, 경로 순)은 스캔한 소스가 import한 선언을 다른 빌드 산출물에서만 닿는
 선언보다 먼저 고른다.
 `outDir`/`rootDir` 대응은 배치만 보는 추론이라, TypeScript 소스면 선언이 내보내는 이름(값·타입, `default`, `export =`, `export *`가
 끌어오는 이름)이 모두 그 소스의 export에도 있을 때만 잇는다. 이름이 빠졌거나 선언 파일 자체를 읽지 못하면(읽기·구문 깊이 실패)
@@ -1280,7 +1281,7 @@ tsograph reach --project fixtures/graph/di-dispatch 'src/app/api/items/route.ts#
 `overridden-methods:`, `missing-dependencies:`,
 호출 그래프 compiler도 tsconfig 루트·전이 import·선언·패키지 입력 각각에 4 MiB 읽기 상한을 적용한다. 생략한 입력은 `oversized-compiler-inputs:`로 알리고 분석 완전성을 인정하지 않는다.
 스캔 루트 밖이거나, 건너뛰는 디렉터리·symlink 경로를 이름으로 적었거나, 열거 상한 뒤라 쓰지 않은 설정 루트도 `graph-config:`로 알리고 분석 완전성을 인정하지 않는다.
-읽지 못한 설정도 `graph-config:`로 알린다. 문맥 자신의 설정은 `<이름> could not be parsed; default compiler options were used, …`이고, 그 밖의 소유 설정을 하나라도 읽지 못하면 프로젝트 전체에 한 줄 `config-unreadable: N compiler config(s) in the project could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<프로젝트 기준 경로>]; omitted: M`을 낸다. 이 줄은 type-checking 문맥이 나뉘어도 같다(그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓴다).
+읽지 못한 설정도 `graph-config:`로 알린다. type-checking 문맥이 아니라 소유권 계획의 주 설정(루트 설정, `--tsconfig`로 고른 설정)을 기준으로 나눠, 주 설정은 `<이름> could not be parsed; default compiler options were used, so path aliases may not resolve`(스캔 루트 밖이면 경로)로, 그 밖에 읽지 못한 소유 설정은 모두 한 줄 `config-unreadable: N compiler config(s) under the scanned root could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<스캔 루트 기준 경로>]; omitted: M`으로 알린다(그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓴다). 두 문장은 문맥·접두사와 상관없이 같아서 한 번씩만 나오고, symlink 디렉터리로 다시 읽은 같은 파일은 한 번만 센다.
 걷기가 골랐지만 compiler가 읽지 못한 소스(권한, 걷기 뒤 삭제, TypeScript가 경로 구분자로 읽는 백슬래시가 든 이름)는 노드가 되지 않으며 `unreadable-sources:`로 세고 역시 분석 완전성을 인정하지 않는다.
 구문 중첩이 400단을 넘거나 파싱이 호출 스택을 넘긴 소스·선언·패키지 입력도 같은 방식으로 Program에서 빠지고 `parse-errors:`로 알린다(소스는 경로와 함께). 역시 분석 완전성을 인정하지 않는다.
 
