@@ -1302,12 +1302,18 @@ What `bound` guarantees, and what it does not:
   loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
   `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
   `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
-  1 MiB), or an incomplete scan (skipped, oversized, unreadable, symlinked, or
+  1 MiB), a publishable package without those fields (a string `name` and not `"private": true`) that has a
+  default index file next to its `package.json` (`index.js`, `index.jsx`, `index.ts`, or `index.tsx`: Node loads
+  `index.js` when `main` is missing and TypeScript resolves the others, so `{"name":"lib"}` is consumed exactly like
+  `{"name":"lib","main":"index.js"}`, as published by express 4 and `@nestjs/core` 10), or an incomplete scan
+  (skipped, oversized, unreadable, symlinked, or
   unsafely named files, or parse errors), additionally opens every exported function and class and every
   non-private property; the document then says so under `bound-dispatch:`. Below the root, each file uses its
   nearest `package.json`: a workspace package that declares those fields and is not `"private": true` (or whose
   manifest cannot be read) opens the exported functions and classes of its own files and, conservatively, every
-  non-private property in the program (`bound-dispatch: nested package.json file(s) …`); a private workspace
+  non-private property in the program (`bound-dispatch: nested package.json file(s) …`); a publishable workspace
+  package without those fields does the same when it has a default index file (`bound-dispatch: nested package.json
+  file(s) are not private and declare no entry fields …`); a private workspace
   package cannot be published, so its consumers are the scanned workspace. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default

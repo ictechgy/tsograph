@@ -6,6 +6,18 @@
 
 ### Fixed
 
+- graph·reach·impact: `package.json`에 공개 진입점 필드(`main`·`exports` 등)가 없어도 게시할 수 있는 패키지(문자열 `name`,
+  `"private": true` 아님)가 그 옆에 기본 index 파일(`index.js`·`index.jsx`·`index.ts`·`index.tsx`)을 두면 Node·TypeScript가 그 파일을
+  패키지 진입점으로 해석하는데, 이를 닫힌 프로그램으로 보고 bound 간선을 내던 문제를 고쳤다. Node는 `main`이 없으면 `index.js`를
+  불러오므로 `{"name":"lib"}`는 `{"name":"lib","main":"index.js"}`와 똑같이 스캔 밖 소비자가 가져다 쓴다(express 4.21.2,
+  `@nestjs/core`·`@nestjs/common` 10.4.15가 이렇게 게시된다). 이제 루트는 `bound-dispatch: package.json is not private and its default
+  index file is the package entry, …`, 중첩 workspace 패키지는 `bound-dispatch: nested package.json file(s) are not private and declare
+  no entry fields, so their default index file is the package entry: […]; …`로 알리고 그 내보낸 함수·클래스를 연다. **bound 간선을
+  줄이는 변경**이다: ESM `index.js`의 `export function run(callback) { return callback(); }`를 프로젝트 안에서 `run(helper)`로만 부르면
+  예전에는 `run → helper` bound 간선을 냈지만, 소비자가 `import('lib').run(other)`로 다른 콜백을 넘기면 그 간선은 거짓이다. 줄어든
+  호출은 `unresolved-calls:`의 원인별 계수(예: `parameter`)에 들어간다. CommonJS 파일은 원래 최상위 선언을 열어 두므로 위 세 패키지의
+  간선은 바뀌지 않고 열린 프로그램 문장만 더해진다. `"private": true`이거나 이름이 없거나 기본 index 파일이 없는 manifest는 예전처럼
+  닫힌 쪽이다.
 - graph·reach·impact: workspace 패키지가 `exports.types`로 프로젝트 안 빌드 산출물(`dist/index.d.ts`)을 가리키면
   앱의 호출이 외부로 조용히 사라지던 문제를 고쳤다. declaration map, 산출물을 낸 설정의 `declarationDir`/`outDir`↔`rootDir`,
   손으로 쓴 선언 옆 JavaScript 구현으로 스캔한 소스 하나를 증명할 때만 그 소스로 잇고, 근거가 없으면

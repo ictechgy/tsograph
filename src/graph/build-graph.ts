@@ -29,6 +29,7 @@ import { SYNTAX_DEPTH_CAUSE } from '../schema/syntax-depth.ts';
 import { readBoundedFileBytes } from './bounded-config-reader.ts';
 import { addClassEdges, addOverrides } from './class-relations.ts';
 import { BoundedFunctionResolver, collectBindingCensus } from './bounded-function-bindings.ts';
+import { hasDefaultIndexEntry } from './default-index-entry.ts';
 import { createModuleResolver, importsTestSources, resolveDispatch } from './dispatch.ts';
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest, type EffectBuildBudget, type EffectInventory } from './effect-inventory.ts';
@@ -120,10 +121,12 @@ interface GraphCounts {
   readonly openProgram: OpenProgramReason | undefined;
   /** 닫힌 프로그램에서 일부 파일을 연 중첩 공개·판단 불가 manifest의 프로젝트 기준 경로 */
   readonly openManifests: readonly string[];
+  /** 닫힌 프로그램에서 기본 index 진입점({@link hasDefaultIndexEntry})으로 일부 파일을 연 중첩 manifest의 프로젝트 기준 경로 */
+  readonly openDefaultIndexManifests: readonly string[];
 }
 
 /** AST·checker를 보유하지 않는 문맥별 호출 진단이다. */
-type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram' | 'openManifests'>;
+type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram' | 'openManifests' | 'openDefaultIndexManifests'>;
 
 /** 직렬화할 DTO와 숫자 진단만 보존하여 끝난 Program을 해제할 수 있게 한다. */
 interface ContextGraphResult {
@@ -131,8 +134,11 @@ interface ContextGraphResult {
   readonly diagnostics: CallDiagnosticCounts;
 }
 
-/** bound 디스패치가 내보낸 선언을 스캔 밖에서 부를 수 있다고 보는 이유다. */
-type OpenProgramReason = 'public-package' | 'unreadable-manifest' | 'incomplete-scan';
+/**
+ * bound 디스패치가 내보낸 선언을 스캔 밖에서 부를 수 있다고 보는 이유다. `default-index-entry`는 진입점 필드 없이 게시할 수 있는
+ * 루트 패키지의 기본 index 파일({@link hasDefaultIndexEntry})이다.
+ */
+type OpenProgramReason = 'public-package' | 'default-index-entry' | 'unreadable-manifest' | 'incomplete-scan';
 
 /**
  * 호출 그래프를 만든다.
@@ -206,7 +212,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const openProgram = gitignoreLimitation !== undefined || compilerInputsIncomplete || configRootsIncomplete ? 'incomplete-scan'
     : openProgramReason(project, inputs, parseErrorFiles.length + deeplyNestedFiles.length, unreadableSources);
   const frameworkFiles = new Set([...files.keys()].filter((path) => isFrameworkFile(path, entryInput)));
-  const nested = openProgram === undefined ? nestedOpenPackages(project, files.keys()) : { openFiles: new Set<string>(), manifests: [] };
+  const nested = openProgram === undefined ? nestedOpenPackages(project, files.keys()) : { openFiles: new Set<string>(), manifests: [], defaultIndexManifests: [] };
   if (analysis.kind === 'full') {
     resolveDispatch({ ...analysis, program, checker, files, openProgram: openProgram !== undefined, openFiles: nested.openFiles, frameworkFiles });
   }
@@ -214,6 +220,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const counts: GraphCounts = {
     ...analysis, config: status, inputs, parseErrorFiles, deeplyNestedFiles, deeplyNestedInputs, unreadableSources, unmatchedCrons, openProgram,
     openManifests: nested.manifests,
+    openDefaultIndexManifests: nested.defaultIndexManifests,
     cronConfigUnreadable: crons.unreadable,
     routeFactLimit: routes.factLimitCause ?? (routes.facts.length === 0 && routes.extraction.routes.length > 0 ? 'facts' : undefined),
   };
@@ -226,7 +233,8 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
   const ownedIds = new Set(ownedNodes.map(node => node.id));
   results.push({ graph: { nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } },
-    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram, openManifests: nested.manifests } });
+    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram, openManifests: nested.manifests,
+      openDefaultIndexManifests: nested.defaultIndexManifests } });
   }
   return mergeContextGraphs(results);
 }
@@ -251,7 +259,8 @@ function mergeContextGraphs(contexts: readonly ContextGraphResult[]): CallGraph 
     }
   }
   const diagnostics: CallDiagnosticCounts = { calls, gaps: mergeContextGaps(contexts),
-    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined, openManifests: [] };
+    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined, openManifests: [],
+    openDefaultIndexManifests: [] };
   const limits = (view: LimitationView): string[] => mergeContextLimitations(contexts, diagnostics, view);
   return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
     edges: edges.sort((a, b) => compareStrings(a.from, b.from) || compareStrings(a.to, b.to) || EDGE_EVIDENCE_ORDER.indexOf(a.evidence) - EDGE_EVIDENCE_ORDER.indexOf(b.evidence)),
@@ -312,18 +321,21 @@ function openProgramReason(project: string, inputs: GraphInputs, parseErrors: nu
 
 /**
  * 프로젝트 루트 `package.json`이 공개 진입점 필드(main·module·exports·bin·types·typings·browser)를 선언했는지
- * 본다. 파일이 없으면 공개 표식도 없다. 있는데 1 MiB를 넘거나 JSON 객체로 읽지 못하면 판단할 수 없으므로
+ * 본다. 필드가 없어도 게시할 수 있는 패키지(문자열 `name`, `"private": true` 아님)가 루트에 기본 index 파일을 두면
+ * Node·TypeScript가 그 파일을 패키지 진입점으로 해석하므로 공개로 본다({@link hasDefaultIndexEntry}).
+ * 파일이 없으면 공개 표식도 없다. 있는데 1 MiB를 넘거나 JSON 객체로 읽지 못하면 판단할 수 없으므로
  * 열린 쪽으로 본다(추측하지 않는다). symlink·FIFO·장치 같은 일반 파일이 아닌 것도 읽지 못한 것으로 본다.
  *
  * @param project 프로젝트 realpath
- * @returns 공개 패키지·판단 불가·비공개
+ * @returns 공개 패키지·기본 index 진입점·판단 불가·비공개
  */
-function readManifestEntry(project: string): 'public-package' | 'unreadable-manifest' | 'private' {
+function readManifestEntry(project: string): 'public-package' | 'default-index-entry' | 'unreadable-manifest' | 'private' {
   const manifest = readManifestObject(join(project, 'package.json'));
   // 없는 package.json은 공개 표식이 없다는 뜻이다. 그 밖의 읽기 실패(권한·링크·비일반 파일·상한·JSON 아님)는 판단할 수 없다.
   if (manifest === 'missing') return 'private';
   if (manifest === 'unreadable') return 'unreadable-manifest';
-  return PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) ? 'public-package' : 'private';
+  if (PUBLIC_ENTRY_FIELDS.some((field) => field in manifest)) return 'public-package';
+  return hasDefaultIndexEntry(project, manifest) ? 'default-index-entry' : 'private';
 }
 
 /**
@@ -356,43 +368,71 @@ function isFormatMarkerManifest(manifest: object): boolean {
   return !('name' in manifest) && !('private' in manifest) && !PUBLIC_ENTRY_FIELDS.some((field) => field in manifest);
 }
 
-/** 루트 아래 workspace 패키지가 연 노드 파일과, 그렇게 판정한 manifest의 프로젝트 기준 경로다. */
+/**
+ * 루트 아래 workspace 패키지가 연 노드 파일과, 그렇게 판정한 manifest의 프로젝트 기준 경로다. 공개 진입점 필드를 선언했거나
+ * 읽지 못한 manifest(`manifests`)와 진입점 필드 없이 기본 index 파일로 열린 manifest(`defaultIndexManifests`)를 나눠
+ * limitation 문장이 실제 근거를 말하게 한다.
+ */
 interface NestedOpenPackages {
   readonly openFiles: ReadonlySet<string>;
   readonly manifests: readonly string[];
+  readonly defaultIndexManifests: readonly string[];
+}
+
+/** 중첩 manifest 하나가 그 아래 파일을 여는 근거다. */
+interface OpenManifest {
+  readonly path: string;
+  readonly cause: 'declared' | 'default-index';
 }
 
 /**
  * 노드 파일마다 루트 아래에서 가장 가까운 package.json을 보고, 게시할 수 있는 공개 패키지(공개 진입점 필드가 있고
- * `"private": true`가 아님)이거나 읽을 수 없는 manifest에 속한 파일을 연다. 루트 manifest는 {@link readManifestEntry}가
- * 프로그램 전체 기준으로 따로 본다. private workspace 패키지는 게시할 수 없어 소비자가 같은 workspace(스캔 안)에 있다.
+ * `"private": true`가 아니거나, 필드 없이 게시할 수 있고 기본 index 파일이 있음)이거나 읽을 수 없는 manifest에 속한 파일을 연다.
+ * 루트 manifest는 {@link readManifestEntry}가 프로그램 전체 기준으로 따로 본다. private workspace 패키지는 게시할 수 없어
+ * 소비자가 같은 workspace(스캔 안)에 있다.
  *
  * @param project 프로젝트 realpath
  * @param paths 노드 파일의 프로젝트 기준 경로
  * @returns 열린 파일과 근거 manifest
  */
 function nestedOpenPackages(project: string, paths: Iterable<string>): NestedOpenPackages {
-  const byDirectory = new Map<string, string | null>();
-  const openManifest = (directory: string): string | null => {
+  const byDirectory = new Map<string, OpenManifest | null>();
+  const openManifest = (directory: string): OpenManifest | null => {
     if (directory === '.' || directory === '') return null;
     const cached = byDirectory.get(directory);
     if (cached !== undefined) return cached;
     const manifest = readManifestObject(join(project, directory, 'package.json'));
     const result = manifest === 'missing' || (manifest !== 'unreadable' && isFormatMarkerManifest(manifest)) ? openManifest(posix.dirname(directory))
-      : manifest === 'unreadable' || (PUBLIC_ENTRY_FIELDS.some((field) => field in manifest) && (manifest as { private?: unknown }).private !== true)
-        ? posix.join(directory, 'package.json') : null;
+      : nestedManifestOpening(join(project, directory), manifest, posix.join(directory, 'package.json'));
     byDirectory.set(directory, result);
     return result;
   };
   const openFiles = new Set<string>();
   const manifests = new Set<string>();
+  const defaultIndexManifests = new Set<string>();
   for (const path of paths) {
     const manifest = openManifest(posix.dirname(path));
     if (manifest === null) continue;
     openFiles.add(path);
-    manifests.add(manifest);
+    (manifest.cause === 'declared' ? manifests : defaultIndexManifests).add(manifest.path);
   }
-  return { openFiles, manifests: [...manifests].sort(compareStrings) };
+  return { openFiles, manifests: [...manifests].sort(compareStrings), defaultIndexManifests: [...defaultIndexManifests].sort(compareStrings) };
+}
+
+/**
+ * 패키지 경계인 중첩 manifest 하나가 그 아래 파일을 여는지와 근거를 정한다. 읽지 못하면 판단할 수 없어 연다.
+ *
+ * @param directory manifest 디렉터리 절대 경로
+ * @param manifest 읽은 JSON 객체 또는 판단 불가
+ * @param path manifest의 프로젝트 기준 경로
+ * @returns 여는 근거, 닫혀 있으면 null
+ */
+function nestedManifestOpening(directory: string, manifest: object | 'unreadable', path: string): OpenManifest | null {
+  if (manifest === 'unreadable') return { path, cause: 'declared' };
+  if (PUBLIC_ENTRY_FIELDS.some((field) => field in manifest)) {
+    return (manifest as { private?: unknown }).private !== true ? { path, cause: 'declared' } : null;
+  }
+  return hasDefaultIndexEntry(directory, manifest) ? { path, cause: 'default-index' } : null;
 }
 
 /** 노드·간선 분석 결과다. */
@@ -815,7 +855,7 @@ function unresolvedCallLimitations(unresolved: Record<UnresolvedReason, number>)
  * @param view 관점
  * @returns limitation 목록
  */
-function dispatchLimitations({ calls, gaps, openProgram, openManifests }: CallDiagnosticCounts, view: LimitationView): string[] {
+function dispatchLimitations({ calls, gaps, openProgram, openManifests, openDefaultIndexManifests }: CallDiagnosticCounts, view: LimitationView): string[] {
   if (view === 'direct') return [];
   const result: string[] = [];
   const { bound, boundPartial, candidate, candidatePartial } = calls.dispatch;
@@ -828,15 +868,18 @@ function dispatchLimitations({ calls, gaps, openProgram, openManifests }: CallDi
   const hasCallableGaps = callableReasons.some((reason) => calls.unresolved[reason] > 0 || (gaps.partial[reason] ?? 0) > 0);
   if (openProgram !== undefined && (hasInterfaceGaps || hasCallableGaps)) {
     const reason = openProgram === 'public-package' ? 'package.json declares public entry points'
-      : openProgram === 'unreadable-manifest' ? 'package.json could not be read as a JSON object within 1 MiB' : 'the scan is incomplete';
+      : openProgram === 'default-index-entry' ? 'package.json is not private and its default index file is the package entry'
+        : openProgram === 'unreadable-manifest' ? 'package.json could not be read as a JSON object within 1 MiB' : 'the scan is incomplete';
     result.push(hasInterfaceGaps
       ? `bound-dispatch: ${reason}, so exported functions and classes and non-private properties are treated as reachable from unseen code and their flows are not bound`
       : `bound-dispatch: ${reason}, so exported functions and classes and callable parameters are treated as reachable from unseen code and their flows are not bound`);
   }
   if (openProgram === undefined && openManifests.length > 0 && (hasInterfaceGaps || hasCallableGaps)) {
-    const shown = openManifests.slice(0, 10);
-    const omitted = openManifests.length > shown.length ? `; omitted: ${openManifests.length - shown.length}` : '';
-    result.push(`bound-dispatch: nested package.json file(s) declare public entry points or could not be read as a JSON object within 1 MiB: ${JSON.stringify(shown)}${omitted}; `
+    result.push(`bound-dispatch: nested package.json file(s) declare public entry points or could not be read as a JSON object within 1 MiB: ${listedManifests(openManifests)}; `
+      + 'exported functions and classes in those packages and non-private properties throughout the program are treated as reachable from unseen code and their flows are not bound');
+  }
+  if (openProgram === undefined && openDefaultIndexManifests.length > 0 && (hasInterfaceGaps || hasCallableGaps)) {
+    result.push(`bound-dispatch: nested package.json file(s) are not private and declare no entry fields, so their default index file is the package entry: ${listedManifests(openDefaultIndexManifests)}; `
       + 'exported functions and classes in those packages and non-private properties throughout the program are treated as reachable from unseen code and their flows are not bound');
   }
   if (calls.dispatch.overBudget > 0) {
@@ -847,6 +890,18 @@ function dispatchLimitations({ calls, gaps, openProgram, openManifests }: CallDi
     result.push(`candidate-dispatch: ${candidate + candidatePartial} call(s) whose receiver flows could not all be proven are linked to every project class or object that implements or is assignable to the receiver type${candidateScope}; these edges over-approximate`);
   }
   return result;
+}
+
+/**
+ * limitation에 싣는 manifest 경로 목록이다. 앞의 10개만 JSON 배열로 싣고 나머지는 개수로 센다.
+ *
+ * @param paths 프로젝트 기준 manifest 경로(정렬됨)
+ * @returns 목록 문자열
+ */
+function listedManifests(paths: readonly string[]): string {
+  const shown = paths.slice(0, 10);
+  const omitted = paths.length > shown.length ? `; omitted: ${paths.length - shown.length}` : '';
+  return `${JSON.stringify(shown)}${omitted}`;
 }
 
 /**
