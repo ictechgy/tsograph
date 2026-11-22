@@ -48,7 +48,7 @@ import {
   type UnresolvedReason,
 } from './graph-model.ts';
 import { collectFileNodes } from './node-collector.ts';
-import { configImportIsBlocked, configRootGaps, createGraphPrograms, GraphProjectInputError, resolutionOptionsIgnored, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
+import { configImportIsBlocked, configParseGaps, configRootGaps, createGraphPrograms, GraphProjectInputError, resolutionOptionsIgnored, sourceEntryKey, type ProgramConfigStatus } from './program.ts';
 import { isMarkedPrivate, isPublishableManifest } from './publishable-manifest.ts';
 import { TargetResolver } from './target-resolver.ts';
 import { scopeIdOf } from './symbol-ids.ts';
@@ -922,9 +922,7 @@ function listedManifests(paths: readonly string[]): string {
 function inputLimitations(counts: GraphCounts): string[] {
   const { config, inputs, parseErrorFiles, unreadableSources, cronConfigUnreadable, routeFactLimit } = counts;
   const result: string[] = [];
-  if (config.configUnreadable) {
-    result.push(`graph-config: ${config.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
-  }
+  result.push(...configParseGaps(config).map((gap) => `graph-config: ${gap}`));
   result.push(...configRootGaps(config, 'calls').map((gap) => gap.startsWith('pnp-dependencies:') ? gap : `graph-config: ${gap}`));
   if ((config.oversizedCompilerInputs ?? 0) > 0) {
     result.push(`oversized-compiler-inputs: ${config.oversizedCompilerInputs} source, declaration, or package input(s) exceeded 4 MiB; type resolution and calls may be incomplete`);
