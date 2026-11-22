@@ -3,21 +3,65 @@
 세션을 이어받을 때 먼저 읽는 진행 상태 문서다. 작업 규칙의 정본은 [AGENTS.md](AGENTS.md)이고, 여기 적힌 상태는
 실제 Git 상태·코드·검증 결과와 대조한 뒤 쓴다. 공통 규칙은 이 파일에 복제하지 않는다.
 
-## 현재 상태 (2026-11-15)
+## 현재 상태 (2026-11-22)
 
-- 발행본은 **0.11.0**이다. npm 게시(2026-11-03, `npm view tsograph version`으로 확인), 태그 `v0.11.0`, `package.json` 버전이 일치한다.
-- isthmus `compatibility.json`의 tsograph 핀은 이 날짜에 로컬 isthmus 체크아웃 기준으로 **0.10.0**이다. isthmus가 게시본을
+- 발행본은 **0.11.0**이다. npm 게시(2026-11-03), 태그 `v0.11.0`, `package.json` 버전이 일치한다(2026-11-22 `npm view tsograph version`으로 다시 확인).
+- isthmus `compatibility.json`의 tsograph 핀은 2026-11-22 로컬 isthmus 체크아웃 기준으로 **0.10.0**이다. isthmus가 게시본을
   검증한 뒤 바꾸는 절차이므로 tsograph 저장소에서 고치지 않는다.
-- PR #57은 2026-11-09에 `main`으로 스쿼시 머지됐다(`9795858`). 2026-11-03 계열 9개 도구 검토의 tsograph 항목과 그 PR의
-  독립 리뷰 지적을 반영한 것이다. 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
-- `main` `9795858`의 CI 체크 6개가 모두 성공했다(2026-11-10 확인).
-- 2026-11-15: 브랜치 `ccr-37904670-hxdjsx`(`origin/main` `13971a4` 기준)에 PR #57 후속인 **선언 역매핑 export 이름 대조**를
-  커밋했고(PR #59), 같은 날 그 PR의 독립 리뷰(B1·B2·S1·S2·S3·nit)를 반영해 커밋을 더했다. 그 head `f0bda2b`는 push되어 CI 6개가
-  모두 성공했고, 델타 재리뷰는 MERGEABLE에 should-fix 하나(S-1)를 남겼다. 2026-11-16에 S-1과 nit 둘을 고친 커밋(`2e98e81`, `bda1897`)과
-  이 HANDOFF 갱신을 더했다. 그 head `1ff6757`도 push됐고 세 번째 델타 재리뷰가 MERGEABLE에 should-fix 하나(S-2)를 남겨, 같은 날
-  `8dc4148`(수정)·`585d009`(문서)와 이 HANDOFF 갱신을 더했다. 아직 push 전이다. 변경은 CHANGELOG `[Unreleased]`에 있다.
+- PR #57은 2026-11-09에 `9795858`로, PR #59(선언 역매핑 export 이름 대조와 그 독립 리뷰 반영)는 2026-11-16에 `3c487b1`로
+  `main`에 스쿼시 머지됐다. `main` `3c487b1`의 CI 체크 6개가 모두 성공했다(2026-11-22 `gh api …/check-runs`로 확인). 두 PR의 변경은
+  모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
+- 2026-11-22: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `3c487b1`에서 다시 시작해 **기본 index 진입점 공개 판정**(아래 절)을
+  커밋했다. push·PR 전이다.
 
-## 선언 역매핑 export 이름 대조 (2026-11-15, PR #57 후속, PR #59)
+## 기본 index 진입점 공개 판정 (2026-11-22)
+
+- 문제: 공개 판정이 `package.json`의 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)만 봤다. Node는 `main`이 없는
+  패키지를 `index.js`로 불러오고 TypeScript는 `index.ts`·`index.tsx`·`index.js`·`index.jsx`로 해석하므로, `{"name":"lib"}` 옆 `index.js`는
+  `{"name":"lib","main":"index.js"}`와 똑같이 스캔 밖에서 소비된다. express 4.21.2, `@nestjs/core`·`@nestjs/common` 10.4.15가 이렇게
+  게시된다. 그런데 앞의 것은 닫힌 프로그램, 뒤의 것은 열린 프로그램으로 봐서 ESM·TypeScript 패키지에 거짓 bound 간선이 났다.
+- 재현(수정 전 `main` 빌드): ESM `index.js`에 `export function run(callback) { return callback(); }`·`function helper()`·
+  `export function selfTest() { return run(helper); }`. `{"name":"lib-implicit","version":"1.0.0","type":"module"}`이면
+  `bound index.js#run -> index.js#helper`, 같은 파일에 `"main":"index.js"`만 더하면 bound 간선 없음 + `bound-dispatch: package.json declares
+  public entry points`. 소비자 디렉터리에서 Node 22.23로 두 패키지를 import하면 둘 다 `index.js`로 해석되고 `run(() => 'consumer callback')`이
+  소비자 콜백을 부른다(ESM은 DEP0151 경고만 낸다). 즉 그 bound 간선은 거짓이다.
+- 수정(`src/graph/default-index-entry.ts`, `build-graph.ts`): 진입점 필드가 없고 게시할 수 있는(문자열 `name`, `"private": true` 아님)
+  manifest 옆에 기본 index 파일이 있으면 공개로 본다. 루트는 `bound-dispatch: package.json is not private and its default index file is
+  the package entry, …`, 중첩 workspace 패키지는 `bound-dispatch: nested package.json file(s) are not private and declare no entry fields,
+  so their default index file is the package entry: […]; …`로 알린다(기존 중첩 문장은 바꾸지 않았다). 디렉터리가 아닌 항목(링크 포함)은
+  있는 것으로, 상태를 읽지 못하면 열린 쪽으로 본다. `private`는 기존 규칙처럼 boolean `true`만 본다.
+- 줄어든 출력과 계수: 재현 사례의 bound 간선 1개가 사라지고 그 호출은 `unresolved-calls: 1 … (parameter: 1)`에 남는다. 실제 패키지:
+  express 4.21.2·`@nestjs/core` 10.4.15·`@nestjs/common` 10.4.15는 간선·노드·통계가 바이트 단위로 같고 열린 프로그램 문장 한 줄만 더해진다
+  (모두 CommonJS라 최상위 선언이 원래 열려 있다; bound 4·63·118 그대로). koa·zod·rxjs·@trpc/server·@tanstack/query-core·pg-boss·
+  connect-pg-simple·effect·isthmus 스냅숏처럼 진입점 필드가 있거나 private인 패키지는 출력이 같다. nest 저장소 소스(v10.4.15 sparse
+  checkout: 루트·`packages/core`·`packages/common`이 모두 이름만 있고 `main` 없음)는 문맥이 이미 불완전 스캔으로 열려 있어 출력이 같다.
+- 회귀 테스트(`src/graph/default-index-entry.test.ts`, 7개): 루트 ESM `index.js`·TypeScript `index.ts`, `"main"`을 적은 같은 패키지와 간선
+  동일, private·이름 없음·index 없음은 닫힘, 중첩 workspace 패키지의 새 문장과 private 대조, 판정 함수 단위. `main`의 `build-graph.ts`로
+  되돌리면 3개(루트 둘·중첩), 게시 가능 검사를 빼면 3개, 중첩 근거를 `declared`로 바꾸면 1개가 실패한다.
+- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 6~18):
+  - `npm run verify`: typecheck 통과, 테스트 단계가 12분 상한을 넘어 종료 2. 상한 전 실패는 `dispatch.test.ts` 600모듈 메모 사례(31.6초)
+    하나이고 단독 재실행 9.0초로 통과했다.
+  - 같은 인자로 상한 없이 돌린 전체 suite(18분 45초): 1,801개 중 1,777 통과·23 skip·1 실패(`relation-facts.test.ts` `chmod 000` 사례, root 환경,
+    `runuser -u nobody`로 통과). 커버리지 라인 98.68%·분기 91.61%·함수 98.21%, `default-index-entry.ts` 100/100/100.
+  - `npm run verify:cli` 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
+  - 자기 분석(`graph --project . --generated-at 2026-11-15T00:00:00Z`): 새 분석기와 `main` 분석기를 이 브랜치 트리에 돌린 stdout·stderr가
+    바이트 단위로 같고 두 번 돌려도 같다(노드 10,185, 간선 14,770, bound 741).
+  - isthmus `scripts/conformance-drift.mjs tsograph=…`: 모든 벡터 current.
+  - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI).
+- 하지 않은 것: `index.d.ts`만 있는 패키지(런타임 진입점이 아니다)와 `index.mjs`·`index.cjs`(Node·TypeScript의 기본 index 이름이 아니다)는
+  보지 않는다. `exports` 없는 패키지는 깊은 경로(`lib/x.js`)도 가져다 쓸 수 있지만 기본 index 파일이 없는 경우까지 넓히지 않았다.
+  루트 manifest가 진입점 필드와 `"private": true`를 함께 가질 때 여는 기존 동작은 그대로다.
+
+### 이번에 살펴보고 남긴 것
+
+| 항목 | 이유 |
+|---|---|
+| `unresolved-export-aliases:`가 `type` 없이 재내보낸 interface·type alias를 센다(rxjs 7.8.1: 31개 중 30개가 타입·enum) | export 노드를 만드는 구문 단계(`collectModuleExports`)에 checker가 없다. 노드를 없애면 그래프 노드·`graphRevision`·entry 표식이 바뀌고, 세기만 빼면 남는 노드를 설명할 한계가 없다. 설계가 필요하다. |
+| `graph-config: declaration-outputs:` import 수가 빌드 산출물 `.d.ts` 사이의 import도 센다(yaml 2.9.1 패키지 분석: 155개 중 스캔한 소스 파일의 import 키는 3개, 나머지는 `dist/*.d.ts` 사이) | import 수의 의미를 바꾸는 일이라 PR #59에서 모드별 계수를 미룬 것과 같은 판단이 필요하다. |
+| 계산된 이름 멤버(`[Symbol.dispose]()`·`*[Symbol.iterator]()`)의 호출이 `<module>`에 귀속되고, `using`·`for…of`·템플릿 문자열의 암묵 호출은 세지 않는다 | README가 계산된 이름을 모듈 범위로 적어 둔 설계다. 암묵 호출 계수는 새 limitation 설계가 필요하다. |
+| 진입점 필드 없는 공개 패키지를 `non-http-entries:` 진입점으로 표시 | README가 `package.json` `bin`/`main`/`exports` 대상을 표시하지 않는다고 적어 둔 범위다. |
+
+## 선언 역매핑 export 이름 대조 (2026-11-15, PR #57 후속, PR #59, 2026-11-16 머지)
 
 - `declarationDir`/`outDir`↔`rootDir` 경로로 잇기 전에 선언의 export 이름(값·타입·`default`·`export =`·`export *`가 끌어오는 이름)이
   모두 그 TypeScript 소스에도 있는지 본다(`src/graph/declaration-exports.ts`). 역매핑은 module 해석 hook 안이라 checker가 없어서
@@ -127,13 +171,13 @@
 | 문맥이 다른 패키지 사이 산출물 import | 여전히 `config-context-boundary:`로 미해결이다. 문맥을 넘는 간선은 별도 설계다. |
 | routes·schema·navigation의 산출물 되짚기 | graph 문맥 Program에만 적용했다. |
 
-## 다음 할 일 (PR #57 머지 이후)
+## 다음 할 일 (PR #59 머지 이후)
 
-0. 브랜치 `ccr-37904670-hxdjsx`(PR #59)의 리뷰 반영 커밋을 push하고 CI(특히 전체 `npm test`·Git 2.45 경로)와 재리뷰를 받는다.
-1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사)이 있으므로 마이너로 올린다.
+0. 브랜치 `ccr-37904670-hxdjsx`(기본 index 진입점 공개 판정)를 push하고 PR·CI(특히 전체 `npm test`·Git 2.45 경로)와 리뷰를 받는다.
+1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사·문장)이 있으므로 마이너로 올린다.
    이전 릴리스 커밋(`chore(release): prepare tsograph 0.11.0`)처럼 `package.json`·`package-lock.json`·CHANGELOG를 함께 바꾼다.
 2. isthmus에 게시본 검증과 `compatibility.json` 핀 갱신을 요청한다(isthmus 저장소의 일).
-3. 위 제외 항목 중 사용자가 고른 것.
+3. 위 제외·남긴 항목 중 사용자가 고른 것.
 
 ## 주의
 
