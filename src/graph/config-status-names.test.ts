@@ -24,9 +24,12 @@ const environment = Object.freeze({ fileSystem, toolVersion: '0.0.0-test', now: 
 /** 소유권 계획의 주 설정(루트 설정·`--tsconfig`로 고른 설정)을 읽지 못했을 때의 기존 문장이다. */
 const representativeUnparsed = (name: string) => `${name} could not be parsed; default compiler options were used, so path aliases may not resolve`;
 
-/** 주 설정이 아닌 소유 설정을 읽지 못했을 때 모든 문맥에서 같은 문장으로 한 번 내는 문장이다. */
-const unreadableConfigs = (paths: readonly string[]) => `config-unreadable: ${paths.length} compiler config(s) under the scanned root could not be `
-  + `parsed, so path aliases and imports in the sources they own may not resolve; files: ${JSON.stringify(paths)}; omitted: 0`;
+/**
+ * 주 설정이 아닌 소유 설정을 읽지 못했을 때 모든 문맥에서 같은 문장으로 한 번 내는 문장이다. 그 계획이 무엇을 분석하려고 읽은 설정인지
+ * (`affected`)를 말한다(graph `calls`, routes server `route registrations`, client `requests`, Next 진입 범위 `Next convention discovery`).
+ */
+const unreadableConfigs = (paths: readonly string[], affected = 'calls') => `config-unreadable: ${paths.length} compiler config(s) read for `
+  + `${affected} could not be parsed, so path aliases and imports in the sources they own may not resolve; files: ${JSON.stringify(paths)}; omitted: 0`;
 
 /** 기본 옵션을 썼다고 말하는 설정 문장이다. 주 설정을 읽었으면 하나도 없어야 한다. */
 const defaultOptionsLines = (lines: readonly string[]) => lines.filter((line) => line.includes('could not be parsed; default compiler options'));
@@ -52,6 +55,9 @@ async function allLimitations(root: string): Promise<Record<'graph' | 'server' |
 
 /** 문서별 접두사다. */
 const prefixes = { graph: 'graph-config', server: 'route-coverage', client: 'route-call-coverage' } as const;
+
+/** 문서별로 설정 목록이 말하는 분석 결과다. */
+const affectedBy = { graph: 'calls', server: 'route registrations', client: 'requests' } as const;
 
 /** 문맥 표시(`; compiler-context: i/n`)를 뗀 limitation이다. */
 const withoutContext = (lines: readonly string[]) => lines.map((line) => line.replace(/; compiler-context: \d+\/\d+$/u, ''));
@@ -101,7 +107,7 @@ test('루트 설정이 없고 중첩 설정을 읽지 못하면 graph·routes �
       assert.ok(!limitations.some((line) => line.includes('undefined')), `${role}: ${limitations.join('\n')}`);
       assert.deepEqual(defaultOptionsLines(limitations), [], role);
       const prefix = role === 'server' ? 'route-coverage' : 'route-call-coverage';
-      assert.deepEqual(limitations.filter((line) => line.includes('config-unreadable:')), [`${prefix}: ${unreadableConfigs(['a/tsconfig.json'])}`],
+      assert.deepEqual(limitations.filter((line) => line.includes('config-unreadable:')), [`${prefix}: ${unreadableConfigs(['a/tsconfig.json'], affectedBy[role])}`],
         `${role}: ${limitations.join('\n')}`);
     }
   });
@@ -229,7 +235,8 @@ for (const [label, withRoot] of [['루트 tsconfig.json을 읽었고', true], ['
     }, async (root) => {
       for (const [document, lines] of Object.entries(await allLimitations(root)) as [keyof typeof prefixes, readonly string[]][]) {
         assert.deepEqual(defaultOptionsLines(lines), [], `${document}: ${lines.join('\n')}`);
-        assert.deepEqual(lines.filter((line) => line.includes('config-unreadable:')), [`${prefixes[document]}: ${unreadableConfigs(['sub/tsconfig.json'])}`],
+        assert.deepEqual(lines.filter((line) => line.includes('config-unreadable:')),
+          [`${prefixes[document]}: ${unreadableConfigs(['sub/tsconfig.json'], affectedBy[document])}`],
           `${document}: ${lines.join('\n')}`);
       }
     });
@@ -246,7 +253,7 @@ test('루트와 중첩 디렉터리에 소스가 있고 중첩 설정만 읽지 
   }, async (root) => {
     for (const [document, lines] of Object.entries(await allLimitations(root)) as [keyof typeof prefixes, readonly string[]][]) {
       assert.deepEqual(lines.filter((line) => /could not be parsed|config-unreadable:/u.test(line)),
-        [`${prefixes[document]}: ${unreadableConfigs(['sub/tsconfig.json'])}`], `${document}: ${lines.join('\n')}`);
+        [`${prefixes[document]}: ${unreadableConfigs(['sub/tsconfig.json'], affectedBy[document])}`], `${document}: ${lines.join('\n')}`);
     }
   });
 });
@@ -262,13 +269,13 @@ test('Next 진입 범위의 route-coverage: config-unreadable:도 graph에서 �
     'sub/b.ts': "import express from 'express';\nconst app = express();\napp.get('/b', () => {});\n",
   }, async (root) => {
     const graph = await buildCallGraph(root, fileSystem);
-    const listed = unreadableConfigs(['app/api/y/tsconfig.json', 'sub/tsconfig.json']);
+    const listed = ['app/api/y/tsconfig.json', 'sub/tsconfig.json'];
     assert.deepEqual(graph.limitations.filter((line) => line.includes('config-unreadable:')),
-      [`graph-config: ${listed}`, `route-coverage: ${listed}`], graph.limitations.join('\n'));
+      [`graph-config: ${unreadableConfigs(listed)}`, `route-coverage: ${unreadableConfigs(listed, 'Next convention discovery')}`], graph.limitations.join('\n'));
   });
 });
 
-test('같은 설정 디렉터리를 symlink로 한 번 더 참조해도 읽지 못한 설정은 실제 파일 하나로 센다', async () => {
+test('같은 설정 디렉터리를 symlink로 한 번 더 참조해 둘 다 실패하면 실제 파일 하나로 세고 실패한 경로 중 경로 순 첫 경로를 쓴다', async () => {
   await withProject({
     'package.json': '{ "name": "fx", "private": true }',
     'tsconfig.json': '{ "compilerOptions": { "strict": true }, "references": [ { "path": "./real" }, { "path": "./link" } ] }',
@@ -278,7 +285,7 @@ test('같은 설정 디렉터리를 symlink로 한 번 더 참조해도 읽지 �
   }, async (root) => {
     symlinkSync(join(root, 'real'), join(root, 'link'), 'dir');
     const graph = await buildCallGraph(root, fileSystem);
-    assert.deepEqual(graph.limitations.filter((line) => line.includes('config-unreadable:')), [`graph-config: ${unreadableConfigs(['real/tsconfig.json'])}`]);
+    assert.deepEqual(graph.limitations.filter((line) => line.includes('config-unreadable:')), [`graph-config: ${unreadableConfigs(['link/tsconfig.json'])}`]);
   });
 });
 
@@ -308,5 +315,77 @@ test('--workspace로 넓힌 경계에서는 목록이 프로젝트 밖 workspace
     const graph = await buildCallGraph(join(root, 'app'), fileSystem, { workspace: root });
     assert.deepEqual(graph.limitations.filter((line) => /could not be parsed|config-unreadable:/u.test(line)),
       [`graph-config: ${unreadableConfigs(['lib/tsconfig.json'])}`], graph.limitations.join('\n'));
+  });
+});
+
+test('주 설정 경로에 공백이 있어도 주 설정 문장은 문맥마다 반복하지 않는다', async () => {
+  await withProject({
+    'package.json': '{ "name": "ws", "private": true }',
+    'my app/package.json': '{ "name": "app", "private": true }',
+    'my app/tsconfig.json': truncatedConfig,
+    'my app/src/a.ts': 'export function a() { return 1; }\n',
+    'lib/tsconfig.json': '{ "compilerOptions": { "strict": false, "target": "es2015", "module": "commonjs", "baseUrl": ".", "paths": { "@q/*": ["./*"] } } }',
+    'lib/l.ts': 'export function l() { return 1; }\n',
+  }, async (root) => {
+    const graph = await buildCallGraph(join(root, 'my app'), fileSystem, { workspace: root });
+    assert.deepEqual(graph.limitations.filter((line) => /could not be parsed|config-unreadable:/u.test(line)),
+      [`graph-config: ${representativeUnparsed('my app/tsconfig.json')}`], graph.limitations.join('\n'));
+  });
+});
+
+test('Next 진입 범위와 Node routes가 읽은 설정이 다르면 한 문서의 두 목록이 서로 다른 분석 범위를 말한다', async () => {
+  // 루트 설정의 include가 app뿐이라 Next 진입 범위 계획은 sub/tsconfig.json을 읽지 않는다. 같은 "under the scanned root" 문장으로 수가 1과 2로
+  // 갈리면 서로 모순된다.
+  await withProject({
+    'package.json': '{ "name": "fx", "private": true, "dependencies": { "next": "15.0.0", "express": "4.21.0" } }',
+    'tsconfig.json': '{ "compilerOptions": { "strict": true, "module": "esnext", "moduleResolution": "bundler" }, "include": ["app"] }',
+    'app/api/x/route.ts': 'export async function GET() { return new Response("ok"); }\n',
+    'app/api/y/route.ts': 'export async function POST() { return new Response("ok"); }\n',
+    'app/api/y/tsconfig.json': truncatedConfig,
+    'sub/tsconfig.json': truncatedConfig,
+    'sub/b.ts': appSource('hB'),
+  }, async (root) => {
+    const { graph, server } = await allLimitations(root);
+    const unreadable = (lines: readonly string[]) => lines.filter((line) => line.includes('config-unreadable:'));
+    assert.deepEqual(unreadable(server), [
+      `route-coverage: ${unreadableConfigs(['app/api/y/tsconfig.json'], 'Next convention discovery')}`,
+      `route-coverage: ${unreadableConfigs(['app/api/y/tsconfig.json', 'sub/tsconfig.json'], 'route registrations')}`,
+    ], server.join('\n'));
+    assert.deepEqual(unreadable(graph), [
+      `graph-config: ${unreadableConfigs(['app/api/y/tsconfig.json', 'sub/tsconfig.json'])}`,
+      `route-coverage: ${unreadableConfigs(['app/api/y/tsconfig.json'], 'Next convention discovery')}`,
+    ], graph.join('\n'));
+  });
+});
+
+test('symlink 경로로만 extends가 깨진 설정은 잘 읽힌 실제 경로가 아니라 실패한 경로로 말한다', async () => {
+  // sub/tsconfig.json의 "../base.json"은 sub/로 읽으면 있지만 deep/link/(→ ../sub)로 읽으면 deep/base.json이라 없다.
+  await withProject({
+    'package.json': '{ "name": "fx", "private": true }',
+    'tsconfig.json': '{ "compilerOptions": { "strict": true }, "references": [ { "path": "./sub" }, { "path": "./deep/link" } ] }',
+    'base.json': '{ "compilerOptions": { "strict": true } }',
+    'src/a.ts': 'export function a() { return 1; }\n',
+    'sub/tsconfig.json': '{ "extends": "../base.json", "compilerOptions": { "noImplicitAny": true } }',
+    'sub/b.ts': 'export function b() { return 1; }\n',
+    'deep/.keep': '',
+  }, async (root) => {
+    symlinkSync('../sub', join(root, 'deep/link'), 'dir');
+    const graph = await buildCallGraph(root, fileSystem);
+    assert.deepEqual(graph.limitations.filter((line) => /could not be parsed|config-unreadable:/u.test(line)),
+      [`graph-config: ${unreadableConfigs(['deep/link/tsconfig.json'])}`], graph.limitations.join('\n'));
+  });
+});
+
+test('주 설정 파일을 symlink로 다시 읽어 실패해도 같은 파일이므로 주 설정 문장 하나만 낸다', async () => {
+  await withProject({
+    'package.json': '{ "name": "fx", "private": true }',
+    'tsconfig.json': truncatedConfig,
+    'src/a.ts': 'export function a() { return 1; }\n',
+    'sub/b.ts': 'export function b() { return 1; }\n',
+  }, async (root) => {
+    symlinkSync('../tsconfig.json', join(root, 'sub/tsconfig.json'));
+    const graph = await buildCallGraph(root, fileSystem);
+    assert.deepEqual(graph.limitations.filter((line) => /could not be parsed|config-unreadable:/u.test(line)),
+      [`graph-config: ${representativeUnparsed('tsconfig.json')}`], graph.limitations.join('\n'));
   });
 });

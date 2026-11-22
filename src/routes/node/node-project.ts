@@ -127,7 +127,7 @@ export function* loadNodeProjects(root: string, tsconfig?: string): Generator<No
  */
 export function compilerConfigGaps(status: ProgramConfigStatus, affected: string): string[] {
   const gaps: string[] = [];
-  gaps.push(...configParseGaps(status));
+  gaps.push(...configParseGaps(status, affected));
   const oversized = status.oversizedCompilerInputs ?? 0;
   if (oversized > 0) gaps.push(`${oversized} source, declaration, or package input(s) exceeded 4 MiB; type resolution and ${affected} may be incomplete`);
   const deeplyNested = status.deeplyNestedCompilerInputs ?? 0;
