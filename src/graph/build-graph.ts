@@ -33,7 +33,7 @@ import { createModuleResolver, importsTestSources, resolveDispatch } from './dis
 import { collectFileEdges, type EdgeGaps, type PendingDispatch } from './edge-collector.ts';
 import { createEffectManifest, effectEmitPolicy, selectEffectManifest, type EffectBuildBudget, type EffectInventory } from './effect-inventory.ts';
 import { type EntryInput, isFrameworkFile, markEntryPoints } from './entry-points.ts';
-import { linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
+import { type ExportLinkGaps, linkExportNodes, type PendingExport, registerExportNodes } from './export-nodes.ts';
 import { buildFileIndex, type FlowIndex, mergeFlowIndexViews } from './flow-index.ts';
 import {
   type CallGraph,
@@ -112,7 +112,8 @@ interface GraphCounts {
   readonly deeplyNestedInputs: number;
   /** 걷기가 골랐지만 compiler host가 읽지 못해 노드 파일이 되지 못한 소스 수 */
   readonly unreadableSources: number;
-  readonly unresolvedExports: number;
+  /** 선언이 아닌 내보내기의 export 노드 중 `alias` 간선을 잇지 못한 것의 원인별 수 */
+  readonly exportGaps: ExportLinkGaps;
   readonly unmatchedCrons: number;
   readonly cronConfigUnreadable: boolean;
   /** 라우트 사실을 진입점 표식에 쓰지 못한 사실 상한 실패의 원인(없으면 undefined) */
@@ -126,7 +127,7 @@ interface GraphCounts {
 }
 
 /** AST·checker를 보유하지 않는 문맥별 호출 진단이다. */
-type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'unresolvedExports' | 'openProgram' | 'openManifests' | 'openPublishableManifests'>;
+type CallDiagnosticCounts = Pick<GraphCounts, 'calls' | 'gaps' | 'exportGaps' | 'openProgram' | 'openManifests' | 'openPublishableManifests'>;
 
 /** 직렬화할 DTO와 숫자 진단만 보존하여 끝난 Program을 해제할 수 있게 한다. */
 interface ContextGraphResult {
@@ -233,7 +234,7 @@ export async function buildCallGraph(project: string, fileSystem: CommandFileSys
   const ownedNodes = nodes.filter(node => ownedSources === undefined || ownedSources.has(resolve(project, node.location.path)));
   const ownedIds = new Set(ownedNodes.map(node => node.id));
   results.push({ graph: { nodes: ownedNodes, edges: analysis.store.edges().filter(edge => ownedIds.has(edge.from) && ownedIds.has(edge.to)), limitations, limitationsByMode, statistics: { files: files.size, calls: analysis.calls } },
-    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, unresolvedExports: analysis.unresolvedExports, openProgram, openManifests: nested.manifests,
+    diagnostics: { calls: analysis.calls, gaps: analysis.gaps, exportGaps: analysis.exportGaps, openProgram, openManifests: nested.manifests,
       openPublishableManifests: nested.publishableManifests } });
   }
   return mergeContextGraphs(results);
@@ -259,7 +260,10 @@ function mergeContextGraphs(contexts: readonly ContextGraphResult[]): CallGraph 
     }
   }
   const diagnostics: CallDiagnosticCounts = { calls, gaps: mergeContextGaps(contexts),
-    unresolvedExports: contexts.reduce((sum, context) => sum + context.diagnostics.unresolvedExports, 0), openProgram: undefined, openManifests: [],
+    exportGaps: {
+      unresolved: contexts.reduce((sum, context) => sum + context.diagnostics.exportGaps.unresolved, 0),
+      typeOnly: contexts.reduce((sum, context) => sum + context.diagnostics.exportGaps.typeOnly, 0),
+    }, openProgram: undefined, openManifests: [],
     openPublishableManifests: [] };
   const limits = (view: LimitationView): string[] => mergeContextLimitations(contexts, diagnostics, view);
   return { nodes: nodes.sort((a, b) => compareStrings(a.id, b.id)),
@@ -287,7 +291,7 @@ function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
 /** 호출 숫자는 모드별 합계로 만들고, 나머지 지역 경고는 문맥 범위를 명시한다. */
 function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const result = new Set(callLimitations(counts, view));
-  const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
+  const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|type-only-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
   const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget):/u;
   for (const [index, { graph }] of contexts.entries()) {
     const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
@@ -441,7 +445,8 @@ interface FileAnalysisBase {
   readonly store: GraphStore;
   readonly calls: CallStatistics;
   readonly gaps: EdgeGaps;
-  readonly unresolvedExports: number;
+  /** export 노드 중 `alias` 간선을 잇지 못한 것의 원인별 수 */
+  readonly exportGaps: ExportLinkGaps;
   readonly inventorySummary: Pick<EffectInventory, 'enumeration' | 'reasons'> | undefined;
   readonly proofDiagnostics: ReadonlySet<string> | undefined;
 }
@@ -574,7 +579,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
       : { enumeration: flowIndex.effectInventory.enumeration, reasons: flowIndex.effectInventory.reasons },
     proofDiagnostics: flowIndex.proofDiagnostics,
     overrides, pending, calls, gaps,
-    unresolvedExports: linkExportNodes(store, checker, (sourceFile) => {
+    exportGaps: linkExportNodes(store, checker, (sourceFile) => {
       const path = pathByFile.get(sourceFile);
       return separateTests && path !== undefined && !testPaths.has(path) ? productionResolver : resolver;
     }, pendingExports.filter(entry => !configImportIsBlocked(program, entry.name.getSourceFile().fileName))),
@@ -583,7 +588,7 @@ function analyzeFiles(program: ts.Program, checker: ts.TypeChecker, files: Reado
 
 /** 실제 cap 상태를 보존하며 모든 AST의 바인딩 쓰기를 먼저 센 뒤 제한된 호출만 해석한다. */
 function analyzeBoundedBindings(program: ts.Program, checker: ts.TypeChecker, files: ReadonlyMap<string, ts.SourceFile>,
-  store: GraphStore, testPaths: ReadonlySet<string>, separateTests: boolean, unresolvedExports: number): BoundedFileAnalysis {
+  store: GraphStore, testPaths: ReadonlySet<string>, separateTests: boolean, unlinkedExports: number): BoundedFileAnalysis {
   const census = collectBindingCensus(files.values());
   const production = separateTests ? collectBindingCensus([...files].filter(([path]) => !testPaths.has(path)).map(([, file]) => file)) : census;
   const pathByFile = new Map([...files].map(([path, file]) => [file, path]));
@@ -597,7 +602,8 @@ function analyzeBoundedBindings(program: ts.Program, checker: ts.TypeChecker, fi
     collectFileEdges({ checker, store, resolver: separateTests && !testPaths.has(path) ? productionResolver : wholeResolver,
       overrides: new Map(), calls, gaps, pending: [], references: false, deferDispatch: false }, path, sourceFile);
   }
-  return { kind: 'bounded', declarationsOnly: false, store, calls, gaps, unresolvedExports,
+  // 이 경로는 export 노드를 잇지 않으므로 타입 전용 여부도 가리지 않고 모두 해석하지 못한 것으로 센다(예전과 같다).
+  return { kind: 'bounded', declarationsOnly: false, store, calls, gaps, exportGaps: { unresolved: unlinkedExports, typeOnly: 0 },
     inventorySummary: { enumeration: 'incomplete', reasons: ['build-cap', 'proof-index-unavailable'] }, proofDiagnostics: undefined,
     boundedSemantic: { files: files.size, writtenNames: census.writtenNames.size, unsafeFiles: census.unsafeFiles.size, incompleteFiles: census.incompleteFiles.size } };
 }
@@ -817,7 +823,7 @@ function remainingDispatchGaps(
  * @returns limitation 목록
  */
 function callLimitations(counts: CallDiagnosticCounts, view: LimitationView): string[] {
-  const { calls, gaps, unresolvedExports } = counts;
+  const { calls, gaps, exportGaps } = counts;
   const remaining = remainingDispatchGaps(calls, gaps, view);
   const result = unresolvedCallLimitations(remaining.unresolved);
   const partial = Object.entries(remaining.partial)
@@ -833,8 +839,12 @@ function callLimitations(counts: CallDiagnosticCounts, view: LimitationView): st
   if (gaps.overriddenCalls > 0) {
     result.push(`overridden-methods: ${gaps.overriddenCalls} call(s) target methods that subclasses override; only the statically resolved declaration is linked`);
   }
-  if (unresolvedExports > 0) {
-    result.push(`unresolved-export-aliases: ${unresolvedExports} export node(s) could not be linked to the declaration they re-export`);
+  if (exportGaps.unresolved > 0) {
+    result.push(`unresolved-export-aliases: ${exportGaps.unresolved} export node(s) could not be linked to the declaration they re-export`);
+  }
+  if (exportGaps.typeOnly > 0) {
+    result.push(`type-only-export-aliases: ${exportGaps.typeOnly} export node(s) re-export names that resolve only to types `
+      + '(interfaces, type aliases, or namespaces without values), which have no runtime declaration; they have no alias edge');
   }
   return result;
 }
