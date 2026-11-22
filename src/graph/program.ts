@@ -747,8 +747,8 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
       + ((status.declarationOutputExportMismatches ?? 0) > 0 ? `; ${status.declarationOutputExportMismatches} of them reach a source through `
         + `declarationDir/outDir and rootDir that does not export every name the declaration exports (or whose names could not be compared), `
         + `so the declaration is not assumed to be emitted from it` : '')
-      + ((status.declarationOutputUnscannedImports ?? 0) > 0 ? `; ${status.declarationOutputUnscannedImports} of them are made by files that the scan `
-        + `does not analyze as sources either (for example build output importing build output), which contribute no calls to the graph` : '')
+      + ((status.declarationOutputUnscannedImports ?? 0) > 0 ? `; ${status.declarationOutputUnscannedImports} of them are made by files that are not `
+        + `analyzed as sources either (for example build output importing build output), so no ${affected} are taken from those files` : '')
       + `; calls through them are counted as external and ${affected} `
       + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
   }

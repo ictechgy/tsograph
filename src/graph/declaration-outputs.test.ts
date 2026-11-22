@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { runRoutesCommand } from '../cli/routes-command.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { DeclarationOutputMapper } from './declaration-outputs.ts';
 import type { CallGraph } from './graph-model.ts';
@@ -782,10 +783,10 @@ test('mapper: 해석하지 못한 bare export *는 설치 여부와 무관하게
   }
 });
 
-/** 산출물끼리의 import를 따로 세는 문장이다. */
-const unscannedImporterClause = (count: number) =>
-  `; ${count} of them are made by files that the scan does not analyze as sources either (for example build output importing build output), `
-  + 'which contribute no calls to the graph';
+/** 산출물끼리의 import를 따로 세는 문장이다. 문장을 함께 쓰는 문서(graph·routes)마다 결과 이름(`calls`·`route registrations`)이 다르다. */
+const unscannedImporterClause = (count: number, affected = 'calls') =>
+  `; ${count} of them are made by files that are not analyzed as sources either (for example build output importing build output), `
+  + `so no ${affected} are taken from those files`;
 
 test('산출물 선언끼리의 import는 스캔한 소스의 import와 나눠 알리고, 소스가 import한 산출물을 파일 목록에서 빠뜨리지 않는다', async () => {
   // 앱이 import한 dist/index.d.ts가 같은 dist의 a0~a10을 다시 내보낸다. 산출물끼리의 import 11개는 호출이 없는 선언 파일의
@@ -818,6 +819,26 @@ test('모든 산출물 import가 스캔한 소스에서 나오면 나눠 세는 
     const line = declarationOutputLimitation(graph) ?? '';
     assert.match(line, /declaration-outputs: 1 import\(s\)/u);
     assert.doesNotMatch(line, /of them are made by files that the scan does not analyze/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Node routes도 산출물끼리의 import를 나눠 알리고, 그 문장은 graph의 calls가 아니라 route registrations를 말한다', async () => {
+  const root = createWorkspace({
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*", "apps/*"], "dependencies": { "express": "4" } }',
+    'tsconfig.json': `{ "compilerOptions": { ${compilerOptions} } }`,
+    'packages/lib/dist/index.d.ts': 'export * from "./helpers";\n',
+    'packages/lib/dist/helpers.d.ts': 'export declare function helper(): number;\n',
+    'apps/web/src/main.ts': "import express from 'express';\nimport { helper } from '@acme/lib';\nconst app = express();\n"
+      + "app.get('/x', (req, res) => res.send(String(helper())));\nexport default app;\n",
+  });
+  try {
+    const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date(0) });
+    const line = (JSON.parse(result.standardOutput) as { limitations: string[] }).limitations.find((candidate) => candidate.includes('declaration-outputs:')) ?? '';
+    assert.match(line, /^route-coverage: declaration-outputs: 2 import\(s\)/u);
+    assert.ok(line.includes(unscannedImporterClause(1, 'route registrations')), line);
+    assert.doesNotMatch(line, /to the graph/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
