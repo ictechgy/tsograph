@@ -81,7 +81,8 @@ export function linkExportNodes(
 /**
  * 내보낸 이름이 별칭을 끝까지 따라가도 타입만 가리키는지 본다. interface·type alias·값 없는 namespace·JSDoc typedef는
  * 런타임 값이 없어(TypeScript는 이런 재내보내기를 emit에서 지운다) 이을 선언이 없다. 값과 합쳐진 심볼(같은 이름의 interface와
- * `const`, enum, 값 있는 namespace)과 찾지 못한 대상(선언 없는 unknown 심볼)은 타입 전용이 아니다.
+ * `const`, enum, 값 있는 namespace)은 타입 전용이 아니다. 찾지 못한 대상은 checker의 unknown 심볼로 따라가고, 그 심볼은 값 플래그를
+ * 가지므로 역시 타입 전용이 아니다(해석 실패로 남는다).
  *
  * @param checker TypeChecker
  * @param symbol 내보낸 이름의 심볼
@@ -90,7 +91,7 @@ export function linkExportNodes(
 function isTypeOnlyTarget(checker: ts.TypeChecker, symbol: ts.Symbol | undefined): boolean {
   if (symbol === undefined) return false;
   const target = (symbol.flags & ts.SymbolFlags.Alias) === 0 ? symbol : checker.getAliasedSymbol(symbol);
-  return (target.declarations ?? []).length > 0 && (target.flags & ts.SymbolFlags.Value) === 0;
+  return (target.flags & ts.SymbolFlags.Value) === 0;
 }
 
 /**
