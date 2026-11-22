@@ -84,10 +84,16 @@ export interface ProgramConfigStatus extends ConfigRootGaps {
   readonly skippedLoaderEntries?: number;
   /**
    * 프로젝트 안 선언 산출물(스캔이 건너뛴 `dist/*.d.ts` 등)로 해석됐지만 스캔한 소스로 되짚지 못한 import 수와
-   * 그 산출물의 프로젝트 기준 경로(최대 10개)다. 그 import를 거친 호출은 외부로 세어진다.
+   * 그 산출물의 프로젝트 기준 경로(최대 10개, 경로 순 — 스캔한 소스가 직접 import한 산출물을 먼저 고른다)다.
+   * 그 import를 거친 호출은 외부로 세어진다.
    */
   readonly declarationOutputImports?: number;
   readonly declarationOutputFiles?: readonly string[];
+  /**
+   * {@link declarationOutputImports} 중 스캔이 소스로 분석하지 않는 파일(산출물 선언끼리의 import, 스캔하지 않은 빌드 출력 JavaScript)이
+   * 한 import 수다. 그 파일의 호출은 그래프에 없으므로 이 import가 호출을 외부로 돌리지 않는다. 0이면 싣지 않는다.
+   */
+  readonly declarationOutputUnscannedImports?: number;
   /**
    * {@link declarationOutputImports} 중 `declarationDir`/`outDir` ↔ `rootDir` 경로의 소스가 선언의 export 이름을 모두 내보내지 않거나
    * 이름을 확정하지 못해 잇지 않은 import 수다(번들러가 산출물 디렉터리를 다른 배치로 덮어쓴 경우 등).
@@ -196,11 +202,11 @@ export function createGraphProgram(
   const declarationOutputs = context?.declarationOutputs
     ?? new DeclarationOutputMapper(boundary.root, ownership.configs, candidates, boundary.excludedDirectories);
   // import 키(파일·지정자)별 마지막 미해결 판정이다. 같은 키를 모드마다 다시 해석해도 import 수와 export 불일치 내역이 같은 판정을 센다.
-  const unmappedDeclarationOutputs = new Map<string, { readonly path: string; readonly exportMismatch: boolean }>();
-  const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importKey: string): ts.ResolvedModuleFull => {
+  const unmappedDeclarationOutputs = new Map<string, UnmappedDeclarationOutput>();
+  const redirectDeclarationOutput = (resolved: ts.ResolvedModuleFull, importer: string, importKey: string): ts.ResolvedModuleFull => {
     const match = declarationOutputs.match(resolved.resolvedFileName);
     if (match.kind === 'unmapped') {
-      unmappedDeclarationOutputs.set(importKey, { path: resolve(resolved.resolvedFileName), exportMismatch: match.exportMismatch === true });
+      unmappedDeclarationOutputs.set(importKey, { path: resolve(resolved.resolvedFileName), importer, exportMismatch: match.exportMismatch === true });
     }
     if (match.kind !== 'source') return resolved;
     return { resolvedFileName: match.fileName.replaceAll('\\', '/'), extension: extname(match.fileName) as ts.Extension,
@@ -220,7 +226,7 @@ export function createGraphProgram(
     } };
     const found = pnp.resolveModule(name, containingFile, sourceOptions, boundedHost, mode);
     if (refused) return undefined;
-    const resolved = found === undefined ? undefined : redirectDeclarationOutput(found, `${absolute}\u0000${name}`);
+    const resolved = found === undefined ? undefined : redirectDeclarationOutput(found, absolute, `${absolute}\u0000${name}`);
     const target = resolved === undefined ? undefined : ownership.owners.get(resolve(resolved.resolvedFileName));
     if (context !== undefined && resolved !== undefined && (ownership.ambiguous.has(resolve(resolved.resolvedFileName))
       || (target !== undefined && context.keys.get(target) !== contextKey))) {
@@ -278,6 +284,7 @@ export function createGraphProgram(
     const otherDeeplyNested = deeplyNested.size - deeplyNestedSources.size;
     const unmappedOutputs = [...unmappedDeclarationOutputs.values()];
     const exportMismatches = unmappedOutputs.filter((output) => output.exportMismatch).length;
+    const unscannedImports = unmappedOutputs.filter((output) => !sources.has(output.importer)).length;
     return {
       program, checker, deeplyNestedSources, excludedSources,
       ...(context === undefined ? {} : { ownedSources: context.ownedSources }), status: {
@@ -291,9 +298,9 @@ export function createGraphProgram(
         ...(ownership.incomplete ? { configOwnershipIncomplete: true } : {}),
         ...(heldByIncomplete.size > 0 ? { configOwnershipBlockedSources: heldByIncomplete.size } : {}),
         ...(unmappedOutputs.length > 0 ? { declarationOutputImports: unmappedOutputs.length,
-          declarationOutputFiles: [...new Set(unmappedOutputs.map((output) => output.path))]
-            .map((path) => relative(boundary.root, path).replaceAll('\\', '/')).sort().slice(0, 10) } : {}),
+          declarationOutputFiles: declarationOutputSample(boundary.root, unmappedOutputs, sources) } : {}),
         ...(exportMismatches > 0 ? { declarationOutputExportMismatches: exportMismatches } : {}),
+        ...(unscannedImports > 0 ? { declarationOutputUnscannedImports: unscannedImports } : {}),
         ...(otherDeeplyNested > 0 ? { deeplyNestedCompilerInputs: otherDeeplyNested } : {}),
         ...(pnp.active ? { staticPnp: true, pnpIssues: pnp.issues } : {}),
         ...(pnp.loaderOnly ? { pnpLoaderOnly: true } : {}),
@@ -313,6 +320,32 @@ export function createGraphProgram(
       cacheLease.release();
     }
   }
+}
+
+/** 스캔한 소스로 되짚지 못한 선언 산출물 import 하나의 판정이다. */
+interface UnmappedDeclarationOutput {
+  /** 해석된 산출물 선언의 절대 경로 */
+  readonly path: string;
+  /** import를 쓴 파일의 절대 경로 */
+  readonly importer: string;
+  /** `declarationDir`/`outDir` ↔ `rootDir` 경로의 소스와 export 이름이 맞지 않아 잇지 않았는지 */
+  readonly exportMismatch: boolean;
+}
+
+/**
+ * `declaration-outputs:` 한계에 실을 산출물 경로 표본(최대 10개, 경로 순)이다. 스캔한 소스가 직접 import한 산출물을 먼저 고른다.
+ * 호출을 외부로 돌린 원인은 그 import이고, 산출물 선언끼리의 import 대상만으로 표본이 차면 원인 파일이 목록에서 빠지기 때문이다.
+ *
+ * @param root 프로젝트 루트
+ * @param outputs 되짚지 못한 import 판정
+ * @param sources 스캔한 소스 절대 경로
+ * @returns 프로젝트 기준 POSIX 경로
+ */
+function declarationOutputSample(root: string, outputs: readonly UnmappedDeclarationOutput[], sources: ReadonlySet<string>): string[] {
+  const relativePath = (path: string) => relative(root, path).replaceAll('\\', '/');
+  const direct = new Set(outputs.filter((output) => sources.has(output.importer)).map((output) => relativePath(output.path)));
+  const others = new Set(outputs.map((output) => relativePath(output.path)).filter((path) => !direct.has(path)));
+  return [...[...direct].sort(), ...[...others].sort()].slice(0, 10).sort();
 }
 
 /** Program과 Next convention이 같은 설정 진입 목록을 쓴다. import 의존성 폐쇄는 이 목록과 별개다. */
@@ -691,6 +724,8 @@ export function configRootGaps(status: ProgramConfigStatus, affected: string): s
       + ((status.declarationOutputExportMismatches ?? 0) > 0 ? `; ${status.declarationOutputExportMismatches} of them reach a source through `
         + `declarationDir/outDir and rootDir that does not export every name the declaration exports (or whose names could not be compared), `
         + `so the declaration is not assumed to be emitted from it` : '')
+      + ((status.declarationOutputUnscannedImports ?? 0) > 0 ? `; ${status.declarationOutputUnscannedImports} of them are made by files that the scan `
+        + `does not analyze as sources either (for example build output importing build output), which contribute no calls to the graph` : '')
       + `; calls through them are counted as external and ${affected} `
       + `may be incomplete (build declaration maps or analyze from sources); files: ${JSON.stringify(status.declarationOutputFiles ?? [])}`);
   }
