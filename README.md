@@ -124,6 +124,12 @@ separate Programs. A workspace package whose `exports`/`types` points at build o
 config's `declarationDir`/`outDir` and `rootDir` (the config directory for `composite`, otherwise the common source
 directory), or a same-name JavaScript implementation next to a hand-written declaration identifies exactly one
 source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
+The count includes imports made by files the scan does not analyze as sources (one build-output declaration
+importing another, or unscanned build-output JavaScript); when there are any, the sentence says how many (`N of them
+are made by files that are not analyzed as sources either …, so no calls are taken from those files`; the same sentence
+in `routes --role server` says `route registrations`, in `--role client` `requests`, and in `navigation` `screen registrations`),
+because nothing is extracted from those files. Its `files:` list (at most 10 paths, in path order) is chosen from the declarations that scanned sources
+import before the ones reached only from other build output.
 The `outDir`/`rootDir` mapping is inferred from layout alone, so for a TypeScript source it links only when every
 name the declaration exports (values and types, `default`, `export =`, and names pulled in through `export *`) is
 also exported by that source. When a name is missing or the declaration file itself cannot be read (unreadable or
@@ -959,7 +965,9 @@ also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `fil
 policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
 generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include
 pattern that starts outside that root, or a `files` entry outside it, is neither enumerated nor used as a root file and is
-counted under `graph-config:`. A `files` entry or wildcard-free include path that names a location in those skipped
+counted under `graph-config:`. The sentence names the config file when it is the config at the scanned root, and
+otherwise gives the project-relative path of the config that holds the pattern (`packages/a/tsconfig.json`, also with
+`--workspace`, where paths are relative to the workspace). A `files` entry or wildcard-free include path that names a location in those skipped
 directories or through a symlink is not used either and is counted there too; glob matches in them stay silent, as in
 the walk. Files in both places still load when project sources import or reference them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
@@ -1572,10 +1580,11 @@ candidate edge).
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
 Config-selected roots outside the scanned root, config entries that name paths in skipped directories or through symlinks, or roots past the enumeration limit are reported under `graph-config:` and prevent complete-coverage claims as well.
+A config that cannot be parsed is reported under `graph-config:` too, split by the ownership plan's main config (the root config or the one chosen with `--tsconfig`) rather than by type-checking context: the main config as `<name> could not be parsed; default compiler options were used, so path aliases may not resolve` (a path when it is not at the scanned root), and every other owning config that cannot be parsed on one line `config-unreadable: N compiler config(s) read for <result> could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<paths relative to the scanned root>]; omitted: M` (those sources either keep their imports unresolved as an ownership conflict or use default options). `<result>` names what the plan read configs for: `calls` in graph, `route registrations` in `routes --role server`, `requests` in `--role client`, `screen registrations` in `navigation`, and `Next convention discovery` for the Next.js route-file scope, which reads only the configs of route files and the root config's `include`, so a server document can carry two lists with different scopes and counts. Both sentences are the same in every context and under every prefix, so each appears once per scope; a file that failed through several paths (a symlinked directory) is listed once under the first failing path in path order, never under a path that parsed.
 A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
 A source, declaration, or package input that nests syntax more than 400 levels deep or overflows the parser's call stack is excluded from the program the same way and reported under `parse-errors:` (sources with their paths); it prevents complete-coverage claims too.
 
-`unresolved-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
+`unresolved-export-aliases:`, `type-only-export-aliases:`, `graph-config:`, `parse-errors:`, `oversized-sources:`,
 `unreadable-sources:`, `skipped-symlinks:`, `unsafe-names:`, `scan-truncated:`, `entry-points:`, `non-http-entries:`, and in
 `reach`/`impact` documents only, `evidence-approximated:` and `unresolved-calls-capped:`.
 Counts only; no source text or absolute paths.
@@ -1599,7 +1608,10 @@ facts, and `symbol.usr` on relation-use facts, so isthmus can chain them by exac
 - An anonymous default export is `<path>#default` (also for `export default <expr>`).
 - An export that is not itself a named declaration (`export { a as GET }`, `export { GET } from
   './impl'`, `export const { GET } = handlers`, `export let x;`) gets an export node
-  `<path>#<export name>` with an `alias` edge to what it resolves to.
+  `<path>#<export name>` with an `alias` edge to what it resolves to. A target it cannot resolve is counted under
+  `unresolved-export-aliases:`. A name re-exported without `type` that resolves only to a type (an interface, a type
+  alias, a namespace without values, or a JSDoc `@typedef`) keeps its export node but has no runtime declaration, so
+  it has no `alias` edge and is counted under `type-only-export-aliases:` instead.
 - Declarations that produce the same id (overloads, a getter/setter pair, same-named functions in
   sibling blocks) are one node.
 - Declaration-side relation-use facts use `#model:` and `#typedsql:` ids (see

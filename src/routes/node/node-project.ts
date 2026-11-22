@@ -13,7 +13,7 @@ import ts from 'typescript';
 
 import type { BridgeLocation } from '../../exchange/bridge-facts.ts';
 import { ByteColumnIndex } from '../../openapi/byte-columns.ts';
-import { configRootGaps, createGraphPrograms, type ProgramConfigStatus } from '../../graph/program.ts';
+import { configParseGaps, configRootGaps, createGraphPrograms, type ProgramConfigStatus } from '../../graph/program.ts';
 import { collectProjectFiles } from '../../schema/project-files.ts';
 import { isSourceFileName } from '../../schema/source-module.ts';
 import { SYNTAX_DEPTH_CAUSE } from '../../schema/syntax-depth.ts';
@@ -127,9 +127,7 @@ export function* loadNodeProjects(root: string, tsconfig?: string): Generator<No
  */
 export function compilerConfigGaps(status: ProgramConfigStatus, affected: string): string[] {
   const gaps: string[] = [];
-  if (status.configUnreadable) {
-    gaps.push(`${status.configName} could not be parsed; default compiler options were used, so path aliases may not resolve`);
-  }
+  gaps.push(...configParseGaps(status, affected));
   const oversized = status.oversizedCompilerInputs ?? 0;
   if (oversized > 0) gaps.push(`${oversized} source, declaration, or package input(s) exceeded 4 MiB; type resolution and ${affected} may be incomplete`);
   const deeplyNested = status.deeplyNestedCompilerInputs ?? 0;

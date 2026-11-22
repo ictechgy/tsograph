@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 import { createNodeFileSystem } from '../cli/file-system.ts';
+import { runRoutesCommand } from '../cli/routes-command.ts';
 import { buildCallGraph } from './build-graph.ts';
 import { DeclarationOutputMapper } from './declaration-outputs.ts';
 import type { CallGraph } from './graph-model.ts';
@@ -777,6 +778,67 @@ test('mapper: 해석하지 못한 bare export *는 설치 여부와 무관하게
       fileNames: scanned };
     const mapper = new DeclarationOutputMapper(root, [config], scanned);
     assert.deepEqual(mapper.match(join(root, 'pkg/out/index.d.ts')), { kind: 'unmapped', exportMismatch: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 산출물끼리의 import를 따로 세는 문장이다. 문장을 함께 쓰는 문서(graph·routes)마다 결과 이름(`calls`·`route registrations`)이 다르다. */
+const unscannedImporterClause = (count: number, affected = 'calls') =>
+  `; ${count} of them are made by files that are not analyzed as sources either (for example build output importing build output), `
+  + `so no ${affected} are taken from those files`;
+
+test('산출물 선언끼리의 import는 스캔한 소스의 import와 나눠 알리고, 소스가 import한 산출물을 파일 목록에서 빠뜨리지 않는다', async () => {
+  // 앱이 import한 dist/index.d.ts가 같은 dist의 a0~a10을 다시 내보낸다. 산출물끼리의 import 11개는 호출이 없는 선언 파일의
+  // import라서 호출을 잃게 한 것은 앱의 import 하나다. 파일 목록(최대 10개)이 경로 순으로 a0~a8만 담으면 원인 파일이 빠진다.
+  const modules = Array.from({ length: 11 }, (_, index) => `a${index}`);
+  const root = createWorkspace({
+    'tsconfig.json': `{ "compilerOptions": { ${compilerOptions} } }`,
+    'packages/lib/dist/index.d.ts': `${modules.map((name) => `export * from "./${name}";`).join('\n')}\nexport declare function helper(): number;\n`,
+    ...Object.fromEntries(modules.map((name) => [`packages/lib/dist/${name}.d.ts`, `export declare function ${name}(): number;\n`])),
+  });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    assert.equal(helperEdge(graph), undefined);
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /^graph-config: declaration-outputs: 12 import\(s\) resolve to declaration files inside the project/u);
+    assert.ok(line.includes(unscannedImporterClause(11)), line);
+    const files = JSON.parse(/files: (\[.*\])$/u.exec(line)?.[1] ?? '[]') as string[];
+    assert.equal(files.length, 10);
+    assert.ok(files.includes('packages/lib/dist/index.d.ts'), '앱이 직접 import한 산출물은 목록에 남는다');
+    assert.deepEqual(files, [...files].sort(), '목록은 예전처럼 경로 순이다');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('모든 산출물 import가 스캔한 소스에서 나오면 나눠 세는 문장을 붙이지 않는다', async () => {
+  const root = createWorkspace({ 'tsconfig.json': `{ "compilerOptions": { ${compilerOptions} } }` });
+  try {
+    const graph = await buildCallGraph(root, createNodeFileSystem());
+    const line = declarationOutputLimitation(graph) ?? '';
+    assert.match(line, /declaration-outputs: 1 import\(s\)/u);
+    assert.doesNotMatch(line, /of them are made by files that the scan does not analyze/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Node routes도 산출물끼리의 import를 나눠 알리고, 그 문장은 graph의 calls가 아니라 route registrations를 말한다', async () => {
+  const root = createWorkspace({
+    'package.json': '{ "name": "root", "private": true, "workspaces": ["packages/*", "apps/*"], "dependencies": { "express": "4" } }',
+    'tsconfig.json': `{ "compilerOptions": { ${compilerOptions} } }`,
+    'packages/lib/dist/index.d.ts': 'export * from "./helpers";\n',
+    'packages/lib/dist/helpers.d.ts': 'export declare function helper(): number;\n',
+    'apps/web/src/main.ts': "import express from 'express';\nimport { helper } from '@acme/lib';\nconst app = express();\n"
+      + "app.get('/x', (req, res) => res.send(String(helper())));\nexport default app;\n",
+  });
+  try {
+    const result = await runRoutesCommand(['--role', 'server', '--project', root], { fileSystem: createNodeFileSystem(), toolVersion: '0.0.0-test', now: () => new Date(0) });
+    const line = (JSON.parse(result.standardOutput) as { limitations: string[] }).limitations.find((candidate) => candidate.includes('declaration-outputs:')) ?? '';
+    assert.match(line, /^route-coverage: declaration-outputs: 2 import\(s\)/u);
+    assert.ok(line.includes(unscannedImporterClause(1, 'route registrations')), line);
+    assert.doesNotMatch(line, /to the graph/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
