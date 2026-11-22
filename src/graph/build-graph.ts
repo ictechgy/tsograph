@@ -292,7 +292,9 @@ function mergeContextGaps(contexts: readonly ContextGraphResult[]): EdgeGaps {
 function mergeContextLimitations(contexts: readonly ContextGraphResult[], counts: CallDiagnosticCounts, view: LimitationView): string[] {
   const result = new Set(callLimitations(counts, view));
   const countedCalls = /^(?:unresolved-calls|partial-dispatch|missing-dependencies|overridden-methods|unresolved-export-aliases|type-only-export-aliases|dispatch-budget|candidate-dispatch):|^bound-dispatch: \d+ /u;
-  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget|unreadable):/u;
+  // 읽지 못한 설정 문장(config-unreadable:, 주 설정의 could not be parsed)은 문맥이 아니라 소유권 계획을 기준으로 하므로 어느 접두사
+  // (graph-config:, Next 진입 범위의 route-coverage: …)로 붙든 문맥마다 같은 문장이다. 문맥 표시를 붙이지 않고 하나로 합친다.
+  const globalInputs = /^(?:oversized-sources:|skipped-symlinks:|unsafe-names:|scan-truncated:)|^unreadable-sources: \d+ directory|^graph-config: config-(?:conflict|ownership|budget):|^[a-z-]+: config-unreadable:|^[a-z-]+: \S+ could not be parsed; default compiler options were used/u;
   for (const [index, { graph }] of contexts.entries()) {
     const lines = view === 'snapshot' ? graph.limitations : graph.limitationsByMode[view];
     for (const line of lines) {
