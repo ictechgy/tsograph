@@ -1049,17 +1049,20 @@ SDK 실행이나 네트워크 요청은 하지 않는다.
   멤버가 호출 대상 밖에서 읽히는(`h.run.bind(x)`, `const { run } = h`, `({ run } = h)`) 메서드의 `this`(쓰기와 같은 규칙으로
   그 읽기의 수신자 흐름이 클래스·하위 클래스를 담지 않음을 증명하지 못하면), 불러온 모듈에서
   재내보내기 배럴(`export *`·`export { x } from`·`export * as ns`)로 닿는 내보내기, `declare`한 값.
-  `package.json`이 `main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`를 선언한 패키지(또는 1 MiB 안에서
-  JSON 객체로 읽지 못하는 `package.json`), 그 필드 없이 게시할 수 있는 패키지(문자열 `name`이 있고 `"private": true`가 아님)가
-  `package.json` 옆에 기본 index 파일(`index.js`·`index.jsx`·`index.ts`·`index.tsx`)을 둔 경우(Node는 `main`이 없으면 `index.js`를
-  불러오고 TypeScript는 나머지도 해석하므로 `{"name":"lib"}`는 `{"name":"lib","main":"index.js"}`와 똑같이 소비된다. express 4와
-  `@nestjs/core` 10이 이렇게 게시된다)이거나 스캔이
-  불완전하면(건너뛴·너무 큰·읽지 못한·symlink·금지 문자 이름 파일, 구문 오류) 모든 내보낸 함수·클래스와 비공개가 아닌 속성도
-  열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 루트 아래 파일은 가장 가까운 `package.json`을 본다. 그 필드를
-  선언하고 `"private": true`가 아닌(또는 manifest를 읽지 못한) workspace 패키지는 자기 파일의 내보낸 함수·클래스를 열고,
-  보수적으로 프로그램 전체의 비공개가 아닌 속성을 연다(`bound-dispatch: nested package.json file(s) …`). 그 필드 없이 게시할 수
-  있는 workspace 패키지도 기본 index 파일이 있으면 똑같이 연다(`bound-dispatch: nested package.json file(s) are not private and
-  declare no entry fields …`). private workspace 패키지는 게시할 수 없어 소비자가 스캔한 workspace 안에 있다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
+  루트 `package.json`이 `main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`를 선언했거나(`"private": true`와 함께여도
+  연다: 선언한 진입점은 `bin`처럼 스캔 밖에서 불러올 수 있다), 그 필드 없이 게시할 수 있거나(문자열 `name`이 있고
+  `"private": true`가 아님: `exports`가 없으면 소비자가 `lib/src/main.js`처럼 아무 파일이나 경로로 가져다 쓰고, `main`이 없으면
+  패키지 이름 자체가 기본 index 파일로 해석된다. express 4와 `@nestjs/core` 10이 이렇게 게시된다), `package.json`을 1 MiB 안에서
+  JSON 객체로 읽지 못하거나, 스캔이 불완전하면(건너뛴·너무 큰·읽지 못한·symlink·금지 문자 이름 파일, 구문 오류) 모든 내보낸
+  함수·클래스와 비공개가 아닌 속성도 열린 자리로 보고, 문서가 `bound-dispatch:`로 알린다. 그 필드가 없고 `"private": true`이거나
+  문자열 `name`이 없는 루트 `package.json`, 또는 루트 `package.json`이 없으면 닫힌 프로그램이다. private는 boolean `true`만 본다:
+  npm은 truthy `private`를 모두 게시하지 않지만 Yarn 4는 boolean만 읽어 `"private": "true"`를 게시하므로, 다른 값은 열린 쪽에 둔다.
+  루트 아래 파일은 가장 가까운 `package.json`을 본다(`{"type":"module"}`처럼 `name`·`private`·진입점 필드가 없는 manifest는
+  module 형식만 정하므로 그 위의 manifest가 정한다). 그 필드를 선언하고 `"private": true`가 아니거나 manifest를 읽지 못한
+  workspace 패키지는 자기 파일의 내보낸 함수·클래스를 열고, 보수적으로 프로그램 전체의 비공개가 아닌 속성을 연다
+  (`bound-dispatch: nested package.json file(s) declare public entry points …`). 그 필드 없이 게시할 수 있는 workspace 패키지도
+  똑같이 연다(`bound-dispatch: nested package.json file(s) have a string name without "private": true and no entry fields …`).
+  `"private": true`인 workspace 패키지는 그 필드가 있든 없든 게시할 수 없어 소비자가 스캔한 workspace 안에 있다. 호출자가 모두 프로젝트 안인 내보낸 함수는 닫혀 있고,
   프로젝트 안 호출자가 없는 내보낸 함수는 관찰된 흐름이 없어 bound하지 않는다. 닫힌 쪽으로 실패한다: 색인된 호출
   위치가 없는 함수·생성자는 모름이다(기본 매개변수 값만으로 흐름 전체라고 보지 않는다). 단 엄격한 문법 재검사로 참조가
   전혀 없음을 증명하면 — 분석한 파일 전체에서 이름이나 별칭 지역 이름과 텍스트가 같은 식별자·`#이름`·문자열 리터럴 토큰이

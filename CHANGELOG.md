@@ -6,18 +6,24 @@
 
 ### Fixed
 
-- graph·reach·impact: `package.json`에 공개 진입점 필드(`main`·`exports` 등)가 없어도 게시할 수 있는 패키지(문자열 `name`,
-  `"private": true` 아님)가 그 옆에 기본 index 파일(`index.js`·`index.jsx`·`index.ts`·`index.tsx`)을 두면 Node·TypeScript가 그 파일을
-  패키지 진입점으로 해석하는데, 이를 닫힌 프로그램으로 보고 bound 간선을 내던 문제를 고쳤다. Node는 `main`이 없으면 `index.js`를
-  불러오므로 `{"name":"lib"}`는 `{"name":"lib","main":"index.js"}`와 똑같이 스캔 밖 소비자가 가져다 쓴다(express 4.21.2,
-  `@nestjs/core`·`@nestjs/common` 10.4.15가 이렇게 게시된다). 이제 루트는 `bound-dispatch: package.json is not private and its default
-  index file is the package entry, …`, 중첩 workspace 패키지는 `bound-dispatch: nested package.json file(s) are not private and declare
-  no entry fields, so their default index file is the package entry: […]; …`로 알리고 그 내보낸 함수·클래스를 연다. **bound 간선을
-  줄이는 변경**이다: ESM `index.js`의 `export function run(callback) { return callback(); }`를 프로젝트 안에서 `run(helper)`로만 부르면
-  예전에는 `run → helper` bound 간선을 냈지만, 소비자가 `import('lib').run(other)`로 다른 콜백을 넘기면 그 간선은 거짓이다. 줄어든
-  호출은 `unresolved-calls:`의 원인별 계수(예: `parameter`)에 들어간다. CommonJS 파일은 원래 최상위 선언을 열어 두므로 위 세 패키지의
-  간선은 바뀌지 않고 열린 프로그램 문장만 더해진다. `"private": true`이거나 이름이 없거나 기본 index 파일이 없는 manifest는 예전처럼
-  닫힌 쪽이다.
+- graph·reach·impact: `package.json`에 공개 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)가 하나도
+  없지만 게시할 수 있는 패키지(문자열 `name`이 있고 `"private": true`가 아님)를 닫힌 프로그램으로 보고 bound 간선을 내던 문제를
+  고쳤다. `exports`가 없는 패키지는 소비자가 `import { run } from 'lib/src/main.js'`처럼 아무 파일이나 경로로 가져다 쓰고, `main`이
+  없으면 패키지 이름 자체가 기본 index 파일(`index.js` 등)로 해석된다(express 4.21.2, `@nestjs/core`·`@nestjs/common` 10.4.15가 이렇게
+  게시된다). 그래서 진입점 필드를 적은 패키지와 똑같이 스캔 밖 소비자가 내보낸 함수를 자기 콜백으로 부를 수 있다. 이제 루트는
+  `bound-dispatch: package.json has a string name without "private": true and no exports field, which lets any file be imported by
+  path, so …`, 중첩 workspace 패키지는 `bound-dispatch: nested package.json file(s) have a string name without "private": true and no
+  entry fields, which lets any of their files be imported by path: […]; …`로 알리고 루트는 프로그램 전체를, 중첩 패키지는 자기 파일의
+  내보낸 함수·클래스를 연다. **bound 간선을 줄이는 변경**이다: ESM `src/main.js`의 `export function run(callback) { return callback(); }`를
+  프로젝트 안에서 `run(helper)`로만 부르면 예전에는 `run → helper` bound 간선을 냈지만, 소비자가 깊은 경로로 불러 다른 콜백을 넘기면
+  그 간선은 거짓이다. 줄어든 호출은 `unresolved-calls:`의 원인별 계수(예: `parameter`)에 들어간다. 이름만 있고 `private`·진입점 필드가
+  없는 앱도 같은 이유로 열린다(그런 공개 앱·템플릿 10개 — umami, jellyfin-web, uptime-kuma, prisma-examples 5개, hono vercel 템플릿,
+  medusa starter — 에서는 bound 간선이 하나도 줄지 않았다). 게시하지 않을 앱은 `"private": true`를 적으면 예전처럼 닫힌다.
+  `"private": true`이거나 문자열 `name`이 없는 manifest, `{"type":"module"}` 같은 형식 표식 manifest는 예전처럼 닫힌 쪽이다.
+  private는 예전처럼 boolean `true`만 본다: npm 10은 truthy `private`를 모두 게시하지 않지만 Yarn 4는 boolean만 읽어
+  `"private": "true"`를 게시하므로 다른 값은 열린 쪽에 두고, 문장은 "private가 아니다"라고 단정하지 않는다. 루트가 진입점 필드와
+  `"private": true`를 함께 가지면 여는 기존 동작과 중첩 workspace 패키지 규칙(진입점 필드가 있고 `"private": true`가 아니면 연다)은
+  그대로다.
 - graph·reach·impact: workspace 패키지가 `exports.types`로 프로젝트 안 빌드 산출물(`dist/index.d.ts`)을 가리키면
   앱의 호출이 외부로 조용히 사라지던 문제를 고쳤다. declaration map, 산출물을 낸 설정의 `declarationDir`/`outDir`↔`rootDir`,
   손으로 쓴 선언 옆 JavaScript 구현으로 스캔한 소스 하나를 증명할 때만 그 소스로 잇고, 근거가 없으면

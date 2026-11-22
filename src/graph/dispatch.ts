@@ -14,9 +14,12 @@
  *
  * bound의 전제(README가 밝힌다): 스캔한 프로젝트가 프로그램 전체다. 그래서 스캔 밖 코드가 부를 수 있는
  * 함수·클래스는 흐름이 열린 자리로 본다: 진입점(과 그 export 별칭·기본 내보내기 대상), 진입점 파일의 내보내기,
- * 멤버를 추적할 수 없는 모듈(동적 import·값으로 쓰인 네임스페이스)의 내보내기, 그리고 공개 패키지
- * (`package.json`의 main·module·exports·bin·types·typings·browser)이거나 스캔이 불완전하면 모든 내보내기와
- * 비공개가 아닌 속성.
+ * 멤버를 추적할 수 없는 모듈(동적 import·값으로 쓰인 네임스페이스)의 내보내기, 그리고 공개 패키지이거나 스캔이
+ * 불완전하면 모든 내보내기와 비공개가 아닌 속성. 공개 패키지는 `package.json`이 main·module·exports·bin·types·typings·browser를
+ * 선언했거나, 그 필드 없이 게시할 수 있는(문자열 `name`, `"private": true` 아님) 패키지다. `exports`가 없으면 소비자가 아무 파일이나
+ * 경로로 가져다 쓸 수 있기 때문이다. 읽지 못한 manifest도 연다. 루트 아래 workspace 패키지는 자기 파일의 내보내기와 프로그램
+ * 전체의 비공개가 아닌 속성을 연다. 판정은 `build-graph.ts`의 `readManifestEntry`·`nestedOpenPackages`가 하고 여기에는
+ * `openProgram`·`openFiles`로 넘어온다.
  *
  * 테스트 소스(`*.test.*`·`*.spec.*`, `__tests__`·`__mocks__` 아래 — routes와 같은 규칙)는 테스트 러너가 따로 실행하는
  * 별개 프로그램이다. 그래서 테스트 소스가 아닌 파일의 호출은 테스트 소스를 뺀 프로그램으로 흐름·후보를 구한다

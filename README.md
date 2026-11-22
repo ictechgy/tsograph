@@ -1300,21 +1300,26 @@ What `bound` guarantees, and what it does not:
   `const { run } = h`, `({ run } = h)`) unless the read's receiver flow provably excludes the class and
   its subclasses (same rule as writes), exports reachable from a
   loaded module through re-export barrels (`export *`, `export { x } from`, `export * as ns`), and
-  `declare`d values. A package whose `package.json` declares `main`, `module`, `exports`, `bin`,
-  `types`, `typings`, or `browser` (or whose `package.json` cannot be read as a JSON object within
-  1 MiB), a publishable package without those fields (a string `name` and not `"private": true`) that has a
-  default index file next to its `package.json` (`index.js`, `index.jsx`, `index.ts`, or `index.tsx`: Node loads
-  `index.js` when `main` is missing and TypeScript resolves the others, so `{"name":"lib"}` is consumed exactly like
-  `{"name":"lib","main":"index.js"}`, as published by express 4 and `@nestjs/core` 10), or an incomplete scan
-  (skipped, oversized, unreadable, symlinked, or
-  unsafely named files, or parse errors), additionally opens every exported function and class and every
-  non-private property; the document then says so under `bound-dispatch:`. Below the root, each file uses its
-  nearest `package.json`: a workspace package that declares those fields and is not `"private": true` (or whose
-  manifest cannot be read) opens the exported functions and classes of its own files and, conservatively, every
-  non-private property in the program (`bound-dispatch: nested package.json file(s) …`); a publishable workspace
-  package without those fields does the same when it has a default index file (`bound-dispatch: nested package.json
-  file(s) are not private and declare no entry fields …`); a private workspace
-  package cannot be published, so its consumers are the scanned workspace. An exported function whose
+  `declare`d values. A root `package.json` that declares `main`, `module`, `exports`, `bin`, `types`,
+  `typings`, or `browser` (even together with `"private": true`: a declared entry can still be loaded from
+  outside the scan, for example through `bin`), a root `package.json` without those fields that is publishable
+  (a string `name` and not `"private": true`: without an `exports` field a consumer can import any file by path,
+  such as `lib/src/main.js`, and without `main` the package name itself resolves to its default index file, as
+  published by express 4 and `@nestjs/core` 10), a `package.json` that cannot be read as a JSON object within
+  1 MiB, or an incomplete scan (skipped, oversized, unreadable, symlinked, or unsafely named files, or parse
+  errors) additionally opens every exported function and class and every non-private property; the document
+  then says so under `bound-dispatch:`. A root `package.json` that has none of those fields and is
+  `"private": true` or has no string `name`, or no root `package.json` at all, keeps the program closed. Only the
+  boolean `true` counts as private: npm refuses to publish any truthy `private`, but Yarn 4 reads only a boolean
+  and publishes `"private": "true"`, so other values stay open. Below the root, each file uses its nearest
+  `package.json` (one with no `name`, `private`, or entry field, such as `{"type":"module"}`, only sets the module
+  format and defers to the next one up): a workspace package that declares those fields and is not
+  `"private": true`, or whose manifest cannot be read, opens the exported functions and classes of its own files
+  and, conservatively, every non-private property in the program (`bound-dispatch: nested package.json file(s)
+  declare public entry points …`); a publishable workspace package without those fields does the same
+  (`bound-dispatch: nested package.json file(s) have a string name without "private": true and no entry fields …`);
+  a `"private": true` workspace package, with or without those fields, cannot be published, so its consumers are
+  the scanned workspace. An exported function whose
   callers are all in the project is closed; one with no project caller has no observed flow and is not
   bound. Fail-closed: a function or constructor with no indexed call site is unknown (a default
   parameter value alone is never taken as the whole flow) unless a strict syntactic re-scan proves it
