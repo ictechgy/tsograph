@@ -10,11 +10,14 @@ schema와 change-impact가 같은 파일 소유권 계획을 사용한다. Next 
 설정을 읽지 못하면 임의 선택을 확정하지 않는다. `extends`는 TypeScript의 bounded JSON 해석을 사용한다.
 읽지 못한 설정은 type-checking 문맥의 대표 설정이 아니라 소유권 계획의 주 설정(루트 설정, `--tsconfig`로 고른 설정)을 기준으로 나눈다. 주
 설정을 읽지 못하면 `<설정 이름> could not be parsed; default compiler options were used, …`(스캔 루트 밖이면 경로)로, 그 밖의 소유 설정을
-하나라도 읽지 못하면 그 설정 전부를 `config-unreadable: N compiler config(s) under the scanned root could not be parsed, … files: [<스캔 루트
-기준 경로>]; omitted: M` 한 줄로 알린다(주 설정은 다시 적지 않는다). 그래서 읽지 못한 설정은 모두 이름이 나오고, 잘 읽은 설정을 읽지 못했다고
-하는 문장은 없다. 같은 이름(`tsconfig.json`)의 루트·중첩 설정을 구별하려고 경로를 쓰고, symlink 디렉터리나 대소문자만 다른 경로로 다시 읽은
-같은 파일은 실제 경로로 한 번만 센다. 두 문장 모두 계획 기준이라 문맥이 나뉘어도, graph가 Next 진입 범위 문장(`route-coverage:`)을 함께 실어도
-한 번씩만 나온다. 그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다.
+하나라도 읽지 못하면 그 설정 전부를 `config-unreadable: N compiler config(s) read for <결과> could not be parsed, … files: [<스캔 루트 기준
+경로>]; omitted: M` 한 줄로 알린다(주 설정은 다시 적지 않는다). 그래서 읽지 못한 설정은 모두 이름이 나오고, 잘 읽은 설정을 읽지 못했다고 하는
+문장은 없다. `<결과>`는 그 계획이 설정을 읽은 목적이다(graph `calls`, routes server `route registrations`, client `requests`, navigation `screen
+registrations`, Next 진입 범위 `Next convention discovery`). Next 진입 범위 계획은 route 파일과 루트 설정의 `include`만 보므로 Node routes
+계획보다 적은 설정을 읽을 수 있어, 한 문서에 범위와 수가 다른 목록 둘이 함께 나올 수 있다. 같은 이름(`tsconfig.json`)의 루트·중첩 설정을
+구별하려고 경로를 쓰고, symlink 디렉터리나 대소문자만 다른 경로로 여러 번 읽어 실패한 같은 파일은 실패한 경로 중 경로 순 첫 경로로 한 번만 적는다
+(다른 경로로 잘 읽힌 경로는 적지 않는다; 상대 `extends`는 링크 경로 기준으로 풀려 경로마다 결과가 다를 수 있다). 두 문장 모두 계획 기준이라
+문맥이 나뉘어도, graph가 Next 진입 범위 문장(`route-coverage:`)을 함께 실어도 범위마다 한 번씩만 나온다(주 설정 경로에 공백이 있어도 같다). 그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다.
 include가 루트 밖을 가리키는 등 설정 루트 공백은 스캔 루트의 대표 설정이 낸 것이면 예전처럼 설정 파일 이름으로, 아니면 그 공백을 낸 설정의
 프로젝트 기준 경로로 알린다(대표 설정 이름이나 설정이 없을 때의 `undefined`가 아니다). 대표 설정인지는 이름이 아니라 설정 자체로 가린다.
 실행 코드, loader, PnP 스크립트, compiler plugin을 실행하지 않는다.

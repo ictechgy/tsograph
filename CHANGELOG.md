@@ -32,20 +32,24 @@
   tsconfig.json …`으로 말했다. 이제 읽지 못한 설정을 문맥이 아니라 소유권 계획의 **주 설정**(루트 설정, `--tsconfig`로 고른 설정) 기준으로
   나눈다. 주 설정을 읽지 못했을 때만 예전 문장 `<이름> could not be parsed; default compiler options were used, so path aliases may not resolve`를
   내고(주 설정이 스캔 루트 밖이면 경로로 적는다), 다른 소유 설정을 하나라도 읽지 못하면 그 설정 전부를 `config-unreadable: N compiler config(s)
-  under the scanned root could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<스캔 루트 기준
-  경로>]; omitted: M` 한 줄로 알린다(주 설정은 자기 문장이 있으므로 목록에 다시 적지 않는다. 그 소스는 소유권 충돌로 import를 미해결로
+  read for <결과> could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<스캔 루트 기준 경로>];
+  omitted: M` 한 줄로 알린다(주 설정은 자기 문장이 있으므로 목록에 다시 적지 않는다. 그 소스는 소유권 충돌로 import를 미해결로
   남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다). 그래서 읽지 못한 설정은 모두 어딘가에 이름이 나오고, 잘 읽은 설정을 읽지
-  못했다고 하는 문장은 없다. 두 문장 모두 계획 기준이라 문맥이 나뉘어도 같은 문장이고, graph는 접두사(`graph-config:`, Next 진입 범위의
-  `route-coverage:` …)와 상관없이 문맥 표시 없이 하나로 합친다. 같은 설정 디렉터리를 symlink로 다시 참조하거나 대소문자만 다른 경로로 읽은
-  같은 파일은 실제 경로로 한 번만 센다. `--workspace`로 경계를 넓히면 목록에 프로젝트 밖 workspace 설정도 들어가므로 "under the scanned root"라고
-  말한다. 밖 include·건너뛴 디렉터리의 루트·열거 상한 문장은 스캔 루트의 대표 설정이 낸 것이면 예전처럼 설정 파일 이름을, 아니면 그 공백을 낸
+  못했다고 하는 문장은 없다. `<결과>`는 그 계획이 무엇을 분석하려고 설정을 읽었는지다: graph `calls`, routes server `route registrations`, client
+  `requests`, navigation `screen registrations`, Next 진입 범위 `Next convention discovery`. Next 진입 범위 계획은 route 파일과 루트 설정의
+  `include`만 보므로 Node routes 계획보다 적은 설정을 읽을 수 있고, 그래서 한 routes server 문서에 범위가 다른 두 목록(`read for Next convention
+  discovery`, `read for route registrations`)이 수가 달라도 함께 나올 수 있다. 두 문장 모두 계획 기준이라 문맥이 나뉘어도 같은 문장이고, graph는
+  접두사(`graph-config:`, Next 진입 범위의 `route-coverage:` …)와 상관없이 문맥 표시 없이 하나로 합친다(주 설정 경로에 공백이 있어도 문장
+  꼬리로 맞춘다). 같은 설정 파일을 symlink 디렉터리나 대소문자만 다른 경로로 여러 번 읽어 실패하면 한 번만 세고, 실패한 경로 중 경로 순으로
+  첫 경로를 적는다. 다른 경로로는 잘 읽힌 파일(상대 `extends`는 링크 경로 기준으로 풀린다)을 실제 경로로 적어 실패했다고 말하지 않는다.
+  `--workspace`로 경계를 넓히면 목록에 프로젝트 밖 workspace 설정도 들어가지만 목록은 프로젝트가 아니라 읽은 범위를 말한다. 밖 include·건너뛴 디렉터리의 루트·열거 상한 문장은 스캔 루트의 대표 설정이 낸 것이면 예전처럼 설정 파일 이름을, 아니면 그 공백을 낸
   설정의 스캔 루트 기준 경로(`packages/a/tsconfig.json`, `--workspace`면 `app/tsconfig.json`)를 쓴다. 루트 `tsconfig.json`과 중첩
   `jsconfig.json`이 있을 때 중첩 설정의 건너뛴 `files` 항목을 `persistence-config: … of tsconfig.json …`으로 말하던 것도 `of a/jsconfig.json`이
   된다. 스캔 불완전 판정과 계수는 그대로다. 설치하지 않은 `@tsconfig/node20`·`@docusaurus/tsconfig`를 extends하는 typeorm 저장소(얕은 clone,
   읽지 못한 설정 3개)에서는 `undefined could not be parsed`와 문맥별 `tsconfig.json could not be parsed` 문장이 모두 사라지고 `graph-config:
-  config-unreadable: 3 compiler config(s) under the scanned root could not be parsed, …; files: ["docs/tsconfig.json",
-  "packages/legacy-naming-strategies/tsconfig.json","packages/typeorm/tsconfig.json"]; omitted: 0` 한 줄이 생긴다(`route-call-coverage:`도
-  같다). 노드·간선·통계는 같다.
+  config-unreadable: 3 compiler config(s) read for calls could not be parsed, …; files: ["docs/tsconfig.json",
+  "packages/legacy-naming-strategies/tsconfig.json","packages/typeorm/tsconfig.json"]; omitted: 0` 한 줄이 생긴다(`route-call-coverage:`는
+  `read for requests`로 같은 목록). 노드·간선·통계는 같다.
 - graph·reach·impact: `package.json`에 공개 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)가 하나도
   없지만 게시할 수 있는 패키지(문자열 `name`이 있고 `"private": true`가 아님)를 닫힌 프로그램으로 보고 bound 간선을 내던 문제를
   고쳤다. `exports`가 없는 패키지는 소비자가 `import { run } from 'lib/src/main.js'`처럼 아무 파일이나 경로로 가져다 쓰고, `main`이
