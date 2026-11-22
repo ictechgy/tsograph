@@ -126,8 +126,8 @@ directory), or a same-name JavaScript implementation next to a hand-written decl
 source. Otherwise calls through it stay external and `graph-config: declaration-outputs:` counts the imports.
 The count includes imports made by files the scan does not analyze as sources (one build-output declaration
 importing another, or unscanned build-output JavaScript); when there are any, the sentence says how many (`N of them
-are made by files that the scan does not analyze as sources either …`), because those files contribute no calls to
-the graph. Its `files:` list (at most 10 paths, in path order) is chosen from the declarations that scanned sources
+are made by files that are not analyzed as sources either …, so no calls are taken from those files`; Node routes say
+`route registrations`), because nothing is extracted from those files. Its `files:` list (at most 10 paths, in path order) is chosen from the declarations that scanned sources
 import before the ones reached only from other build output.
 The `outDir`/`rootDir` mapping is inferred from layout alone, so for a TypeScript source it links only when every
 name the declaration exports (values and types, `default`, `export =`, and names pulled in through `export *`) is
@@ -964,7 +964,9 @@ also from the root files that `tsconfig.json`/`jsconfig.json` `include` and `fil
 policy (inside `--project`, or `--workspace` when given; no `node_modules`, `dist`, `build`, `out`, `coverage`, dot, or Prisma
 generator output directories; symlinks are not followed; at most 500,000 directory entries are enumerated). An include
 pattern that starts outside that root, or a `files` entry outside it, is neither enumerated nor used as a root file and is
-counted under `graph-config:` with the name of the config that holds the pattern. A `files` entry or wildcard-free include path that names a location in those skipped
+counted under `graph-config:`. The sentence names the config file when it is the config at the scanned root, and
+otherwise gives the project-relative path of the config that holds the pattern (`packages/a/tsconfig.json`, also with
+`--workspace`, where paths are relative to the workspace). A `files` entry or wildcard-free include path that names a location in those skipped
 directories or through a symlink is not used either and is counted there too; glob matches in them stay silent, as in
 the walk. Files in both places still load when project sources import or reference them. The root `package.json`
 and `vercel.json` are read only as regular, non-symlink files within 1 MiB; a symlink, FIFO, device, or permission
@@ -1577,7 +1579,7 @@ candidate edge).
 `overridden-methods:`, `missing-dependencies:`,
 The call-graph compiler also caps each source, declaration, and package input at 4 MiB, including tsconfig-selected roots and transitive imports. Skipped compiler inputs produce `oversized-compiler-inputs:` and prevent complete-coverage claims.
 Config-selected roots outside the scanned root, config entries that name paths in skipped directories or through symlinks, or roots past the enumeration limit are reported under `graph-config:` and prevent complete-coverage claims as well.
-A config that cannot be parsed is named under `graph-config:` too: the context's own config as `<name> could not be parsed; default compiler options were used, …`, and any other owning config as `N other compiler config(s) (<names>) could not be parsed, so path aliases and imports in the sources they own may not resolve` (those sources either keep their imports unresolved as an ownership conflict or use default options).
+A config that cannot be parsed is reported under `graph-config:` too: the context's own config as `<name> could not be parsed; default compiler options were used, …`, and, when any other owning config cannot be parsed, one project-wide line `config-unreadable: N compiler config(s) in the project could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<project-relative paths>]; omitted: M` that is the same in every type-checking context (those sources either keep their imports unresolved as an ownership conflict or use default options).
 A walked source the compiler could not read (permissions, a file removed after the walk, or a name with a backslash that TypeScript reads as a path separator) is not a node; it is counted under `unreadable-sources:` and also prevents complete-coverage claims.
 A source, declaration, or package input that nests syntax more than 400 levels deep or overflows the parser's call stack is excluded from the program the same way and reported under `parse-errors:` (sources with their paths); it prevents complete-coverage claims too.
 

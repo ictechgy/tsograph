@@ -12,7 +12,8 @@
   머지됐다. `main` `cea6584`의 CI 체크 6개가 모두 성공했다(2026-11-22 `gh api …/check-runs`로 확인). 세 PR의 변경은 모두 CHANGELOG
   `[Unreleased]`에 있고 아직 발행하지 않았다.
 - 2026-11-22 4회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `cea6584`에서 다시 시작해 limitation 문장 정확성 세 가지(아래 절)를
-  커밋했다. push·PR은 아직이다(조정자가 올린다).
+  PR #61(head `4939c2a` push됨)로 올렸다. 독립 리뷰 지적(아래 "PR #61 리뷰 반영")을 반영한 커밋 `b6d4052`·`f826ac0`·`6e67a71`과 문서 커밋은
+  push 전이다(조정자가 올린다).
 
 ## limitation 문장 정확성: 타입 전용 export 별칭·산출물끼리의 import·합친 설정 이름 (2026-11-22, 4회차)
 
@@ -34,55 +35,73 @@
 2. **산출물끼리의 import** (`6795257`, `src/graph/program.ts`): `graph-config: declaration-outputs:` import 수에 스캔이 소스로 분석하지 않는
    파일(산출물 선언끼리, 스캔하지 않은 빌드 출력 JavaScript)의 import가 들어가는데 문장이 그것을 말하지 않았고, `files:` 표본(경로 순 10개)이
    그 대상으로 차서 스캔한 소스가 실제로 import한 산출물이 빠졌다. 전체 수의 의미와 스캔 불완전 판정은 그대로 두고(지난 HANDOFF가 "의미를
-   바꾸는 일"로 미룬 부분은 건드리지 않았다), 그런 import가 있으면 `; N of them are made by files that the scan does not analyze as sources
-   either (for example build output importing build output), which contribute no calls to the graph`를 붙이고 표본은 스캔한 소스가 import한
-   산출물을 먼저 고른 뒤 경로 순으로 싣는다. 모든 import가 스캔한 소스에서 나오면 출력이 예전과 같다.
+   바꾸는 일"로 미룬 부분은 건드리지 않았다), 그런 import가 있으면 `; N of them are made by files that are not analyzed as sources either
+   (for example build output importing build output), so no <calls|route registrations> are taken from those files`를 붙이고(리뷰 반영
+   `f826ac0` 전에는 graph를 박은 `which contribute no calls to the graph`였다) 표본은 스캔한 소스가 import한 산출물을 먼저 고른 뒤 경로 순으로
+   싣는다. Node routes도 같은 graph Program으로 산출물을 되짚으므로 `route-coverage: declaration-outputs:`에 같은 절이 나온다. 모든 import가 스캔한 소스에서 나오면 출력이 예전과 같다.
    - 재현: yaml 2.9.1 패키지 → 155개 중 스캔한 소스(`util.js`)의 import는 1개, `dist/*.d.ts` 사이 147개, 스캔하지 않은 `dist/cli.mjs` 7개.
      예전 표본은 `dist/compose/…`~`dist/nodes/Node.d.ts`로 `util.js`가 import하는 `dist/util.d.ts`가 없었다. 새 분석기: `154 of them …`,
      표본 끝에 `dist/util.d.ts`.
    - 테스트(`declaration-outputs.test.ts` 2개 추가): `dist/index.d.ts`가 `a0`~`a10`을 다시 내보내는 12개 import 사례(문장·표본에 원인 파일·경로 순),
-     모든 import가 소스에서 나오면 문장 없음. 변이: 계수를 0이나 전체로 바꾸면 1~2개, 표본 우선순위나 마지막 정렬을 빼면 1~2개가 실패한다.
+     모든 import가 소스에서 나오면 문장 없음, Node routes 문장의 `route registrations`(리뷰 반영). 변이: 계수를 0이나 전체로 바꾸면 1~2개, 표본
+     우선순위나 마지막 정렬을 빼면 1~2개, 절을 예전 graph 문장으로 되돌리면 2개가 실패한다.
 3. **합친 설정 상태의 이름** (`e5343c2`, `program.ts`·`build-graph.ts`·`routes/node/node-project.ts`): `ownershipStatus`가 읽지 못함·밖 include·
    건너뛴 루트·열거 상한을 모든 소유 설정에서 모으면서 문장은 대표 설정 이름을 썼다. 루트 설정이 없으면 `graph-config: undefined could not be
    parsed; …`(routes server·client도 같다), 루트 `tsconfig.json`을 잘 읽었어도 중첩 `jsconfig.json`을 읽지 못하면 거짓 `tsconfig.json could
    not be parsed; default compiler options were used`, 밖 include는 `… of undefined point outside …`가 나왔다. 대표 설정 자신을 읽지 못했을
-   때만 예전 문장을 내고, 다른 소유 설정은 `N other compiler config(s) (<이름>) could not be parsed, so path aliases and imports in the sources
-   they own may not resolve`로 알린다. 그 소스가 막히는지(소유권 충돌)는 그 설정이 nearest 소유자인지, reference로만 닿는지, plan 루트 설정인지와
-   문맥 모드에 따라 달라 단정하지 않았다. 루트 공백 문장은 공백을 낸 설정 이름을 쓰고, 대표 설정 이름 하나로 설명되면
-   상태에 싣지 않아 기존 상태 `deepEqual` 테스트와 출력이 그대로다. 문장 함수는 `configParseGaps` 하나로 graph와 Node routes가 같이 쓴다.
+   때만 예전 문장을 내고, 다른 소유 설정을 하나라도 읽지 못하면 프로젝트에서 읽지 못한 설정 전부를 `config-unreadable: N compiler config(s) in
+   the project could not be parsed, so path aliases and imports in the sources they own may not resolve; files: [<경로>]; omitted: M` 한 줄로
+   알린다(리뷰 반영 `b6d4052`; 첫 커밋은 `N other compiler config(s) (<이름>)`을 문맥마다 냈다). 목록은 대표 설정과 상관없어 문맥마다 같은
+   문장이라 graph는 전역 줄(`globalInputs`)로, routes는 문장 합치기로 하나만 남는다. 그 소스가 막히는지(소유권 충돌)는 그 설정이 nearest
+   소유자인지, reference로만 닿는지, plan 루트 설정인지와 문맥 모드에 따라 달라 단정하지 않았다. 루트 공백 문장은 공백을 낸 설정의 프로젝트(스캔
+   경계) 기준 경로를 쓰고, 스캔 루트의 대표 설정 하나만 냈으면(설정 자체로 비교하고 경로가 파일 이름과 같을 때) 상태에 싣지 않아 기존 상태
+   `deepEqual` 테스트와 출력이 그대로다. `--workspace`로 경계를 넓히면 프로젝트 설정의 공백도 `app/tsconfig.json`처럼 경로로 말한다(기존 테스트
+   기대값 하나를 바꿨다). 문장 함수는 `configParseGaps` 하나로 graph와 Node routes가 같이 쓴다.
    - 재현: typeorm 얕은 clone(`d5b143d`, 의존성 미설치라 `@tsconfig/node20`·`@docusaurus/tsconfig` extends를 못 읽음, 읽지 못한 설정 3개)
      `graph` → 루트 문맥 `undefined could not be parsed`, 잘 읽은 `playground`·`packages/codemod` 문맥에도 `tsconfig.json could not be parsed`.
-     새 분석기: `3 other compiler config(s) (tsconfig.json) …`, 대표를 읽지 못한 세 문맥은 예전 문장 + `2 other …`. 합성 재현: 설정 없는 루트 +
+     새 분석기: `config-unreadable: 3 compiler config(s) in the project could not be parsed, …; files: ["docs/tsconfig.json",
+     "packages/legacy-naming-strategies/tsconfig.json","packages/typeorm/tsconfig.json"]` 한 줄, 대표를 읽지 못한 세 문맥은 예전 문장을 그대로
+     낸다(`route-call-coverage:`도 같다). 합성 재현: 설정 없는 루트 +
      읽지 못한 `a/tsconfig.json` + 설정 없는 `b/app.ts`(Express)에서 graph·routes server·client 모두 `undefined` 문장, 루트 `tsconfig.json` +
      중첩 `jsconfig.json`의 건너뛴 `files` 항목은 graph·schema(`persistence-config:`)가 `of tsconfig.json`이라고 썼다.
-   - 테스트 `src/graph/config-status-names.test.ts`(5개, graph·routes server·client): 위 세 모양, 대표·중첩 모두 읽지 못함(이름 한 번, 수 2),
-     중첩 `jsconfig.json`의 건너뛴 `files` 항목.
-     변이: 대표 문장 조건을 항상 참으로 하면 2개, 다른 설정 문장을 빼면 3개, 루트 공백 이름·이름 중복 제거·설정 수 계수·routes 쪽 함수를
-     되돌리면 각각 1개가 실패한다.
+   - 테스트 `src/graph/config-status-names.test.ts`(8개, graph·routes server·client): 위 세 모양, 같은 이름 설정 둘을 읽지 못함(한 줄, 경로 둘),
+     대표·중첩 모두 읽지 못함, 루트와 같은 이름의 중첩 `tsconfig.json`이 밖을 가리킴(두 문맥 모두 `packages/a/tsconfig.json`), 중첩
+     `jsconfig.json`의 건너뛴 `files` 항목, 루트 설정 자신의 공백은 이름 그대로(보호 테스트). 리뷰 반영 전 코드(`4939c2a`)에서 보호 테스트를 뺀
+     7개가 실패한다. 변이(리뷰 반영 뒤): 경로 대신 이름을 쓰면 7개, 대표 판정을 설정 자체로만 하면 3개, 전역 줄 정규식을 빼면 4개, 전역 줄을
+     대표 설정만 읽지 못해도 내면 이 파일과 `program.test.ts`에서 4개, 대표 문장 조건을 항상 참으로 하면 2개, 대표 판정 없이 늘 경로를 쓰면
+     5개(`program.test.ts` 상태 `deepEqual` 포함)가 실패한다. 대표 판정을 경로 비교로만 하는 변이는 출력이 같다(스캔 루트에서 파일 이름과 같은
+     경로는 그 설정 하나뿐이다).
 - 적대 입력(수정 전후 비교, 노드·간선이 바뀐 사례 없음): 타입 쪽 — const enum(해석 실패 유지), interface+function·interface+class 병합(간선 유지),
   `import type`으로 가져온 class를 `export { }`(기존 alias 간선 유지, 아래 남긴 것), JSDoc `@callback`, 외부 패키지·ambient `.d.ts`·`declare
   function`(외부라 세지 않음 유지), `export * as ns`(노드 대상 없음 유지). 산출물 쪽 — 스캔한 `src/shim.d.ts`가 산출물을 다시 내보냄(소스 import로
   셈, 문장 없음), 소스가 산출물 12개를 직접 import(표본 동일), 같은 산출물을 소스와 산출물이 함께 import(1개만 나눠 셈). 설정 쪽 — 중첩
   `jsconfig.json`의 건너뛴 `files`(graph·schema 이름 수정), Next 앱 + 설정 없는 루트 + 읽지 못한 `lib/tsconfig.json`(graph 문장 수정, routes는
-  해당 문장 없음), 읽은 설정끼리의 같은 이름 루트 공백(출력 동일).
+  해당 문장 없음), 읽은 설정끼리의 같은 이름 루트 공백(출력 동일). 리뷰 반영 뒤 — 루트와 같은 이름 중첩 `tsconfig.json`의 밖 include(두 문맥 모두
+  `packages/a/tsconfig.json`), 루트 설정 없이 같은 이름 설정 둘 읽기 실패(한 줄, 경로 둘), 루트 있음 + 같은 이름 설정 둘 읽기 실패(문맥 셋에서
+  한 줄), 중첩 `jsconfig.json`의 건너뛴 `files`(graph·schema `of a/jsconfig.json`), Express 앱 workspace의 산출물끼리 import(`route-coverage:` 절이
+  `route registrations`).
 - corpus 비교(`graph --generated-at 2026-11-15T00:00:00Z`, `main` `cea6584` 빌드 대 새 빌드): rxjs 7.8.1·yaml 2.9.1·typeorm만 limitation이 바뀌고
   노드·간선·통계·`graphRevision`·stderr는 모두 같다. zod 3.23.8, koa 2.15.3, express 4.21.2, @trpc/server 10.45.2, @tanstack/query-core
   5.59.0, @nestjs/common·core 10.4.15, pg-boss 10.1.5, connect-pg-simple 10.0.0, hono(얕은 clone), node-express-realworld-example-app,
-  node-express-boilerplate는 stdout·stderr 바이트가 같다. 네 저장소의 `routes --role server|client`도 바이트가 같다.
-- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어, load 10~30):
-  - `npx tsc --noEmit` 통과. 관련 15개 파일 집중 실행 185개 중 181 통과·4 skip.
-  - 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(27분 48초, load 20~30): 1,812개 중 1,786 통과·23 skip·3 실패. 실패는
-    `schema-command` 힙 사례(61초 timeout)와 `dispatch` 600모듈 메모 사례(부하; 둘 다 단독 재실행 통과), `relation-facts`의 `chmod 000` 사례(root
-    컨테이너, 기존 환경 문제)다. 커버리지 라인 98.69%·분기 91.65%·함수 98.22%, `export-nodes.ts` 100/100/100, `program.ts` 100/97.06/99.19,
-    `build-graph.ts` 99.70/94.47/97.06. 이 실행 뒤에 `config-status-names.test.ts`의 다섯째 테스트(건너뛴 `files` 이름)를 더해 그 파일만 다시 돌렸다
-    (5/5). 12분 상한 `npm test`는 부하로 상한 안에 들지 못하는 시간이라 돌리지 않았다.
+  node-express-boilerplate는 stdout·stderr 바이트가 같다. 리뷰 반영 뒤 다시 잰 `routes --role server|client`(`generatedAt`만 빼고 비교)는 typeorm
+  client만 위 문장이 바뀌고 나머지 일곱은 같다. 첫 커밋 때 적은 "routes도 바이트가 같다"는 `routes`가 받지 않는 `--generated-at`을 넘겨 두 쪽
+  출력이 모두 비어 있던 잘못된 비교였다. `schema`(`generatedAt` 제외)는 네 저장소 모두 같다.
+- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어, load 10~30). 리뷰 반영 뒤 다시 돌렸다.
+  - `npx tsc --noEmit` 통과. 관련 16개 파일 집중 실행 319개 중 313 통과·5 skip·1 실패였고, 실패는 `--workspace` 기대값이 의도대로
+    `app/tsconfig.json`이 된 것이라 기대값을 고친 뒤 통과했다.
+  - 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(18분 34초, load 13~16): 1,816개 중 1,792 통과·23 skip·1 실패. 실패는
+    `relation-facts`의 `chmod 000` 사례(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.69%·분기 91.64%·함수 98.22%, `export-nodes.ts`
+    100/100/100, `program.ts` 100/97.06/99.21, `build-graph.ts` 99.70/94.47/97.06. 첫 커밋 때 실행(1,812개, 27분 48초, load 20~30)은 부하로
+    `schema-command` 힙 사례·`dispatch` 600모듈 사례도 실패했고 둘 다 단독 재실행으로 통과했다. 12분 상한 `npm test`는 부하로 상한 안에 들지 못하는
+    시간이라 돌리지 않았다.
   - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
-  - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`(isthmus `30285f9`): 모든 벡터 current.
-  - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `origin/main` `cea6584` worktree에 돌린 결과는 `cea6584` 분석기 결과와
-    stdout·stderr 모두 바이트 단위로 같다(노드 10,174, 간선 14,761). 이 head 트리(실제 저장소 경로)와의 차이는 바뀐 일곱 파일 안뿐이다(노드
-    10,174 → 10,244, 간선 14,761 → 14,875, bound 간선 710 → 715·호출 740 → 741, `unresolved-calls` 4,555 → 4,556(parameter +1), 바뀐 파일을
-    건드리지 않는 노드·간선 변화 0). 두 번 돌려 바이트가 같다. worktree의 `node_modules` symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별
-    `effect-inventory` 줄은 경로 차이다. 자기 분석에는 새 문장이 나오지 않는다.
+  - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus 체크아웃의 conformance는 `origin/main`
+    `30285f9`와 같다).
+  - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `cea6584` worktree에 돌린 결과는 `cea6584` 분석기 결과와 stdout·stderr
+    모두 바이트 단위로 같다(노드 10,174, 간선 14,761). 이 head 트리(실제 저장소 경로)에서 새 분석기와 `4939c2a` 분석기의 출력도 바이트가 같다
+    (자기 분석에는 새 문장이 나오지 않는다). `cea6584` 트리와의 차이는 바뀐 여덟 파일 안뿐이다(노드 10,174 → 10,265, 간선 14,761 → 14,914,
+    bound 간선 710 → 721·호출 740 → 742, `unresolved-calls` 4,555 → 4,557(parameter +2), 바뀐 파일을 건드리지 않는 노드·간선 변화 0). 두 번
+    돌려 바이트가 같다. worktree의 `node_modules` symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄은 경로 차이다.
   - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
     재실행(스크래치 디렉터리 권한을 넓히지 않으려고 하지 않았다).
 
@@ -96,6 +115,19 @@
 | `import * as ns from './x'; export { ns }`를 `unresolved-export-aliases:`로 셈 | 모듈 객체라 이을 선언 노드가 없다. `<module>` 노드로 잇는 것은 새 간선 설계다. |
 | 의존성을 설치하지 않은 typeorm 저장소는 간선 0개 | 읽지 못한 extends 설정 3개가 소유권 계획을 불완전으로 만들어 모든 소스의 import를 보류하는 기존 보수 규칙이다. limitation은 사실대로 알린다(이번 수정으로 이름도 맞다). |
 | GLM 리뷰 | 이 환경에 `packet-ask`가 없다. |
+| 산출물 import가 모두 스캔하지 않는 파일에서 나와도 `declaration-outputs:`가 "calls through them are counted as external"을 말하고 스캔을 불완전으로 본다 | 전체 수로 판정하는 기존 동작이다. 그런 경우를 완전한 스캔으로 바꾸면 bound 간선이 늘 수 있어 반례 corpus가 필요하다(리뷰 nit 3, 후속). routes 문장도 이 고정 구절은 `calls`라고 말한다. |
+| 대표 설정을 읽지 못한 문맥의 `<이름> could not be parsed; default compiler options were used`는 중첩 설정이어도 파일 이름만 쓴다 | 리뷰가 기존 문장을 유지하라고 했다. 같은 프로젝트의 `config-unreadable:` 줄이 경로를 준다. |
+| 설정 루트 공백 문장은 문맥마다 같은 합계를 `compiler-context:` 표시와 함께 반복한다 | 기존 구조다. 이번에는 이름·경로만 고쳤다. |
+
+### PR #61 리뷰 반영 (2026-11-22)
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| should-fix: 이름만 저장하고 이름으로 대표 설정을 가려 같은 이름(`tsconfig.json`) 설정을 구별하지 못함 | 고침(`b6d4052`): 두 필드에 프로젝트 기준 경로, 대표 판정은 설정 자체, 대표 문장은 그대로 | 같은 이름 밖 include·같은 이름 설정 둘 읽기 실패 테스트, `4939c2a`에서 실패 |
+| nit: 다른 설정 줄이 문맥마다 다른 수로 반복 | 고침(`b6d4052`): 프로젝트 전체 `config-unreadable:` 한 줄 | 문맥 셋에서 한 줄만 나오는지 검사, 전역 정규식 변이에서 실패 |
+| nit: 산출물끼리 절이 "to the graph"를 박아 routes 문장에 맞지 않음 | 고침(`f826ac0`): `so no <affected> are taken from those files` | Node routes 테스트, 예전 절로 되돌리면 실패 |
+| nit: 모든 import가 스캔하지 않는 파일에서 나와도 외부 호출·불완전 문장 | 후속으로 기록(위 표) | — |
+| nit: `isTypeOnlyTarget`의 선언 수 검사, `configRootGapSubject`의 `undefined` 반환 타입 | 고침(`6e67a71`, `b6d4052`) | 기존 export-nodes 테스트 그대로 통과 |
 
 ## 진입점 필드 없는 게시 가능 패키지 공개 판정 (2026-11-22, PR #60)
 
