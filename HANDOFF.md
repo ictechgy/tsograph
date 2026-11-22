@@ -11,46 +11,82 @@
 - PR #57은 2026-11-09에 `9795858`로, PR #59(선언 역매핑 export 이름 대조와 그 독립 리뷰 반영)는 2026-11-16에 `3c487b1`로
   `main`에 스쿼시 머지됐다. `main` `3c487b1`의 CI 체크 6개가 모두 성공했다(2026-11-22 `gh api …/check-runs`로 확인). 두 PR의 변경은
   모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
-- 2026-11-22: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `3c487b1`에서 다시 시작해 **기본 index 진입점 공개 판정**(아래 절)을
-  커밋했다. push·PR 전이다.
+- 2026-11-22: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `3c487b1`에서 다시 시작해 **진입점 필드 없는 게시 가능 패키지 공개 판정**(아래 절)을
+  PR #60(열림, push된 head `8e0a7b1`)으로 올렸다. 독립 리뷰 지적(S1·N1·N2·N3)을 반영한 `5ff8259`와 이 HANDOFF 갱신 커밋은 push 전이다.
+  PR 제목·본문은 아직 첫 커밋의 기본 index 규칙을 말하므로 push할 때 바꾼다.
 
-## 기본 index 진입점 공개 판정 (2026-11-22)
+## 진입점 필드 없는 게시 가능 패키지 공개 판정 (2026-11-22, PR #60)
 
-- 문제: 공개 판정이 `package.json`의 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)만 봤다. Node는 `main`이 없는
-  패키지를 `index.js`로 불러오고 TypeScript는 `index.ts`·`index.tsx`·`index.js`·`index.jsx`로 해석하므로, `{"name":"lib"}` 옆 `index.js`는
-  `{"name":"lib","main":"index.js"}`와 똑같이 스캔 밖에서 소비된다. express 4.21.2, `@nestjs/core`·`@nestjs/common` 10.4.15가 이렇게
-  게시된다. 그런데 앞의 것은 닫힌 프로그램, 뒤의 것은 열린 프로그램으로 봐서 ESM·TypeScript 패키지에 거짓 bound 간선이 났다.
-- 재현(수정 전 `main` 빌드): ESM `index.js`에 `export function run(callback) { return callback(); }`·`function helper()`·
-  `export function selfTest() { return run(helper); }`. `{"name":"lib-implicit","version":"1.0.0","type":"module"}`이면
-  `bound index.js#run -> index.js#helper`, 같은 파일에 `"main":"index.js"`만 더하면 bound 간선 없음 + `bound-dispatch: package.json declares
-  public entry points`. 소비자 디렉터리에서 Node 22.23로 두 패키지를 import하면 둘 다 `index.js`로 해석되고 `run(() => 'consumer callback')`이
-  소비자 콜백을 부른다(ESM은 DEP0151 경고만 낸다). 즉 그 bound 간선은 거짓이다.
-- 수정(`src/graph/default-index-entry.ts`, `build-graph.ts`): 진입점 필드가 없고 게시할 수 있는(문자열 `name`, `"private": true` 아님)
-  manifest 옆에 기본 index 파일이 있으면 공개로 본다. 루트는 `bound-dispatch: package.json is not private and its default index file is
-  the package entry, …`, 중첩 workspace 패키지는 `bound-dispatch: nested package.json file(s) are not private and declare no entry fields,
-  so their default index file is the package entry: […]; …`로 알린다(기존 중첩 문장은 바꾸지 않았다). 디렉터리가 아닌 항목(링크 포함)은
-  있는 것으로, 상태를 읽지 못하면 열린 쪽으로 본다. `private`는 기존 규칙처럼 boolean `true`만 본다.
-- 줄어든 출력과 계수: 재현 사례의 bound 간선 1개가 사라지고 그 호출은 `unresolved-calls: 1 … (parameter: 1)`에 남는다. 실제 패키지:
-  express 4.21.2·`@nestjs/core` 10.4.15·`@nestjs/common` 10.4.15는 간선·노드·통계가 바이트 단위로 같고 열린 프로그램 문장 한 줄만 더해진다
-  (모두 CommonJS라 최상위 선언이 원래 열려 있다; bound 4·63·118 그대로). koa·zod·rxjs·@trpc/server·@tanstack/query-core·pg-boss·
-  connect-pg-simple·effect·isthmus 스냅숏처럼 진입점 필드가 있거나 private인 패키지는 출력이 같다. nest 저장소 소스(v10.4.15 sparse
-  checkout: 루트·`packages/core`·`packages/common`이 모두 이름만 있고 `main` 없음)는 문맥이 이미 불완전 스캔으로 열려 있어 출력이 같다.
-- 회귀 테스트(`src/graph/default-index-entry.test.ts`, 7개): 루트 ESM `index.js`·TypeScript `index.ts`, `"main"`을 적은 같은 패키지와 간선
-  동일, private·이름 없음·index 없음은 닫힘, 중첩 workspace 패키지의 새 문장과 private 대조, 판정 함수 단위. `main`의 `build-graph.ts`로
-  되돌리면 3개(루트 둘·중첩), 게시 가능 검사를 빼면 3개, 중첩 근거를 `declared`로 바꾸면 1개가 실패한다.
-- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 6~18):
-  - `npm run verify`: typecheck 통과, 테스트 단계가 12분 상한을 넘어 종료 2. 상한 전 실패는 `dispatch.test.ts` 600모듈 메모 사례(31.6초)
-    하나이고 단독 재실행 9.0초로 통과했다.
-  - 같은 인자로 상한 없이 돌린 전체 suite(18분 45초): 1,801개 중 1,777 통과·23 skip·1 실패(`relation-facts.test.ts` `chmod 000` 사례, root 환경,
-    `runuser -u nobody`로 통과). 커버리지 라인 98.68%·분기 91.61%·함수 98.21%, `default-index-entry.ts` 100/100/100.
-  - `npm run verify:cli` 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
-  - 자기 분석(`graph --project . --generated-at 2026-11-15T00:00:00Z`): 새 분석기와 `main` 분석기를 이 브랜치 트리에 돌린 stdout·stderr가
-    바이트 단위로 같고 두 번 돌려도 같다(노드 10,185, 간선 14,770, bound 741).
-  - isthmus `scripts/conformance-drift.mjs tsograph=…`: 모든 벡터 current.
-  - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI).
-- 하지 않은 것: `index.d.ts`만 있는 패키지(런타임 진입점이 아니다)와 `index.mjs`·`index.cjs`(Node·TypeScript의 기본 index 이름이 아니다)는
-  보지 않는다. `exports` 없는 패키지는 깊은 경로(`lib/x.js`)도 가져다 쓸 수 있지만 기본 index 파일이 없는 경우까지 넓히지 않았다.
-  루트 manifest가 진입점 필드와 `"private": true`를 함께 가질 때 여는 기존 동작은 그대로다.
+- 문제: 공개 판정이 `package.json`의 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)만 봤다. 게시할 수 있는
+  패키지에 `exports`가 없으면 Node·TypeScript는 패키지 안 모든 파일을 경로로 가져다 쓰게 하고(`import { run } from 'lib/src/main.js'`),
+  `main`이 없으면 패키지 이름 자체가 기본 index 파일(Node `index.js`, TypeScript는 `index.ts`·`index.tsx`·`index.jsx`도)로 해석된다.
+  express 4.21.2, `@nestjs/core`·`@nestjs/common` 10.4.15가 진입점 필드 없이 게시된다. 그런데 진입점 필드가 없으면 닫힌 프로그램으로 봐서
+  ESM·TypeScript 패키지에 거짓 bound 간선이 났다.
+- 경과: 첫 커밋 `f81d4f4`는 기본 index 파일(`index.js|jsx|ts|tsx`)이 있을 때만 열었다. 독립 리뷰 S1이 index 없는 깊은 경로 import를 재현해
+  `5ff8259`에서 index 파일과 상관없이 열도록 넓혔다(모듈 `default-index-entry.ts` → `publishable-manifest.ts`, index 존재 검사 삭제).
+- 재현:
+  - 기본 index(`main` `3c487b1` 빌드): ESM `index.js`에 `export function run(callback) { return callback(); }`·`function helper()`·
+    `export function selfTest() { return run(helper); }`. `{"name":"lib-implicit","version":"1.0.0","type":"module"}`이면
+    `bound index.js#run -> index.js#helper`, `"main":"index.js"`만 더하면 bound 간선 없음 + `bound-dispatch: package.json declares public entry
+    points`. 소비자 디렉터리에서 Node 22.23로 import하면 둘 다 `index.js`로 해석되고 소비자 콜백이 불린다.
+  - 깊은 경로(리뷰 S1, `8e0a7b1` 빌드): `{"name":"lib","version":"1.0.0","type":"module"}`과 같은 내용의 `src/main.js` →
+    `bound src/main.js#run -> src/main.js#helper`. 패키지를 소비자 `node_modules/lib`로 링크하고
+    `node --input-type=module -e "import { run } from 'lib/src/main.js'; console.log(run(() => 'consumer callback via deep import'))"`를 돌리면
+    소비자 콜백 문자열이 찍힌다(이름 import `lib`는 index가 없어 `ERR_MODULE_NOT_FOUND`). 루트 `index.mjs`(`lib-mjs/index.mjs`)도 같다.
+- 수정(`src/graph/publishable-manifest.ts`, `build-graph.ts`): 진입점 필드가 없고 게시할 수 있는(문자열 `name`, `"private": true` 아님)
+  manifest는 루트면 프로그램 전체를, 중첩 workspace 패키지면 자기 파일을 연다. 루트는 `bound-dispatch: package.json has a string name
+  without "private": true and no exports field, which lets any file be imported by path, so …`, 중첩은 `bound-dispatch: nested package.json
+  file(s) have a string name without "private": true and no entry fields, which lets any of their files be imported by path: […]; …`로
+  알린다(기존 중첩 문장은 그대로). `"private": true`·문자열 `name` 없음·형식 표식 manifest는 닫힌 쪽이다. 루트가 진입점 필드와
+  `"private": true`를 함께 가지면 여는 기존 동작, 중첩 패키지의 진입점 필드 규칙도 그대로다.
+- private 판정(리뷰 N1): boolean `true`만 private로 본다(`isMarkedPrivate`). npm 10.9.9는 truthy 값을 모두 거절한다(`libnpmpublish` 10.0.2
+  `lib/publish.js:15`의 `if (manifest.private)`, `lib/commands/publish.js:136` workspace 검사; 가짜 레지스트리로 `npm publish`하면
+  `"private": "true"`·`1`은 네트워크 전에 `EPRIVATE`, `false`는 요청까지 간다). 그러나 Yarn 4(`@yarnpkg/core` 4.9.3 `Manifest.js:170-173`은
+  `typeof data.private === 'boolean'`일 때만 읽고, `@yarnpkg/plugin-npm-cli` 4.6.0 `publish.js:43`은 그 값만 검사)는 `"private": "true"`를
+  게시한다. 리뷰는 npm 규칙을 권했지만 그렇게 닫으면 Yarn으로 게시한 패키지에 거짓 bound 간선이 다시 나므로, 판정은 열린 쪽에 두고
+  문장이 "is not private"라고 단정하지 않게 바꿨다.
+- 출력 비교(`graph --generated-at 2026-11-15T00:00:00Z`, `main` `3c487b1` / `8e0a7b1` / 새 분석기, bound 간선 수/bound 호출 수):
+  - 재현 사례: 기본 index 1→0(`8e0a7b1`부터), 깊은 경로 `src/main.js`·`index.mjs` 1/1→1/1→0. 줄어든 호출은 `unresolved-calls: … (parameter: 1)`.
+  - express 4.21.2 4/4, `@nestjs/core` 60/63, `@nestjs/common` 89/118: 세 분석기 간선·노드·통계 동일(CommonJS라 원래 열려 있다). `main` 대비
+    열린 프로그램 문장 한 줄만 더해지고 `8e0a7b1` 대비 그 문장만 바뀐다.
+  - koa 0/0, zod 122/219, rxjs 46/45, @trpc/server 6/10, @tanstack/query-core 49/55, pg-boss 23/23, connect-pg-simple 0/0, effect
+    9,289/11,937: 세 분석기 출력 바이트 동일(진입점 필드가 있다).
+  - 이름만 있고 `private`·진입점 필드가 없는 공개 앱·템플릿(GitHub 얕은 clone): prisma-examples `orm/express`·`fastify`·`graphql`·`koa`
+    (0/0, 바이트 동일: 간극이 없어 문장도 안 나온다), `orm/hono`(0/0, 문장 한 줄 추가), hono starter `templates/vercel`·medusa-starter-default
+    (0/0, 바이트 동일), umami(40/43, 간선 동일; 네 문맥 중 셋은 이미 불완전 스캔, 하나는 중첩 문장이 루트 문장으로 바뀜), jellyfin-web(136/165)·
+    uptime-kuma(387/444, 빈 `files` tsconfig를 치운 사본; 원본은 노드 0): 원본 그대로는 source-scope로 이미 열려 있어 바이트 동일이고,
+    제외된 루트 설정 파일 9개·sibling 1개를 사본에서 치워 스캔을 완전하게 만들어도 간선·노드·통계가 같고 문장만 바뀐다. 즉 이 표본에서
+    앱이 잃은 bound 간선은 0개다.
+  - 자기 분석(이 브랜치 `5ff8259` 트리): 세 분석기 stdout·stderr 바이트 동일, 두 번 돌려도 같다(노드 10,174, 간선 14,761, bound 간선 710·
+    호출 740; `package.json`에 `bin`이 있어 원래 공개 패키지).
+- 회귀 테스트(`src/graph/publishable-manifest.test.ts`, 7개): 판정 단위(boolean이 아닌 `private`는 게시 가능), 루트 깊은 경로 `src/main.js`
+  (+ 그 파일을 `main`으로 적은 패키지와 간선 동일), 루트 `index.js`·`index.mjs`·`index.ts`, `"private": true`·이름 없음·`{"type":"module"}`는
+  index가 있든 없든 닫힘, 루트 `"private": true` + `main`은 열림, `"private": "true"`는 열리고 문장에 `is not private`가 없음, 중첩 workspace
+  패키지(index 있음·없음)는 열리고 private·이름 없음·형식 표식은 닫힘. 변이 확인: `8e0a7b1`이나 `main`의 `build-graph.ts`로 되돌리면 4개
+  (루트 깊은 경로·index 파일·`"private": "true"`·중첩)가 실패하고(`8e0a7b1`에서 `"private": "true"` 사례는 옛 문장 때문에 실패), private를
+  truthy로 판정하면 2개, 중첩 근거를 `declared`로 바꾸거나 중첩을 닫으면 1개, 루트가 private를 무시하면 2개가 실패한다.
+- 검증(2026-11-22, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어):
+  - `npx tsc --noEmit` 통과. 집중 실행 `publishable-manifest`·`dispatch`·`build-graph` 테스트 73개 중 71 통과·2 skip(root 권한 사례).
+  - 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(14분 25초, load 13~19): 1,801개 중 1,777 통과·23 skip·1 실패. 실패는
+    `relation-facts.test.ts`의 `chmod 000` 사례(root 컨테이너, `runuser -u nobody`로 통과)뿐이다. 커버리지 라인 98.68%·분기 91.61%·함수 98.21%,
+    `publishable-manifest.ts` 100/100/100, `build-graph.ts` 99.70/94.46/97.00. 12분 상한 안에는 들지 못하는 시간이다.
+  - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
+  - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current.
+  - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI). 12분 상한
+    `npm run verify`는 앞 회차에서 부하로 상한을 넘었으므로 이번에는 단계별로(테스트는 상한 없이) 돌렸다. nest 저장소 소스와 isthmus
+    스냅숏은 다시 돌리지 않았다(isthmus는 `bin`이 있어 판정이 바뀌지 않는다).
+- 하지 않은 것: `files` 필드·`.npmignore`로 게시본에서 빠지는 파일도 연다(게시본 파일 목록을 계산하지 않는다). `exports`가 있으면 그 대상만
+  여는 정밀화는 하지 않았다(진입점 필드가 하나라도 있으면 프로그램 전체를 여는 기존 거친 규칙 그대로). Yarn과 npm이 다르게 보는 `private`
+  값은 열린 쪽에 둔다.
+
+### PR #60 독립 리뷰 반영 (2026-11-22)
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| S1 `exports` 없는 게시 가능 패키지는 깊은 경로로 아무 파일이나 불러오는데 index가 없으면 닫혀 있고, 새 테스트가 그 거짓 간선을 맞다고 고정 | 고침(`5ff8259`): 게시 가능 manifest는 index 파일과 상관없이 연다. 거짓 간선을 고정하던 테스트를 바꿨다 | 루트 깊은 경로·`index.mjs`·중첩 index 없음 테스트, `8e0a7b1` 구현에서 실패 |
+| N1 `"private": "true"`를 게시 가능으로 보면서 "is not private"라고 씀 | 문장을 고침. 판정은 boolean 유지(Yarn 4가 게시한다, 위 근거) | `"private": "true"` 루트 테스트, `8e0a7b1`에서 옛 문장으로 실패. truthy 판정 변이에서 실패 |
+| N2 README가 루트 `private: true` + 진입점 필드는 열고 `private: true`만은 닫는다는 규칙을 안 적음 | 고침: README·README.ko에 루트·중첩 규칙과 private 값 규칙을 구현대로 적음 | 루트 `"private": true` + `main` 열림 테스트 추가 |
+| N3 `dispatch.ts` 모듈 주석이 공개 패키지를 일곱 필드로만 정의 | 고침 | — |
 
 ### 이번에 살펴보고 남긴 것
 
@@ -173,7 +209,8 @@
 
 ## 다음 할 일 (PR #59 머지 이후)
 
-0. 브랜치 `ccr-37904670-hxdjsx`(기본 index 진입점 공개 판정)를 push하고 PR·CI(특히 전체 `npm test`·Git 2.45 경로)와 리뷰를 받는다.
+0. 브랜치 `ccr-37904670-hxdjsx`의 리뷰 반영 커밋을 push하고 PR #60 제목·본문을 게시 가능 manifest 규칙으로 바꾼 뒤 CI(특히 전체
+   `npm test`·Git 2.45 경로)와 재리뷰를 받는다.
 1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사·문장)이 있으므로 마이너로 올린다.
    이전 릴리스 커밋(`chore(release): prepare tsograph 0.11.0`)처럼 `package.json`·`package-lock.json`·CHANGELOG를 함께 바꾼다.
 2. isthmus에 게시본 검증과 `compatibility.json` 핀 갱신을 요청한다(isthmus 저장소의 일).
