@@ -8,6 +8,10 @@ schema와 change-impact가 같은 파일 소유권 계획을 사용한다. Next 
 명시적으로 파일을 소유하면 그 설정을 사용하되 가까운 설정도 같은 파일을 진입 파일로 고르면 두 소유권을 비교한다.
 서로 다른 유효 옵션의 설정이 같은 파일을 소유하거나
 설정을 읽지 못하면 임의 선택을 확정하지 않는다. `extends`는 TypeScript의 bounded JSON 해석을 사용한다.
+문맥의 대표 설정 자신을 읽지 못하면 `<설정 이름> could not be parsed; default compiler options were used, …`로, 다른 소유 설정을
+읽지 못하면 `N other compiler config(s) (<설정 이름>) could not be parsed, so path aliases and imports in the sources they own may not
+resolve`로 알린다. 그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다. 다른 설정의
+include가 루트 밖을 가리키는 등 설정 루트 공백도 그 공백을 낸 설정의 이름으로 알린다(대표 설정 이름이나 설정이 없을 때의 `undefined`가 아니다).
 실행 코드, loader, PnP 스크립트, compiler plugin을 실행하지 않는다.
 
 `baseUrl`·`paths`와 설정 파일 신원만 다른 옵션은 공유가 확인된 범위에서 하나의 Program으로 파일별 module resolver를 쓴다.
@@ -44,6 +48,9 @@ module.exports = api`, `module.exports = create()`, `var x = exports.x = …`, `
 `module.exports = require(…)`) 최상위 구문만 보는 표는 맞는 소스를 틀렸다고 판정하기 때문이다. 소스 폐쇄에 JavaScript 모듈이 있으면
 (소스 자신이나 `export *` 대상) 예전처럼 잇는다. 잇지 않은 import는 `graph-config: declaration-outputs:`에 export 불일치 수와 함께 세고
 스캔을 불완전으로 본다. 이름이 맞지 않은 선언은 옆의 같은 이름 `.js`(그 산출물 루트의 빌드 출력)로도 돌리지 않는다.
+import 수에는 산출물 선언끼리의 import처럼 스캔이 소스로 분석하지 않는 파일이 한 import도 들어 있다. 그 파일들은 그래프에 호출을 더하지
+않으므로 문장이 그 수를 따로 말하고(`N of them are made by files that the scan does not analyze as sources either …`), `files:`
+표본(최대 10개, 경로 순)은 스캔한 소스가 import한 산출물을 먼저 고른다. 스캔 불완전 판정은 예전처럼 전체 import 수로 한다.
 
 남은 한계: 같은 이름을 모두 내보내는 다른 구현은 이름으로 구별하지 못하고, export 이름이 없는 선언(`export {}`, `declare global`만 있음)은
 그 위치의 어느 소스와도 맞으며, 이름의 종류(값·타입)를 구별하지 않아 타입 전용 이름도 같은 이름의 값으로 맞는다. 대응 소스가

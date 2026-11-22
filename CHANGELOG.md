@@ -6,6 +6,34 @@
 
 ### Fixed
 
+- graph·reach·impact: `type` 없이 다시 내보낸 interface·type alias·값 없는 namespace·JSDoc `@typedef`
+  (`export { Config } from './types'`)의 export 노드를 `unresolved-export-aliases:`(대상을 해석하지 못함)로 세던 문제를 고쳤다. 이런
+  이름은 타입만 가리켜 런타임 선언이 없으므로(TypeScript는 이 재내보내기를 emit에서 지운다) 이을 대상이 처음부터 없다. 이제 checker가
+  별칭을 끝까지 따라간 대상에 값 의미가 없으면 `type-only-export-aliases: N export node(s) re-export names that resolve only to types
+  (interfaces, type aliases, or namespaces without values), which have no runtime declaration; they have no alias edge`로 따로 센다.
+  노드·간선·`graphRevision`은 바뀌지 않고 limitation만 나뉜다. 값과 합쳐진 이름(같은 이름의 interface와 `const`), enum·const enum,
+  값 있는 namespace, 찾지 못한 이름·모듈은 예전처럼 `unresolved-export-aliases:`다. rxjs 7.8.1 소스 패키지에서는
+  `unresolved-export-aliases: 31`이 `unresolved-export-aliases: 1`(enum `NotificationKind`) + `type-only-export-aliases: 30`이 됐다.
+- graph·reach·impact: `graph-config: declaration-outputs:`가 스캔한 소스의 import와 빌드 산출물 선언끼리의 import를 구별하지 않아,
+  import 수 대부분이 호출이 없는 파일의 것이어도 그렇게 말하지 않고 `files:` 표본(경로 순 10개)이 산출물끼리의 import 대상으로 차서
+  스캔한 소스가 실제로 import한 산출물이 빠지던 문제를 고쳤다. 전체 import 수와 스캔 불완전 판정은 그대로 두고, 스캔이 소스로 분석하지 않는
+  파일(산출물 선언, 스캔하지 않은 빌드 출력 JavaScript)이 한 import가 있으면 `; N of them are made by files that the scan does not analyze
+  as sources either (for example build output importing build output), which contribute no calls to the graph`를 붙인다. `files:`는
+  스캔한 소스가 import한 산출물을 먼저 고른 뒤 경로 순으로 싣는다. yaml 2.9.1 패키지에서는 155개 중 154개가 그런 import이고, 표본에
+  `util.js`가 실제로 import하는 `dist/util.d.ts`가 들어간다. 모든 import가 스캔한 소스에서 나오면 출력은 예전과 같다.
+- graph·routes(server·client)·navigation·schema·Next 진입 범위: 여러 소유 설정의 공백을 한 문맥 상태로 합칠 때 문장이 대표 설정(루트 설정,
+  없으면 이름 없는 기본값)의 이름을 써서, 루트 설정이 없는 모노레포에서 중첩 설정 하나를 읽지 못하면 `graph-config: undefined could not
+  be parsed; …`·`route-coverage: undefined could not be parsed; …`를, 루트 `tsconfig.json`을 잘 읽었어도 중첩 `jsconfig.json`을 읽지
+  못하면 `graph-config: tsconfig.json could not be parsed; default compiler options were used, …`(거짓)를 내던 문제를 고쳤다. 설정 루트
+  공백도 `… files entr(ies) of undefined point outside the scanned root …`로 나왔다. 이제 대표 설정 자신을 읽지 못했을 때만 예전 문장을
+  내고, 다른 소유 설정을 읽지 못하면 `N other compiler config(s) (<이름>) could not be parsed, so path aliases and imports in the sources
+  they own may not resolve`로 알린다(그 소스는 소유권 충돌로 import를 미해결로 남기거나 기본 옵션을 쓰므로 어느 쪽인지 단정하지 않는다).
+  밖 include·건너뛴 디렉터리의 루트·열거 상한 문장은 그 공백을 낸 설정의 이름을 쓴다(루트 `tsconfig.json`과 중첩 `jsconfig.json`이 있을 때
+  중첩 설정의 건너뛴 `files` 항목을 `persistence-config: … of tsconfig.json …`으로 말하던 것도 `of jsconfig.json`이 된다). 스캔 불완전
+  판정과 계수는 그대로다. 설치하지 않은 `@tsconfig/node20`·`@docusaurus/tsconfig`를 extends하는 typeorm 저장소(얕은 clone, 읽지 못한
+  설정 3개)에서는 설정이 없는 루트 문맥의 `graph-config: undefined could not be parsed; …`가 `graph-config: 3 other compiler config(s) (tsconfig.json) could not be parsed, …`가
+  되고, 잘 읽은 설정이 대표인 두 문맥(`playground`, `packages/codemod`)의 거짓 `tsconfig.json could not be parsed; default compiler options
+  were used`가 사라졌다. 노드·간선·통계는 같다.
 - graph·reach·impact: `package.json`에 공개 진입점 필드(`main`·`module`·`exports`·`bin`·`types`·`typings`·`browser`)가 하나도
   없지만 게시할 수 있는 패키지(문자열 `name`이 있고 `"private": true`가 아님)를 닫힌 프로그램으로 보고 bound 간선을 내던 문제를
   고쳤다. `exports`가 없는 패키지는 소비자가 `import { run } from 'lib/src/main.js'`처럼 아무 파일이나 경로로 가져다 쓰고, `main`이
