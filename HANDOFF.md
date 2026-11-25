@@ -11,11 +11,12 @@
 - PR #57·#59·#60·#61이 `main`에 스쿼시 머지됐다(#61은 `2dac50e`). `main` `2dac50e`의 CI 체크 6개가 모두 성공했다(2026-11-25
   `gh api …/check-runs`로 확인). 네 PR의 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
 - 2026-11-25 5회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `2dac50e`에서 다시 시작해 Fastify 플러그인 접두사 이음 두 가지(아래 절)를
-  고쳤다. 커밋은 push 전이다(조정자가 올린다).
+  고쳐 PR #62(`36491b4`·`e381053`, 조정자가 push)로 올렸다. 독립 리뷰의 should-fix 둘(`routerOptions` 주 버전, 직접 쓴 skip-override)과 nit 둘을
+  그 위 커밋으로 반영했고(아래 "PR #62 독립 리뷰 반영"), 반영 커밋은 push 전이다(조정자가 올린다).
 
 ## Fastify 플러그인 접두사 이음 (2026-11-25, 5회차)
 
-두 수정 모두 `src/routes/node/fastify-adapter.ts`의 펼치기(`flattenFastify`) 안이다. 해석기·다른 프레임워크·graph·schema는 바뀌지 않는다.
+첫 커밋의 두 수정은 `src/routes/node/fastify-adapter.ts`의 펼치기(`flattenFastify`) 안이다. 리뷰 반영(아래 "PR #62 독립 리뷰 반영")으로 `fastifyCreation`의 옵션 출처, 새 `fastify-skip-override.ts`, 해석기 문맥의 `includesFile()`이 더해졌다. 다른 프레임워크·graph·schema 출력은 바뀌지 않는다.
 
 1. **타입으로만 아는 `FastifyInstance` 아래의 플러그인 접두사**: 붙는 위치를 모르는 인스턴스(fastify-cli가 불러 붙이는
    `export default async function app(fastify: FastifyInstance)`)를 "값을 모르는 접두사"(`{ kind: 'unknown' }`)로 다뤄, 그 아래
@@ -36,14 +37,16 @@
 2. **Fastify 4의 접두사 이음 규칙**: 부모 접두사가 `/`로 끝나고 플러그인 접두사가 `/` 아닌 글자로 시작하면 fastify 5.12.5
    (`lib/plugin-override.js`)는 그대로 잇고 4.29.1(`lib/pluginOverride.js`)은 `/`를 더한다. 포팅이 5 규칙만 따라 fastify 4 앱에서
    `/v1/` + `bare` + `/y`를 `/v1/bare/y`(실제 404)로 냈다(실제 4.29.1은 `/v1//bare/y`).
-   - 수정: `flattenFastify`가 감지한 주 버전을 받고 `joinPrefixText`가 4·5 규칙을 고른다. `ignoreDuplicateSlashes`면 find-my-way가 겹친
-     `/`를 줄여 두 버전이 같으므로 5 규칙을 쓴다(실행으로 확인: 두 버전 모두 `/v1/bare/y`·`/v1//bare/y` 200). 주 버전을 모르는데 두 규칙이
-     다르면 부모 접두사까지만 아는 partial이라 root에서는 dynamic(`dynamicScope` `/v1`), base에서는 위 규칙대로 base에 합친다. 플러그인
-     접두사 앞부분이 빈 문자열이면 첫 글자를 모르므로 두 규칙 모두 부모(`/`로 끝나지 않으면 `/`까지)만 확정한다.
+   - 수정: `flattenFastify`가 감지한 주 버전을 받고 `joinPrefixText`가 4·5 규칙을 고른다. 그 주 버전에서 켜진 `ignoreDuplicateSlashes`
+     (최상위 값은 4·5 모두, `routerOptions` 값은 5만 — 리뷰 SF1 반영)면 find-my-way가 겹친 `/`를 줄여 두 버전이 같으므로 5 규칙을 쓴다
+     (실행으로 확인: 최상위 옵션이면 두 버전 모두 `/v1/bare/y`·`/v1//bare/y` 200). 주 버전을 모르는데 두 규칙이 다르면 부모 접두사까지만 아는
+     partial이라 root에서는 dynamic(`dynamicScope` `/v1`), base에서는 위 규칙대로 base에 합친다. 플러그인 접두사 앞부분이 빈 문자열이면 첫
+     글자를 모르므로 두 규칙 모두 부모(`/`로 끝나지 않으면 `/`까지)만 확정한다.
    - 주 버전을 모르는 경우 정적 사실이 dynamic이 된다(아래 적대 입력 a18-vx: `/v1/bare/y` → `/v1/{dynamic}`). 그 정적 사실은 증명된 사실이
      아니었고(5에서는 참, 4에서는 거짓), 문서에는 이미 `route-framework-version-unknown:`("주 버전마다 다른 경로 문법은 dynamic")이 붙으며 줄어든 정적
-     사실은 `route-coverage: N route declaration(s) have paths … dynamic`(1 → 2)에 그대로 센다. Express·@koa/router가 주 버전을 모를 때 쓰는
-     기존 규칙과 같다.
+     사실은 `route-coverage: N route declaration(s) have paths … dynamic`(1 → 2)에 센다. 이 수는 경로가 아니라 등록을 세므로 사실 수는 더 줄 수
+     있다: 접두사 아래 `/` 라우트는 `prefix`·`prefix/` 두 decl 대신 dynamic 하나다(리뷰 nit 2: `^4.0.0 || ^5.0.0`에 `/aa/` → `bb/` → `/cc/` → `dd`
+     사슬이면 사실 7개가 5개). Express·@koa/router가 주 버전을 모를 때 쓰는 기존 규칙과 같다.
 - 테스트(`src/routes/node/fastify-adapter.test.ts`): `buildRoutePrefix` 단위 테스트를 4·5·모름 세 규칙으로 돌리고 갈리는 이음을 더했다(예전
   단언 중 `unknown` 부모 하나는 타입으로 막혀 지웠다 — 그 표현이 버그의 원인이었다). 끝까지 테스트 2개: 타입으로만 아는 루트 아래 리터럴·
   `/` 없는·`/`로 끝나는 접두사, `no-slash`, 모르는 접두사 뒤 리터럴 접두사, `fastify-plugin`, base 아래 `@fastify/static` 스코프 없음; 4·5·모름(`*`)
@@ -64,28 +67,52 @@
 
 ### 5회차 검증
 
-2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어(load 20~32).
+리뷰 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 8~11). 첫 커밋 때의 결과는 아래 괄호.
 
 - `npx tsc --noEmit` 통과.
-- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(40분 54초): 1,829개 중 1,801 통과·23 skip·5 실패. 실패는 기존 환경·부하
-  사례뿐이다: `relation-facts`의 `chmod 000`(root 컨테이너), `schema-command` 힙 사례(부하 중 timeout), `dispatch` 600모듈 메모 사례(45.9초),
-  `node-pipeline` 라우터 DAG 사실 상한 두 사례(부하 중 감시 자식 timeout, Express·Hono·Koa이고 Fastify 아님). 뒤의 넷은 따로 다시 돌려 모두
-  통과했다. 커버리지 라인 98.69%·분기 91.66%·함수 98.22%(90% 게이트 통과), `fastify-adapter.ts` 100/90.87/96.88. Fastify 테스트 두 파일만
-  돌린 같은 비교에서 `main`은 `fastify-adapter.ts` 100/89.13/96.55였다. 12분 상한 `npm test`는 이 부하에서 상한 안에 들지 못하므로 돌리지 않았다.
+- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(11분 57초): 1,834개 중 1,810 통과·23 skip·1 실패. 실패는 `relation-facts`의
+  `chmod 000`(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.70%·분기 91.64%·함수 98.24%(90% 게이트 통과), `fastify-adapter.ts`
+  100/90.95/97.14, 새 `fastify-skip-override.ts` 99.79/90.76/100. (첫 커밋: 40분 54초, load 20~32에서 부하 timeout 넷이 더 실패했고 따로 다시 돌려
+  통과했다. `fastify-adapter.ts` 100/90.87/96.88, Fastify 테스트만 돌린 비교에서 `main` 100/89.13/96.55.) 12분 상한 `npm test`는 단계별로 돌렸다.
 - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
 - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus `4a3e99d`).
 - 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `2dac50e` worktree에 돌린 결과는 `2dac50e` 분석기 결과와 stdout·stderr
-  바이트가 같다. 이 head 트리와의 차이는 바뀐 세 파일(`fastify-adapter.ts`·그 테스트·`node-routes.ts`) 안뿐이다(노드 10,306 → 10,315, 간선 14,999 →
-  15,016, 바뀐 파일을 건드리지 않는 노드·간선 변화 0, bound 742·candidate 213과 `unresolved-calls` 줄은 같다). limitation 차이는 worktree의
-  `node_modules` symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄뿐이다(지난 회차와 같은 현상).
+  바이트가 같다. 이 head 트리와의 노드·간선 차이는 바뀐 다섯 파일(`fastify-adapter.ts`·그 테스트·`fastify-skip-override.ts`·`node-routes.ts`·
+  `router-interpreter.ts`) 안뿐이다(노드 10,306 → 10,362, 간선 14,999 → 15,110, 바뀐 파일을 건드리지 않는 노드·간선 변화 0). 합계 줄은 새 코드의
+  호출만큼 바뀐다(bound 742 → 743, candidate 213 → 214, `unresolved-calls` 4,557 → 4,560). 그 밖의 limitation 차이는 worktree의 `node_modules`
+  symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄뿐이다(지난 회차와 같은 현상).
 - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
   재실행(스크래치 디렉터리 권한을 넓히지 않으려고 하지 않았다), 저장소 오라클(`experiments/node-routes-oracle`) 재기록(fixture를 바꾸지 않았다;
-  대신 scratch에 fastify 5.12.5·4.29.1을 설치해 위 모양을 직접 실행했다).
+  대신 scratch와 리뷰어 하네스에 설치한 fastify 4.29.1·5.12.5·5.12.8로 위 모양을 직접 실행했다).
+
+### PR #62 독립 리뷰 반영 (2026-11-25, `e381053` 위)
+
+리뷰어 fixture(`scratchpad/r5-review-tsograph/fx` 43개, 실제 fastify 4.29.1·5.12.8 하네스 `rt4`·`rt5`)와 반영용 fixture 22개
+(`scratchpad/r5-tsograph/rv/mk.mjs`: `routerOptions`·최상위 옵션 × 4·5·`*`, skip-override 11모양)를 `2dac50e`·`e381053`·새 head와 실제 실행에 돌렸다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| SF1: `routerOptions.ignoreDuplicateSlashes`를 fastify 4·주 버전 모름에서도 믿음 — fastify 4.29.1은 `routerOptions`가 없어 `/v1//bare/y`·`/v1//bare`·`/v1//bare/`·`/v1//`를 등록하는데 `main`·`e381053` 모두 `/v1/bare/y` 등을 정적 사실로 냄 | 고침: `fastifyCreation`이 옵션마다 최상위 값과 `routerOptions` 값을 따로 담고(`RouterOptionSources`), 펼칠 때 `effectiveOption`이 4는 최상위, 5는 `routerOptions`(없으면 최상위), 모르면 같을 때만 쓴다. `ignoreDuplicateSlashes`·`ignoreTrailingSlash`·`caseSensitive` 모두(`fmwOptions`·접두사 아래 `/`의 두 등록·`trailingSlash`·`caseInsensitive`)에 적용. 4는 실제 등록과 같아지고(`/v1//`·`/v1//bare*`·`/v1/a//b`, `routerOptions: { caseSensitive: false, ignoreTrailingSlash: true }`는 `/Mixed`·`/users`·`/users/` strict), 모름은 갈리는 이음이 dynamic, 옵션은 모르는 값(`trailingSlash` 생략) | 테스트 "routerOptions의 라우터 옵션은 fastify 5만 읽고 …"(4·5·모름 × 최상위·`routerOptions`, 세 옵션), `e381053`에서 실패. 변이: 4가 `routerOptions`를 읽음 1, 모름이 5 값을 씀 1 |
+| SF2: 플러그인 바인딩에 직접 쓴 `Symbol.for('skip-override')`를 몰라 base 아래에서 `/p2/manual`(실제 `<바깥>/manual`)을 냄. root에서는 `main`부터 `/p2/manual`(실제 `/manual`) | 고침: `fastify-skip-override.ts`가 해석 대상 파일에서 그 심볼을 바꿀 수 있는 자리를 한 번 모으고(이름별 식별자 사용, import 지역 이름, CommonJS `module.exports[…]` 쓰기, 이름으로 풀 수 없는 대상의 쓰기), 등록한 함수의 바인딩마다 판정한다. 참 리터럴을 모듈 최상위에서 조건 없이 쓰거나(`const` 키·다른 이름 import 포함) `fastify-plugin`에 넘기면 건너뜀(접두사 무시), 함수 안·조건 아래의 쓰기·모르는 키·`register()` 첫 인자 밖의 호출 인자·변수·객체·배열·반환값으로 흘러간 바인딩·이름 없는 대상의 쓰기가 있으면 모름 → 접두사를 모르는 값(root dynamic, base는 base에 합침). 등록 인자에서 따라간 `const` 별칭은 함께 본다. 모르는 감싸기(`wrap(fn)`)는 원래 걷지 않고 `route-coverage:`로 센다 | 테스트 넷(root 10모양, base, CommonJS·이름 없는 대상, 값의 참·거짓·`delete`·`??`·대입으로 흘러감), `e381053`에서 모두 실패. 변이: 모름이 접두사를 그대로 둠 3, 조건 아래를 최상위로 봄 1, 흘러간 바인딩을 무시 1, 이름 없는 대상 무시 1, `module.exports` 쓰기 무시 1, `const` 키를 못 풂 1, 등록 별칭을 흘러감으로 봄 1, `register()` 인자를 흘러감으로 봄 2, 다른 이름 import 무시 1, 등록 별칭 이름을 찾지 않음 1, 숫자 참 리터럴 무시 1, `delete`를 쓰기로 보지 않음 1, `??`·대입 오른쪽을 흐름으로 보지 않음 각 1 |
+| nit 1: 모르는 접두사(`process.env.TENANT`) 아래 `/users/:id`와 `/users` 아래 `/:id`가 둘 다 `/users/{}` base라 isthmus `route-decl-conflict` 경고가 날 수 있음 | 문서화(CHANGELOG·NODE-ROUTES의 남은 한계). base에 합치는 설계에서 둘을 가를 정보가 없다 | — |
+| nit 2: 주 버전 모름에서 사실 수가 등록 수보다 더 준다(7 → 5) | 문서화(위 2번 항목, CHANGELOG, NODE-ROUTES) | — |
+
+- 바뀐 출력(리뷰어 fixture 43개 중 `e381053` 대비): d3-ids-routeropts-v4(실제 4와 같아짐)·-vx(갈리는 이음 dynamic), f1-fp-indirect(`/p2/manual` →
+  `/manual` base), f2-skip-root(`/p2/manual` → `/manual` root). 나머지 39개는 같다. 반영용 22개: `routerOptions` 4·모름 넷과 skip-override 9개가 바뀌고
+  최상위 옵션 6개·`routerOptions` 5 둘·무해한 속성 쓰기(`autoPrefix`·`'meta'`)는 같다. 실제로 건너뛰지 않는
+  `export const registry = { users }`처럼 흘러간 바인딩은 dynamic이 된다(건전하지만 덜 정밀).
+- 5회차 적대 입력 60개와 실제 프로젝트 여섯 개는 `e381053`과 출력이 같다.
+- 비용: census는 해석 대상 파일을 한 번 걷고(Fastify `register()`가 프로젝트 함수를 걸을 때만, 문맥마다 한 번) import 지역 이름은 심볼별 색인을
+  한 번 만든다. 합성 앱(플러그인 N개를 접두사로 등록, 파일 2N개)의 CPU user 시간은 N=600에서 `e381053` 3.8~4.3초·새 head 4.4~4.5초, N=2400에서
+  7.0~7.1초·6.4~8.3초다(공유 4코어 load 8~11, 두 번씩). 크기를 4배로 늘려도 차이가 4배를 넘지 않는다.
 
 ### 이번에 살펴보고 남긴 것 (5회차)
 
 | 항목 | 이유 |
 |---|---|
+| `fp(fn, { encapsulate: true })`는 실제로 접두사를 붙이는데(`/encap/enc`) tsograph는 `GET root /enc`(거짓)를 낸다 | `main`부터 있던 문제다(리뷰가 범위 밖으로 정함). `fastify-plugin` 옵션 해석을 더하는 후속 수정이다. |
+| `d.after(() => addUsers(d))`나 `for (const h of hooks) h(c)`로 부른 `FastifyInstance` 도우미의 라우트가 한계 없이 빠진다 | `main`부터 있던 해석기 한계다(리뷰가 범위 밖으로 정함). 콜백·반복으로 부른 함수를 걷거나 한계로 세는 설계가 필요하다. |
+| 주 버전을 모르고 `ignoreDuplicateSlashes`가 버전마다 다르면 `/a//b` 같은 리터럴 경로는 겹친 `/`를 줄이지 않은 채 정적 사실이다 | 모르는 옵션 값을 끈 것으로 컴파일하는 기존 규칙(`Fastify(opts)`의 모르는 옵션과 같다)이다. 줄이는 버전에서도 그 요청은 줄인 경로로 받아지므로 거짓 사실은 아니다. |
 | 타입 없는 JavaScript 플러그인(`module.exports = async function (fastify, opts) { fastify.get(…) }`, fastify-cli JS 템플릿·fastify-example-twitter·fastify-example-todo)과 `FastifyPluginAsync`로 문맥 타입만 받은 매개변수, JSDoc `@param {import('fastify').FastifyInstance}`는 라우터로 보지 않아 사실 0개·limitation 0개다 | 받는 쪽을 증명하지 못하는 호출을 사실로 낼지, 새 limitation(증명하지 못한 수신자의 등록 모양 호출 수)으로 알릴지는 설계 결정이다. 수신자 판정을 넓히면 거짓 decl이 생길 수 있어 반례 corpus가 필요하다. |
 | 타입으로만 아는 루트 자신의 `get('/')`은 바깥 접두사가 비어 있지 않으면 `<바깥>`과 `<바깥>/` 둘로 등록되는데 `/` base 하나만 낸다 | 참인 사실이고(`<바깥>/`은 늘 있다) 빠진 `<바깥>`은 `unresolved-route-prefix:`가 덮는다. 바깥 접두사가 비었는지 모르므로 `<바깥>`을 따로 낼 근거가 없다. |
 | SQL `DELETE FROM a USING b`·`MERGE INTO t USING s`의 `b`·`s`가 relation-use로 나오지 않는다(한계도 없다) | 계열이 공유하는 lexical 추출기(dartograph·cartograph 포트, 공유 벡터)의 규칙이라 교차 저장소 계약 변경이다. |
