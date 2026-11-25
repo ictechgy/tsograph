@@ -250,7 +250,8 @@ function holderName(fn: ts.SignatureDeclaration): ts.Identifier | undefined {
 }
 
 /**
- * 바인딩 하나의 파일별 근거다(메모한다). `const` 별칭과 매개변수로 흘러간 자리는 그 바인딩의 근거를 합친다.
+ * 바인딩 하나의 파일별 근거다(메모한다). `const` 별칭과 매개변수로 흘러간 자리는 그 바인딩의 근거를 합친다. 바인딩마다 흘러간 모듈
+ * 객체로 닿는 근거({@link mergeEscapedExports})도 더한다.
  *
  * 흘러가는 관계는 순환할 수 있다(서로 부르는 도우미). Tarjan 강연결 요소를 재귀 없이 구해, 한 요소의 바인딩은 모두 요소 안의 근거와 요소
  * 밖으로 이어지는 근거의 합을 갖는다. 바인딩마다 사용 자리를 한 번만 분류하므로 비용은 살펴본 사용 수에 선형이고, 긴 도우미 사슬에서도
@@ -270,6 +271,7 @@ function evidenceOf(census: SkipCensus, context: InterpreterContext, root: ts.Sy
   const stack: ts.Symbol[] = [];
   const onStack = new Set<ts.Symbol>();
   const frames: { readonly symbol: ts.Symbol; readonly next: readonly ts.Symbol[]; position: number }[] = [];
+  const escaped = escapedExports(census, context);
   const open = (symbol: ts.Symbol): void => {
     order.set(symbol, order.size);
     low.set(symbol, order.get(symbol)!);
@@ -283,6 +285,8 @@ function evidenceOf(census: SkipCensus, context: InterpreterContext, root: ts.Sy
       if (typeof verdict === 'string') addLevel(evidence, use.getSourceFile(), verdict);
       else next.push(verdict.follow);
     }
+    // 따라간 바인딩(`export const handle = users`)이 흘러간 모듈 객체로 이름 없이 닿으면 그 근거도 이 바인딩의 것이다.
+    mergeEscapedExports(evidence, escaped, new Set([symbol]), symbol.declarations ?? []);
     local.set(symbol, evidence);
     frames.push({ symbol, next, position: 0 });
   };
@@ -677,7 +681,8 @@ function isValueReference(identifier: ts.Identifier): boolean {
 
 /**
  * 식(바인딩을 가리키는 식별자·속성 접근)이 바인딩의 값을 쓰거나 다른 곳으로 흘려보내 skip-override를 바꿀 수 있는 자리인지 본다.
- * 호출 대상, 점 접근, 읽기 원소 접근, `register()` 첫 인자, 내보내기, 비교·`typeof`·조건 판정은 바꾸지 못한다.
+ * 호출 대상, 점 접근, 읽기 원소 접근, `register()` 첫 인자, 내보내기, 비교·`typeof`·조건 판정, 태그 없는 템플릿 보간은 바꾸지 못한다.
+ * 태그 붙은 템플릿의 보간은 태그 함수의 인자다.
  *
  * @param node 식
  * @returns 바꿀 수 있으면 true
@@ -690,7 +695,9 @@ function mayChangeBinding(node: ts.Expression): boolean {
   if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) return parent.expression !== outer && !isRegisterPlugin(parent, outer);
   if (ts.isBinaryExpression(parent)) return bindingFlowsThroughBinary(parent, outer);
   if (ts.isConditionalExpression(parent)) return parent.condition !== outer;
-  return !(ts.isExportAssignment(parent) || ts.isExportSpecifier(parent) || ts.isTypeOfExpression(parent) || ts.isTemplateSpan(parent)
+  // 태그 붙은 템플릿은 태그 함수가 보간한 값을 그대로 받는다. 태그 없는 템플릿은 문자열로 바꾸기만 한다.
+  if (ts.isTemplateSpan(parent)) return ts.isTaggedTemplateExpression(parent.parent.parent);
+  return !(ts.isExportAssignment(parent) || ts.isExportSpecifier(parent) || ts.isTypeOfExpression(parent)
     || ts.isExpressionStatement(parent) || ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)
     || ts.isForOfStatement(parent) || ts.isForInStatement(parent) || ts.isCaseClause(parent) || ts.isSwitchStatement(parent)
     || (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken));
@@ -724,7 +731,9 @@ function isRegisterPlugin(call: ts.CallExpression | ts.NewExpression, argument: 
 
 /**
  * 이항식에서 바인딩의 값이 다른 곳으로 흘러가는지 본다. 비교 연산, `&&`·쉼표의 왼쪽, 바인딩에 대입하는 왼쪽은 흘려보내지 않는다.
- * `module.exports = x`·`exports.a = x`는 내보내기라 흘려보내지 않는다(그 뒤 쓰기는 {@link skipOverrideOf}가 따로 본다).
+ * JS 파일의 `module.exports = x`·`exports.a = x`는 TypeScript가 그 바인딩의 별칭인 내보내기로 묶으므로 흘려보내지 않는다(그 모듈 객체가
+ * 흘러가면 {@link escapedExports}가 별칭을 따라 이 바인딩에 닿고, 그 뒤 쓰기는 {@link skipOverrideOf}가 따로 본다). TS 파일에서는 내보내기로
+ * 묶지 않아 모듈 객체에서 이 바인딩에 닿는 길을 모르므로 흘러간 것으로 본다.
  *
  * @param binary 이항식
  * @param operand 바인딩을 담은 피연산자
@@ -734,7 +743,9 @@ function bindingFlowsThroughBinary(binary: ts.BinaryExpression, operand: ts.Expr
   const operator = binary.operatorToken.kind;
   // 바인딩에 다른 값을 대입하는 자리(`exports.users = fn`, `x ||= y`)는 지금 값에 심볼을 쓰지 않는다.
   if (isAssignmentOperator(operator) && binary.left === operand) return false;
-  if (operator === ts.SyntaxKind.EqualsToken && binary.right === operand) return !isModuleExportsReference(exportsRoot(unwrap(binary.left)));
+  if (operator === ts.SyntaxKind.EqualsToken && binary.right === operand) {
+    return !isModuleExportsReference(exportsRoot(unwrap(binary.left))) || (binary.flags & ts.NodeFlags.JavaScriptFile) === 0;
+  }
   if (isAssignmentOperator(operator)) return true;
   // 함수 값은 참이라 `plugin && x`·`plugin, x`는 오른쪽 값을 돌려준다(왼쪽의 함수는 흘러가지 않는다).
   if (operator === ts.SyntaxKind.AmpersandAmpersandToken || operator === ts.SyntaxKind.CommaToken) return binary.right === operand;

@@ -721,3 +721,73 @@ test('TS 네임스페이스·import().then·TS 파일의 require()·CommonJS 모
   self['src/plugins.js'] += "require('mark-all').markAll(module.exports);\n";
   assert.deepEqual(factLines(await scanNodeProject(self)), unproven);
 });
+
+test('따라간 const 별칭이 흘러간 모듈 객체로 내보내지면 그 근거도 플러그인의 것이다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 `/x`다: `markAll(P)`가 `P.handle`(= users)에 심볼을 쓴다. 점 접근으로만 읽으면 `/u/x`.
+  const base = { 'package.json': packageJson({ fastify: '5.2.0' }), 'tsconfig.json': ambientTypesFreeConfig };
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  const aliased = (escape: string): Record<string, string> => ({
+    ...base,
+    'src/plugins.ts': [
+      "import type { FastifyInstance } from 'fastify';",
+      "async function users(f: any) { f.get('/x', async () => 'x'); }",
+      'export const handle = users;',
+      "export function mount(app: FastifyInstance) { app.register(users, { prefix: '/u' }); }",
+    ].join('\n'),
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "import * as P from './plugins.ts';",
+      "import { mount } from './plugins.ts';",
+      escape,
+      'const app = Fastify();',
+      'mount(app);',
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(await scanNodeProject(aliased('markAll(P);'))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(aliased('console.log(P.handle === P.handle);'))), ['GET root /u/x strict']);
+});
+
+test('태그 붙은 템플릿의 보간은 태그 함수의 인자라 플러그인을 흘려보내고, 태그 없는 템플릿은 그대로다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 태그 붙은 쪽이 `/x`다(태그 함수가 보간한 함수를 그대로 받는다).
+  const base = { 'package.json': packageJson({ fastify: '5.2.0' }), 'tsconfig.json': ambientTypesFreeConfig };
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  const template = (use: string): Record<string, string> => ({
+    ...base,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { tag } from 'mark-all';",
+      "async function users(f: any) { f.get('/x', async () => 'x'); }",
+      use,
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(await scanNodeProject(template('tag`${users}`;'))), unproven);
+  // 태그 없는 템플릿은 문자열로 바꾸기만 한다(실제 fastify: `/u/x`).
+  assert.deepEqual(factLines(await scanNodeProject(template('console.log(`${users}`);'))), ['GET root /u/x strict']);
+});
+
+test('TS 파일에서 CommonJS 내보내기에 대입한 바인딩은 흘러간 것으로 본다', async () => {
+  // TypeScript는 TS 파일의 `exports.handle = users`를 내보내기로 묶지 않아, 그 모듈 객체가 흘러가도 이 바인딩에 닿는 길을 모른다. 실제 fastify
+  // 4.29.1·5.12.8은 `markAll(require('./re'))`면 `/x`다(`.cts`로 실행해 확인). 넘기지 않아도 dynamic인 것은 건전하지만 덜 정밀하다.
+  const document = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/users.ts': "export async function users(f: any) { f.get('/x', async () => 'x'); }\n",
+    'src/re.ts': "import { users } from './users.ts';\ndeclare const exports: any;\nexports.handle = users;\n",
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "import { users } from './users.ts';",
+      'declare const require: any;',
+      "markAll(require('./re.ts'));",
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(document), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+});
