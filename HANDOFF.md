@@ -3,17 +3,221 @@
 세션을 이어받을 때 먼저 읽는 진행 상태 문서다. 작업 규칙의 정본은 [AGENTS.md](AGENTS.md)이고, 여기 적힌 상태는
 실제 Git 상태·코드·검증 결과와 대조한 뒤 쓴다. 공통 규칙은 이 파일에 복제하지 않는다.
 
-## 현재 상태 (2026-11-22)
+## 현재 상태 (2026-11-25)
 
-- 발행본은 **0.11.0**이다. npm 게시(2026-11-03), 태그 `v0.11.0`, `package.json` 버전이 일치한다(2026-11-22 `npm view tsograph version`으로 다시 확인).
-- isthmus `compatibility.json`의 tsograph 핀은 2026-11-22 로컬 isthmus 체크아웃(`30285f9`, `origin/main`과 같음) 기준으로 **0.10.0**이다.
+- 발행본은 **0.11.0**이다. npm 게시(2026-11-03), 태그 `v0.11.0`, `package.json` 버전이 일치한다(2026-11-25 `npm view tsograph version`으로 다시 확인).
+- isthmus `compatibility.json`의 tsograph 핀은 2026-11-25 로컬 isthmus 체크아웃(`4a3e99d`, `origin/main`과 같음) 기준으로 **0.10.0**이다.
   isthmus가 게시본을 검증한 뒤 바꾸는 절차이므로 tsograph 저장소에서 고치지 않는다.
-- PR #57(`9795858`), PR #59(`3c487b1`), PR #60(진입점 필드 없는 게시 가능 패키지 공개 판정, 2026-11-22 `cea6584`)이 `main`에 스쿼시
-  머지됐다. `main` `cea6584`의 CI 체크 6개가 모두 성공했다(2026-11-22 `gh api …/check-runs`로 확인). 세 PR의 변경은 모두 CHANGELOG
-  `[Unreleased]`에 있고 아직 발행하지 않았다.
-- 2026-11-22 4회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `cea6584`에서 다시 시작해 limitation 문장 정확성 세 가지(아래 절)를
-  PR #61로 올렸다. 첫 리뷰 반영(`b6d4052`·`f826ac0`·`6e67a71`·`11ee842`)과 델타 리뷰 반영(`e02ecbb`·`ca7a2c3`)까지 push됐고, 재확인
-  리뷰(아래 "PR #61 재확인 리뷰 반영") 반영 커밋과 문서 커밋은 push 전이다(조정자가 올린다).
+- PR #57·#59·#60·#61이 `main`에 스쿼시 머지됐다(#61은 `2dac50e`). `main` `2dac50e`의 CI 체크 6개가 모두 성공했다(2026-11-25
+  `gh api …/check-runs`로 확인). 네 PR의 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
+- 2026-11-25 5회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `2dac50e`에서 다시 시작해 Fastify 플러그인 접두사 이음 두 가지(아래 절)를
+  고쳐 PR #62(`36491b4`·`e381053`, 조정자가 push)로 올렸다. 독립 리뷰의 should-fix 둘(`routerOptions` 주 버전, 직접 쓴 skip-override)과 nit 둘을
+  `ae729b0`·`60553ce`로 반영했고(아래 "PR #62 독립 리뷰 반영"), 재확인 리뷰의 should-fix 넷(A~D)과 nit 넷을 그 위 커밋으로 반영했다(아래 "PR #62
+  재확인 리뷰 반영"). 마지막 재확인 리뷰의 should-fix 셋과 nit 셋은 `db64014` 위 커밋으로, 최종 확인에서 나온 작은 거짓 사실 둘은 `61b4b63` 위
+  커밋으로 반영했다(아래 "PR #62 마지막 재확인 리뷰 반영"·"PR #62 최종 확인 반영"). 이 반영 커밋들은 push 전이다(조정자가 올린다).
+
+## Fastify 플러그인 접두사 이음 (2026-11-25, 5회차)
+
+첫 커밋의 두 수정은 `src/routes/node/fastify-adapter.ts`의 펼치기(`flattenFastify`) 안이다. 리뷰 반영(아래 "PR #62 독립 리뷰 반영")으로 `fastifyCreation`의 옵션 출처, 새 `fastify-skip-override.ts`, 해석기 문맥의 `includesFile()`이 더해졌고, 마지막 재확인 반영에서 해석기의 상대 `require()` 해석(`requiredModule()`)을 문맥에 드러냈다. 다른 프레임워크·graph·schema 출력은 바뀌지 않는다.
+
+1. **타입으로만 아는 `FastifyInstance` 아래의 플러그인 접두사**: 붙는 위치를 모르는 인스턴스(fastify-cli가 불러 붙이는
+   `export default async function app(fastify: FastifyInstance)`)를 "값을 모르는 접두사"(`{ kind: 'unknown' }`)로 다뤄, 그 아래
+   `register(plugin, { prefix: '/users' })`를 `buildRoutePrefix`가 모두 버렸다(`unknown`이 이기므로). `/users` 플러그인의 `get('/')`·
+   `get('/:id')`·`get('/:id/posts')`가 `/`·`/{}`·`/{}/posts` base로 나왔고 접두사 아래 `/`의 `prefixTrailingSlash` 규칙도 빠졌다. Express·Koa·Hono
+   어댑터는 같은 모양에서 `/api/x` base처럼 접두사를 지킨다(확인함).
+   - 수정: 앵커를 접두사 값과 따로 들고 다닌다(`InstancePrefix { anchor, value }`, Express·Koa 어댑터와 같은 구조). 타입으로만 아는 루트는
+     `base` + 빈 리터럴로 시작하고, 리터럴 플러그인 접두사는 base 뒤 꼬리로 잇는다. base 아래에서 이은 결과가 리터럴이 아니면(모르거나
+     앞부분만 아는 접두사, 주 버전을 몰라 정하지 못한 이음) 꼬리를 비워 알 수 없는 base에 합친다(예전 출력과 같다). base 아래 제공 경로
+     (`framework-provided-routes:`·`route-coverage:`)는 예전처럼 스코프가 없다. `buildRoutePrefix`는 이제 `unknown` 부모를 받지 않는다(타입으로
+     막았다).
+   - 실제 실행(scratch에 fastify 5.12.5·4.29.1 설치, find-my-way `on` 기록과 `inject`): 같은 플러그인을 바깥 접두사 `''`·`/api`로 붙이면
+     `<바깥>/users`·`<바깥>/users/`·`<바깥>/users/:id`·`<바깥>/users/:id/posts`가 등록되고 `<바깥>/7`·`<바깥>/`·`<바깥>/orders/7/posts`는 404다.
+   - isthmus로 확인(로컬 `4a3e99d` dist, `check --pairs`): 클라이언트 `/api/users`·`/api/users/7`·`/api/users/7/posts`·`/api/orders/7/posts`에 대해
+     `main` 출력은 `/{}/posts` base가 `/api/users/7/posts`와 **없는 경로** `/api/orders/7/posts`를 모두 받고(suffix match) `/api/users`·`/api/users/7`은
+     decl 없음 warning이었다. 새 출력은 세 호출이 각자 decl(`/users`·`/users/{}`·`/users/{}/posts`)과 이어지고 `/api/orders/7/posts`는
+     `route-call-without-decl` error다(실제로 404). warning 5 → 2, error 0 → 1.
+2. **Fastify 4의 접두사 이음 규칙**: 부모 접두사가 `/`로 끝나고 플러그인 접두사가 `/` 아닌 글자로 시작하면 fastify 5.12.5
+   (`lib/plugin-override.js`)는 그대로 잇고 4.29.1(`lib/pluginOverride.js`)은 `/`를 더한다. 포팅이 5 규칙만 따라 fastify 4 앱에서
+   `/v1/` + `bare` + `/y`를 `/v1/bare/y`(실제 404)로 냈다(실제 4.29.1은 `/v1//bare/y`).
+   - 수정: `flattenFastify`가 감지한 주 버전을 받고 `joinPrefixText`가 4·5 규칙을 고른다. 그 주 버전에서 켜진 `ignoreDuplicateSlashes`
+     (최상위 값은 4·5 모두, `routerOptions` 값은 5만 — 리뷰 SF1 반영)면 find-my-way가 겹친 `/`를 줄여 두 버전이 같으므로 5 규칙을 쓴다
+     (실행으로 확인: 최상위 옵션이면 두 버전 모두 `/v1/bare/y`·`/v1//bare/y` 200). 주 버전을 모르는데 두 규칙이 다르면 부모 접두사까지만 아는
+     partial이라 root에서는 dynamic(`dynamicScope` `/v1`), base에서는 위 규칙대로 base에 합친다. 플러그인 접두사 앞부분이 빈 문자열이면 첫
+     글자를 모르므로 두 규칙 모두 부모(`/`로 끝나지 않으면 `/`까지)만 확정한다.
+   - 주 버전을 모르는 경우 정적 사실이 dynamic이 된다(아래 적대 입력 a18-vx: `/v1/bare/y` → `/v1/{dynamic}`). 그 정적 사실은 증명된 사실이
+     아니었고(5에서는 참, 4에서는 거짓), 문서에는 이미 `route-framework-version-unknown:`("주 버전마다 다른 경로 문법은 dynamic")이 붙으며 줄어든 정적
+     사실은 `route-coverage: N route declaration(s) have paths … dynamic`(1 → 2)에 센다. 이 수는 경로가 아니라 등록을 세므로 사실 수는 더 줄 수
+     있다: 접두사 아래 `/` 라우트는 `prefix`·`prefix/` 두 decl 대신 dynamic 하나다(리뷰 nit 2: `^4.0.0 || ^5.0.0`에 `/aa/` → `bb/` → `/cc/` → `dd`
+     사슬이면 사실 7개가 5개). Express·@koa/router가 주 버전을 모를 때 쓰는 기존 규칙과 같다.
+- 테스트(`src/routes/node/fastify-adapter.test.ts`): `buildRoutePrefix` 단위 테스트를 4·5·모름 세 규칙으로 돌리고 갈리는 이음을 더했다(예전
+  단언 중 `unknown` 부모 하나는 타입으로 막혀 지웠다 — 그 표현이 버그의 원인이었다). 끝까지 테스트 2개: 타입으로만 아는 루트 아래 리터럴·
+  `/` 없는·`/`로 끝나는 접두사, `no-slash`, 모르는 접두사 뒤 리터럴 접두사, `fastify-plugin`, base 아래 `@fastify/static` 스코프 없음; 4·5·모름(`*`)
+  ·`ignoreDuplicateSlashes`의 이음. 변이: `main` 구현으로 되돌리면 3개, base에서 늘 꼬리를 비우면 1개, 주 버전을 늘 5로 보면 1개, 모르는 주
+  버전을 5로 보면 2개, 제공 경로 스코프가 앵커를 보지 않으면 1개, 빈 앞부분에 주 버전 규칙을 쓰면 1개, 타입으로만 아는 루트를 root로 보면
+  2개, `ignoreDuplicateSlashes` 처리를 빼면 1개가 실패한다.
+- 적대 입력 20모양 × fastify 5.2.0·4.28.1·`*` = 60개(`scratchpad/r5-tsograph/adv/mk.mjs`, 사실·한계·스코프를 `main`과 비교): 바뀌지 않은 것은
+  모르는 접두사·partial 접두사 바로 아래(base에 합침, a04·a05), `fastify-plugin`(a06), base 아래 `@fastify/static`(a08, 스코프 없음 유지),
+  `Fastify()` 앱(a12), JSDoc으로만 타입을 단 JavaScript(a14, 원래 사실 없음), autoload·동적 import(a17), 5와 4 + `ignoreDuplicateSlashes`의
+  이음(a18-v5, a20). 바뀐 것은 모두 실제 실행 결과 쪽으로 바뀌었다: a01(`/users`…), a02(`bare` → `/bare/x`), a03(`/v1/` 아래 `/users`·`bare`, 4는
+  `/v1//bare/y`, 모름은 `/y` base), a07·a16(모르는 접두사 뒤 리터럴), a09(`slash`·`no-slash`·`both`), a10(조건부 등록 스코프 `/users/cond`,
+  dynamic 사실의 접두사), a11(타입 루트에서 타입 루트로 register), a13(`/` 접두사 아래 `/`는 `/`·`//`), a15(`/users/:org` 접두사), a18-v4·vx,
+  a19(base 아래 `/v1/`·`bare`). `unresolved-route-prefix:` 수는 base decl이 늘어난 만큼 늘었다(예: a01 5 → 6, `/users`와 `/users/`).
+- 실제 프로젝트(`routes --role server`, `generatedAt`·`project` 제외 비교): fastify/demo, yonathan06/fastify-typescript-starter,
+  fastify/fastify-example-todo, delvedor/fastify-example-twitter, 저장소 `fixtures/node/fastify4-app`·`fastify5-app`은 stdout·stderr가 같다(이 표본에는
+  타입 루트 아래 접두사 register나 4의 `/`로 끝나는 부모 접두사가 없다).
+- 검증: 아래 "5회차 검증".
+
+### 5회차 검증
+
+최종 확인 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 1~3.5).
+
+- `npx tsc --noEmit` 통과.
+- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(최종 트리, 5분 19초): 1,852개 중 1,828 통과·23 skip·1 실패. 실패는
+  `relation-facts`의 `chmod 000`(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.72%·분기 91.72%·함수 98.23%(90% 게이트 통과),
+  `fastify-adapter.ts` 100/92.02/97.14, `fastify-skip-override.ts` 99.63/92.87/98.81(미실행은 `++`·`--` 대입 대상 두 줄과 checker 예외 처리 세 줄).
+  앞 회차들: 첫 커밋 40분 54초(load 20~32), 첫 리뷰 반영 11분 57초, 재확인 반영 6분 6초, 마지막 재확인 반영 5분 17초(모두 같은 환경 실패 1).
+- `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
+- isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus `4a3e99d`).
+- 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `61b4b63` worktree에 돌린 결과는 `61b4b63` 분석기 결과와 stdout·stderr
+  바이트가 같다(앞 회차는 `2dac50e`·`60553ce`·`db64014`와 같은 비교). 이 head 트리와의 노드·간선 차이는 바뀐 두 파일(`fastify-skip-override.ts`·
+  `fastify-adapter.test.ts`) 안뿐이다(노드 10,454 → 10,459, 간선 15,305 → 15,321, 바뀐 파일 밖 변화 0). `db64014` 대비로는 노드 10,420 → 10,459,
+  간선 15,224 → 15,321이고 `candidate-dispatch` 214 → 219·`unresolved-calls` 4,564 → 4,573은 그때 더한 코드의 호출이다. 그 밖의 limitation 차이(`effect-inventory` 문맥 수, `skipped-symlinks`)는 worktree의
+  `node_modules` symlink 때문에 생기는 줄뿐이다.
+- 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
+  재실행, 저장소 오라클(`experiments/node-routes-oracle`) 재기록(fixture를 바꾸지 않았다; 대신 리뷰어 하네스 `rt4`·`rt5`의 fastify 4.29.1·5.12.8로
+  새 모양을 직접 실행했다). TS 네임스페이스·`import x = require()`·TS 파일 `require()`는 Node의 타입 지우기로 실행할 수 없어 실제 실행 대신 같은
+  값이 패키지 함수에 닿는다는 의미로 판단했다.
+
+### PR #62 독립 리뷰 반영 (2026-11-25, `e381053` 위)
+
+리뷰어 fixture(`scratchpad/r5-review-tsograph/fx` 43개, 실제 fastify 4.29.1·5.12.8 하네스 `rt4`·`rt5`)와 반영용 fixture 22개
+(`scratchpad/r5-tsograph/rv/mk.mjs`: `routerOptions`·최상위 옵션 × 4·5·`*`, skip-override 11모양)를 `2dac50e`·`e381053`·새 head와 실제 실행에 돌렸다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| SF1: `routerOptions.ignoreDuplicateSlashes`를 fastify 4·주 버전 모름에서도 믿음 — fastify 4.29.1은 `routerOptions`가 없어 `/v1//bare/y`·`/v1//bare`·`/v1//bare/`·`/v1//`를 등록하는데 `main`·`e381053` 모두 `/v1/bare/y` 등을 정적 사실로 냄 | 고침: `fastifyCreation`이 옵션마다 최상위 값과 `routerOptions` 값을 따로 담고(`RouterOptionSources`), 펼칠 때 `effectiveOption`이 4는 최상위, 5는 `routerOptions`(없으면 최상위), 모르면 같을 때만 쓴다. `ignoreDuplicateSlashes`·`ignoreTrailingSlash`·`caseSensitive` 모두(`fmwOptions`·접두사 아래 `/`의 두 등록·`trailingSlash`·`caseInsensitive`)에 적용. 4는 실제 등록과 같아지고(`/v1//`·`/v1//bare*`·`/v1/a//b`, `routerOptions: { caseSensitive: false, ignoreTrailingSlash: true }`는 `/Mixed`·`/users`·`/users/` strict), 모름은 갈리는 이음이 dynamic, 옵션은 모르는 값(`trailingSlash` 생략) | 테스트 "routerOptions의 라우터 옵션은 fastify 5만 읽고 …"(4·5·모름 × 최상위·`routerOptions`, 세 옵션), `e381053`에서 실패. 변이: 4가 `routerOptions`를 읽음 1, 모름이 5 값을 씀 1 |
+| SF2: 플러그인 바인딩에 직접 쓴 `Symbol.for('skip-override')`를 몰라 base 아래에서 `/p2/manual`(실제 `<바깥>/manual`)을 냄. root에서는 `main`부터 `/p2/manual`(실제 `/manual`) | 고침: `fastify-skip-override.ts`가 해석 대상 파일에서 그 심볼을 바꿀 수 있는 자리를 한 번 모으고(이름별 식별자 사용, import 지역 이름, CommonJS `module.exports[…]` 쓰기, 이름으로 풀 수 없는 대상의 쓰기), 등록한 함수의 바인딩마다 판정한다. 참 리터럴을 모듈 최상위에서 조건 없이 쓰거나(`const` 키·다른 이름 import 포함) `fastify-plugin`에 넘기면 건너뜀(접두사 무시), 함수 안·조건 아래의 쓰기·모르는 키·`register()` 첫 인자 밖의 호출 인자·변수·객체·배열·반환값으로 흘러간 바인딩·이름 없는 대상의 쓰기가 있으면 모름 → 접두사를 모르는 값(root dynamic, base는 base에 합침). 등록 인자에서 따라간 `const` 별칭은 함께 본다. 모르는 감싸기(`wrap(fn)`)는 원래 걷지 않고 `route-coverage:`로 센다 | 테스트 넷(root 10모양, base, CommonJS·이름 없는 대상, 값의 참·거짓·`delete`·`??`·대입으로 흘러감), `e381053`에서 모두 실패. 변이: 모름이 접두사를 그대로 둠 3, 조건 아래를 최상위로 봄 1, 흘러간 바인딩을 무시 1, 이름 없는 대상 무시 1, `module.exports` 쓰기 무시 1, `const` 키를 못 풂 1, 등록 별칭을 흘러감으로 봄 1, `register()` 인자를 흘러감으로 봄 2, 다른 이름 import 무시 1, 등록 별칭 이름을 찾지 않음 1, 숫자 참 리터럴 무시 1, `delete`를 쓰기로 보지 않음 1, `??`·대입 오른쪽을 흐름으로 보지 않음 각 1 |
+| nit 1: 모르는 접두사(`process.env.TENANT`) 아래 `/users/:id`와 `/users` 아래 `/:id`가 둘 다 `/users/{}` base라 isthmus `route-decl-conflict` 경고가 날 수 있음 | 문서화(CHANGELOG·NODE-ROUTES의 남은 한계). base에 합치는 설계에서 둘을 가를 정보가 없다 | — |
+| nit 2: 주 버전 모름에서 사실 수가 등록 수보다 더 준다(7 → 5) | 문서화(위 2번 항목, CHANGELOG, NODE-ROUTES) | — |
+
+- 바뀐 출력(리뷰어 fixture 43개 중 `e381053` 대비): d3-ids-routeropts-v4(실제 4와 같아짐)·-vx(갈리는 이음 dynamic), f1-fp-indirect(`/p2/manual` →
+  `/manual` base), f2-skip-root(`/p2/manual` → `/manual` root). 나머지 39개는 같다. 반영용 22개: `routerOptions` 4·모름 넷과 skip-override 9개가 바뀌고
+  최상위 옵션 6개·`routerOptions` 5 둘·무해한 속성 쓰기(`autoPrefix`·`'meta'`)는 같다. 실제로 건너뛰지 않는
+  `export const registry = { users }`처럼 흘러간 바인딩은 dynamic이 된다(건전하지만 덜 정밀).
+- 5회차 적대 입력 60개와 실제 프로젝트 여섯 개는 `e381053`과 출력이 같다.
+- 비용(이 시점, 무해한 모양만 쟀다): 합성 앱(플러그인 N개를 접두사로 등록, 파일 2N개)의 CPU user 시간은 N=600에서 `e381053` 3.8~4.3초·
+  `60553ce` 4.4~4.5초, N=2400에서 7.0~7.1초·6.4~8.3초. 같은 이름 바인딩이 많은 적대 모양은 재확인 리뷰 D에서 이차로 드러났다(아래 절).
+- 이 절의 판정 규칙 일부(해석 대상 파일만 보기, 이름으로 풀 수 없는 대상의 리터럴 키만 전역으로 보기, 흘러간 바인딩은 모두 모름)는 재확인
+  리뷰에서 바뀌었다(아래 "PR #62 재확인 리뷰 반영").
+
+### PR #62 재확인 리뷰 반영 (2026-11-25, `60553ce` 위)
+
+재확인 리뷰는 SF1을 완결로 확인했고 SF2에서 should-fix 넷과 nit 넷을 냈다. 새 fixture 9개(`scratchpad/r5-tsograph/rv2/mk.mjs`)와 리뷰어 fixture 83개
+(`r5-review-tsograph/fx`, 실제 fastify 4.29.1·5.12.8 하네스)를 `60553ce`·새 head에 돌렸다(아래 표의 "실제"는 실제 등록 경로).
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| A: 해석 대상에서 빠지는 테스트 경로 규칙(`test/`·`tests/`·`e2e/`·`__mocks__/`) 파일의 쓰기를 못 봄 — `src/routes/test/index.ts`가 자기 플러그인에 skip-override를 써도 `/test/ping`(실제 `/ping`) | 고침: census가 프로젝트 파일을 모두 걷고 근거를 파일별로 둔다. 판정할 때 등록 호출·플러그인 함수·등록 인자에서 따라간 바인딩의 선언이 있는 파일은 늘 쓰고, 그 밖에는 해석 대상 파일만 쓴다 | 테스트 "해석에서 빼는 테스트 디렉터리 이름이어도 …", `60553ce`에서 실패. 변이: 늘 쓰는 파일을 무시 1 |
+| B: 이름이 아닌 대상의 `const` 키 쓰기를 못 봄 — `plugins.users[SKIP] = true`·`P.users[SKIP] = true`가 `/u/x`(실제 `/x`) | 고침: 속성 접근도 바인딩 사용으로 세어 속성 심볼(객체 리터럴 속성, 네임스페이스로 가져온 내보내기)의 근거로 둔다(`plugins.users` 등록 인자의 사슬에 그 심볼이 있다). 값의 출처를 따라가지 않는 대상(매개변수·반복 변수·구조 분해·원소 접근·호출 결과)에 skip-override 키(리터럴·`const`)를 쓰면 모든 플러그인이 모름이다. 모듈 객체(네임스페이스·`require()`·`import()`·`module.exports`)가 흘러가거나 원소로 읽히거나 그 아래에 계산된 키로 쓰이면 그 모듈이 내보낸 플러그인이 모름이다(`Object.values(P)` 반복) | 테스트 "const 키·네임스페이스 속성에 쓴 …"(고정된 속성 둘은 실제처럼 접두사 없음, 반복 변수·매개변수 대상은 모름)와 "require() 모듈 객체가 흘러가면 …"(점 접근만 하면 그대로, `Object.keys(mod)`·`require()[k]` 읽기면 그 모듈이 내보낸 플러그인만 모름, 같은 파일의 내보내지 않은 함수는 그대로), 둘 다 `60553ce`에서 실패. 변이: 속성 대상을 바인딩으로 잇지 않음 2, 모든 바인딩을 값이 정해진 것으로 봄 1, 속성 사용을 세지 않음 1, 모듈 객체 사용 무시 1, 내보낸 바인딩을 못 알아봄 1, 대입 왼쪽을 흐름으로 봄 1 |
+| C: `--include-tests`에서 테스트 전용 코드가 운영 사실을 바꿈 — `src/users.test.ts`의 `fp(users)`로 운영 등록이 `/`·`/{}`(실제 `/users/:id`, 새 거짓 사실) | 고침: 테스트 소스에 있지 않은 등록에 대해 (늘 쓰는 파일이 아닌) 테스트 소스의 근거는 많아야 모름이다. 기본 실행에서는 테스트 소스가 해석 대상이 아니라 쓰지 않는다 | 테스트 "--include-tests의 테스트 소스는 …"(기본 실행은 `/users/{}`, `--include-tests`는 dynamic), `60553ce`에서 실패. 변이: 테스트 근거를 깎지 않음 1 |
+| D: 이차 비용 — 등록마다 같은 이름의 모든 사용을 훑음(플러그인 3,000개 `plugin` 이름에서 6.7초 → 48.6초) | 고침: 이름별 사용을 심볼별로 한 번 묶고(첫 질의 때), 바인딩별 근거를 메모한다(`const` 별칭·매개변수를 따라가며 순환을 만나면 그 경로의 부분 결과는 메모하지 않는다) | `fastify-skip-override.test.ts`: 살펴본 사용 수가 플러그인 수에 선형(20개 → 320, 60개 → 960, 등록 둘씩)인지 결정적으로 본다. `60553ce`에서 실패(내보낸 계수 없음). 변이: 근거 메모 끔 1, 이름 묶기 메모 끔 1. 측정은 아래 |
+| nit 1: 흘러간 바인딩의 정밀도 손실 — 도우미 `mountUsers(app, users)`(리터럴 접두사로 등록)가 dynamic, s4의 세 플러그인(객체·`console.log`·배열) | 일부 반영: 프로젝트 함수의 매개변수 자리는 그 매개변수의 사용을 따라 보고(본문이 `arguments`를 읽거나 나머지 매개변수·펼친 인자면 모름), `console.*` 인자는 바꾸지 않음으로 본다. `&&`·쉼표의 왼쪽은 흘러가지 않는다(함수 값은 참). 제안된 프로젝트 전체 게이트(skip-override·모르는 키·추적하지 않는 `fp()` 쓰기가 프로젝트에 없으면 흘러감을 무시)는 건전하지 않아 넣지 않았다: 바인딩을 받은 패키지 함수(예: `fastify-plugin`을 감싼 사내 패키지)나 그 바인딩을 다시 패키지로 넘기는 프로젝트 함수가 심볼을 쓸 수 있는데 그런 코드는 프로젝트 안에 쓰기로 나타나지 않는다. 객체·배열·다른 변수·패키지 함수로 흘러간 바인딩은 여전히 dynamic이고 비용을 문서에 적었다 | 테스트 "프로젝트 함수 매개변수로 넘긴 …"(도우미·두 단계 도우미·재귀·console은 접두사 유지, 저장·나머지 매개변수·`arguments`는 모름), `60553ce`에서 실패. 변이: 매개변수를 따라가지 않음 1, console을 무해로 보지 않음 1, `arguments` 무시 1, `&&` 왼쪽을 흐름으로 봄 1 |
+| nit 2: `--include-tests`의 테스트 도우미(`build(users)`)가 운영 사실을 dynamic으로 만듦 | 매개변수 따라가기로 해결: 리뷰어 s8-tests(`build(p)`가 등록만 함)는 `--include-tests`에서도 `/users/{}`. 테스트 소스가 바인딩을 패키지 함수나 저장소로 넘기면 C 규칙대로 모름(dynamic)이다 | 테스트 "프로젝트 함수 매개변수로 넘긴 …", 리뷰어 s8-tests |
+| nit 3: 주 버전 모름에서 두 위치의 `caseSensitive`가 다르면 "모름"이라 썼지만 `caseInsensitive`는 생략되어 대소문자 구분으로 읽힘 | 문구를 고침(CHANGELOG·NODE-ROUTES): `trailingSlash`만 모름을 표현하고, 증명했을 때만 싣는 `caseInsensitive`는 싣지 않아 대소문자 구분으로 읽힌다(대소문자만 다른 호출은 isthmus `route-case-mismatch` 경고) | — |
+| nit 4: SF2 문서가 실제보다 넓게 말함("해석 대상 파일", 증명 못 하면 모름) | 문서를 실제 규칙대로 다시 썼다(CHANGELOG·NODE-ROUTES·이 절): 근거를 모으는 파일, 건너뜀·모름의 조건, 정밀도 비용, 남은 한계 | — |
+
+- 바뀐 출력(`60553ce` 대비): 리뷰어 fixture 83개 중 s1-testdir(`/ping`), s2-prop-constkey(`/x`), s4-escape(`console.log`로 넘긴 orders가 `/orders/{}`),
+  s9-helper-literal(`/users/{}`)이 실제 쪽으로 바뀌고 79개는 같다(`--include-tests`로 돌린 s8-tests는 dynamic → `/users/{}`, s10-test-fp는 `/`·`/{}` →
+  dynamic). 새 fixture 9개 중 a1·b1·b2(실제처럼 접두사 없음), b3(`Object.values(P)` 반복 → dynamic), n1(도우미 → `/users/{}`, s4의 console 인자 →
+  접두사 유지)가 바뀌었다. 5회차 적대 입력 60개, 반영용 22개, 실제 프로젝트 여섯 개는 `60553ce`와 같다.
+- 비용(공유 4코어 load 1~4, wall/CPU user): 같은 이름 `plugin` 바인딩 N개를 31번씩 흘려보내는 적대 모양(`scratchpad/r5-tsograph/perf/gen3.mjs`)은
+  N=1,500에서 `e381053` 3.5초/5.2초 · `60553ce` 10.5~10.7초/12.3~12.5초 · 새 head 3.5초/6.1초, N=3,000에서 5.1초/7.1초 · 34.2~41.1초/36.9~42.8초 ·
+  5.3초/8.2초다. 리뷰어 perf1(1,500개)·perf3(3,000개)은 `e381053` 4.5초·5.1초, `60553ce` 11.3초·35.4초, 새 head 3.8초·5.1초, 무해한 perf2는 5.1초·
+  5.2초·4.2초다. perf3은 `&&` 왼쪽을 흘러감으로 보지 않게 되어 `60553ce`의 dynamic 사실 6,000개가 `e381053`처럼 정적 사실 12,000개로 돌아왔다.
+  perf1은 바인딩을 받은 프로젝트 함수(`tag(x) { return x; }`)가 그 값을 반환해(반환은 흘러감) 여전히 dynamic 15,000개다.
+- 남은 한계(문서에 적음): 테스트 경로 규칙에 걸린 파일 중 등록·플러그인·바인딩 선언 파일이 아닌 운영 코드의 쓰기는 기본 실행에서 보지 않는다.
+  이름으로 다시 내보낸 모듈 네임스페이스(`export { P }`)를 받은 쪽의 동적 접근은 따라가지 않는다.
+
+### PR #62 마지막 재확인 리뷰 반영 (2026-11-25, `db64014` 위)
+
+마지막 재확인 리뷰는 A~D를 완결로 확인했고, 새 매개변수 따라가기와 모듈 객체 규칙이 거짓 접두사 사실을 내고 비용 절벽을 더한다고 했다
+(should-fix 셋, nit 셋, 지침 "건전함이 정밀함보다 먼저"). 고른 쪽: **매개변수 따라가기는 남기되 대상이 정적으로 하나인 호출만 따른다**
+(`60553ce`의 "흘러가면 모름"으로 되돌리지 않았다 — 대상이 정해지지 않는 호출은 모두 모름이라 건전하고, 등록만 하는 도우미·`console` 도우미의
+정밀도가 남는다). 리뷰가 허용한 "쓰기 없는 `const` 객체 리터럴 수신자의 메서드" 예외는 넣지 않았다(메서드는 모두 모름). 모듈 객체는 내보낸
+값을 별칭·재내보내기를 따라 펼치는 쪽을 택하고, TypeScript가 별칭으로 잇지 않는 모양(`exports.P = require(…)`, TS 파일의 `require()` 구조
+분해)은 흘러감으로 본다. 순환은 Tarjan 강연결 요소로 정확히 합쳤다(순환을 모름으로 보지 않았고, 재귀가 없어 깊이 상한도 두지 않았다).
+리뷰어 fixture 112개(새 37개 포함, 실제 fastify 4.29.1·5.12.8 하네스)와 반영 중 만든 모양 20여 개를 `db64014`·새 head·실제 실행에 돌렸다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| SF1: 매개변수 따라가기가 정적 호출 대상 선언을 믿음 — p1(`let prepare`를 `markAll({ p })`를 부르는 본문으로 다시 대입), p2(`helper: Base = new Marking()`의 재정의 메서드)가 `/u/x`(실제 `/x`) | 고침: `projectFunction`이 식별자 호출만 보고, 별칭을 따라간 바인딩의 선언이 하나이며 본문 있는 함수 선언이거나 함수 식·화살표 함수를 초기값으로 둔 `const`이고, census가 이름별로 모은 대입 대상(대입·복합 대입·`++`/`--`·구조 분해 대입·`for (x of …)`·속성 대입) 중 같은 심볼로 풀리는 것이 없을 때만 따른다. 메서드·속성 호출, `let`·`var`, 다시 대입한 함수는 모름 | 테스트 "매개변수를 따라가는 호출은 대상이 정적으로 하나인 함수뿐이고 …"(p1·p2·다시 대입한 함수 선언·구조 분해 대입은 dynamic, `const`·함수 선언은 `/u/x`): 넷 모두 `db64014`는 `/u/x`(실제 `/x`, 실행 확인). 변이: 메서드 호출을 따라감 1, 재대입 무시 1, 구조 분해 대입을 못 봄 1. `const` 검사를 지운 변이는 살아남는다(재대입 검사와 겹친다: `let`도 다시 대입해야 다른 함수가 된다) |
+| SF2: 모듈 객체 규칙이 재내보내기를 놓침 — b1(`export *` 배럴), b2(`export { users } from`), b3(`import * as P; export { P }`를 받은 `import { P }`)를 `markAll`에 넘겨도 `/u/x`(실제 `/x`) | 고침: 모듈 객체가 흘러가면 `getExportsOfModule`로 내보낸 값을 별칭 너머 선언까지 따라가 심볼·선언 근거로 두고, 내보낸 값이 다시 모듈이면 그 모듈도 펼친다(작업 목록, 재귀 없음). 모듈 객체는 이름이 아니라 심볼로 알아본다: 별칭을 따라가 모듈(파일 모듈·TS 네임스페이스)로 풀리는 식별자·속성 접근(`import { P as Plugins }`, `All.R`), `require()`·`import()`와 그 결과 변수(TS 파일의 상대 `require()`는 해석기와 같은 `requiredModule`로 파일을 찾고, 심볼이 없으면 그 파일의 플러그인 모두), `import().then` 콜백, `module.exports`·`exports`. 모듈 객체를 대입하면(`exports.P = require('./users')`) 흘러감이다 | 테스트 셋: "모듈 객체가 흘러가면 다시 내보낸 이름 …"(b1·b2·b3·이름 바꾼 b3·`All.R`은 dynamic, 점 접근만 하면 `/u/x`), "CommonJS에서 내보내기에 대입한 모듈 객체 …", "TS 네임스페이스·import().then·TS 파일의 require()·…"(`import().then`·TS `require`·`import x = require`·다시 내보낸 네임스페이스를 통째로·TS 네임스페이스·CommonJS `mount`). 다시 내보낸 네임스페이스를 통째로 넘기는 경우 말고는 모두 `db64014`가 `/u/x`인 거짓 사실이다(실제 `/x`, 실행 확인; 통째로 넘기면 한 겹만 보는 `markAll`에서 실제 `/u/x`라 건전하지만 덜 정밀하다). 변이 11(재내보낸 모듈 펼치지 않음, 별칭 이름 무시, 대입을 흘러감으로 보지 않음, 내보낸 별칭을 풀지 않음, `then` 무시, TS `require` 미해석, 네임스페이스 이름 무시, `module.exports` 흘러감 무시, 파일 근거·선언 근거 무시, 원소 읽기 무시) |
+| SF3: 서로 부르는 도우미에서 계승 비용(도우미 9개 5.3초, 10개 41.9초) | 고침: 바인딩 근거를 Tarjan 강연결 요소로 재귀 없이 구해 요소의 근거를 합치고 모두 메모한다. 서로 부르기만 하는 도우미는 접두사를 지키고, 순환 어디서든 흘려보내면 순환 전체가 모름이다. 사용 자리는 바인딩마다 한 번만 분류한다 | 테스트 "서로 부르는 도우미의 매개변수는 순환을 한 번에 묶어 …"(살펴본 사용 수 2k(k-1)+2: 6개 62, 8개 114, 결정적), "순환 안의 한 도우미가 …"(두 도우미, 세 도우미 순환 가운데로 들어간 둘째 플러그인). 앞 것은 `db64014`에서 실패. 변이: 요소 합을 뿌리 근거만 씀 1, low 전파 끔 1 |
+| nit 1: 긴 도우미 사슬(3,000~4,500개)에서 호출 스택을 넘겨 "nests too deeply"로 종료 2 | 위 Tarjan이 재귀 없이 돌아 사슬 길이와 상관없다. 깊이 상한을 두지 않아 사슬 끝까지 따라가 실제와 같은 `/u/x`를 낸다 | 테스트 "매개변수를 넘기기만 하는 도우미 사슬이 길어도 …"(6,000개), `db64014`에서 실패. 리뷰어 chain4500·chain6000은 `db64014` 종료 2 → `/u/x` |
+| nit 2: A3 — 운영 코드가 부수 효과로 불러오는 `setup/test/mark.ts`의 쓰기를 버려 `/u/x`(실제 `/x`) | 고침: 해석 대상 파일에서 값을 불러오는 문자열 지정자(import·export·`import x = require()`·`require()`·`import()`, 타입 전용 제외)를 따라 닿는 파일은 해석 대상에서 빠졌어도 근거를 쓴다. 테스트 경로 파일이라 많아야 모름이다. 테스트 파일만 불러오면 그대로 버린다 | 테스트 "운영 코드가 불러오는 테스트 디렉터리 파일 …"(운영 import → dynamic, 테스트 파일 import·없음 → `/u/x`), `db64014`에서 실패. 변이: 불러오는 파일 무시 1, 그 `'yes'`를 줄이지 않음 1, 해석 대상 밖에서 따라가기 시작 1 |
+| nit 3: 문서·PR이 실제 동작과 맞아야 함(순환·비용 한계 포함) | CHANGELOG·NODE-ROUTES·PR 초안을 새 규칙, 비용(살펴본 사용 수에 선형인 범위와 모듈 객체의 추가 근거), 정밀도 비용, 남은 한계로 다시 썼다. PR의 "등록 수에 선형이다"는 측정한 범위로 고쳤다 | — |
+
+- 바뀐 출력(`db64014` 대비): 리뷰어 fixture 112개 중 a3·b1·b2·b3·p1·p2(`/u/x` → dynamic, 실제 `/x`), chain4500·chain6000(종료 2 → `/u/x`)의 8개가
+  바뀌고 104개는 같다(p6·p10의 `/u/x`, b4의 `/x`, b0·h1~h3·p3~p5·p7~p9·p11·p12의 dynamic 유지). 반영용 22개·새 fixture 9개·적대 입력 60개, 실제
+  프로젝트 여섯 개(fastify/demo·fastify-example-todo·fastify-example-twitter·yonathan06/fastify-typescript-starter를 다시 받아 돌림,
+  `fixtures/node/fastify4-app`·`fastify5-app`)는 `generatedAt` 밖 출력이 같다.
+- 근거 줄이기: 모듈 객체 근거는 흘러간 자리의 파일마다 두면 같은 배럴을 파일 M개가 흘려보낼 때 내보낸 값 N개 × M이 된다(N=M=2,000에서 5.1초,
+  `db64014` 3.3초). 근거가 모두 `'unknown'`이라 판정에 늘 세는 파일(해석 대상, 그것이 불러오는 파일)은 하나만 남겨도 판정이 같으므로 하나로 줄였다
+  (3.3초). 그 밖의 파일을 남기는 분기는 살아남는 변이가 있다: 늘 보는 파일인데 해석 대상이 불러오지 않는 파일은 해석기가 닿지 않아 실제로 생기지
+  않는다. 이 배럴 모양에서 `db64014`는 정적 사실 4,000개(실제로는 모두 접두사 없음, 거짓)를 냈다.
+- 비용(wall/CPU user, 공유 4코어 load 1~2, 새 head는 두 번 잰 범위): 리뷰어 perf1·perf2·perf3 `db64014` 3.7/6.0·4.0/6.3·4.7/7.5초, 새 head
+  3.7~4.0/5.9~6.4·4.0~4.3/6.4~6.8·4.4~4.7/7.3~7.8초. 같은 이름 바인딩 적대 모양(`perf/gen3.mjs`) N=1,500은 3.4/5.4초와 3.4/5.6초, N=3,000은
+  5.3/7.9초와 5.2~5.6/7.8~8.6초. 서로 모두 부르는 도우미 8·9·10개는 `db64014` 1.9·5.2·39.4초, 새 head 1.4초 안팎(고정). 도우미 사슬 3,000개는
+  1.8초와 1.6초, 6,000개는 `db64014` 종료 2와 1.6~2.0초. 배럴 모양(`perf/gen4.mjs`, N=M=2,000)은 `db64014` 3.3초, 새 head 3.3~3.9초.
+- 변이 23종 중 21종이 잡힌다(위 표 밖: 근거를 하나로 줄이며 늘 세는 자리까지 버림 1, JS 파일의 `require()` 구조 분해를 흘러감으로 봄 1). 살아남는
+  둘(`const` 검사 제거, 늘 세지 않는 자리 버리기)은 위의 이유로 출력이 같은 변이다.
+- 정밀도 비용(문서에 적음): 메서드·`let`·다시 대입하는 함수에 넘긴 바인딩, 흘러간 모듈 객체가 내보낸 플러그인 전부(다시 내보낸 네임스페이스 안을
+  건드리지 않는 함수여도), TS 파일의 `const { a } = require('./x')`와 CommonJS 재내보내기(`exports.P = require('./x')`·`module.exports =
+  require('./x')`, 아무도 넘기지 않아도)가 가리키는 모듈의 플러그인은 실제로 건너뛰지 않아도 dynamic이다. 받는 쪽에서 그 이름이 모듈 객체인지
+  TypeScript가 잇지 않아(`exports.P`는 별칭이 아닌 속성 심볼이다, 확인함) 내보내는 자리를 흘러감으로 봤다.
+- 남은 한계(문서에 적음): 문자열 리터럴이 아닌 `require(x)`·`import(x)`는 따라가지 않는다(그 결과가 흘러가는 것도, 그것으로만 불러오는 테스트 경로
+  파일의 쓰기도 보지 않는다). 해석기도 그 모듈의 등록을 따라가지 않지만 같은 플러그인을 정적으로 불러와 등록하면 놓친다.
+- 위 "PR #62 재확인 리뷰 반영" 절의 남은 한계 두 줄(테스트 경로의 그 밖의 운영 코드, `export { P }`를 받은 쪽)은 이 반영으로 닫혔다.
+
+### PR #62 최종 확인 반영 (2026-11-25, `61b4b63` 위)
+
+최종 확인은 막는 문제·비용 절벽 없이 Tarjan 합치기(요소 사이 간선, 메모 재사용), 선언 하나 규칙(p1·p2·q7·q8 dynamic, p6·p10 정적), 모듈 펼치기
+(b1~b3, q2 `export default NS`, q3 순환 배럴)를 확인했고 작은 거짓 사실 둘을 냈다. 반영하며 같은 갈래의 거짓 사실 하나를 더 찾아 고쳤다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| 1(q6): 내보낸 `const` 별칭이 네임스페이스로 흘러가도 못 봄 — `plugins.ts`의 `export const handle = users`, `mount(app)`가 `register(users, { prefix: '/u' })`, `app.ts`의 `markAll(P)`(P = 그 네임스페이스)가 `/u/x`(실제 `/x`). `evidenceOf`가 `users → handle`을 따라가지만 `handle`의 흘러간 내보내기 근거를 보지 않았다 | 고침: Tarjan의 `open(symbol)`이 그 바인딩의 흘러간 내보내기 근거(`mergeEscapedExports`: 내보낸 심볼, 내보낸 선언 안, 심볼 없는 모듈 파일)를 그 바인딩의 근거에 더해, 요소 합치기로 플러그인까지 돌아온다 | 테스트 "따라간 const 별칭이 흘러간 모듈 객체로 내보내지면 …"(`markAll(P)` dynamic, 점 접근만 하면 `/u/x`), `61b4b63`에서 실패. 변이: `open`에서 근거를 더하지 않음 1 |
+| 2(q1): 태그 붙은 템플릿의 보간을 무해로 봄 — ``tag`${users}` ``(패키지 태그 함수) 뒤 `register(users, { prefix: '/u' })`가 `/u/x`(실제 `/x`) | 고침: `mayChangeBinding`이 `TemplateSpan`을 태그 붙은 템플릿 안이면 흘러감(태그 함수 인자 → 모름), 태그 없는 템플릿이면 무해로 본다 | 테스트 "태그 붙은 템플릿의 보간은 …"(태그 붙음 dynamic, `` console.log(`${users}`) ``는 `/u/x`), `61b4b63`에서 실패. 변이: 태그 붙은 쪽을 무해로 봄 1, 태그 없는 쪽을 흘러감으로 봄 1 |
+| 더 찾은 것: TS 파일의 CommonJS 내보내기 — `re.ts`의 `exports.handle = users`를 `markAll(require('./re.ts'))`로 넘기면 `/u/x`(실제 `/x`, `.cts`로 실행해 확인) | 고침: TypeScript는 TS 파일의 `exports.a = x`·`module.exports = x`를 내보내기로 묶지 않아 모듈 객체에서 그 바인딩에 닿는 길을 모르므로, TS 파일에서는 그 대입을 흘러감으로 본다(JS 파일은 별칭으로 묶여 지금처럼 모듈 객체가 흘러갈 때만 모름) | 테스트 "TS 파일에서 CommonJS 내보내기에 대입한 바인딩은 …", `61b4b63`에서 실패. 변이: TS 파일도 무해로 봄 1, JS 파일도 흘러감으로 봄 1 |
+| 문서 | NODE-ROUTES·CHANGELOG의 흘러가지 않는 자리에 태그 없는 템플릿 보간을 넣고 태그 붙은 보간은 흘러감으로 적었다. 따라간 별칭의 모듈 객체 근거, TS 파일 CommonJS 내보내기의 정밀도 비용을 적었다 | — |
+
+- 바뀐 출력(`61b4b63` 대비): 리뷰어 fixture 120개 중 q1-tagged·q6-alias-export만 `/u/x` → dynamic(실제 `/x`)으로 바뀌고 118개는 같다. 반영용
+  22개·재확인 fixture 9개·적대 입력 60개·`fixtures/node/fastify4-app`·`fastify5-app`도 같다.
+- 비용(wall/CPU user, load 1~2): perf3 `61b4b63` 4.9/7.7초·새 head 4.7/7.7초, 도우미 순환 9·10개 1.6초·1.5초와 1.4초·1.3초.
+- 변이: 앞 절의 23종에 다섯을 더한 28종 중 26종이 잡힌다(살아남는 둘은 앞 절과 같다).
+- 알려진 한계(거짓 사실이 날 수 있는 길, 문서에 적음): 문자열 리터럴이 아닌 `require(x)`·`import(x)`(앞 절에서 이미 밝힘). 값을 넘기는 것처럼 보이지
+  않는 숨은 호출 — `users instanceof C`가 부르는 `C[Symbol.hasInstance](users)`, 느슨한 `==`·`+`·태그 없는 템플릿이 부르는 변환 메서드
+  (`users == 1`은 users의 `Symbol.toPrimitive`·`valueOf`를, `` `${users}` ``는 `toString`을 users를 `this`로 해 부른다), getter·Proxy처럼 문법에
+  드러나지 않는 호출은 비교·판정·문자열 자리로 보아 무해로 센다. 그 메서드가 `this[키] = …`로 쓰면 이름으로 잇지 못한 대상의 쓰기라 모든
+  플러그인이 모름이 되지만, `this`를 다른 함수에 넘기면 놓친다. 짜맞춘 모양이라 실제 코드에서 드물다고 보고 남겼다.
+
+### 이번에 살펴보고 남긴 것 (5회차)
+
+| 항목 | 이유 |
+|---|---|
+| `fp(fn, { encapsulate: true })`는 실제로 접두사를 붙이는데(`/encap/enc`) tsograph는 `GET root /enc`(거짓)를 낸다 | `main`부터 있던 문제다(리뷰가 범위 밖으로 정함). `fastify-plugin` 옵션 해석을 더하는 후속 수정이다. |
+| `d.after(() => addUsers(d))`나 `for (const h of hooks) h(c)`로 부른 `FastifyInstance` 도우미의 라우트가 한계 없이 빠진다 | `main`부터 있던 해석기 한계다(리뷰가 범위 밖으로 정함). 콜백·반복으로 부른 함수를 걷거나 한계로 세는 설계가 필요하다. |
+| 앱을 받은 도우미가 앱을 다른 도우미에 다시 넘겨 등록하면(`mountUsers(app, users)` → `inner(app, plugin)` → `app.register(plugin, …)`) 사실도 한계도 없다 | `e381053`·`60553ce`·새 head가 같다(재확인 반영 중 확인한 기존 해석기 한계). 위 항목과 같은 설계 문제다. |
+| 도우미 매개변수로 받은 접두사(`mount(app, users, '/users')` → `register(plugin, { prefix })`)는 dynamic이다 | `e381053`부터 같은 기존 동작(리뷰어 s7-helper). 매개변수 값을 접두사로 푸는 해석기 개선이다. |
+| 주 버전을 모르고 `ignoreDuplicateSlashes`가 버전마다 다르면 `/a//b` 같은 리터럴 경로는 겹친 `/`를 줄이지 않은 채 정적 사실이다 | 모르는 옵션 값을 끈 것으로 컴파일하는 기존 규칙(`Fastify(opts)`의 모르는 옵션과 같다)이다. 줄이는 버전에서도 그 요청은 줄인 경로로 받아지므로 거짓 사실은 아니다. |
+| 타입 없는 JavaScript 플러그인(`module.exports = async function (fastify, opts) { fastify.get(…) }`, fastify-cli JS 템플릿·fastify-example-twitter·fastify-example-todo)과 `FastifyPluginAsync`로 문맥 타입만 받은 매개변수, JSDoc `@param {import('fastify').FastifyInstance}`는 라우터로 보지 않아 사실 0개·limitation 0개다 | 받는 쪽을 증명하지 못하는 호출을 사실로 낼지, 새 limitation(증명하지 못한 수신자의 등록 모양 호출 수)으로 알릴지는 설계 결정이다. 수신자 판정을 넓히면 거짓 decl이 생길 수 있어 반례 corpus가 필요하다. |
+| 타입으로만 아는 루트 자신의 `get('/')`은 바깥 접두사가 비어 있지 않으면 `<바깥>`과 `<바깥>/` 둘로 등록되는데 `/` base 하나만 낸다 | 참인 사실이고(`<바깥>/`은 늘 있다) 빠진 `<바깥>`은 `unresolved-route-prefix:`가 덮는다. 바깥 접두사가 비었는지 모르므로 `<바깥>`을 따로 낼 근거가 없다. |
+| SQL `DELETE FROM a USING b`·`MERGE INTO t USING s`의 `b`·`s`가 relation-use로 나오지 않는다(한계도 없다) | 계열이 공유하는 lexical 추출기(dartograph·cartograph 포트, 공유 벡터)의 규칙이라 교차 저장소 계약 변경이다. |
+| `reach --max-depth -1`이 "unknown, repeated, or empty option"을 낸다(`-`로 시작하는 값은 값으로 받지 않는 파서 규칙) | 종료 코드 64는 맞고 문구만 덜 정확하다. 파서 공통 규칙이라 이번 범위 밖에 두었다. |
+| 문자열 리터럴이 아닌 `require(x)`·`import(x)`의 결과가 흘러가거나 그것으로만 테스트 경로 파일을 불러오면 skip-override 근거를 보지 않는다 | 어느 모듈인지 모르면 모든 플러그인을 모름으로 봐야 하는데, 설정 로더(`require(configPath)`)처럼 흔한 모양이 프로젝트 전체를 dynamic으로 만든다. 해석기도 그 모듈을 따라가지 않으므로 같은 플러그인을 정적으로도 등록할 때만 생기는 누락이라 문서에 남겼다. |
+| 다시 내보낸 네임스페이스를 통째로 넘기면(`markAll(All)`, `All`이 `export * as R`을 담음) 한 겹만 보는 함수여도 그 안의 플러그인이 dynamic이다 | 받은 함수가 얼마나 깊이 걷는지 모른다. 건전한 쪽을 택했다(실제 `markAll`은 한 겹이라 `/u/x`). |
+| `users instanceof C`(`C[Symbol.hasInstance]`가 users를 받음)·getter·Proxy처럼 문법에 드러나지 않는 호출로 플러그인이 넘어가면 skip-override 근거를 보지 않는다 | 비교·판정 자리를 모두 흘러감으로 보면 `if (plugin)`·`plugin === x` 같은 흔한 자리가 전부 dynamic이 된다. 짜맞춘 모양이라 알려진 한계로 남겼다(최종 확인 반영 절). |
+| 4회차에 남긴 항목(`import type` 재내보내기 alias 간선, `import * as ns; export { ns }`, 산출물끼리만의 import 판정, 설정 루트 공백 반복 등) | 4회차 표의 이유 그대로다. |
 
 ## limitation 문장 정확성: 타입 전용 export 별칭·산출물끼리의 import·합친 설정 이름 (2026-11-22, 4회차)
 
@@ -359,10 +563,10 @@
 | 문맥이 다른 패키지 사이 산출물 import | 여전히 `config-context-boundary:`로 미해결이다. 문맥을 넘는 간선은 별도 설계다. |
 | routes·schema·navigation의 산출물 되짚기 | graph 문맥 Program에만 적용했다. |
 
-## 다음 할 일 (4회차 이후)
+## 다음 할 일 (5회차 이후)
 
-0. 브랜치 `ccr-37904670-hxdjsx`의 4회차 커밋을 push해 PR로 올리고 CI(특히 전체 `npm test`·Git 2.45 경로·macOS·Windows)와 리뷰를 받는다.
-1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사·문장)이 있으므로 마이너로 올린다.
+0. 브랜치 `ccr-37904670-hxdjsx`의 5회차 커밋을 push해 PR로 올리고 CI(특히 전체 `npm test`·Git 2.45 경로·macOS·Windows)와 리뷰를 받는다.
+1. 0.12.0 릴리스. 출력이 바뀌는 변경(새 direct 간선, bound→candidate, 새 limitation 접두사·문장, Fastify base 접두사)이 있으므로 마이너로 올린다.
    이전 릴리스 커밋(`chore(release): prepare tsograph 0.11.0`)처럼 `package.json`·`package-lock.json`·CHANGELOG를 함께 바꾼다.
 2. isthmus에 게시본 검증과 `compatibility.json` 핀 갱신을 요청한다(isthmus 저장소의 일).
 3. 위 제외·남긴 항목 중 사용자가 고른 것.

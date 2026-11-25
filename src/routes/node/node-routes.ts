@@ -89,7 +89,7 @@ function extractNodeContext(input: NodeRoutesInput, frameworks: DetectedFramewor
   if (frameworks.hono !== undefined) results.push(flattenHono(project, interpretation.instances, interpretation.events, budget));
   if (frameworks.express !== undefined) results.push(flattenExpress(project, interpretation.instances, interpretation.events, frameworks.express.major, budget));
   if (frameworks.koa !== undefined) results.push(flattenKoa(project, interpretation.instances, interpretation.events, frameworks.koa.routerMajor, budget));
-  if (frameworks.fastify !== undefined) results.push(flattenFastify(project, interpretation.instances, interpretation.events));
+  if (frameworks.fastify !== undefined) results.push(flattenFastify(project, interpretation.instances, interpretation.events, frameworks.fastify.major));
   if (frameworks.nest !== undefined) results.push(...extractNestRoutes(project, frameworks.nest, includeFile));
   const syntaxErrorFiles = [...project.files].filter(([path, sourceFile]) => includeFile(path) && hasParseErrors(sourceFile)).length;
   const deeplyNestedFiles = project.deeplyNestedFiles.filter(includeFile).length;
