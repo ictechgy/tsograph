@@ -12,7 +12,8 @@
   `gh api …/check-runs`로 확인). 네 PR의 변경은 모두 CHANGELOG `[Unreleased]`에 있고 아직 발행하지 않았다.
 - 2026-11-25 5회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `2dac50e`에서 다시 시작해 Fastify 플러그인 접두사 이음 두 가지(아래 절)를
   고쳐 PR #62(`36491b4`·`e381053`, 조정자가 push)로 올렸다. 독립 리뷰의 should-fix 둘(`routerOptions` 주 버전, 직접 쓴 skip-override)과 nit 둘을
-  그 위 커밋으로 반영했고(아래 "PR #62 독립 리뷰 반영"), 반영 커밋은 push 전이다(조정자가 올린다).
+  `ae729b0`·`60553ce`로 반영했고(아래 "PR #62 독립 리뷰 반영"), 재확인 리뷰의 should-fix 넷(A~D)과 nit 넷을 그 위 커밋으로 반영했다(아래 "PR #62
+  재확인 리뷰 반영"). 재확인 반영 커밋은 push 전이다(조정자가 올린다).
 
 ## Fastify 플러그인 접두사 이음 (2026-11-25, 5회차)
 
@@ -67,23 +68,23 @@
 
 ### 5회차 검증
 
-리뷰 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 8~11). 첫 커밋 때의 결과는 아래 괄호.
+재확인 리뷰 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 1~4).
 
 - `npx tsc --noEmit` 통과.
-- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(11분 57초): 1,834개 중 1,810 통과·23 skip·1 실패. 실패는 `relation-facts`의
-  `chmod 000`(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.70%·분기 91.64%·함수 98.24%(90% 게이트 통과), `fastify-adapter.ts`
-  100/90.95/97.14, 새 `fastify-skip-override.ts` 99.79/90.76/100. (첫 커밋: 40분 54초, load 20~32에서 부하 timeout 넷이 더 실패했고 따로 다시 돌려
-  통과했다. `fastify-adapter.ts` 100/90.87/96.88, Fastify 테스트만 돌린 비교에서 `main` 100/89.13/96.55.) 12분 상한 `npm test`는 단계별로 돌렸다.
+- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(6분 6초): 1,840개 중 1,816 통과·23 skip·1 실패. 실패는 `relation-facts`의
+  `chmod 000`(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.70%·분기 91.70%·함수 98.18%(90% 게이트 통과), `fastify-adapter.ts`
+  100/91.95/97.14, `fastify-skip-override.ts` 98.52/90.66/95.71(그 뒤 더한 네임스페이스 컨테이너 테스트가 남은 미실행 줄 `exportedFrom`의 최상위
+  선언 경로를 덮는다; Fastify 테스트 세 파일 47/47 통과). 앞 회차들: 첫 커밋 40분 54초(load 20~32, 부하 timeout 넷은 따로 다시 돌려 통과), 첫 리뷰
+  반영 11분 57초(실패 1, 같은 환경 문제).
 - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
 - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus `4a3e99d`).
-- 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `2dac50e` worktree에 돌린 결과는 `2dac50e` 분석기 결과와 stdout·stderr
-  바이트가 같다. 이 head 트리와의 노드·간선 차이는 바뀐 다섯 파일(`fastify-adapter.ts`·그 테스트·`fastify-skip-override.ts`·`node-routes.ts`·
-  `router-interpreter.ts`) 안뿐이다(노드 10,306 → 10,362, 간선 14,999 → 15,110, 바뀐 파일을 건드리지 않는 노드·간선 변화 0). 합계 줄은 새 코드의
-  호출만큼 바뀐다(bound 742 → 743, candidate 213 → 214, `unresolved-calls` 4,557 → 4,560). 그 밖의 limitation 차이는 worktree의 `node_modules`
-  symlink 때문에 생기는 `skipped-symlinks: 1`·문맥별 `effect-inventory` 줄뿐이다(지난 회차와 같은 현상).
+- 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `60553ce` worktree에 돌린 결과는 `60553ce` 분석기 결과와 stdout·stderr
+  바이트가 같다(첫 리뷰 반영 때는 `2dac50e`와 같은 비교를 했다). 이 head 트리와의 노드·간선 차이는 이번에 바뀐 네 파일(`fastify-skip-override.ts`·
+  그 테스트·`fastify-adapter.ts`·그 테스트) 안뿐이다(노드 10,362 → 10,420, 간선 15,110 → 15,224, 바뀐 파일을 건드리지 않는 변화 0, bound 743 → 742·
+  `unresolved-calls` 4,560 → 4,564는 새 코드의 호출). 그 밖의 limitation 차이는 worktree의 `node_modules` symlink 때문에 생기는 줄뿐이다.
 - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
-  재실행(스크래치 디렉터리 권한을 넓히지 않으려고 하지 않았다), 저장소 오라클(`experiments/node-routes-oracle`) 재기록(fixture를 바꾸지 않았다;
-  대신 scratch와 리뷰어 하네스에 설치한 fastify 4.29.1·5.12.5·5.12.8로 위 모양을 직접 실행했다).
+  재실행, 저장소 오라클(`experiments/node-routes-oracle`) 재기록(fixture를 바꾸지 않았다; 대신 scratch와 리뷰어 하네스에 설치한 fastify 4.29.1·
+  5.12.5·5.12.8로 위 모양을 직접 실행했다).
 
 ### PR #62 독립 리뷰 반영 (2026-11-25, `e381053` 위)
 
@@ -102,9 +103,38 @@
   최상위 옵션 6개·`routerOptions` 5 둘·무해한 속성 쓰기(`autoPrefix`·`'meta'`)는 같다. 실제로 건너뛰지 않는
   `export const registry = { users }`처럼 흘러간 바인딩은 dynamic이 된다(건전하지만 덜 정밀).
 - 5회차 적대 입력 60개와 실제 프로젝트 여섯 개는 `e381053`과 출력이 같다.
-- 비용: census는 해석 대상 파일을 한 번 걷고(Fastify `register()`가 프로젝트 함수를 걸을 때만, 문맥마다 한 번) import 지역 이름은 심볼별 색인을
-  한 번 만든다. 합성 앱(플러그인 N개를 접두사로 등록, 파일 2N개)의 CPU user 시간은 N=600에서 `e381053` 3.8~4.3초·새 head 4.4~4.5초, N=2400에서
-  7.0~7.1초·6.4~8.3초다(공유 4코어 load 8~11, 두 번씩). 크기를 4배로 늘려도 차이가 4배를 넘지 않는다.
+- 비용(이 시점, 무해한 모양만 쟀다): 합성 앱(플러그인 N개를 접두사로 등록, 파일 2N개)의 CPU user 시간은 N=600에서 `e381053` 3.8~4.3초·
+  `60553ce` 4.4~4.5초, N=2400에서 7.0~7.1초·6.4~8.3초. 같은 이름 바인딩이 많은 적대 모양은 재확인 리뷰 D에서 이차로 드러났다(아래 절).
+- 이 절의 판정 규칙 일부(해석 대상 파일만 보기, 이름으로 풀 수 없는 대상의 리터럴 키만 전역으로 보기, 흘러간 바인딩은 모두 모름)는 재확인
+  리뷰에서 바뀌었다(아래 "PR #62 재확인 리뷰 반영").
+
+### PR #62 재확인 리뷰 반영 (2026-11-25, `60553ce` 위)
+
+재확인 리뷰는 SF1을 완결로 확인했고 SF2에서 should-fix 넷과 nit 넷을 냈다. 새 fixture 9개(`scratchpad/r5-tsograph/rv2/mk.mjs`)와 리뷰어 fixture 83개
+(`r5-review-tsograph/fx`, 실제 fastify 4.29.1·5.12.8 하네스)를 `60553ce`·새 head에 돌렸다(아래 표의 "실제"는 실제 등록 경로).
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| A: 해석 대상에서 빠지는 테스트 경로 규칙(`test/`·`tests/`·`e2e/`·`__mocks__/`) 파일의 쓰기를 못 봄 — `src/routes/test/index.ts`가 자기 플러그인에 skip-override를 써도 `/test/ping`(실제 `/ping`) | 고침: census가 프로젝트 파일을 모두 걷고 근거를 파일별로 둔다. 판정할 때 등록 호출·플러그인 함수·등록 인자에서 따라간 바인딩의 선언이 있는 파일은 늘 쓰고, 그 밖에는 해석 대상 파일만 쓴다 | 테스트 "해석에서 빼는 테스트 디렉터리 이름이어도 …", `60553ce`에서 실패. 변이: 늘 쓰는 파일을 무시 1 |
+| B: 이름이 아닌 대상의 `const` 키 쓰기를 못 봄 — `plugins.users[SKIP] = true`·`P.users[SKIP] = true`가 `/u/x`(실제 `/x`) | 고침: 속성 접근도 바인딩 사용으로 세어 속성 심볼(객체 리터럴 속성, 네임스페이스로 가져온 내보내기)의 근거로 둔다(`plugins.users` 등록 인자의 사슬에 그 심볼이 있다). 값의 출처를 따라가지 않는 대상(매개변수·반복 변수·구조 분해·원소 접근·호출 결과)에 skip-override 키(리터럴·`const`)를 쓰면 모든 플러그인이 모름이다. 모듈 객체(네임스페이스·`require()`·`import()`·`module.exports`)가 흘러가거나 원소로 읽히거나 그 아래에 계산된 키로 쓰이면 그 모듈이 내보낸 플러그인이 모름이다(`Object.values(P)` 반복) | 테스트 "const 키·네임스페이스 속성에 쓴 …"(고정된 속성 둘은 실제처럼 접두사 없음, 반복 변수·매개변수 대상은 모름)와 "require() 모듈 객체가 흘러가면 …"(점 접근만 하면 그대로, `Object.keys(mod)`·`require()[k]` 읽기면 그 모듈이 내보낸 플러그인만 모름, 같은 파일의 내보내지 않은 함수는 그대로), 둘 다 `60553ce`에서 실패. 변이: 속성 대상을 바인딩으로 잇지 않음 2, 모든 바인딩을 값이 정해진 것으로 봄 1, 속성 사용을 세지 않음 1, 모듈 객체 사용 무시 1, 내보낸 바인딩을 못 알아봄 1, 대입 왼쪽을 흐름으로 봄 1 |
+| C: `--include-tests`에서 테스트 전용 코드가 운영 사실을 바꿈 — `src/users.test.ts`의 `fp(users)`로 운영 등록이 `/`·`/{}`(실제 `/users/:id`, 새 거짓 사실) | 고침: 테스트 소스에 있지 않은 등록에 대해 (늘 쓰는 파일이 아닌) 테스트 소스의 근거는 많아야 모름이다. 기본 실행에서는 테스트 소스가 해석 대상이 아니라 쓰지 않는다 | 테스트 "--include-tests의 테스트 소스는 …"(기본 실행은 `/users/{}`, `--include-tests`는 dynamic), `60553ce`에서 실패. 변이: 테스트 근거를 깎지 않음 1 |
+| D: 이차 비용 — 등록마다 같은 이름의 모든 사용을 훑음(플러그인 3,000개 `plugin` 이름에서 6.7초 → 48.6초) | 고침: 이름별 사용을 심볼별로 한 번 묶고(첫 질의 때), 바인딩별 근거를 메모한다(`const` 별칭·매개변수를 따라가며 순환을 만나면 그 경로의 부분 결과는 메모하지 않는다) | `fastify-skip-override.test.ts`: 살펴본 사용 수가 플러그인 수에 선형(20개 → 320, 60개 → 960, 등록 둘씩)인지 결정적으로 본다. `60553ce`에서 실패(내보낸 계수 없음). 변이: 근거 메모 끔 1, 이름 묶기 메모 끔 1. 측정은 아래 |
+| nit 1: 흘러간 바인딩의 정밀도 손실 — 도우미 `mountUsers(app, users)`(리터럴 접두사로 등록)가 dynamic, s4의 세 플러그인(객체·`console.log`·배열) | 일부 반영: 프로젝트 함수의 매개변수 자리는 그 매개변수의 사용을 따라 보고(본문이 `arguments`를 읽거나 나머지 매개변수·펼친 인자면 모름), `console.*` 인자는 바꾸지 않음으로 본다. `&&`·쉼표의 왼쪽은 흘러가지 않는다(함수 값은 참). 제안된 프로젝트 전체 게이트(skip-override·모르는 키·추적하지 않는 `fp()` 쓰기가 프로젝트에 없으면 흘러감을 무시)는 건전하지 않아 넣지 않았다: 바인딩을 받은 패키지 함수(예: `fastify-plugin`을 감싼 사내 패키지)나 그 바인딩을 다시 패키지로 넘기는 프로젝트 함수가 심볼을 쓸 수 있는데 그런 코드는 프로젝트 안에 쓰기로 나타나지 않는다. 객체·배열·다른 변수·패키지 함수로 흘러간 바인딩은 여전히 dynamic이고 비용을 문서에 적었다 | 테스트 "프로젝트 함수 매개변수로 넘긴 …"(도우미·두 단계 도우미·재귀·console은 접두사 유지, 저장·나머지 매개변수·`arguments`는 모름), `60553ce`에서 실패. 변이: 매개변수를 따라가지 않음 1, console을 무해로 보지 않음 1, `arguments` 무시 1, `&&` 왼쪽을 흐름으로 봄 1 |
+| nit 2: `--include-tests`의 테스트 도우미(`build(users)`)가 운영 사실을 dynamic으로 만듦 | 매개변수 따라가기로 해결: 리뷰어 s8-tests(`build(p)`가 등록만 함)는 `--include-tests`에서도 `/users/{}`. 테스트 소스가 바인딩을 패키지 함수나 저장소로 넘기면 C 규칙대로 모름(dynamic)이다 | 테스트 "프로젝트 함수 매개변수로 넘긴 …", 리뷰어 s8-tests |
+| nit 3: 주 버전 모름에서 두 위치의 `caseSensitive`가 다르면 "모름"이라 썼지만 `caseInsensitive`는 생략되어 대소문자 구분으로 읽힘 | 문구를 고침(CHANGELOG·NODE-ROUTES): `trailingSlash`만 모름을 표현하고, 증명했을 때만 싣는 `caseInsensitive`는 싣지 않아 대소문자 구분으로 읽힌다(대소문자만 다른 호출은 isthmus `route-case-mismatch` 경고) | — |
+| nit 4: SF2 문서가 실제보다 넓게 말함("해석 대상 파일", 증명 못 하면 모름) | 문서를 실제 규칙대로 다시 썼다(CHANGELOG·NODE-ROUTES·이 절): 근거를 모으는 파일, 건너뜀·모름의 조건, 정밀도 비용, 남은 한계 | — |
+
+- 바뀐 출력(`60553ce` 대비): 리뷰어 fixture 83개 중 s1-testdir(`/ping`), s2-prop-constkey(`/x`), s4-escape(`console.log`로 넘긴 orders가 `/orders/{}`),
+  s9-helper-literal(`/users/{}`)이 실제 쪽으로 바뀌고 79개는 같다(`--include-tests`로 돌린 s8-tests는 dynamic → `/users/{}`, s10-test-fp는 `/`·`/{}` →
+  dynamic). 새 fixture 9개 중 a1·b1·b2(실제처럼 접두사 없음), b3(`Object.values(P)` 반복 → dynamic), n1(도우미 → `/users/{}`, s4의 console 인자 →
+  접두사 유지)가 바뀌었다. 5회차 적대 입력 60개, 반영용 22개, 실제 프로젝트 여섯 개는 `60553ce`와 같다.
+- 비용(공유 4코어 load 1~4, wall/CPU user): 같은 이름 `plugin` 바인딩 N개를 31번씩 흘려보내는 적대 모양(`scratchpad/r5-tsograph/perf/gen3.mjs`)은
+  N=1,500에서 `e381053` 3.5초/5.2초 · `60553ce` 10.5~10.7초/12.3~12.5초 · 새 head 3.5초/6.1초, N=3,000에서 5.1초/7.1초 · 34.2~41.1초/36.9~42.8초 ·
+  5.3초/8.2초다. 리뷰어 perf1(1,500개)·perf3(3,000개)은 `e381053` 4.5초·5.1초, `60553ce` 11.3초·35.4초, 새 head 3.8초·5.1초, 무해한 perf2는 5.1초·
+  5.2초·4.2초다. perf3은 `&&` 왼쪽을 흘러감으로 보지 않게 되어 `60553ce`의 dynamic 사실 6,000개가 `e381053`처럼 정적 사실 12,000개로 돌아왔다.
+  perf1은 바인딩을 받은 프로젝트 함수(`tag(x) { return x; }`)가 그 값을 반환해(반환은 흘러감) 여전히 dynamic 15,000개다.
+- 남은 한계(문서에 적음): 테스트 경로 규칙에 걸린 파일 중 등록·플러그인·바인딩 선언 파일이 아닌 운영 코드의 쓰기는 기본 실행에서 보지 않는다.
+  이름으로 다시 내보낸 모듈 네임스페이스(`export { P }`)를 받은 쪽의 동적 접근은 따라가지 않는다.
 
 ### 이번에 살펴보고 남긴 것 (5회차)
 
@@ -112,6 +142,8 @@
 |---|---|
 | `fp(fn, { encapsulate: true })`는 실제로 접두사를 붙이는데(`/encap/enc`) tsograph는 `GET root /enc`(거짓)를 낸다 | `main`부터 있던 문제다(리뷰가 범위 밖으로 정함). `fastify-plugin` 옵션 해석을 더하는 후속 수정이다. |
 | `d.after(() => addUsers(d))`나 `for (const h of hooks) h(c)`로 부른 `FastifyInstance` 도우미의 라우트가 한계 없이 빠진다 | `main`부터 있던 해석기 한계다(리뷰가 범위 밖으로 정함). 콜백·반복으로 부른 함수를 걷거나 한계로 세는 설계가 필요하다. |
+| 앱을 받은 도우미가 앱을 다른 도우미에 다시 넘겨 등록하면(`mountUsers(app, users)` → `inner(app, plugin)` → `app.register(plugin, …)`) 사실도 한계도 없다 | `e381053`·`60553ce`·새 head가 같다(재확인 반영 중 확인한 기존 해석기 한계). 위 항목과 같은 설계 문제다. |
+| 도우미 매개변수로 받은 접두사(`mount(app, users, '/users')` → `register(plugin, { prefix })`)는 dynamic이다 | `e381053`부터 같은 기존 동작(리뷰어 s7-helper). 매개변수 값을 접두사로 푸는 해석기 개선이다. |
 | 주 버전을 모르고 `ignoreDuplicateSlashes`가 버전마다 다르면 `/a//b` 같은 리터럴 경로는 겹친 `/`를 줄이지 않은 채 정적 사실이다 | 모르는 옵션 값을 끈 것으로 컴파일하는 기존 규칙(`Fastify(opts)`의 모르는 옵션과 같다)이다. 줄이는 버전에서도 그 요청은 줄인 경로로 받아지므로 거짓 사실은 아니다. |
 | 타입 없는 JavaScript 플러그인(`module.exports = async function (fastify, opts) { fastify.get(…) }`, fastify-cli JS 템플릿·fastify-example-twitter·fastify-example-todo)과 `FastifyPluginAsync`로 문맥 타입만 받은 매개변수, JSDoc `@param {import('fastify').FastifyInstance}`는 라우터로 보지 않아 사실 0개·limitation 0개다 | 받는 쪽을 증명하지 못하는 호출을 사실로 낼지, 새 limitation(증명하지 못한 수신자의 등록 모양 호출 수)으로 알릴지는 설계 결정이다. 수신자 판정을 넓히면 거짓 decl이 생길 수 있어 반례 corpus가 필요하다. |
 | 타입으로만 아는 루트 자신의 `get('/')`은 바깥 접두사가 비어 있지 않으면 `<바깥>`과 `<바깥>/` 둘로 등록되는데 `/` base 하나만 낸다 | 참인 사실이고(`<바깥>/`은 늘 있다) 빠진 `<바깥>`은 `unresolved-route-prefix:`가 덮는다. 바깥 접두사가 비었는지 모르므로 `<바깥>`을 따로 낼 근거가 없다. |
