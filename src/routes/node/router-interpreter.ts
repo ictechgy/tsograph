@@ -82,6 +82,8 @@ export interface InterpreterContext extends ValueEnvironment {
   interpretFunction(fn: ts.SignatureDeclaration, definitionFrame: Frame, site: EventSite, firstParameter?: readonly RouterTarget[]): void;
   instance(spec: InstanceSpec, framework: RouterInstance['framework'], node: ts.Node, frame: Frame): RouterInstance;
   emit(event: RouterEvent): void;
+  /** 해석 대상 파일인지(테스트 소스 제외 등, 프로젝트 기준 경로) */
+  includesFile(path: string): boolean;
 }
 
 /** 프레임워크 어댑터다. */
@@ -116,7 +118,7 @@ export interface InterpretationResult {
  * @returns 인스턴스·사건
  */
 export function interpretProject(project: NodeProject, adapters: readonly FrameworkAdapter[], includeFile: (path: string) => boolean): InterpretationResult {
-  const interpreter = new RouterInterpreter(project, adapters);
+  const interpreter = new RouterInterpreter(project, adapters, includeFile);
   for (const [path, sourceFile] of project.files) {
     if (includeFile(path)) interpreter.walkModule(sourceFile);
   }
@@ -150,15 +152,25 @@ class RouterInterpreter implements InterpreterContext {
   private frameCount = 0;
   private truncatedCalls = 0;
 
+  /** 해석 대상 파일인지(테스트 소스 제외 등) */
+  private readonly includeFile: (path: string) => boolean;
+
   /**
    * @param project 프로젝트
    * @param adapters 어댑터
+   * @param includeFile 해석할 파일인지
    */
-  constructor(project: NodeProject, adapters: readonly FrameworkAdapter[]) {
+  constructor(project: NodeProject, adapters: readonly FrameworkAdapter[], includeFile: (path: string) => boolean) {
     this.project = project;
     this.checker = project.checker;
     this.adapters = adapters;
+    this.includeFile = includeFile;
     this.memberNames = new Set(adapters.flatMap((adapter) => [...adapter.memberNames]));
+  }
+
+  /** @inheritdoc */
+  includesFile(path: string): boolean {
+    return this.includeFile(path);
   }
 
   /**

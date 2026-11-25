@@ -6,23 +6,26 @@
  * - `fastify.METHOD(url, [options], handler)`·`fastify.route({method, url, handler})`가 라우트다. `all`은 지원 method 전부다.
  *   GET 라우트에는 HEAD 라우트가 자동으로 붙는다(`exposeHeadRoutes`, decl로 내지 않는다).
  * - `register(plugin, {prefix})`는 새 캡슐화 인스턴스를 만들어 접두사를 `buildRoutePrefix`로 잇는다(부모가 `/`로 끝날 때의
- *   이음은 주 버전마다 다르다). `fastify-plugin`으로 감싼 플러그인(`skip-override`)은 부모 인스턴스를 그대로 쓰고 접두사를 무시한다.
+ *   이음은 주 버전마다 다르다). `fastify-plugin`으로 감싸거나 `Symbol.for('skip-override')`를 쓴 플러그인은 부모 인스턴스를 그대로
+ *   쓰고 접두사를 무시한다(`fastify-skip-override.ts`).
  * - 타입 주석으로만 아는 `FastifyInstance`는 붙는 위치를 모르므로 base 앵커이고, 그 아래 리터럴 접두사는 base 뒤 꼬리로 잇는다.
  * - 접두사 아래 `/` 라우트는 기본(`prefixTrailingSlash: 'both'`)으로 `prefix`와 `prefix/` 둘 다 등록한다.
  * - find-my-way는 정적 > 파라미터 > 와일드카드 순으로 고르므로 문서는 `specificity`다. `constraints`(version·host)는 조건부다.
- * - `caseSensitive: false`면 대소문자 무시, `ignoreTrailingSlash`면 끝 슬래시 선택이다(v5는 `routerOptions`가 우선).
+ * - `caseSensitive: false`면 대소문자 무시, `ignoreTrailingSlash`면 끝 슬래시 선택이다. fastify 5는 `routerOptions` 값이 우선이고
+ *   fastify 4는 `routerOptions`를 읽지 않는다.
  */
 
 import ts from 'typescript';
 
 import type { HttpMethod, PathAnchor, RouteDeclMethod } from '../../exchange/bridge-facts.ts';
+import { skipOverrideOf } from './fastify-skip-override.ts';
 import { eventsByInstance, type FlatProvided, type FlatRoute, type FrameworkRoutes } from './flat-route.ts';
 import { compileFindMyWayPath, type FindMyWayOptions } from './fmw-path.ts';
 import type { NodeProject } from './node-project.ts';
 import { type CompiledPath, prefixTemplates } from './path-model.ts';
 import type { FrameworkAdapter, InstanceSpec, InterpreterContext } from './router-interpreter.ts';
 import type { EventSite, Frame, PathArgument, PathValue, ProvidedEvent, RouteEvent, RouterEvent, RouterInstance, RouterTarget } from './router-model.ts';
-import { calleeFromPackage, packageBindingOf, unwrap } from './symbols.ts';
+import { calleeFromPackage, packageBindingOf, resolveAlias, symbolAt, unwrap } from './symbols.ts';
 import type { PropertyLookup } from './value-resolver.ts';
 
 /** 경로를 받는 단축 method다. */
@@ -61,15 +64,10 @@ function fastifyCreation(node: ts.CallExpression | ts.NewExpression, context: In
   if (!ts.isCallExpression(node) || calleeFromPackage(context.checker, node.expression, ['fastify'], ['default', '*', 'fastify']) === undefined) return undefined;
   const options = node.arguments[0];
   const frame = context.moduleFrame(node.getSourceFile());
-  const routerOption = (name: string, fallback: boolean): boolean | undefined => {
-    const routerOptions = options === undefined ? undefined : context.lookupProperty(options, 'routerOptions', frame);
-    if (routerOptions?.kind === 'found') {
-      const nested = context.lookupProperty(routerOptions.expression, name, routerOptions.frame);
-      if (nested.kind !== 'absent') return nested.kind === 'found' ? context.resolveBoolean(nested.expression, nested.frame) : undefined;
-    }
-    if (routerOptions?.kind === 'unknown') return undefined;
-    return context.booleanOption(options, name, frame, fallback);
-  };
+  const routerOption = (name: string, fallback: boolean): RouterOptionSources => ({
+    topLevel: context.booleanOption(options, name, frame, fallback),
+    routerOptions: nestedRouterOption(options, name, frame, context),
+  });
   return {
     kind: 'app',
     options: {
@@ -79,6 +77,53 @@ function fastifyCreation(node: ts.CallExpression | ts.NewExpression, context: In
       prefix: { kind: 'literal', text: '' },
     },
   };
+}
+
+/**
+ * 라우터 옵션 하나의 두 출처다. fastify 5는 `routerOptions`에 그 키가 있으면 그 값을, 없으면 최상위 값을 쓰고
+ * (5.12.5 `lib/route.js#buildRouterOptions`), fastify 4는 `routerOptions`를 모르고 최상위 값만 쓴다(4.29.1 `fastify.js`).
+ * 주 버전을 알아야 실제 값을 고를 수 있으므로 만들 때는 둘 다 담고 펼칠 때 {@link effectiveOption}으로 고른다.
+ */
+interface RouterOptionSources {
+  /** 최상위 값(없으면 기본값, 모르면 undefined) */
+  readonly topLevel: boolean | undefined;
+  /** `routerOptions` 안의 값. `'absent'`는 그 키(또는 `routerOptions`)가 없다는 뜻, undefined는 값을 모른다는 뜻이다 */
+  readonly routerOptions: boolean | undefined | 'absent';
+}
+
+/**
+ * `routerOptions.<name>`을 읽는다.
+ *
+ * @param options `Fastify()`의 첫 인자
+ * @param name 옵션 이름
+ * @param frame 프레임
+ * @param context 문맥
+ * @returns 값, 없으면 `'absent'`, 모르면 undefined
+ */
+function nestedRouterOption(options: ts.Expression | undefined, name: string, frame: Frame, context: InterpreterContext): boolean | undefined | 'absent' {
+  const routerOptions = options === undefined ? { kind: 'absent' as const } : context.lookupProperty(options, 'routerOptions', frame);
+  if (routerOptions.kind !== 'found') return routerOptions.kind === 'absent' ? 'absent' : undefined;
+  const nested = context.lookupProperty(routerOptions.expression, name, routerOptions.frame);
+  if (nested.kind !== 'found') return nested.kind === 'absent' ? 'absent' : undefined;
+  return context.resolveBoolean(nested.expression, nested.frame);
+}
+
+/**
+ * 주 버전에 맞는 라우터 옵션 값이다. 4는 최상위 값, 5는 `routerOptions` 값이 있으면 그 값이다. 주 버전을 모르면 두 값이 같을 때만
+ * 그 값이고 다르면 모른다(undefined) — fastify 4에서 `routerOptions.ignoreDuplicateSlashes`를 믿으면 실제로 등록되는 `/v1//bare`를
+ * `/v1/bare`로 내게 된다.
+ *
+ * @param sources 옵션 출처(타입으로만 아는 인스턴스면 undefined)
+ * @param grammar 주 버전
+ * @returns 값 또는 undefined
+ */
+function effectiveOption(sources: unknown, grammar: PrefixGrammar): boolean | undefined {
+  if (sources === undefined) return undefined;
+  const { topLevel, routerOptions } = sources as RouterOptionSources;
+  const fastify5 = routerOptions === 'absent' ? topLevel : routerOptions;
+  if (grammar === 4) return topLevel;
+  if (grammar === 5) return fastify5;
+  return topLevel === fastify5 ? topLevel : undefined;
 }
 
 /**
@@ -216,12 +261,13 @@ function recordRegister(target: RouterTarget, call: ts.CallExpression, site: Eve
   const prefixLookup = options === undefined ? { kind: 'absent' as const } : context.lookupProperty(options, 'prefix', site.frame);
   const prefix: PathArgument | undefined = prefixLookup.kind === 'found' ? { value: context.resolvePath(prefixLookup.expression, prefixLookup.frame), node: prefixLookup.expression } : prefixLookup.kind === 'unknown' ? { value: { kind: 'unknown' }, node: options! } : undefined;
   const plugin = unwrapPlugin(pluginArgument!, site.frame, context);
-  const { wrapped } = plugin;
   const inner = plugin.expression;
   const fn = inner === undefined ? undefined : context.resolveFunction(inner, plugin.frame);
   if (fn !== undefined) {
-    const child = wrapped ? target : { instance: context.instance({ kind: 'plugin', options: { ...target.instance.options, prefix: prefix?.value ?? { kind: 'literal', text: '' } }, parent: target }, 'fastify', call, site.frame), basePaths: [] };
-    if (!wrapped) context.emit({ kind: 'mount', target, prefix, children: [child], unresolved: false, mode: 'reference', site });
+    const skip = plugin.wrapped ? 'yes' : skipOverrideOf(context, plugin.symbols, fn.node);
+    const pluginPrefix = skip === 'unknown' ? unprovenPrefix(prefix) : prefix;
+    const child = skip === 'yes' ? target : { instance: context.instance({ kind: 'plugin', options: { ...target.instance.options, prefix: pluginPrefix?.value ?? { kind: 'literal', text: '' } }, parent: target }, 'fastify', call, site.frame), basePaths: [] };
+    if (skip !== 'yes') context.emit({ kind: 'mount', target, prefix: pluginPrefix, children: [child], unresolved: false, mode: 'reference', site });
     context.interpretFunction(fn.node, fn.frame, site, [child]);
     return;
   }
@@ -231,26 +277,53 @@ function recordRegister(target: RouterTarget, call: ts.CallExpression, site: Eve
 }
 
 /**
+ * 캡슐화를 건너뛰는지 증명하지 못한 플러그인의 접두사다. 건너뛰면 `prefix`를 무시하고 아니면 붙이므로, 비어 있지 않은 접두사는
+ * 값을 모르는 접두사로 바꾼다(root 앵커는 부모 접두사까지만 아는 dynamic, base 앵커는 알 수 없는 base에 합친다).
+ *
+ * @param prefix `register()`의 접두사 인자
+ * @returns 바꾼 접두사 인자
+ */
+function unprovenPrefix(prefix: PathArgument | undefined): PathArgument | undefined {
+  if (prefix === undefined || (prefix.value.kind === 'literal' && prefix.value.text === '')) return prefix;
+  return { value: { kind: 'unknown' }, node: prefix.node };
+}
+
+/** 플러그인 식을 따라간 결과다. */
+interface UnwrappedPlugin {
+  /** `fastify-plugin`으로 감쌌는지 */
+  readonly wrapped: boolean;
+  /** 안쪽 함수 식(감싼 경우 `fp()`의 첫 인자) */
+  readonly expression: ts.Expression | undefined;
+  readonly frame: Frame;
+  /** 따라가며 지난 식별자·속성 접근의 심볼(별칭을 푼 뒤). skip-override 쓰기를 찾는 데 쓴다 */
+  readonly symbols: ReadonlySet<ts.Symbol>;
+}
+
+/**
  * 플러그인 식을 따라가 `fastify-plugin`으로 감쌌는지와 안쪽 함수 식을 찾는다(`const p = fp(async (app) => …)`도 따라간다).
  *
  * @param expression 플러그인 식
  * @param frame 프레임
  * @param context 문맥
- * @returns 감쌌는지, 안쪽 식, 평가 프레임
+ * @returns 감쌌는지, 안쪽 식, 평가 프레임, 지난 심볼
  */
-function unwrapPlugin(expression: ts.Expression, frame: Frame, context: InterpreterContext): { wrapped: boolean; expression: ts.Expression | undefined; frame: Frame } {
+function unwrapPlugin(expression: ts.Expression, frame: Frame, context: InterpreterContext): UnwrappedPlugin {
+  const symbols = new Set<ts.Symbol>();
   let current = unwrap(expression);
   let currentFrame = frame;
   for (let depth = 0; depth < 8; depth++) {
     if (ts.isCallExpression(current) && calleeFromPackage(context.checker, current.expression, ['fastify-plugin'], ['default', '*', 'fastifyPlugin']) !== undefined) {
-      return { wrapped: true, expression: current.arguments[0], frame: currentFrame };
+      return { wrapped: true, expression: current.arguments[0], frame: currentFrame, symbols };
     }
-    const reference = ts.isIdentifier(current) || ts.isPropertyAccessExpression(current) ? context.resolveReference(current, currentFrame) : undefined;
+    if (!ts.isIdentifier(current) && !ts.isPropertyAccessExpression(current)) break;
+    const symbol = symbolAt(context.checker, ts.isIdentifier(current) ? current : current.name);
+    if (symbol !== undefined) symbols.add(resolveAlias(context.checker, symbol));
+    const reference = context.resolveReference(current, currentFrame);
     if (reference === undefined) break;
     current = unwrap(reference.expression);
     currentFrame = reference.frame;
   }
-  return { wrapped: false, expression, frame };
+  return { wrapped: false, expression, frame, symbols };
 }
 
 /**
@@ -337,9 +410,9 @@ export function flattenFastify(_project: NodeProject, instances: readonly Router
   const context: FlattenContext = { byInstance: eventsByInstance(fastifyEvents), routes: [], provided: [], active: new Set(), grammar };
   for (const root of fastify.filter((instance) => instance.kind !== 'plugin')) {
     const options: AppOptions = {
-      ignoreTrailingSlash: root.options['ignoreTrailingSlash'] as boolean | undefined,
-      ignoreDuplicateSlashes: root.options['ignoreDuplicateSlashes'] as boolean | undefined,
-      caseSensitive: root.options['caseSensitive'] as boolean | undefined,
+      ignoreTrailingSlash: effectiveOption(root.options['ignoreTrailingSlash'], grammar),
+      ignoreDuplicateSlashes: effectiveOption(root.options['ignoreDuplicateSlashes'], grammar),
+      caseSensitive: effectiveOption(root.options['caseSensitive'], grammar),
     };
     walkInstance(context, root, { anchor: root.kind === 'opaque' ? 'base' : 'root', value: { kind: 'literal', text: '' } }, options);
   }
@@ -369,8 +442,9 @@ function walkInstance(context: FlattenContext, instance: RouterInstance, prefix:
 }
 
 /**
- * 이 앱에서 플러그인 접두사를 잇는 규칙이다. `ignoreDuplicateSlashes`가 켜져 있으면 find-my-way가 등록·요청 경로의 겹친 `/`를 하나로
- * 줄이므로 fastify 4가 더한 `/`(`/v1//bare`)도 5의 `/v1/bare`와 같은 경로가 된다(fastify 4.29.1·5.12.5 실행으로 확인).
+ * 이 앱에서 플러그인 접두사를 잇는 규칙이다. 주 버전에 맞게 고른 `ignoreDuplicateSlashes`({@link effectiveOption})가 켜져 있으면
+ * find-my-way가 등록·요청 경로의 겹친 `/`를 하나로 줄이므로 fastify 4가 더한 `/`(`/v1//bare`)도 5의 `/v1/bare`와 같은 경로가 된다
+ * (fastify 4.29.1·5.12.5 실행으로 확인). fastify 4는 `routerOptions.ignoreDuplicateSlashes`를 읽지 않으므로 그 값은 여기 오지 않는다.
  *
  * @param context 펼치기 문맥
  * @param options 앱 옵션

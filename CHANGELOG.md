@@ -16,16 +16,37 @@
   호출은 이을 decl이 없었다. 이제 Express·Koa 어댑터처럼 앵커를 접두사 값과 따로 들고 다녀 리터럴 플러그인 접두사를 base 뒤의 꼬리로 잇는다
   (`/users`·`/users/`·`/users/{}`·`/users/{}/posts` base). 값을 모르거나 앞부분만 아는 플러그인 접두사는 예전처럼 알 수 없는 base에 합치되
   그 아래에서 다시 붙인 리터럴 접두사는 이제 남는다(`/inner/z` base). base 아래 `framework-provided-routes:`·`route-coverage:` 제공 경로는
-  예전처럼 스코프가 없다. `Fastify()`로 만든 앱(root 앵커)은 이 수정으로 바뀌지 않는다(다음 항목만 해당한다).
+  예전처럼 스코프가 없다. `Fastify()`로 만든 앱(root 앵커)은 이 수정으로 바뀌지 않는다(다음 항목들만 해당한다). 남은 한계: base에 합친
+  접두사 아래 경로(`process.env.TENANT` 아래 `/users/:id`)와 리터럴 접두사 아래 경로(`/users` 아래 `/:id`)가 같은 channel(`/users/{}` base)이
+  될 수 있어, 실제로는 다른 경로여도 isthmus가 `route-decl-conflict` 경고를 낼 수 있다.
 - routes(server): Fastify 4의 플러그인 접두사 이음을 fastify 5 규칙으로 계산하던 문제를 고쳤다. 부모 접두사가 `/`로 끝나고 플러그인 접두사가
   `/` 아닌 글자로 시작하면 fastify 5.12.5(`lib/plugin-override.js`)는 그대로 잇지만(`/v1/` + `bare` → `/v1/bare`) 4.29.1(`lib/pluginOverride.js`)은
   `/`를 더한다(`/v1//bare`). 4에서 tsograph는 실제로 등록되지 않는 `/v1/bare/y`를 정적 사실로 냈다(fastify 4.29.1에 실제로 등록하면
-  `/v1/bare/y`는 404이고 `/v1//bare/y`가 받는다). 이제 잠금 파일·범위로 정한 주 버전의 규칙을 쓴다. `ignoreDuplicateSlashes`가 켜져 있으면
-  find-my-way가 겹친 `/`를 줄여 두 주 버전 모두 `/v1/bare/y`가 받으므로 예전처럼 정적 사실이다. 주 버전을 모르는데 두 규칙이 다르면 그
-  이음 아래 라우트를 부모 접두사까지만 아는 dynamic 사실(`dynamicScope` 접두사 `/v1`)로 낸다 — 이때 문서에는 이미
-  `route-framework-version-unknown:`("주 버전마다 다른 경로 문법은 dynamic")이 붙는다. 타입으로만 아는 `FastifyInstance`(base 앵커)
-  아래에서는 그런 이음을 앞 항목처럼 알 수 없는 base에 합친다. 두 규칙이 같은 이음(부모가 `/`로 끝나지 않거나 플러그인 접두사가 `/`로
-  시작)은 주 버전과 상관없이 예전과 같다.
+  `/v1/bare/y`는 404이고 `/v1//bare/y`가 받는다). 이제 잠금 파일·범위로 정한 주 버전의 규칙을 쓴다. 최상위 `ignoreDuplicateSlashes`가
+  켜져 있으면(fastify 4·5 모두 읽는다) find-my-way가 겹친 `/`를 줄여 두 주 버전 모두 `/v1/bare/y`가 받으므로 예전처럼 정적 사실이다
+  (`routerOptions.ignoreDuplicateSlashes`는 fastify 5만 읽는다 — 다음 항목). 주 버전을 모르는데 두 규칙이 다르면 그 이음 아래 라우트를 부모
+  접두사까지만 아는 dynamic 사실(`dynamicScope` 접두사 `/v1`)로 낸다 — 이때 문서에는 이미 `route-framework-version-unknown:`("주 버전마다
+  다른 경로 문법은 dynamic")이 붙는다. 이때 사실 수도 줄 수 있다: 접두사 아래 `/` 라우트는 `prefix`·`prefix/` 두 decl 대신 dynamic 하나가
+  되고, `route-coverage: N route declaration(s) have paths … dynamic`은 경로가 아니라 등록을 센다(`^4.0.0 || ^5.0.0`에 `/aa/` → `bb/` →
+  `/cc/` → `dd` 사슬이면 사실 7개가 5개). 타입으로만 아는 `FastifyInstance`(base 앵커) 아래에서는 그런 이음을 앞 항목처럼 알 수 없는 base에
+  합친다. 두 규칙이 같은 이음(부모가 `/`로 끝나지 않거나 플러그인 접두사가 `/`로 시작)은 주 버전과 상관없이 예전과 같다.
+- routes(server): `Fastify({ routerOptions: { … } })`의 `ignoreDuplicateSlashes`·`ignoreTrailingSlash`·`caseSensitive`를 fastify 주 버전과
+  상관없이 읽던 문제를 고쳤다. fastify 4.29.1에는 `routerOptions`가 없어 그 값을 무시하고 최상위 값만 쓴다. 예를 들어
+  `routerOptions: { ignoreDuplicateSlashes: true }`인 fastify 4 앱은 실제로 `/v1//bare/y`·`/v1/a//b`를 등록하고 `/v1/bare/y`는 404인데
+  tsograph는 `/v1/bare/y`·`/v1/a/b`를 냈고, `routerOptions: { caseSensitive: false, ignoreTrailingSlash: true }`면 실제로는 대소문자를 가리고
+  끝 슬래시가 엄격한데(`/users`와 `/users/` 둘 다 등록) `trailingSlash: "optional"`·`caseInsensitive`와 `/users` 하나를 냈다. 이제 옵션마다
+  최상위 값과 `routerOptions` 값을 따로 읽어, 4는 최상위 값, 5는 `routerOptions` 값(없으면 최상위 값)을 쓴다. 주 버전을 모르면 두 값이 같을
+  때만 쓰고 다르면 모르는 값이다(`trailingSlash` 생략, 갈리는 접두사 이음은 dynamic). 최상위 옵션만 쓰는 앱과 fastify 5 앱은 바뀌지 않는다.
+- routes(server): 프로젝트 코드가 플러그인 바인딩에 `Symbol.for('skip-override')`를 직접 쓴 Fastify 플러그인의 `prefix`를 붙이던 문제를
+  고쳤다. fastify 4.29.1·5.12.8은 `fn[Symbol.for('skip-override')]`가 참이면 새 인스턴스를 만들지 않아 `prefix`를 무시한다(실행으로 확인:
+  `manual[Symbol.for('skip-override')] = true; app.register(manual, { prefix: '/p2' })`는 `/manual`). tsograph는 `fastify-plugin` 호출만 알아봐
+  `/p2/manual`을 냈다(타입으로만 아는 `FastifyInstance` 아래에서는 앞 항목의 수정 뒤 `/p2/manual` base). 이제 해석 대상 파일에서 그 심볼을
+  바꿀 수 있는 자리를 모아, 플러그인 바인딩에 참 리터럴을 모듈 최상위에서 조건 없이 쓰거나(그 심볼을 담은 `const` 키, CommonJS
+  `module.exports[…]`, 다른 이름으로 가져온 바인딩 포함) 바인딩을 `fastify-plugin`에 넘기면 `fastify-plugin`처럼 접두사를 무시한다. 건너뛰는지
+  증명하지 못하면(함수 안·조건 아래의 쓰기, 모르는 키, `register()` 첫 인자 밖의 호출 인자·다른 변수·객체·배열·반환값으로 흘러간 바인딩,
+  이름으로 풀 수 없는 대상에 그 키를 쓴 곳이 있는 프로젝트) 접두사를 모르는 값으로 본다: root에서는 부모 접두사까지만 아는 dynamic 사실,
+  base에서는 알 수 없는 base에 합친 꼬리다. 그래서 바인딩을 다른 곳에 넘기기만 해도 정적 사실이 dynamic이 될 수 있다(실제로 건너뛰지 않는
+  `export const registry = { users }`도 그렇다). 바인딩을 `register()`·호출 대상·점 접근·비교로만 쓰는 플러그인은 바뀌지 않는다.
 - graph·reach·impact: `type` 없이 다시 내보낸 interface·type alias·값 없는 namespace·JSDoc `@typedef`
   (`export { Config } from './types'`)의 export 노드를 `unresolved-export-aliases:`(대상을 해석하지 못함)로 세던 문제를 고쳤다. 이런
   이름은 타입만 가리켜 런타임 선언이 없으므로(TypeScript는 이 재내보내기를 emit에서 지운다) 이을 대상이 처음부터 없다. 이제 checker가
