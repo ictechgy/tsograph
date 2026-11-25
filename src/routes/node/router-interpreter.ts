@@ -84,6 +84,8 @@ export interface InterpreterContext extends ValueEnvironment {
   emit(event: RouterEvent): void;
   /** 해석 대상 파일인지(테스트 소스 제외 등, 프로젝트 기준 경로) */
   includesFile(path: string): boolean;
+  /** 상대 `require('…')`가 가리키는 프로젝트 소스(TS 파일에서도 Program과 같은 옵션으로 푼다) */
+  requiredModule(call: ts.CallExpression): ts.SourceFile | undefined;
 }
 
 /** 프레임워크 어댑터다. */
@@ -513,7 +515,7 @@ class RouterInterpreter implements InterpreterContext {
    * @param call 호출 식
    * @returns 소스 또는 undefined
    */
-  private requiredModule(call: ts.CallExpression): ts.SourceFile | undefined {
+  requiredModule(call: ts.CallExpression): ts.SourceFile | undefined {
     const binding = requireBinding(call);
     if (binding === undefined || !binding.module.startsWith('.')) return undefined;
     const containingFile = call.getSourceFile().fileName;

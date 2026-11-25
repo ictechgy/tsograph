@@ -9,14 +9,17 @@
  *   `fastify-plugin`에 넘기면 건너뛴다(`'yes'`). `fastify-plugin`은 받은 함수에 그 심볼을 직접 쓰고 같은 함수를 돌려준다.
  * - 같은 쓰기가 함수 안·조건 아래에 있거나, 값·키를 모르거나, 바인딩이 다른 곳으로 흘러가면 건너뛰는지 모른다(`'unknown'`). 흘러가지
  *   않는 자리: `register()` 첫 인자, 호출 대상, 점 접근, 읽기 원소 접근, 내보내기, 비교·`typeof`·조건 판정, `console.*` 인자, `const`
- *   별칭(그 별칭의 사용도 함께 본다), 프로젝트 함수의 매개변수 자리(그 매개변수의 사용을 따라 본다).
+ *   별칭(그 별칭의 사용도 함께 본다), 대상이 정적으로 하나인 프로젝트 함수(다시 대입하지 않는 함수 선언·`const` 함수)의 매개변수
+ *   자리(그 매개변수의 사용을 따라 본다). 메서드·`let`·다시 대입하는 바인딩을 부르는 호출은 실제로 부를 함수를 몰라 모른다.
+ *   따라가는 관계가 순환하면(서로 부르는 도우미) 강연결 요소마다 근거를 합친다.
  * - 바인딩으로 이을 수 없는 대상(매개변수·반복 변수·원소 접근·호출 결과)에 skip-override 키를 쓰는 곳이 있으면 어느 플러그인이든 모른다.
- *   모듈 네임스페이스·`require()`·`import()`·`module.exports` 객체가 호출 인자·컨테이너로 흘러가거나 원소 접근으로 읽히거나 그 아래 원소에
- *   계산된 키로 쓰이면, 그 모듈이 내보낸 플러그인을 모른다.
+ *   모듈 객체(네임스페이스 import, `require()`·`import()`, `module.exports`, TS 네임스페이스, 다시 내보낸 네임스페이스)가 호출 인자·컨테이너·
+ *   대입으로 흘러가거나 원소 접근으로 읽히면, 그 모듈이 (다시 내보낸 것까지) 내보낸 플러그인을 모른다.
  *
  * 근거는 파일마다 모은다. 등록 호출이 있는 파일, 플러그인 함수가 있는 파일, 등록 인자에서 따라간 바인딩을 선언한 파일은 늘 보고
- * (테스트 디렉터리 이름이어도 서버가 실제로 불러 쓰는 코드다), 그 밖에는 해석 대상 파일만 본다. 테스트 소스의 근거는 테스트 소스에 있지
- * 않은 등록에 대해 많아야 `'unknown'`이다(테스트 코드는 서버 실행 경로가 아니지만 테스트 디렉터리 판정은 이름 규칙이라 단정하지 않는다).
+ * (테스트 디렉터리 이름이어도 서버가 실제로 불러 쓰는 코드다), 그 밖에는 해석 대상 파일과 해석 대상 파일이 (거쳐서라도) 불러오는 파일을
+ * 본다. 테스트 소스의 근거는 테스트 소스에 있지 않은 등록에 대해 많아야 `'unknown'`이다(테스트 디렉터리 판정은 이름 규칙이라 단정하지
+ * 않는다).
  */
 
 import ts from 'typescript';
@@ -41,8 +44,8 @@ type UseVerdict = Level | 'no' | { readonly follow: ts.Symbol };
 let visitedUses = 0;
 
 /**
- * 지금까지 사용 자리를 살펴본 수다. 같은 이름의 사용을 등록마다 다시 훑거나 같은 바인딩을 다시 분류하지 않는지(등록 수에 선형인지)
- * 테스트가 본다.
+ * 지금까지 사용 자리를 살펴본 수다. 같은 이름의 사용을 등록마다 다시 훑거나 같은 바인딩을 다시 분류하지 않는지(등록 수·도우미 순환
+ * 모양과 상관없이 사용 자리마다 한 번씩인지) 테스트가 본다.
  *
  * @returns 누적 수
  */
@@ -62,26 +65,40 @@ interface SkipCensus {
   readonly moduleExportWrites: ReadonlyMap<ts.SourceFile, readonly ts.ElementAccessExpression[]>;
   /** 키가 skip-override일 수 있는 원소 쓰기(바인딩으로 잇지 못하면 전역·모듈 근거가 된다) */
   readonly computedWrites: readonly ts.ElementAccessExpression[];
-  /** 모듈 객체(네임스페이스·`require()`·`import()`·`module.exports`)가 흘러가거나 원소로 읽히는 자리 */
+  /** `require()`·`import()` 호출과 `module.exports`·`exports`가 흘러가는 자리(모듈 객체 이름은 판정할 때 심볼로 찾는다) */
   readonly moduleObjectUses: readonly ts.Expression[];
+  /** 이름별로 모은, 대입 대상 식별자·속성 접근(`x = …`, `x++`, 구조 분해 대입, `for (x of …)`, `globalThis.x = …`) */
+  readonly assignedTargets: ReadonlyMap<string, readonly ts.Expression[]>;
+  /** 이름별로 모은, 모듈 객체일 때만 흘러가는 자리의 식별자·속성 접근(원소 접근 대상 `P[k]`, `exports.x = P`의 오른쪽) */
+  readonly objectOnlyUses: ReadonlyMap<string, readonly ts.Expression[]>;
+  /** 모듈 객체일 수 있는 이름(네임스페이스 import, `import x = require()`, `require()`·`import()` 결과 변수, TS 네임스페이스, 다시 내보낸 이름) */
+  readonly moduleObjectNames: ReadonlySet<string>;
+  /** 파일별 모듈 지정자(값을 불러오는 import·export·`import x = require()`·`require()`·`import()`) */
+  readonly moduleSpecifiers: ReadonlyMap<ts.SourceFile, readonly ts.StringLiteralLike[]>;
   /** 이름 → 심볼별 사용(그 이름을 처음 물을 때 만든다) */
   readonly usesBySymbol: Map<string, Map<ts.Symbol, ts.Expression[]>>;
   /** 심볼 → import 지역 이름(첫 질의 때 만든다) */
   aliasIndex: Map<ts.Symbol, string[]> | undefined;
   /** 바인딩별 근거 메모 */
   readonly evidence: Map<ts.Symbol, Evidence>;
+  /** 함수 바인딩 → 다른 값이 대입되는지 메모 */
+  readonly reassigned: Map<ts.Symbol, boolean>;
   /** 바인딩으로 잇지 못한 skip-override 키 쓰기(모든 플러그인의 근거, 첫 질의 때 만든다) */
   global: Evidence | undefined;
-  /** 모듈 파일 → 그 모듈 심볼(알면)과 모듈 객체가 흘러간 자리(첫 질의 때 만든다) */
-  escapedModules: Map<ts.SourceFile, EscapedModule> | undefined;
+  /** 모듈 객체가 흘러가 이름 없이 닿을 수 있게 된 내보낸 값(첫 질의 때 만든다) */
+  escapedExports: EscapedExports | undefined;
+  /** 운영 소스가 (다시) 불러오는, 해석 대상에서 빠진 파일(첫 질의 때 만든다) */
+  importedExcluded: ReadonlySet<ts.SourceFile> | undefined;
 }
 
-/** 모듈 객체가 흘러간 모듈이다. */
-interface EscapedModule {
-  /** 모듈 심볼(`module.exports`처럼 지정자 없이 만난 모듈이면 undefined) */
-  symbol: ts.Symbol | undefined;
-  /** 모듈 객체가 흘러간 자리의 파일별 근거 */
-  readonly evidence: Evidence;
+/** 모듈 객체가 흘러가 이름 없이 닿을 수 있게 된 내보낸 값과 그 자리의 근거다. */
+interface EscapedExports {
+  /** 별칭을 따라간 내보낸 심볼 → 근거 */
+  readonly symbols: Map<ts.Symbol, Evidence>;
+  /** 그 심볼의 선언 노드 → 근거(내보낸 객체 안에 선언한 플러그인을 찾는다) */
+  readonly declarations: Map<ts.Node, Evidence>;
+  /** 모듈 심볼 없이 만난 모듈 파일(`module.exports`·`exports` 객체, TS 파일의 상대 `require()`) → 근거(그 파일의 플러그인 모두) */
+  readonly files: Map<ts.SourceFile, Evidence>;
 }
 
 /** 해석기 문맥마다 한 번 만든 census다. */
@@ -104,81 +121,57 @@ export function skipOverrideOf(context: InterpreterContext, chain: ReadonlySet<t
   const checker = context.checker;
   const tracked = trackedSymbols(checker, chain, fn);
   const merged: Evidence = new Map();
-  for (const symbol of tracked) mergeInto(merged, evidenceOf(census, context, symbol, new Set()));
+  for (const symbol of tracked) mergeInto(merged, evidenceOf(census, context, symbol));
   const file = fn.getSourceFile();
   const exportsFunction = (census.moduleExports.get(file) ?? []).some((value) => value === fn
     || (ts.isIdentifier(value) && tracked.has(resolvedSymbol(checker, value) as ts.Symbol)));
   if (exportsFunction) for (const write of census.moduleExportWrites.get(file) ?? []) addLevel(merged, write.getSourceFile(), classifyWrite(checker, write));
   mergeInto(merged, globalEvidence(census, context));
   const declarations = [fn, ...[...tracked].flatMap((symbol) => symbol.declarations ?? [])];
-  const modules = escapedModules(census, context);
-  for (const module of new Set(declarations.map((declaration) => declaration.getSourceFile()))) {
-    const escaped = modules.get(module);
-    if (escaped !== undefined && (exportsFunction && module === file || exportedFrom(checker, escaped.symbol, module, declarations, [...tracked]))) {
-      mergeInto(merged, escaped.evidence);
+  mergeEscapedExports(merged, escapedExports(census, context), tracked, declarations);
+  const privileged = new Set([...declarations.map((declaration) => declaration.getSourceFile()), call.getSourceFile()]);
+  return verdictOf(census, context, merged, privileged, call.getSourceFile());
+}
+
+/**
+ * 모듈 객체가 흘러가 이름 없이 닿을 수 있게 된 값의 근거를 더한다: 바인딩이 그 내보낸 심볼이거나, 플러그인·바인딩 선언이 내보낸 선언 안에
+ * 있거나, 심볼 없이 만난 `module.exports` 파일에 있으면 그 자리의 근거다.
+ *
+ * @param merged 합칠 근거
+ * @param escaped 흘러간 내보낸 값
+ * @param tracked 바인딩 심볼
+ * @param declarations 플러그인 함수와 바인딩 선언
+ */
+function mergeEscapedExports(merged: Evidence, escaped: EscapedExports, tracked: ReadonlySet<ts.Symbol>, declarations: readonly ts.Node[]): void {
+  for (const symbol of tracked) mergeInto(merged, escaped.symbols.get(symbol));
+  for (const declaration of declarations) {
+    mergeInto(merged, escaped.files.get(declaration.getSourceFile()));
+    for (let current: ts.Node | undefined = declaration; current !== undefined && !ts.isSourceFile(current); current = current.parent) {
+      mergeInto(merged, escaped.declarations.get(current));
     }
   }
-  const privileged = new Set([...declarations.map((declaration) => declaration.getSourceFile()), call.getSourceFile()]);
-  return verdictOf(context, merged, privileged, call.getSourceFile());
 }
 
 /**
- * 선언 중 하나가 모듈이 내보낸 최상위 선언(또는 그 안)에 있는지 본다. 모듈 객체가 흘러가면 내보낸 값에만 이름 없이 닿을 수 있다.
+ * 파일별 근거를 등록 하나에 대한 판정으로 줄인다. 늘 보는 파일(등록·플러그인·바인딩 선언 파일)이 아니면 해석 대상 파일과, 해석 대상에서
+ * 빠졌지만 해석 대상 파일이 불러오는 파일의 근거만 쓴다. 테스트 소스에 있지 않은 등록에 대한 테스트 소스의 근거는 많아야 `'unknown'`이다
+ * (해석 대상에서 빠지는 파일은 테스트 소스뿐이라 불러오는 파일의 근거도 여기서 줄어든다).
  *
- * @param checker TypeChecker
- * @param moduleSymbol 모듈 심볼(모르면 undefined)
- * @param module 모듈 파일
- * @param declarations 플러그인 함수와 바인딩 선언
- * @param tracked 바인딩 심볼(CommonJS `exports.x = fn`처럼 그 심볼 자체가 내보낸 이름일 수 있다)
- * @returns 내보낸 선언 안에 있으면 true
- */
-function exportedFrom(checker: ts.TypeChecker, moduleSymbol: ts.Symbol | undefined, module: ts.SourceFile, declarations: readonly ts.Node[], tracked: readonly ts.Symbol[]): boolean {
-  // 모듈 심볼을 모르면(지정자 없이 만난 `module.exports`) 내보냈는지 가리지 않고 모르는 쪽으로 본다.
-  if (moduleSymbol === undefined) return true;
-  const exported = new Set(checker.getExportsOfModule(moduleSymbol).map((symbol) => resolveAlias(checker, symbol)));
-  if (tracked.some((symbol) => exported.has(symbol))) return true;
-  return declarations.some((declaration) => {
-    if (declaration.getSourceFile() !== module) return false;
-    let statement: ts.Node = declaration;
-    while (!ts.isSourceFile(statement.parent)) statement = statement.parent;
-    return declaredSymbols(checker, statement).some((symbol) => exported.has(symbol));
-  });
-}
-
-/**
- * 최상위 문장이 선언하는 심볼이다(변수·함수·클래스).
- *
- * @param checker TypeChecker
- * @param statement 최상위 문장
- * @returns 심볼
- */
-function declaredSymbols(checker: ts.TypeChecker, statement: ts.Node): ts.Symbol[] {
-  const names = ts.isVariableStatement(statement)
-    ? statement.declarationList.declarations.map((declaration) => declaration.name)
-    : ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) ? [statement.name] : [];
-  return names.flatMap((name) => {
-    const symbol = name !== undefined && ts.isIdentifier(name) ? symbolAt(checker, name) : undefined;
-    return symbol === undefined ? [] : [symbol];
-  });
-}
-
-/**
- * 파일별 근거를 등록 하나에 대한 판정으로 줄인다. 늘 보는 파일(등록·플러그인·바인딩 선언 파일)이 아니면 해석 대상 파일의 근거만 쓰고,
- * 테스트 소스에 있지 않은 등록에 대한 테스트 소스의 근거는 많아야 `'unknown'`이다.
- *
+ * @param census census
  * @param context 해석기 문맥
  * @param evidence 파일별 근거
  * @param privileged 늘 보는 파일
  * @param registrationFile 등록 호출이 있는 파일
  * @returns 판정
  */
-function verdictOf(context: InterpreterContext, evidence: Evidence, privileged: ReadonlySet<ts.SourceFile>, registrationFile: ts.SourceFile): SkipOverride {
+function verdictOf(census: SkipCensus, context: InterpreterContext, evidence: Evidence, privileged: ReadonlySet<ts.SourceFile>, registrationFile: ts.SourceFile): SkipOverride {
   const registrationInTests = isTestSource(context, registrationFile);
+  const importedExcluded = importedExcludedFiles(census, context);
   let result: SkipOverride = 'no';
   for (const [file, level] of evidence) {
     if (!privileged.has(file)) {
       const path = context.project.pathOf(file);
-      if (path === undefined || !context.includesFile(path)) continue;
+      if (path === undefined || (!context.includesFile(path) && !importedExcluded.has(file))) continue;
       if (level === 'yes' && !registrationInTests && isNodeTestPath(path)) {
         result = 'unknown';
         continue;
@@ -257,43 +250,73 @@ function holderName(fn: ts.SignatureDeclaration): ts.Identifier | undefined {
 }
 
 /**
- * 바인딩 하나의 파일별 근거다(메모한다). `const` 별칭과 매개변수로 흘러간 자리는 그 바인딩의 근거를 합친다. 따라가다 다시 만난 바인딩은
- * 비어 있는 근거로 보고, 그런 순환을 거친 결과는 순환의 시작 바인딩에만 메모한다(부분 결과를 다른 바인딩에 남기지 않는다).
+ * 바인딩 하나의 파일별 근거다(메모한다). `const` 별칭과 매개변수로 흘러간 자리는 그 바인딩의 근거를 합친다.
+ *
+ * 흘러가는 관계는 순환할 수 있다(서로 부르는 도우미). Tarjan 강연결 요소를 재귀 없이 구해, 한 요소의 바인딩은 모두 요소 안의 근거와 요소
+ * 밖으로 이어지는 근거의 합을 갖는다. 바인딩마다 사용 자리를 한 번만 분류하므로 비용은 살펴본 사용 수에 선형이고, 긴 도우미 사슬에서도
+ * 호출 스택이 자라지 않는다.
  *
  * @param census census
  * @param context 해석기 문맥
- * @param symbol 바인딩 심볼
- * @param active 지금 계산 중인 바인딩
+ * @param root 바인딩 심볼
  * @returns 근거
  */
-function evidenceOf(census: SkipCensus, context: InterpreterContext, symbol: ts.Symbol, active: Set<ts.Symbol>): Evidence {
-  const memo = census.evidence.get(symbol);
+function evidenceOf(census: SkipCensus, context: InterpreterContext, root: ts.Symbol): Evidence {
+  const memo = census.evidence.get(root);
   if (memo !== undefined) return memo;
-  if (active.has(symbol)) {
-    active.add(CYCLE);
-    return new Map();
-  }
-  active.add(symbol);
-  const evidence: Evidence = new Map();
-  let cycleBelow = false;
-  for (const use of usesOf(census, context.checker, symbol)) {
-    visitedUses++;
-    const verdict = classifyUse(context, use);
-    if (typeof verdict === 'string') addLevel(evidence, use.getSourceFile(), verdict);
-    else {
-      const inner = new Set(active);
-      mergeInto(evidence, evidenceOf(census, context, verdict.follow, inner));
-      if (inner.has(CYCLE)) cycleBelow = true;
+  const order = new Map<ts.Symbol, number>();
+  const low = new Map<ts.Symbol, number>();
+  const local = new Map<ts.Symbol, Evidence>();
+  const stack: ts.Symbol[] = [];
+  const onStack = new Set<ts.Symbol>();
+  const frames: { readonly symbol: ts.Symbol; readonly next: readonly ts.Symbol[]; position: number }[] = [];
+  const open = (symbol: ts.Symbol): void => {
+    order.set(symbol, order.size);
+    low.set(symbol, order.get(symbol)!);
+    stack.push(symbol);
+    onStack.add(symbol);
+    const evidence: Evidence = new Map();
+    const next: ts.Symbol[] = [];
+    for (const use of usesOf(census, context.checker, symbol)) {
+      visitedUses++;
+      const verdict = classifyUse(census, context, use);
+      if (typeof verdict === 'string') addLevel(evidence, use.getSourceFile(), verdict);
+      else next.push(verdict.follow);
+    }
+    local.set(symbol, evidence);
+    frames.push({ symbol, next, position: 0 });
+  };
+  open(root);
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1]!;
+    if (frame.position < frame.next.length) {
+      const target = frame.next[frame.position++]!;
+      const done = census.evidence.get(target);
+      if (done !== undefined) mergeInto(local.get(frame.symbol)!, done);
+      else if (!order.has(target)) open(target);
+      else if (onStack.has(target)) low.set(frame.symbol, Math.min(low.get(frame.symbol)!, order.get(target)!));
+      continue;
+    }
+    frames.pop();
+    const parent = frames[frames.length - 1];
+    if (low.get(frame.symbol) === order.get(frame.symbol)) {
+      const members: ts.Symbol[] = [];
+      let member: ts.Symbol;
+      do {
+        member = stack.pop()!;
+        onStack.delete(member);
+        members.push(member);
+      } while (member !== frame.symbol);
+      const evidence: Evidence = new Map();
+      for (const each of members) mergeInto(evidence, local.get(each));
+      for (const each of members) census.evidence.set(each, evidence);
+      if (parent !== undefined) mergeInto(local.get(parent.symbol)!, evidence);
+    } else if (parent !== undefined) {
+      low.set(parent.symbol, Math.min(low.get(parent.symbol)!, low.get(frame.symbol)!));
     }
   }
-  active.delete(symbol);
-  if (cycleBelow) active.add(CYCLE);
-  else census.evidence.set(symbol, evidence);
-  return evidence;
+  return census.evidence.get(root)!;
 }
-
-/** 순환을 만났다는 표식 심볼이다. */
-const CYCLE = { name: '<cycle>' } as unknown as ts.Symbol;
 
 /**
  * 심볼의 사용 자리다. 심볼 이름, 선언 이름, 그 심볼을 다른 이름으로 가져온 import 지역 이름으로 찾는다.
@@ -399,18 +422,25 @@ function buildCensus(context: InterpreterContext): SkipCensus {
   const moduleExportWrites = new Map<ts.SourceFile, ts.ElementAccessExpression[]>();
   const computedWrites: ts.ElementAccessExpression[] = [];
   const moduleObjectUses: ts.Expression[] = [];
+  const assignedTargets = new Map<string, ts.Expression[]>();
+  const objectOnlyUses = new Map<string, ts.Expression[]>();
+  const moduleObjectNames = new Set<string>();
+  const moduleSpecifiers = new Map<ts.SourceFile, ts.StringLiteralLike[]>();
+  const lists = {
+    usesByName, aliasNames, moduleExports, moduleExportWrites, computedWrites, moduleObjectUses, assignedTargets, objectOnlyUses, moduleObjectNames,
+    moduleSpecifiers,
+  };
   for (const sourceFile of context.project.files.values()) {
-    const moduleNames = moduleObjectNames(sourceFile);
     const stack: ts.Node[] = [sourceFile];
     while (stack.length > 0) {
       const node = stack.pop()!;
-      visitNode(node, sourceFile, moduleNames, { usesByName, aliasNames, moduleExports, moduleExportWrites, computedWrites, moduleObjectUses });
+      visitNode(node, sourceFile, lists);
       ts.forEachChild(node, (child) => { stack.push(child); });
     }
   }
   return {
-    usesByName, aliasNames, moduleExports, moduleExportWrites, computedWrites, moduleObjectUses,
-    usesBySymbol: new Map(), aliasIndex: undefined, evidence: new Map(), global: undefined, escapedModules: undefined,
+    ...lists, usesBySymbol: new Map(), aliasIndex: undefined, evidence: new Map(), reassigned: new Map(), global: undefined, escapedExports: undefined,
+    importedExcluded: undefined,
   };
 }
 
@@ -422,6 +452,10 @@ interface CensusLists {
   readonly moduleExportWrites: Map<ts.SourceFile, ts.ElementAccessExpression[]>;
   readonly computedWrites: ts.ElementAccessExpression[];
   readonly moduleObjectUses: ts.Expression[];
+  readonly assignedTargets: Map<string, ts.Expression[]>;
+  readonly objectOnlyUses: Map<string, ts.Expression[]>;
+  readonly moduleObjectNames: Set<string>;
+  readonly moduleSpecifiers: Map<ts.SourceFile, ts.StringLiteralLike[]>;
 }
 
 /**
@@ -429,26 +463,126 @@ interface CensusLists {
  *
  * @param node 노드
  * @param sourceFile 파일
- * @param moduleNames 이 파일에서 모듈 객체를 담은 이름
  * @param lists 목록
  */
-function visitNode(node: ts.Node, sourceFile: ts.SourceFile, moduleNames: ReadonlySet<string>, lists: CensusLists): void {
+function visitNode(node: ts.Node, sourceFile: ts.SourceFile, lists: CensusLists): void {
   if (ts.isIdentifier(node)) {
-    if (isAliasName(node)) lists.aliasNames.push(node);
-    else if (isValueReference(node) && mayChangeBinding(node)) pushTo(lists.usesByName, node.text, node);
-    if ((moduleNames.has(node.text) || node.text === 'exports') && isValueReference(node) && moduleObjectEscapes(node)) lists.moduleObjectUses.push(node);
+    visitReference(node, node.text, lists);
   } else if (ts.isPropertyAccessExpression(node)) {
-    if (isModuleExportsReference(node)) {
-      if (moduleObjectEscapes(node)) lists.moduleObjectUses.push(node);
-    } else if (mayChangeBinding(node)) pushTo(lists.usesByName, node.name.text, node);
+    visitReference(node, node.name.text, lists);
   } else if (ts.isElementAccessExpression(node) && isWriteTarget(node)) {
     const target = unwrap(node.expression);
     if (isModuleExportsReference(target)) pushTo(lists.moduleExportWrites, sourceFile, node);
     else if (!isOtherKeyLiteral(node.argumentExpression)) lists.computedWrites.push(node);
-  } else if (isModuleObjectCall(node) && moduleObjectEscapes(node)) {
-    lists.moduleObjectUses.push(node);
+  } else if (isModuleObjectCall(node)) {
+    pushTo(lists.moduleSpecifiers, sourceFile, node.arguments[0] as ts.StringLiteralLike);
+    if (moduleObjectEscapes(node)) lists.moduleObjectUses.push(node);
   } else if (isTopLevelModuleExportsAssignment(node)) {
     pushTo(lists.moduleExports, sourceFile, unwrap(node.right));
+  } else {
+    visitModuleSyntax(node, sourceFile, lists);
+  }
+}
+
+/**
+ * 식별자·속성 접근 하나를 census 목록에 분류한다.
+ *
+ * @param node 식별자 또는 속성 접근
+ * @param name 이름(속성 접근이면 속성 이름)
+ * @param lists 목록
+ */
+function visitReference(node: ts.Identifier | ts.PropertyAccessExpression, name: string, lists: CensusLists): void {
+  if (ts.isIdentifier(node)) {
+    if (isAliasName(node)) {
+      lists.aliasNames.push(node);
+      return;
+    }
+    if (!isValueReference(node)) return;
+  }
+  if (isModuleExportsReference(node)) {
+    if (moduleObjectEscapes(node)) lists.moduleObjectUses.push(node);
+    return;
+  }
+  if (mayChangeBinding(node)) pushTo(lists.usesByName, name, node);
+  if (isAssignmentTarget(node)) pushTo(lists.assignedTargets, name, node);
+  if (isObjectOnlyUse(node)) pushTo(lists.objectOnlyUses, name, node);
+}
+
+/**
+ * 모듈 지정자와 모듈 객체일 수 있는 이름을 모은다.
+ *
+ * @param node 노드
+ * @param sourceFile 파일
+ * @param lists 목록
+ */
+function visitModuleSyntax(node: ts.Node, sourceFile: ts.SourceFile, lists: CensusLists): void {
+  if (ts.isImportDeclaration(node) && !(node.importClause?.isTypeOnly ?? false) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+    pushTo(lists.moduleSpecifiers, sourceFile, node.moduleSpecifier);
+  } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier !== undefined && ts.isStringLiteralLike(node.moduleSpecifier)) {
+    pushTo(lists.moduleSpecifiers, sourceFile, node.moduleSpecifier);
+  } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+    if (ts.isStringLiteralLike(node.moduleReference.expression)) pushTo(lists.moduleSpecifiers, sourceFile, node.moduleReference.expression);
+    lists.moduleObjectNames.add(node.name.text);
+  } else if (ts.isNamespaceImport(node) || ts.isNamespaceExport(node) || ts.isExportSpecifier(node)) {
+    if (ts.isIdentifier(node.name)) lists.moduleObjectNames.add(node.name.text);
+  } else if (ts.isModuleDeclaration(node) && ts.isIdentifier(node.name)) {
+    lists.moduleObjectNames.add(node.name.text);
+  } else if (ts.isVariableDeclaration(node) && node.initializer !== undefined && isModuleObjectCall(unwrap(node.initializer))) {
+    for (const name of boundNames(node.name)) lists.moduleObjectNames.add(name);
+  }
+}
+
+/**
+ * 바인딩 이름(구조 분해 포함)의 식별자 이름이다.
+ *
+ * @param name 바인딩 이름
+ * @returns 이름
+ */
+function boundNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  return name.elements.flatMap((element) => ts.isOmittedExpression(element) ? [] : boundNames(element.name));
+}
+
+/**
+ * 식별자·속성 접근이 모듈 객체일 때만 흘러가는 자리에 있는지 본다: 원소 접근의 대상(`P[k]`), `module.exports`·`exports` 아래에 대입하는
+ * 값(`exports.x = P`). 바인딩이면 이 자리는 바꾸지 않는 자리이거나 따로 센다.
+ *
+ * @param node 식별자 또는 속성 접근
+ * @returns 그렇다면 true
+ */
+function isObjectOnlyUse(node: ts.Expression): boolean {
+  const outer = outermostWrapper(node);
+  const parent = outer.parent;
+  if (ts.isElementAccessExpression(parent)) return parent.expression === outer;
+  return ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === outer
+    && isModuleExportsReference(exportsRoot(unwrap(parent.left)));
+}
+
+/**
+ * 식별자·속성 접근이 대입 대상인지 본다(`x = …`, 복합 대입, `x++`, 구조 분해 대입 안, `for (x of …)`·`for (x in …)`).
+ *
+ * @param node 식별자 또는 속성 접근
+ * @returns 대입 대상이면 true
+ */
+function isAssignmentTarget(node: ts.Expression): boolean {
+  let current: ts.Node = node;
+  for (;;) {
+    const parent: ts.Node = current.parent;
+    if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isSatisfiesExpression(parent)
+      || ts.isTypeAssertionExpression(parent) || ts.isArrayLiteralExpression(parent) || ts.isObjectLiteralExpression(parent) || ts.isSpreadElement(parent)
+      || ts.isSpreadAssignment(parent) || (ts.isShorthandPropertyAssignment(parent) && parent.name === current)
+      || (ts.isPropertyAssignment(parent) && parent.initializer === current)
+      || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.left === current
+        && (ts.isArrayLiteralExpression(parent.parent) || ts.isObjectLiteralExpression(parent.parent) || ts.isPropertyAssignment(parent.parent)))) {
+      current = parent;
+      continue;
+    }
+    if (ts.isBinaryExpression(parent)) return parent.left === current && isAssignmentOperator(parent.operatorToken.kind);
+    if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return parent.initializer === current;
+    if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
+      return parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken;
+    }
+    return false;
   }
 }
 
@@ -466,24 +600,6 @@ function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
 }
 
 /**
- * 파일에서 모듈 객체를 담은 이름이다: 네임스페이스 import, `import x = require()`, `require()`·`import()` 결과로 초기화한 변수.
- *
- * @param sourceFile 파일
- * @returns 이름 집합
- */
-function moduleObjectNames(sourceFile: ts.SourceFile): Set<string> {
-  const names = new Set<string>();
-  const stack: ts.Node[] = [sourceFile];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (ts.isNamespaceImport(node) || (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference))) names.add(node.name.text);
-    else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined && isModuleObjectCall(unwrap(node.initializer))) names.add(node.name.text);
-    ts.forEachChild(node, (child) => { stack.push(child); });
-  }
-  return names;
-}
-
-/**
  * 식이 `require('…')` 또는 `import('…')` 호출인지 본다.
  *
  * @param node 노드
@@ -495,11 +611,13 @@ function isModuleObjectCall(node: ts.Node): node is ts.CallExpression {
 }
 
 /**
- * 모듈 객체 식이 흘러가거나(호출 인자·컨테이너·다른 변수) 원소 접근으로 읽혀, 그 모듈의 내보낸 값에 이름 없이 닿을 수 있는지 본다.
+ * 모듈 객체 식이 흘러가거나(호출 인자·컨테이너·다른 변수·대입·`then` 콜백) 원소 접근으로 읽혀, 그 모듈의 내보낸 값에 이름 없이 닿을 수
+ * 있는지 본다. `exports.x = P`처럼 모듈 객체를 내보내는 대입도 흘러간 것으로 본다(TypeScript가 그 내보내기를 모듈 별칭으로 잇지 않는다).
  * 모듈 객체 자체에 대입하는 자리(`module.exports = …`, `module.exports[k] = …`)는 내보낸 값을 읽지 않는다(`module.exports[k]` 쓰기는
  * {@link skipOverrideOf}가 따로 본다).
- * 점 접근(`P.users`)은 속성 심볼로 따로 세고, 호출 대상·`register()` 첫 인자, 모듈 객체 이름이 되는 `require()`·`import()` 결과의 변수
- * 초기값은 흘려보내지 않는다(이름을 다른 변수에 옮기면 흘러간 것으로 본다).
+ * 점 접근(`P.users`)은 속성 심볼로 따로 세고, 호출 대상·`register()` 첫 인자, 이름 하나에 담는 `require()`·`import()` 결과의 변수
+ * 초기값은 흘려보내지 않는다(그 이름의 사용을 따로 본다). JS 파일의 `const { a } = require()`는 TypeScript가 이름마다 그 내보내기의
+ * 별칭으로 잇는다. 그 밖의 구조 분해는 흘러간 것으로 본다.
  *
  * @param node 모듈 객체 식
  * @returns 흘러가면 true
@@ -508,11 +626,26 @@ function moduleObjectEscapes(node: ts.Expression): boolean {
   const outer = outermostWrapper(node);
   const parent = outer.parent;
   if (ts.isElementAccessExpression(parent) && parent.expression === outer) return !isWriteTarget(parent);
-  if (ts.isBinaryExpression(parent) && parent.left === outer && isAssignmentOperator(parent.operatorToken.kind)) return false;
-  if (ts.isVariableDeclaration(parent) && parent.initializer === outer) return !isModuleObjectCall(node);
+  if (ts.isBinaryExpression(parent) && isAssignmentOperator(parent.operatorToken.kind)) return parent.right === outer;
+  if (ts.isVariableDeclaration(parent) && parent.initializer === outer) {
+    const call = unwrap(outer);
+    if (!isModuleObjectCall(call)) return true;
+    if (ts.isIdentifier(parent.name)) return false;
+    return !(isRequireCall(call) && (call.flags & ts.NodeFlags.JavaScriptFile) !== 0 && ts.isObjectBindingPattern(parent.name));
+  }
   if (ts.isAwaitExpression(parent)) return moduleObjectEscapes(parent);
-  if (ts.isPropertyAccessExpression(parent)) return false;
+  if (ts.isPropertyAccessExpression(parent)) return isModuleObjectCall(node) && !isRequireCall(node);
   return mayChangeBinding(node);
+}
+
+/**
+ * 호출이 `require('…')`인지 본다(`import('…')`가 아니다).
+ *
+ * @param node 노드
+ * @returns 맞으면 true
+ */
+function isRequireCall(node: ts.Node): boolean {
+  return isModuleObjectCall(node) && ts.isIdentifier(node.expression);
 }
 
 /**
@@ -671,11 +804,12 @@ function isTopLevelModuleExportsAssignment(node: ts.Node): node is ts.BinaryExpr
 /**
  * 바인딩을 쓰는 자리 하나를 분류한다.
  *
+ * @param census census
  * @param context 해석기 문맥
  * @param use 바인딩 식(식별자·속성 접근)
  * @returns 근거, 따라갈 바인딩, 또는 바꾸지 않음
  */
-function classifyUse(context: InterpreterContext, use: ts.Expression): UseVerdict {
+function classifyUse(census: SkipCensus, context: InterpreterContext, use: ts.Expression): UseVerdict {
   const checker = context.checker;
   const outer = outermostWrapper(use);
   const parent = outer.parent;
@@ -685,27 +819,28 @@ function classifyUse(context: InterpreterContext, use: ts.Expression): UseVerdic
     const alias = resolvedSymbol(checker, parent.name);
     return alias === undefined ? 'unknown' : { follow: alias };
   }
-  if (ts.isCallExpression(parent) && parent.expression !== outer) return classifyArgument(context, parent, outer);
+  if (ts.isCallExpression(parent) && parent.expression !== outer) return classifyArgument(census, context, parent, outer);
   return 'unknown';
 }
 
 /**
  * 호출 인자로 넘긴 바인딩을 분류한다. `fastify-plugin` 한 인자 호출은 건너뜀(모듈 최상위·조건 없음일 때), `console.*`은 바꾸지 않음,
- * 프로젝트 함수는 받는 매개변수의 사용을 따라간다. 그 밖(패키지·전역 함수, 모르는 호출)은 모름이다 — `fastify-plugin`처럼 받은
- * 함수에 심볼을 쓰는 패키지가 있을 수 있다.
+ * 호출 대상이 정적으로 하나로 정해지는 프로젝트 함수면 받는 매개변수의 사용을 따라간다({@link projectFunction}). 그 밖(패키지·전역 함수,
+ * 메서드, 다시 대입할 수 있는 바인딩, 모르는 호출)은 모름이다 — `fastify-plugin`처럼 받은 함수에 심볼을 쓰는 패키지가 있을 수 있다.
  *
+ * @param census census
  * @param context 해석기 문맥
  * @param call 호출
  * @param argument 인자 식
  * @returns 분류
  */
-function classifyArgument(context: InterpreterContext, call: ts.CallExpression, argument: ts.Expression): UseVerdict {
+function classifyArgument(census: SkipCensus, context: InterpreterContext, call: ts.CallExpression, argument: ts.Expression): UseVerdict {
   const checker = context.checker;
   if (calleeFromPackage(checker, call.expression, ['fastify-plugin'], ['default', '*', 'fastifyPlugin']) !== undefined) {
     return call.arguments.length === 1 && runsOnceAtTopLevel(call) ? 'yes' : 'unknown';
   }
   if (isConsoleCall(context, call)) return 'no';
-  const parameter = parameterReceiving(context, call, argument);
+  const parameter = parameterReceiving(census, context, call, argument);
   if (parameter === 'none') return 'no';
   return parameter === undefined ? 'unknown' : { follow: parameter };
 }
@@ -730,15 +865,16 @@ function isConsoleCall(context: InterpreterContext, call: ts.CallExpression): bo
 /**
  * 프로젝트 함수 호출에서 인자를 받는 매개변수 심볼이다.
  *
+ * @param census census
  * @param context 해석기 문맥
  * @param call 호출
  * @param argument 인자 식
  * @returns 매개변수 심볼, 받는 매개변수가 없고 `arguments`·나머지 매개변수도 없으면 `'none'`, 모르면 undefined
  */
-function parameterReceiving(context: InterpreterContext, call: ts.CallExpression, argument: ts.Expression): ts.Symbol | 'none' | undefined {
+function parameterReceiving(census: SkipCensus, context: InterpreterContext, call: ts.CallExpression, argument: ts.Expression): ts.Symbol | 'none' | undefined {
   const index = call.arguments.indexOf(argument);
   if (index < 0 || call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return undefined;
-  const callee = projectFunction(context, call.expression);
+  const callee = projectFunction(census, context, call.expression);
   if (callee === undefined || readsArguments(callee)) return undefined;
   const parameters = callee.parameters.filter((parameter) => !(ts.isIdentifier(parameter.name) && parameter.name.text === 'this'));
   const parameter = parameters[index];
@@ -749,37 +885,60 @@ function parameterReceiving(context: InterpreterContext, call: ts.CallExpression
 }
 
 /**
- * 호출 대상이 가리키는 본문 있는 프로젝트 함수다(함수 선언, 메서드, 함수 식을 초기값으로 둔 변수·속성). 선언이 여럿이거나 본문이 없으면
- * undefined다.
+ * 호출 대상이 정적으로 하나로 정해지는 본문 있는 프로젝트 함수다: 식별자 호출이고, 그 바인딩(별칭을 따라간 뒤)의 선언이 하나뿐이며 본문
+ * 있는 함수 선언이거나 함수 식·화살표 함수를 초기값으로 둔 `const`이고, 프로젝트 어디서도 그 바인딩에 다른 값을 대입하지 않는다.
+ * 메서드·속성 호출(재정의·다른 객체가 받을 수 있다), `let`·`var`, 다시 대입하는 바인딩은 실제로 부를 함수를 모르므로 undefined다.
  *
+ * @param census census
  * @param context 해석기 문맥
  * @param callee 호출 대상 식
  * @returns 함수 또는 undefined
  */
-function projectFunction(context: InterpreterContext, callee: ts.Expression): ts.SignatureDeclaration | undefined {
+function projectFunction(census: SkipCensus, context: InterpreterContext, callee: ts.Expression): ts.SignatureDeclaration | undefined {
   const node = unwrap(callee);
-  const name = ts.isIdentifier(node) ? node : ts.isPropertyAccessExpression(node) ? node.name : undefined;
-  const symbol = name === undefined ? undefined : symbolAt(context.checker, name);
-  if (symbol === undefined) return undefined;
-  const bodies = (resolveAlias(context.checker, symbol).declarations ?? []).flatMap((declaration) => {
-    const fn = functionOfDeclaration(declaration);
-    return fn === undefined ? [] : [fn];
-  });
-  const only = bodies.length === 1 ? bodies[0]! : undefined;
-  return only !== undefined && context.project.pathOf(only.getSourceFile()) !== undefined ? only : undefined;
+  const raw = ts.isIdentifier(node) ? symbolAt(context.checker, node) : undefined;
+  if (raw === undefined) return undefined;
+  const symbol = resolveAlias(context.checker, raw);
+  const declarations = symbol.declarations ?? [];
+  const fn = declarations.length === 1 ? staticFunctionOf(declarations[0]!) : undefined;
+  if (fn === undefined || context.project.pathOf(fn.getSourceFile()) === undefined || isReassigned(census, context.checker, symbol)) return undefined;
+  return fn;
 }
 
 /**
- * 선언이 담은 본문 있는 함수다.
+ * 선언이 바인딩에 묶는 본문 있는 함수다(함수 선언, 함수 식·화살표 함수를 초기값으로 둔 `const`).
  *
  * @param declaration 선언
  * @returns 함수 또는 undefined
  */
-function functionOfDeclaration(declaration: ts.Declaration): ts.SignatureDeclaration | undefined {
-  if ((ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) && declaration.body !== undefined) return declaration;
-  if (!(ts.isVariableDeclaration(declaration) || ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)) || declaration.initializer === undefined) return undefined;
+function staticFunctionOf(declaration: ts.Declaration): ts.SignatureDeclaration | undefined {
+  if (ts.isFunctionDeclaration(declaration)) return declaration.body === undefined ? undefined : declaration;
+  if (!ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name) || declaration.initializer === undefined
+    || (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0) return undefined;
   const initializer = unwrap(declaration.initializer);
   return ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer) ? initializer : undefined;
+}
+
+/**
+ * 프로젝트 어딘가에서 바인딩에 다른 값을 대입하는지 본다(메모한다). 선언 이름·import 지역 이름으로 찾은 대입 대상 중 같은 심볼로 풀리는
+ * 것이 있으면 참이다.
+ *
+ * @param census census
+ * @param checker TypeChecker
+ * @param symbol 바인딩 심볼
+ * @returns 대입하면 true
+ */
+function isReassigned(census: SkipCensus, checker: ts.TypeChecker, symbol: ts.Symbol): boolean {
+  const cached = census.reassigned.get(symbol);
+  if (cached !== undefined) return cached;
+  const declared = (symbol.declarations ?? []).flatMap((declaration) => {
+    const name = (declaration as ts.Declaration & { readonly name?: ts.Node }).name;
+    return name !== undefined && ts.isIdentifier(name) ? [name.text] : [];
+  });
+  const names = new Set([symbol.name, ...declared, ...(aliasIndexOf(census, checker).get(symbol) ?? [])]);
+  const result = [...names].some((name) => (census.assignedTargets.get(name) ?? []).some((target) => resolvedSymbol(checker, target) === symbol));
+  census.reassigned.set(symbol, result);
+  return result;
 }
 
 /**
@@ -868,71 +1027,236 @@ function hasKnownValue(symbol: ts.Symbol): boolean {
 }
 
 /**
- * 모듈 객체가 흘러간 모듈 파일과 그 자리다(한 번 만든다). 계산된 키 쓰기의 대상이 모듈 객체에서 원소로 읽은 값이면 그 모듈도 넣는다.
- * 프로젝트 밖(패키지) 모듈은 프로젝트 플러그인을 담지 않으므로 뺀다.
+ * 모듈 객체가 흘러가 이름 없이 닿을 수 있게 된 내보낸 값과 그 자리다(한 번 만든다). 모듈 객체는 `require()`·`import()` 호출,
+ * `module.exports`·`exports`, 그리고 별칭을 따라가 모듈(파일 모듈·TS 네임스페이스)로 풀리는 식별자·속성 접근이다. 흘러간 모듈은
+ * `getExportsOfModule`로 내보낸 값을 별칭 너머 선언까지 따라가고(`export *`·`export { a } from`·다시 내보낸 네임스페이스 포함), 그 값이 다시
+ * 모듈이면 그 모듈도 펼친다. `module.exports`·`exports` 객체 자체와 심볼 없이 찾은 모듈(TS 파일의 상대 `require()`)은 그 파일의 플러그인 모두로 본다. 프로젝트 밖
+ * (패키지) 모듈은 프로젝트 플러그인을 담지 않으므로 뺀다. 바인딩으로 잇지 못한 원소 쓰기는 {@link globalEvidence}가 따로 센다.
  *
  * @param census census
  * @param context 해석기 문맥
- * @returns 모듈 파일 → 모듈 심볼과 파일별 근거
+ * @returns 흘러간 내보낸 값
  */
-function escapedModules(census: SkipCensus, context: InterpreterContext): Map<ts.SourceFile, EscapedModule> {
-  if (census.escapedModules !== undefined) return census.escapedModules;
-  const modules = new Map<ts.SourceFile, EscapedModule>();
-  const record = (expression: ts.Expression, site: ts.Node): void => {
+function escapedExports(census: SkipCensus, context: InterpreterContext): EscapedExports {
+  if (census.escapedExports !== undefined) return census.escapedExports;
+  const checker = context.checker;
+  const escaped: EscapedExports = { symbols: new Map(), declarations: new Map(), files: new Map() };
+  const sitesByModule = new Map<ts.Symbol, Evidence>();
+  const record = (expression: ts.Expression): void => {
     const found = moduleOfObject(context, expression);
     if (found === undefined) return;
-    const entry = modules.get(found.file) ?? { symbol: found.symbol, evidence: new Map<ts.SourceFile, Level>() };
-    entry.symbol ??= found.symbol;
-    addLevel(entry.evidence, site.getSourceFile(), 'unknown');
-    modules.set(found.file, entry);
+    if (found.symbol !== undefined) addSite(sitesByModule, found.symbol, expression.getSourceFile());
+    else addSite(escaped.files, found.file, expression.getSourceFile());
   };
-  for (const use of census.moduleObjectUses) record(use, use);
-  for (const write of census.computedWrites) {
-    const target = unwrap(write.expression);
-    if (attributedSymbol(context.checker, target) !== undefined) continue;
-    const root = accessRoot(target);
-    if (root !== target && (ts.isIdentifier(root) || isModuleObjectCall(root) || isModuleExportsReference(root))) record(root, write);
+  for (const use of census.moduleObjectUses) record(use);
+  const names = new Set(census.moduleObjectNames);
+  for (const [symbol, aliases] of aliasIndexOf(census, checker)) {
+    if (isModuleSymbol(context, symbol)) for (const alias of aliases) names.add(alias);
   }
-  census.escapedModules = modules;
-  return modules;
-}
-
-/**
- * 원소·속성 접근 사슬의 뿌리 식이다.
- *
- * @param expression 식
- * @returns 뿌리
- */
-function accessRoot(expression: ts.Expression): ts.Expression {
-  let current = expression;
-  while (ts.isElementAccessExpression(current) || ts.isPropertyAccessExpression(current)) current = unwrap(current.expression);
-  return current;
-}
-
-/**
- * 모듈 객체 식이 가리키는 프로젝트 모듈 파일이다.
- *
- * @param context 해석기 문맥
- * @param expression 모듈 객체 식(네임스페이스 이름·`require()`·`import()`·`module.exports`)
- * @returns 모듈 파일과 모듈 심볼(지정자로 찾았을 때), 프로젝트 모듈이 아니면 undefined
- */
-function moduleOfObject(context: InterpreterContext, expression: ts.Expression): { readonly file: ts.SourceFile; readonly symbol: ts.Symbol | undefined } | undefined {
-  const checker = context.checker;
-  if (isModuleExportsReference(expression)) return { file: expression.getSourceFile(), symbol: undefined };
-  let specifier: ts.Expression | undefined;
-  if (isModuleObjectCall(expression)) specifier = expression.arguments[0];
-  else if (ts.isIdentifier(expression)) {
-    const declaration = symbolAt(checker, expression)?.declarations?.[0];
-    if (declaration !== undefined && ts.isNamespaceImport(declaration)) specifier = declaration.parent.parent.moduleSpecifier;
-    else if (declaration !== undefined && ts.isImportEqualsDeclaration(declaration) && ts.isExternalModuleReference(declaration.moduleReference)) specifier = declaration.moduleReference.expression;
-    else if (declaration !== undefined && ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
-      const initializer = unwrap(declaration.initializer);
-      if (isModuleObjectCall(initializer)) specifier = initializer.arguments[0];
+  for (const name of names) {
+    for (const use of [...(census.usesByName.get(name) ?? []), ...(census.objectOnlyUses.get(name) ?? [])]) {
+      if (moduleObjectEscapes(use)) record(use);
     }
   }
-  const symbol = specifier === undefined ? undefined : symbolAt(checker, specifier);
-  const module = symbol?.valueDeclaration;
-  return module !== undefined && ts.isSourceFile(module) && context.project.pathOf(module) !== undefined ? { file: module, symbol } : undefined;
+  for (const [file, sites] of escaped.files) escaped.files.set(file, countedOnce(census, context, sites));
+  for (const [module, sites] of sitesByModule) {
+    const reach = moduleClosure(context, module);
+    const counted = countedOnce(census, context, sites);
+    for (const symbol of reach.symbols) mergeAt(escaped.symbols, symbol, counted);
+    for (const declaration of reach.declarations) mergeAt(escaped.declarations, declaration, counted);
+  }
+  census.escapedExports = escaped;
+  return escaped;
+}
+
+/**
+ * 흘러간 자리의 근거(모두 `'unknown'`)에서 판정 때 늘 세는 파일(해석 대상, 해석 대상이 불러오는 파일)은 하나만 남긴다. 그런 파일 하나면
+ * {@link verdictOf}가 이미 모름이므로 판정은 같고, 같은 모듈 객체를 파일 수천 개가 흘려보내도 내보낸 값마다 근거가 하나로 준다. 그 밖의
+ * 파일은 등록마다 늘 보는 파일일 때만 세므로 모두 남긴다.
+ *
+ * @param census census
+ * @param context 해석기 문맥
+ * @param sites 흘러간 자리의 근거
+ * @returns 줄인 근거
+ */
+function countedOnce(census: SkipCensus, context: InterpreterContext, sites: Evidence): Evidence {
+  const importedExcluded = importedExcludedFiles(census, context);
+  const kept: Evidence = new Map();
+  let counted = false;
+  for (const [file, level] of sites) {
+    const path = context.project.pathOf(file);
+    const counts = path !== undefined && (context.includesFile(path) || importedExcluded.has(file));
+    if (!counts || !counted) kept.set(file, level);
+    counted ||= counts;
+  }
+  return kept;
+}
+
+/**
+ * 모듈에서 이름 없이 닿는 내보낸 값이다: 내보낸 심볼(별칭을 따라간 뒤)과 그 선언, 내보낸 값이 다시 모듈이면 그 모듈의 것까지.
+ * CommonJS 파일의 `exports.a = x`·`module.exports.a = x`도 TypeScript가 내보내기로 묶는다(오른쪽이 이름이면 그 별칭이다).
+ *
+ * @param context 해석기 문맥
+ * @param module 모듈 심볼
+ * @returns 닿는 심볼·선언
+ */
+function moduleClosure(context: InterpreterContext, module: ts.Symbol): { symbols: Set<ts.Symbol>; declarations: Set<ts.Node> } {
+  const checker = context.checker;
+  const reach = { symbols: new Set<ts.Symbol>(), declarations: new Set<ts.Node>() };
+  const seen = new Set([module]);
+  const queue = [module];
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    for (const target of moduleExportsOf(checker, current)) {
+      reach.symbols.add(target);
+      for (const declaration of target.declarations ?? []) {
+        if (context.project.pathOf(declaration.getSourceFile()) !== undefined) reach.declarations.add(declaration);
+      }
+      if (isModuleSymbol(context, target) && !seen.has(target)) {
+        seen.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return reach;
+}
+
+/**
+ * 모듈이 내보낸 값의 심볼이다(별칭을 따라간 뒤). `export =`·`module.exports =` 모듈은 TypeScript가 모듈 객체 식별자를 그 대상으로 바로
+ * 풀어 주므로 여기까지 오지 않는다.
+ *
+ * @param checker TypeChecker
+ * @param module 모듈 심볼
+ * @returns 심볼
+ */
+function moduleExportsOf(checker: ts.TypeChecker, module: ts.Symbol): ts.Symbol[] {
+  try {
+    return checker.getExportsOfModule(module).map((symbol) => resolveAlias(checker, symbol));
+  } catch {
+    // 구문 오류가 있는 파일에서 checker가 던지면 내보낸 값을 모른다(심볼 없이 찾은 모듈처럼 파일로 보지 않고 빈 값으로 둔다).
+    return [];
+  }
+}
+
+/**
+ * 심볼이 프로젝트 안의 모듈(파일 모듈 또는 값이 있는 TS 네임스페이스)인지 본다.
+ *
+ * @param context 해석기 문맥
+ * @param symbol 심볼
+ * @returns 맞으면 true
+ */
+function isModuleSymbol(context: InterpreterContext, symbol: ts.Symbol): boolean {
+  if ((symbol.flags & ts.SymbolFlags.ValueModule) === 0) return false;
+  const declaration = symbol.valueDeclaration;
+  return declaration !== undefined && (ts.isSourceFile(declaration) || ts.isModuleDeclaration(declaration))
+    && context.project.pathOf(declaration.getSourceFile()) !== undefined;
+}
+
+/**
+ * 맵의 근거에 자리 하나를 더한다.
+ *
+ * @param map 맵
+ * @param key 키
+ * @param site 자리 파일
+ */
+function addSite<K>(map: Map<K, Evidence>, key: K, site: ts.SourceFile): void {
+  const evidence = map.get(key) ?? new Map<ts.SourceFile, Level>();
+  addLevel(evidence, site, 'unknown');
+  map.set(key, evidence);
+}
+
+/**
+ * 맵의 근거에 근거를 합친다.
+ *
+ * @param map 맵
+ * @param key 키
+ * @param source 더할 근거
+ */
+function mergeAt<K>(map: Map<K, Evidence>, key: K, source: Evidence): void {
+  const evidence = map.get(key) ?? new Map<ts.SourceFile, Level>();
+  mergeInto(evidence, source);
+  map.set(key, evidence);
+}
+
+/**
+ * 모듈 객체 식이 가리키는 프로젝트 모듈이다.
+ *
+ * @param context 해석기 문맥
+ * @param expression 모듈 객체 식(`require()`·`import()`·`module.exports`, 모듈로 풀리는 식별자·속성 접근, `require()` 결과 변수)
+ * @returns 모듈 심볼, 심볼 없이 찾은 모듈 파일, 프로젝트 모듈이 아니면 undefined
+ */
+function moduleOfObject(context: InterpreterContext, expression: ts.Expression): { readonly symbol: ts.Symbol } | { readonly symbol: undefined; readonly file: ts.SourceFile } | undefined {
+  if (isModuleExportsReference(expression)) return { symbol: undefined, file: expression.getSourceFile() };
+  if (isModuleObjectCall(expression)) return moduleOfCall(context, expression);
+  if (!ts.isIdentifier(expression) && !ts.isPropertyAccessExpression(expression)) return undefined;
+  const symbol = resolvedSymbol(context.checker, expression);
+  if (symbol === undefined) return undefined;
+  if (isModuleSymbol(context, symbol)) return { symbol };
+  // TS 파일의 `const P = require('./x')`·`const P = await import('./x')`는 별칭이 아니라 변수다.
+  const declaration = symbol.valueDeclaration;
+  const initializer = declaration !== undefined && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name) && declaration.initializer !== undefined
+    ? unwrap(declaration.initializer) : undefined;
+  return initializer !== undefined && isModuleObjectCall(initializer) ? moduleOfCall(context, initializer) : undefined;
+}
+
+/**
+ * `require()`·`import()` 호출이 가리키는 프로젝트 모듈이다.
+ *
+ * @param context 해석기 문맥
+ * @param call 호출
+ * @returns 모듈 심볼, 심볼 없이 찾은 모듈 파일, 또는 undefined
+ */
+function moduleOfCall(context: InterpreterContext, call: ts.CallExpression): { readonly symbol: ts.Symbol } | { readonly symbol: undefined; readonly file: ts.SourceFile } | undefined {
+  const symbol = symbolAt(context.checker, call.arguments[0]!);
+  if (symbol !== undefined && isModuleSymbol(context, symbol)) return { symbol };
+  const file = context.requiredModule(call);
+  return file === undefined ? undefined : { symbol: undefined, file };
+}
+
+/**
+ * 해석 대상 파일에서 값을 불러오는 import·`require()`·`import()`를 따라 닿는 파일 중 해석 대상에서 빠진 파일이다(한 번 만든다). 테스트
+ * 디렉터리 이름의 파일이라도 운영 코드가 불러오면 서버에서 실행된다.
+ *
+ * @param census census
+ * @param context 해석기 문맥
+ * @returns 파일 집합
+ */
+function importedExcludedFiles(census: SkipCensus, context: InterpreterContext): ReadonlySet<ts.SourceFile> {
+  if (census.importedExcluded !== undefined) return census.importedExcluded;
+  const reached = new Set<ts.SourceFile>();
+  const queue: ts.SourceFile[] = [];
+  for (const [path, file] of context.project.files) {
+    if (context.includesFile(path)) {
+      reached.add(file);
+      queue.push(file);
+    }
+  }
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    for (const specifier of census.moduleSpecifiers.get(file) ?? []) {
+      const module = moduleFileOf(context, specifier);
+      if (module !== undefined && !reached.has(module)) {
+        reached.add(module);
+        queue.push(module);
+      }
+    }
+  }
+  const excluded = new Set([...reached].filter((file) => !context.includesFile(context.project.pathOf(file)!)));
+  census.importedExcluded = excluded;
+  return excluded;
+}
+
+/**
+ * 모듈 지정자가 가리키는 프로젝트 파일이다.
+ *
+ * @param context 해석기 문맥
+ * @param specifier 지정자
+ * @returns 파일 또는 undefined
+ */
+function moduleFileOf(context: InterpreterContext, specifier: ts.StringLiteralLike): ts.SourceFile | undefined {
+  const declaration = symbolAt(context.checker, specifier)?.valueDeclaration;
+  if (declaration !== undefined && ts.isSourceFile(declaration)) return context.project.pathOf(declaration) === undefined ? undefined : declaration;
+  return ts.isCallExpression(specifier.parent) ? context.requiredModule(specifier.parent) : undefined;
 }
 
 /**

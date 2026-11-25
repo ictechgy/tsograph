@@ -388,6 +388,14 @@ test('해석에서 빼는 테스트 디렉터리 이름이어도 등록한 플�
     'src/routes/test/index.ts': "export default async function testRoutes(f: any) { f.get('/ping', async () => 'pong'); }\n(testRoutes as any)[Symbol.for('skip-override')] = true;\n",
   });
   assert.deepEqual(factLines(document), ['GET root /ping strict']);
+  // 그 파일이 자기 모듈 객체를 흘려보내도 본다(실제 fastify 4.29.1·5.12.8은 `/ping`: 패키지 함수가 내보낸 플러그인에 심볼을 쓴다).
+  const escaped = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.js': "const fastify = require('fastify');\nconst app = fastify();\napp.register(require('./routes/test/index.js').testRoutes, { prefix: '/test' });\nmodule.exports = app;\n",
+    'src/routes/test/index.js': "exports.testRoutes = async function (f) { f.get('/ping', async () => 'pong'); };\nrequire('mark-all').markAll(exports);\n",
+  });
+  assert.deepEqual(factLines(escaped), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
 });
 
 test('const 키·네임스페이스 속성에 쓴 skip-override는 그 속성의 근거이고, 이름으로 잇지 못한 대상은 모든 플러그인의 근거다', async () => {
@@ -529,6 +537,7 @@ test('require() 모듈 객체가 흘러가면 그 모듈이 내보낸 플러그�
   // 모듈 객체를 넘기거나 원소로 읽으면 그 너머에서 내보낸 함수에 심볼을 쓸 수 있다(같은 파일의 내보내지 않은 함수는 그대로).
   assert.deepEqual(factLines(await scanNodeProject(commonJs('Object.keys(mod);'))), ['GET root /l/local strict', unproven]);
   assert.deepEqual(factLines(await scanNodeProject(commonJs("console.info(require('./plugins.js')[process.env.NAME]);"))), ['GET root /l/local strict', unproven]);
+  assert.deepEqual(factLines(await scanNodeProject(commonJs('console.info(mod[process.env.NAME]);'))), ['GET root /l/local strict', unproven]);
 });
 
 test('네임스페이스 객체가 흘러가면 내보낸 최상위 선언 안의 플러그인도 모르고, 흘러가지 않으면 그대로다', async () => {
@@ -547,4 +556,168 @@ test('네임스페이스 객체가 흘러가면 내보낸 최상위 선언 안�
   });
   assert.deepEqual(factLines(await scanNodeProject(files(''))), ['GET root /u/x strict']);
   assert.deepEqual(factLines(await scanNodeProject(files('export const all = Object.values(P);'))), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+});
+
+test('매개변수를 따라가는 호출은 대상이 정적으로 하나인 함수뿐이고, 다시 대입한 바인딩·재정의할 수 있는 메서드는 모른다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 다시 대입한 `let`·함수 선언(구조 분해 대입 포함)과 재정의한 메서드 모두 접두사를 무시한다(`/x`): 실제로 부르는 함수가
+  // 받은 플러그인을 패키지 함수에 넘겨 심볼을 쓴다. 정적 선언만 보면 `p.name`만 읽는 함수라 건너뛰지 않음으로 잘못 단정한다.
+  const files = (body: readonly string[]): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "async function users(f: any) { f.get('/x', async () => 'x'); }",
+      ...body,
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  const reassignedLet = ['let prepare = (p: any) => p.name;', 'prepare = (p: any) => { markAll({ p }); };', 'prepare(users);'];
+  assert.deepEqual(factLines(await scanNodeProject(files(reassignedLet))), unproven);
+  const overridden = [
+    'class Base { prepare(p: any) { return p.name; } }',
+    'class Marking extends Base { prepare(p: any) { markAll({ p }); } }',
+    'const helper: Base = new Marking();',
+    'helper.prepare(users);',
+  ];
+  assert.deepEqual(factLines(await scanNodeProject(files(overridden))), unproven);
+  const reassignedFunction = ['function prepare(p: any) { return p.name; }', '(prepare as any) = (p: any) => { markAll({ p }); };', 'prepare(users);'];
+  assert.deepEqual(factLines(await scanNodeProject(files(reassignedFunction))), unproven);
+  const destructured = ['function prepare(p: any) { return p.name; }', '[prepare] = [(p: any) => { markAll({ p }); }] as any;', 'prepare(users);'];
+  assert.deepEqual(factLines(await scanNodeProject(files(destructured))), unproven);
+  // 다시 대입하지 않는 `const` 화살표 함수·함수 선언은 그 매개변수의 사용을 따라간다(실제 fastify: `/u/x`).
+  assert.deepEqual(factLines(await scanNodeProject(files(['const prepare = (p: any) => p.name;', 'prepare(users);']))), ['GET root /u/x strict']);
+  assert.deepEqual(factLines(await scanNodeProject(files(['function prepare(p: any) { return p.name; }', 'prepare(users);']))), ['GET root /u/x strict']);
+});
+
+test('모듈 객체가 흘러가면 다시 내보낸 이름(export *·export { a } from·네임스페이스 재내보내기)을 따라 그 플러그인을 모른다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 흘러간 넷 모두 접두사를 무시한다(`/x`): 패키지 함수가 모듈 객체의 값마다 심볼을 쓴다.
+  const files = (app: readonly string[]): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/users.ts': "export async function users(f: any) { f.get('/x', async () => 'x'); }\n",
+    'src/barrel.ts': "export * from './users.ts';\n",
+    'src/named.ts': "export { users } from './users.ts';\n",
+    'src/reexp.ts': "import * as P from './users.ts';\nexport { P };\n",
+    'src/nested.ts': "export * as R from './users.ts';\n",
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "import { users } from './users.ts';",
+      ...app,
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  assert.deepEqual(factLines(await scanNodeProject(files(["import * as plugins from './barrel.ts';", 'markAll(plugins);']))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(files(["import * as plugins from './named.ts';", 'markAll(plugins);']))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(files(["import { P } from './reexp.ts';", 'markAll(P);']))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(files(["import { P as Plugins } from './reexp.ts';", 'markAll(Plugins);']))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(files(["import * as All from './nested.ts';", 'markAll(All.R);']))), unproven);
+  // 점 접근으로만 읽으면 흘러가지 않는다(실제 fastify: `/u/x`).
+  assert.deepEqual(factLines(await scanNodeProject(files(["import * as plugins from './barrel.ts';", 'console.log(plugins.users === users);']))), ['GET root /u/x strict']);
+});
+
+test('CommonJS에서 내보내기에 대입한 모듈 객체는 흘러간 것으로 본다', async () => {
+  // `exports.P = require('./users.js')`는 TypeScript가 모듈 별칭으로 잇지 않아, 받는 쪽에서 `P`가 모듈 객체인지 모른다. 그래서 모듈 객체를
+  // 내보내는 대입 자체를 흘러감으로 본다(실제 fastify 4.29.1·5.12.8은 `markAll(P)`면 `/x`, 넘기지 않으면 `/u/x` — 뒤의 것은 건전하지만 덜 정밀하다).
+  const files = (reexported: string, escape: string): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/users.js': "exports.users = async function (f) { f.get('/x', async () => 'x'); };\n",
+    'src/reexp.js': `exports.P = ${reexported};\n`,
+    'src/app.js': [
+      "const fastify = require('fastify');",
+      "const { markAll } = require('mark-all');",
+      "const { P } = require('./reexp.js');",
+      "const { users } = require('./users.js');",
+      escape,
+      'const app = fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'module.exports = app;',
+    ].join('\n'),
+  });
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  assert.deepEqual(factLines(await scanNodeProject(files("require('./users.js')", 'markAll(P);'))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(files("require('./users.js')", ''))), unproven);
+  // JS 파일의 `const { a } = require()`는 이름마다 그 내보내기의 별칭이라 흘러가지 않는다(실제 fastify: `/u/x`).
+  assert.deepEqual(factLines(await scanNodeProject(files('{}', 'markAll(P);'))), ['GET root /u/x strict']);
+});
+
+test('운영 코드가 불러오는 테스트 디렉터리 파일의 skip-override 쓰기는 많아야 모르는 값으로 센다', async () => {
+  // `setup/test/mark.ts`는 테스트 경로 규칙에 걸려 해석 대상에서 빠지지만 운영 코드가 부수 효과로 불러 실행한다. 실제 fastify
+  // 4.29.1·5.12.8은 `/x`. 테스트 파일만 불러오면 서버 실행 경로가 아니다(`/u/x`).
+  const files = (importer: string): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/users.ts': "export default async function users(f: any) { f.get('/x', async () => 'x'); }\n",
+    'src/setup/test/mark.ts': "import users from '../../users.ts';\n(users as any)[Symbol.for('skip-override')] = true;\n",
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import users from './users.ts';",
+      importer === 'app' ? "import './setup/test/mark.ts';" : '',
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+    'src/app.test.ts': importer === 'test' ? "import './setup/test/mark.ts';\n" : 'export {};\n',
+  });
+  assert.deepEqual(factLines(await scanNodeProject(files('app'))), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+  assert.deepEqual(factLines(await scanNodeProject(files('test'))), ['GET root /u/x strict']);
+  assert.deepEqual(factLines(await scanNodeProject(files('none'))), ['GET root /u/x strict']);
+});
+
+test('TS 네임스페이스·import().then·TS 파일의 require()·CommonJS 모듈 객체가 흘러가도 그 플러그인을 모른다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 `import().then`·CommonJS `mount`가 `/x`다(TS 네임스페이스·TS 파일 require도 같은 값이 패키지 함수에 닿는다).
+  const base = { 'package.json': packageJson({ fastify: '5.2.0' }), 'tsconfig.json': ambientTypesFreeConfig };
+  const unproven = ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}'];
+  const esm = (escape: readonly string[]): Record<string, string> => ({
+    ...base,
+    'src/users.ts': "export async function users(f: any) { f.get('/x', async () => 'x'); }\n",
+    'src/nested.ts': "export * as R from './users.ts';\n",
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "import { users } from './users.ts';",
+      ...escape,
+      'const app = Fastify();',
+      "app.register(users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(await scanNodeProject(esm(["await import('./users.ts').then((m) => markAll(m));"]))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(esm(['declare const require: any;', "const mod = require('./users.ts');", 'markAll(mod);']))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(esm(["import mod = require('./users.ts');", 'markAll(mod);']))), unproven);
+  // 다시 내보낸 네임스페이스 안까지 걷는 함수인지 모른다(값을 한 겹만 보는 함수면 실제는 `/u/x`).
+  assert.deepEqual(factLines(await scanNodeProject(esm(["import * as All from './nested.ts';", 'markAll(All);']))), unproven);
+  const namespace = await scanNodeProject({
+    ...base,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { markAll } from 'mark-all';",
+      "namespace Plugins { export async function users(f: any) { f.get('/x', async () => 'x'); } }",
+      'markAll(Plugins);',
+      'const app = Fastify();',
+      "app.register(Plugins.users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  assert.deepEqual(factLines(namespace), unproven);
+  // CommonJS `module.exports.users = users`는 TypeScript가 그 함수의 별칭으로 묶는다.
+  const commonJs = (escape: string): Record<string, string> => ({
+    ...base,
+    'src/plugins.js': "async function users(f) { f.get('/x', async () => 'x'); }\nmodule.exports.users = users;\nmodule.exports.mount = (app) => { app.register(users, { prefix: '/u' }); };\n",
+    'src/app.js': ["const fastify = require('fastify');", "const { markAll } = require('mark-all');", "const mod = require('./plugins.js');", escape, 'const app = fastify();', 'mod.mount(app);', 'module.exports = app;'].join('\n'),
+  });
+  assert.deepEqual(factLines(await scanNodeProject(commonJs('markAll(mod);'))), unproven);
+  assert.deepEqual(factLines(await scanNodeProject(commonJs(''))), ['GET root /u/x strict']);
+  // 모듈 파일이 자기 `module.exports` 객체를 넘겨도 같다.
+  const self = commonJs('');
+  self['src/plugins.js'] += "require('mark-all').markAll(module.exports);\n";
+  assert.deepEqual(factLines(await scanNodeProject(self)), unproven);
 });
