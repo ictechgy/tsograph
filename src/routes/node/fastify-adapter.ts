@@ -1,12 +1,13 @@
 /**
  * Fastify 4·5 라우트 등록을 해석하고 플러그인 접두사를 펼친다.
  *
- * 확인한 fastify@4.29.1·5.12.5(`lib/route.js`, `lib/plugin-override.js`)와 find-my-way@8.2.2·9.9.0 동작(오라클 실행으로
- * 재확인):
+ * 확인한 fastify@4.29.1·5.12.5(`lib/route.js`, 5 `lib/plugin-override.js`·4 `lib/pluginOverride.js`)와 find-my-way@8.2.2·9.9.0
+ * 동작(오라클 실행으로 재확인):
  * - `fastify.METHOD(url, [options], handler)`·`fastify.route({method, url, handler})`가 라우트다. `all`은 지원 method 전부다.
  *   GET 라우트에는 HEAD 라우트가 자동으로 붙는다(`exposeHeadRoutes`, decl로 내지 않는다).
- * - `register(plugin, {prefix})`는 새 캡슐화 인스턴스를 만들어 접두사를 `buildRoutePrefix`로 잇는다. `fastify-plugin`으로
- *   감싼 플러그인(`skip-override`)은 부모 인스턴스를 그대로 쓰고 접두사를 무시한다.
+ * - `register(plugin, {prefix})`는 새 캡슐화 인스턴스를 만들어 접두사를 `buildRoutePrefix`로 잇는다(부모가 `/`로 끝날 때의
+ *   이음은 주 버전마다 다르다). `fastify-plugin`으로 감싼 플러그인(`skip-override`)은 부모 인스턴스를 그대로 쓰고 접두사를 무시한다.
+ * - 타입 주석으로만 아는 `FastifyInstance`는 붙는 위치를 모르므로 base 앵커이고, 그 아래 리터럴 접두사는 base 뒤 꼬리로 잇는다.
  * - 접두사 아래 `/` 라우트는 기본(`prefixTrailingSlash: 'both'`)으로 `prefix`와 `prefix/` 둘 다 등록한다.
  * - find-my-way는 정적 > 파라미터 > 와일드카드 순으로 고르므로 문서는 `specificity`다. `constraints`(version·host)는 조건부다.
  * - `caseSensitive: false`면 대소문자 무시, `ignoreTrailingSlash`면 끝 슬래시 선택이다(v5는 `routerOptions`가 우선).
@@ -14,7 +15,7 @@
 
 import ts from 'typescript';
 
-import type { HttpMethod, RouteDeclMethod } from '../../exchange/bridge-facts.ts';
+import type { HttpMethod, PathAnchor, RouteDeclMethod } from '../../exchange/bridge-facts.ts';
 import { eventsByInstance, type FlatProvided, type FlatRoute, type FrameworkRoutes } from './flat-route.ts';
 import { compileFindMyWayPath, type FindMyWayOptions } from './fmw-path.ts';
 import type { NodeProject } from './node-project.ts';
@@ -300,6 +301,24 @@ interface FlattenContext {
   readonly routes: FlatRoute[];
   readonly provided: FlatProvided[];
   readonly active: Set<RouterInstance>;
+  /** 플러그인 접두사를 잇는 규칙의 주 버전(모르면 undefined) */
+  readonly grammar: PrefixGrammar;
+}
+
+/** 주 버전마다 다른 `buildRoutePrefix` 규칙이다. 확인한 4·5가 아니거나 모르면 undefined다. */
+type PrefixGrammar = 4 | 5 | undefined;
+
+/** 값을 아는(리터럴) 또는 앞부분만 아는(partial) 경로 접두사다. */
+type KnownPrefix = Exclude<PathValue, { readonly kind: 'unknown' }>;
+
+/**
+ * 인스턴스가 라우트를 붙이는 경로 접두사다. 붙는 위치를 모르는 인스턴스(타입 주석으로만 아는 `FastifyInstance` 매개변수)는
+ * `base` 앵커이고, `value`는 그 알 수 없는 base 뒤에 이어지는 알려진 꼬리다(처음은 빈 문자열). Express·Koa 어댑터처럼 앵커를
+ * 접두사 값과 따로 들고 다녀야 base 아래 `register(plugin, { prefix: '/users' })`의 `/users`를 잃지 않는다.
+ */
+interface InstancePrefix {
+  readonly anchor: PathAnchor;
+  readonly value: KnownPrefix;
 }
 
 /**
@@ -308,19 +327,21 @@ interface FlattenContext {
  * @param _project 프로젝트
  * @param instances 인스턴스
  * @param events 사건
+ * @param major Fastify 주 버전(모르면 undefined)
  * @returns Fastify 추출 결과
  */
-export function flattenFastify(_project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[]): FrameworkRoutes {
+export function flattenFastify(_project: NodeProject, instances: readonly RouterInstance[], events: readonly RouterEvent[], major: number | undefined): FrameworkRoutes {
   const fastify = instances.filter((instance) => instance.framework === 'fastify');
   const fastifyEvents = events.filter((event) => event.target.instance.framework === 'fastify');
-  const context: FlattenContext = { byInstance: eventsByInstance(fastifyEvents), routes: [], provided: [], active: new Set() };
+  const grammar: PrefixGrammar = major === 4 || major === 5 ? major : undefined;
+  const context: FlattenContext = { byInstance: eventsByInstance(fastifyEvents), routes: [], provided: [], active: new Set(), grammar };
   for (const root of fastify.filter((instance) => instance.kind !== 'plugin')) {
     const options: AppOptions = {
       ignoreTrailingSlash: root.options['ignoreTrailingSlash'] as boolean | undefined,
       ignoreDuplicateSlashes: root.options['ignoreDuplicateSlashes'] as boolean | undefined,
       caseSensitive: root.options['caseSensitive'] as boolean | undefined,
     };
-    walkInstance(context, root, root.kind === 'opaque' ? { kind: 'unknown' } : { kind: 'literal', text: '' }, options);
+    walkInstance(context, root, { anchor: root.kind === 'opaque' ? 'base' : 'root', value: { kind: 'literal', text: '' } }, options);
   }
   return { framework: 'fastify', dispatch: 'specificity', routes: context.routes, provided: context.provided, middlewareCount: 0, notes: [] };
 }
@@ -333,37 +354,83 @@ export function flattenFastify(_project: NodeProject, instances: readonly Router
  * @param prefix 이 인스턴스의 경로 접두사
  * @param options 앱 옵션
  */
-function walkInstance(context: FlattenContext, instance: RouterInstance, prefix: PathValue, options: AppOptions): void {
+function walkInstance(context: FlattenContext, instance: RouterInstance, prefix: InstancePrefix, options: AppOptions): void {
   if (context.active.has(instance)) return;
   context.active.add(instance);
   for (const event of context.byInstance.get(instance) ?? []) {
     if (event.kind === 'route') routeEvent(context, event, prefix, options);
     else if (event.kind === 'mount') {
-      for (const child of event.children) walkInstance(context, child.instance, buildRoutePrefix(prefix, event.prefix?.value), options);
+      for (const child of event.children) walkInstance(context, child.instance, joinPluginPrefix(prefix, event.prefix?.value, joinGrammar(context, options)), options);
     } else if (event.kind === 'provided') {
-      context.provided.push(providedOf(event, buildRoutePrefix(prefix, event.prefix?.value)));
+      context.provided.push(providedOf(event, joinPluginPrefix(prefix, event.prefix?.value, joinGrammar(context, options))));
     }
   }
   context.active.delete(instance);
 }
 
 /**
- * Fastify `buildRoutePrefix`를 옮긴다(`/`가 겹치거나 빠지지 않게 잇는다).
+ * 이 앱에서 플러그인 접두사를 잇는 규칙이다. `ignoreDuplicateSlashes`가 켜져 있으면 find-my-way가 등록·요청 경로의 겹친 `/`를 하나로
+ * 줄이므로 fastify 4가 더한 `/`(`/v1//bare`)도 5의 `/v1/bare`와 같은 경로가 된다(fastify 4.29.1·5.12.5 실행으로 확인).
+ *
+ * @param context 펼치기 문맥
+ * @param options 앱 옵션
+ * @returns 이음 규칙의 주 버전
+ */
+function joinGrammar(context: FlattenContext, options: AppOptions): PrefixGrammar {
+  return options.ignoreDuplicateSlashes === true ? 5 : context.grammar;
+}
+
+/**
+ * 플러그인 접두사를 인스턴스 접두사에 잇는다. root 앵커는 {@link buildRoutePrefix} 그대로다. base 앵커 뒤에서는 이은 결과가
+ * 리터럴일 때만 알려진 꼬리로 쓰고, 값을 모르는 부분이 생기면(모르거나 앞부분만 아는 플러그인 접두사, 주 버전을 몰라 정하지
+ * 못한 이음) 그 부분까지 알 수 없는 base로 보아 꼬리를 비운다 — 그 뒤에 붙는 라우트 경로는 여전히 알려진 꼬리이기 때문이다.
+ *
+ * @param prefix 인스턴스 접두사
+ * @param pluginPrefix `register()`의 `prefix` 값(없으면 undefined)
+ * @param grammar 접두사를 잇는 규칙의 주 버전
+ * @returns 플러그인 인스턴스의 접두사
+ */
+function joinPluginPrefix(prefix: InstancePrefix, pluginPrefix: PathValue | undefined, grammar: PrefixGrammar): InstancePrefix {
+  const joined = buildRoutePrefix(prefix.value, pluginPrefix, grammar);
+  if (prefix.anchor === 'base' && joined.kind !== 'literal') return { anchor: 'base', value: { kind: 'literal', text: '' } };
+  return { anchor: prefix.anchor, value: joined };
+}
+
+/**
+ * Fastify `buildRoutePrefix`를 옮긴다(`/`가 겹치거나 빠지지 않게 잇는다). 주 버전마다 다른 부분은 {@link joinPrefixText}가 정하고,
+ * 주 버전을 몰라 정하지 못하면 부모 접두사까지만 아는 값이다.
  *
  * @param instancePrefix 부모 접두사
  * @param pluginPrefix 플러그인 접두사
+ * @param grammar 접두사를 잇는 규칙의 주 버전
  * @returns 이은 접두사
  */
-export function buildRoutePrefix(instancePrefix: PathValue, pluginPrefix: PathValue | undefined): PathValue {
+export function buildRoutePrefix(instancePrefix: KnownPrefix, pluginPrefix: PathValue | undefined, grammar: PrefixGrammar): KnownPrefix {
   if (pluginPrefix === undefined || (pluginPrefix.kind === 'literal' && pluginPrefix.text === '')) return instancePrefix;
   if (instancePrefix.kind !== 'literal') return instancePrefix;
   if (pluginPrefix.kind === 'unknown') return { kind: 'partial', head: instancePrefix.text };
   const text = pluginPrefix.kind === 'literal' ? pluginPrefix.text : pluginPrefix.head;
-  let joined: string;
-  if (instancePrefix.text.endsWith('/') && text.startsWith('/')) joined = instancePrefix.text + text.slice(1);
-  else if (!text.startsWith('/') && !instancePrefix.text.endsWith('/')) joined = `${instancePrefix.text}/${text}`;
-  else joined = instancePrefix.text + text;
+  const joined = joinPrefixText(instancePrefix.text, text, grammar);
+  if (joined === undefined) return { kind: 'partial', head: instancePrefix.text };
   return pluginPrefix.kind === 'literal' ? { kind: 'literal', text: joined } : { kind: 'partial', head: joined };
+}
+
+/**
+ * 부모 접두사 뒤에 플러그인 접두사 문자열(앞부분만 알면 그 앞부분)을 잇는다. fastify 5.12.5 `lib/plugin-override.js`는 부모가 `/`로
+ * 끝나지 않을 때만 `/`로 시작하지 않는 플러그인 접두사 앞에 `/`를 더하고, fastify 4.29.1 `lib/pluginOverride.js`는 부모와 상관없이
+ * 더한다. 그래서 부모가 `/`로 끝나고 플러그인 접두사가 `/` 아닌 글자로 시작할 때만 결과가 다르다(`/v1/` + `bare`는 5에서 `/v1/bare`,
+ * 4에서 `/v1//bare`). 앞부분이 빈 문자열이면 첫 글자를 모르므로 두 규칙 모두 부모(`/`로 끝나지 않으면 `/`까지)만 확정한다.
+ *
+ * @param instance 부모 접두사
+ * @param plugin 플러그인 접두사(또는 그 앞부분)
+ * @param grammar 접두사를 잇는 규칙의 주 버전
+ * @returns 이은 문자열. 주 버전을 몰라 두 규칙의 결과가 다르면 undefined
+ */
+function joinPrefixText(instance: string, plugin: string, grammar: PrefixGrammar): string | undefined {
+  if (instance.endsWith('/') && plugin.startsWith('/')) return instance + plugin.slice(1);
+  if (!instance.endsWith('/')) return plugin.startsWith('/') ? instance + plugin : `${instance}/${plugin}`;
+  if (plugin === '' || grammar === 5) return instance + plugin;
+  return grammar === 4 ? `${instance}/${plugin}` : undefined;
 }
 
 /**
@@ -374,9 +441,9 @@ export function buildRoutePrefix(instancePrefix: PathValue, pluginPrefix: PathVa
  * @param prefix 인스턴스 접두사
  * @param options 앱 옵션
  */
-function routeEvent(context: FlattenContext, event: RouteEvent & { prefixTrailingSlash?: PathValue }, prefix: PathValue, options: AppOptions): void {
+function routeEvent(context: FlattenContext, event: RouteEvent & { prefixTrailingSlash?: PathValue }, prefix: InstancePrefix, options: AppOptions): void {
   const path = event.paths[0]!;
-  for (const url of routeUrls(prefix, path.value, event.prefixTrailingSlash, options)) {
+  for (const url of routeUrls(prefix.value, path.value, event.prefixTrailingSlash, options)) {
     const compiled = compileUrl(url, options);
     context.routes.push({
       handler: event.handler,
@@ -384,7 +451,7 @@ function routeEvent(context: FlattenContext, event: RouteEvent & { prefixTrailin
       methods: event.methods,
       path: compiled.path,
       rawPath: compiled.raw,
-      anchor: prefix.kind === 'unknown' ? 'base' : 'root',
+      anchor: prefix.anchor,
       locationNode: path.node,
       order: undefined,
       trailingSlash: options.ignoreTrailingSlash === undefined ? undefined : options.ignoreTrailingSlash ? 'optional' : 'strict',
@@ -404,8 +471,7 @@ function routeEvent(context: FlattenContext, event: RouteEvent & { prefixTrailin
  * @param options 앱 옵션
  * @returns URL 값 목록
  */
-function routeUrls(prefix: PathValue, path: PathValue, prefixTrailingSlash: PathValue | undefined, options: AppOptions): PathValue[] {
-  if (prefix.kind === 'unknown') return [path];
+function routeUrls(prefix: KnownPrefix, path: PathValue, prefixTrailingSlash: PathValue | undefined, options: AppOptions): PathValue[] {
   if (prefix.kind === 'partial') return [{ kind: 'partial', head: prefix.head }];
   if (path.kind !== 'literal') return [path.kind === 'partial' ? { kind: 'partial', head: joinUrl(prefix.text, path.head) } : { kind: 'partial', head: prefix.text }];
   if (path.text === '/' && prefix.text.length > 0) {
@@ -465,10 +531,12 @@ function fmwOptions(options: AppOptions): FindMyWayOptions {
  * @param prefix 플러그인 접두사를 이은 값
  * @returns 펼친 제공 경로
  */
-function providedOf(event: ProvidedEvent, prefix: PathValue): FlatProvided {
+function providedOf(event: ProvidedEvent, prefix: InstancePrefix): FlatProvided {
   const base = { prefixKind: event.prefixKind, description: event.description };
-  if (prefix.kind !== 'literal') return { ...base, scope: undefined };
-  const compiled = compileFindMyWayPath(prefix.text === '' ? '/' : prefix.text, { ignoreTrailingSlash: false, ignoreDuplicateSlashes: false });
+  // base 앵커 뒤의 경로는 root 기준 접두사로 상한을 잡을 수 없다(Express·Koa 어댑터와 같다).
+  if (prefix.anchor !== 'root' || prefix.value.kind !== 'literal') return { ...base, scope: undefined };
+  const text = prefix.value.text;
+  const compiled = compileFindMyWayPath(text === '' ? '/' : text, { ignoreTrailingSlash: false, ignoreDuplicateSlashes: false });
   const prefixes = compiled.kind === 'variants' ? prefixTemplates(compiled.variants) : [];
   if (prefixes.length === 0) return { ...base, scope: undefined };
   return { ...base, scope: { templatePrefixes: prefixes, ...(event.methods === undefined ? {} : { methods: event.methods }) } };

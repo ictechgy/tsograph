@@ -6,6 +6,26 @@
 
 ### Fixed
 
+- routes(server): 타입 주석으로만 아는 `FastifyInstance` 매개변수(fastify-cli가 불러 붙이는 플러그인처럼 붙는 위치를 모르는 인스턴스,
+  `pathAnchor: "base"`) 아래에서 `register(plugin, { prefix: '/users' })`의 접두사를 버리던 문제를 고쳤다. 붙는 위치를 모르는 인스턴스를
+  "값을 모르는 접두사"로 다뤄 그 아래 플러그인 접두사가 모두 사라졌다: `/users` 플러그인의 `get('/')`·`get('/:id')`·`get('/:id/posts')`가
+  `/`·`/{}`·`/{}/posts` base로 나왔고, 접두사 아래 `/`의 `prefixTrailingSlash` 규칙(`/users`와 `/users/`)도 적용되지 않았다. 실제 fastify
+  5.12.5·4.29.1에 같은 플러그인을 바깥 접두사 `''`·`/api`로 붙이면 `<바깥>/users`·`<바깥>/users/`·`<바깥>/users/:id`·`<바깥>/users/:id/posts`로
+  등록되고 `<바깥>/7`·`<바깥>/orders/7/posts`는 404다. isthmus는 root 호출과 base decl을 세그먼트 경계 suffix로 잇고 리터럴 세그먼트가 없는
+  decl은 후보로 쓰지 않으므로, 예전 출력에서 `/{}/posts` base는 없는 경로 `/api/orders/7/posts` 호출의 후보가 됐고 `/api/users/7`·`/api/users`
+  호출은 이을 decl이 없었다. 이제 Express·Koa 어댑터처럼 앵커를 접두사 값과 따로 들고 다녀 리터럴 플러그인 접두사를 base 뒤의 꼬리로 잇는다
+  (`/users`·`/users/`·`/users/{}`·`/users/{}/posts` base). 값을 모르거나 앞부분만 아는 플러그인 접두사는 예전처럼 알 수 없는 base에 합치되
+  그 아래에서 다시 붙인 리터럴 접두사는 이제 남는다(`/inner/z` base). base 아래 `framework-provided-routes:`·`route-coverage:` 제공 경로는
+  예전처럼 스코프가 없다. `Fastify()`로 만든 앱(root 앵커)은 이 수정으로 바뀌지 않는다(다음 항목만 해당한다).
+- routes(server): Fastify 4의 플러그인 접두사 이음을 fastify 5 규칙으로 계산하던 문제를 고쳤다. 부모 접두사가 `/`로 끝나고 플러그인 접두사가
+  `/` 아닌 글자로 시작하면 fastify 5.12.5(`lib/plugin-override.js`)는 그대로 잇지만(`/v1/` + `bare` → `/v1/bare`) 4.29.1(`lib/pluginOverride.js`)은
+  `/`를 더한다(`/v1//bare`). 4에서 tsograph는 실제로 등록되지 않는 `/v1/bare/y`를 정적 사실로 냈다(fastify 4.29.1에 실제로 등록하면
+  `/v1/bare/y`는 404이고 `/v1//bare/y`가 받는다). 이제 잠금 파일·범위로 정한 주 버전의 규칙을 쓴다. `ignoreDuplicateSlashes`가 켜져 있으면
+  find-my-way가 겹친 `/`를 줄여 두 주 버전 모두 `/v1/bare/y`가 받으므로 예전처럼 정적 사실이다. 주 버전을 모르는데 두 규칙이 다르면 그
+  이음 아래 라우트를 부모 접두사까지만 아는 dynamic 사실(`dynamicScope` 접두사 `/v1`)로 낸다 — 이때 문서에는 이미
+  `route-framework-version-unknown:`("주 버전마다 다른 경로 문법은 dynamic")이 붙는다. 타입으로만 아는 `FastifyInstance`(base 앵커)
+  아래에서는 그런 이음을 앞 항목처럼 알 수 없는 base에 합친다. 두 규칙이 같은 이음(부모가 `/`로 끝나지 않거나 플러그인 접두사가 `/`로
+  시작)은 주 버전과 상관없이 예전과 같다.
 - graph·reach·impact: `type` 없이 다시 내보낸 interface·type alias·값 없는 namespace·JSDoc `@typedef`
   (`export { Config } from './types'`)의 export 노드를 `unresolved-export-aliases:`(대상을 해석하지 못함)로 세던 문제를 고쳤다. 이런
   이름은 타입만 가리켜 런타임 선언이 없으므로(TypeScript는 이 재내보내기를 emit에서 지운다) 이을 대상이 처음부터 없다. 이제 checker가

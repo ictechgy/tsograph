@@ -47,7 +47,8 @@ symlink를 거치면 역시 쓰지 않고 센다(그 디렉터리에서 글롭�
 - 어느 프레임에서도 걷지 않은 함수 중 라우터 문법이 있는 것(프로젝트 밖에서 부르는 `export default function (app: Hono)`,
   생성자에서 `this.app = express()`)은 마지막에 독립 프레임으로 걷는다. 타입 주석만으로 라우터임을 아는 매개변수(`Hono`,
   Express `Router`·`Express`·`Application`, @koa/router `Router`, `FastifyInstance`)는 붙는 위치를 모르는 라우터로 보고
-  `pathAnchor: "base"`와 `unresolved-route-prefix:`로 낸다.
+  `pathAnchor: "base"`와 `unresolved-route-prefix:`로 낸다. 그 아래에서 리터럴 접두사로 붙인 하위 라우터·플러그인은 그 접두사를
+  base 뒤의 꼬리로 잇는다(`r.use('/k', sub.routes())` → `/k/x` base, Fastify `register(users, { prefix: '/users' })` → `/users/{}` base).
 - 경로 값은 문자열 리터럴, `const`, import한 상수, 열거형 멤버, `as const` 객체 속성, 템플릿 문자열·`+` 연결을 따라간다. 앞부분만
   확정되면(`` `/users/${id}` ``) dynamic 사실의 `dynamicScope` 접두사로 쓴다. 경로 값 하나는 4,096단계(식 하나를 구하는 호출)와
   이은 템플릿·`+` 문자열 64 KiB 안에서만 구한다 — 같은 상수를 거듭 보간하는 상수 사슬은 깊이 상한(16) 안에서도 해석이 보간 수의
@@ -90,7 +91,7 @@ symlink를 거치면 역시 쓰지 않고 센다(그 디렉터리에서 글롭�
 | 규칙 | 확인한 소스 |
 |---|---|
 | `fastify.METHOD(url, [options], handler)`·`route({method, url, handler})`, `all`은 지원 method 전부. GET 라우트에는 HEAD가 자동으로 붙는다(`exposeHeadRoutes`) | fastify 5.12.5·4.29.1 `lib/route.js` |
-| `register(plugin, {prefix})`는 새 캡슐화 인스턴스와 `buildRoutePrefix` 접두사. `fastify-plugin`(`skip-override`)은 부모 인스턴스를 쓰고 접두사를 무시한다 | `lib/plugin-override.js` |
+| `register(plugin, {prefix})`는 새 캡슐화 인스턴스와 `buildRoutePrefix` 접두사. `fastify-plugin`(`skip-override`)은 부모 인스턴스를 쓰고 접두사를 무시한다. 부모 접두사가 `/`로 끝나고 플러그인 접두사가 `/` 아닌 글자로 시작하면 5는 그대로 잇고(`/v1/` + `bare` → `/v1/bare`) 4는 `/`를 더한다(`/v1//bare`). `ignoreDuplicateSlashes`면 겹친 `/`를 줄여 두 주 버전이 같다. 주 버전을 모르면 그 이음 아래 라우트는 부모 접두사까지만 아는 dynamic이다. 타입으로만 아는 `FastifyInstance`(base) 아래에서는 리터럴 접두사만 꼬리로 잇고, 값을 모르거나 앞부분만 아는 접두사와 주 버전을 몰라 정하지 못한 이음은 알 수 없는 base에 합친다(그 뒤 라우트 경로는 base 꼬리로 남는다) | 5.12.5 `lib/plugin-override.js`, 4.29.1 `lib/pluginOverride.js` |
 | 접두사 아래 `/`는 `prefixTrailingSlash`(기본 `both`: `prefix`와 `prefix/`, `slash`, `no-slash`)대로 등록한다 | `lib/route.js#route` |
 | find-my-way: 끝 선택 파라미터는 두 경로, `::`는 리터럴 `:`, 제약 없는 파라미터와 `*`는 **빈 값도 받는다**(빈 값 변형 decl), 한 세그먼트에 파라미터가 둘 이상이면 dynamic | find-my-way 9.9.0·8.2.2 `index.js#on`·`#_on`·`#find` |
 | 정적 > 파라미터(정규식 먼저) > 와일드카드로 고르고 되돌아간다 → `specificity`. 같은 (method, 템플릿)의 명시적 정적 선언이 있으면 빈 값 변형은 요청을 받지 않아 뺀다 | `lib/node.js#getNextNode` |

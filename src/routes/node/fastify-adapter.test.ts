@@ -76,14 +76,97 @@ test('타입 주석으로만 아는 FastifyInstance 매개변수는 base 앵커�
   assert.deepEqual(factLines(document), ['GET base /health -']);
 });
 
-test('buildRoutePrefix는 fastify lib/plugin-override.js와 같다', () => {
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '' }, { kind: 'literal', text: 'admin' }), { kind: 'literal', text: '/admin' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a/' }, { kind: 'literal', text: '/b' }), { kind: 'literal', text: '/a/b' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a' }, { kind: 'literal', text: '/b' }), { kind: 'literal', text: '/a/b' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a' }, undefined), { kind: 'literal', text: '/a' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a' }, { kind: 'unknown' }), { kind: 'partial', head: '/a' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'literal', text: '/a' }, { kind: 'partial', head: 'b' }), { kind: 'partial', head: '/a/b' });
-  assert.deepEqual(buildRoutePrefix({ kind: 'unknown' }, { kind: 'literal', text: '/b' }), { kind: 'unknown' });
+test('buildRoutePrefix는 fastify 5 lib/plugin-override.js·4 lib/pluginOverride.js와 같다', () => {
+  const literal = (text: string) => ({ kind: 'literal', text }) as const;
+  const partial = (head: string) => ({ kind: 'partial', head }) as const;
+  // 두 주 버전이 같은 결과를 내는 이음은 주 버전을 몰라도 같다.
+  for (const grammar of [4, 5, undefined] as const) {
+    assert.deepEqual(buildRoutePrefix(literal(''), literal('admin'), grammar), literal('/admin'));
+    assert.deepEqual(buildRoutePrefix(literal('/a/'), literal('/b'), grammar), literal('/a/b'));
+    assert.deepEqual(buildRoutePrefix(literal('/a'), literal('/b'), grammar), literal('/a/b'));
+    assert.deepEqual(buildRoutePrefix(literal('/a'), undefined, grammar), literal('/a'));
+    assert.deepEqual(buildRoutePrefix(literal('/a'), { kind: 'unknown' }, grammar), partial('/a'));
+    assert.deepEqual(buildRoutePrefix(literal('/a'), partial('b'), grammar), partial('/a/b'));
+    // 앞부분이 비면 첫 글자를 몰라 두 규칙 모두 부모(`/`로 끝나지 않으면 `/`까지)만 확정한다.
+    assert.deepEqual(buildRoutePrefix(literal('/a/'), partial(''), grammar), partial('/a/'));
+    assert.deepEqual(buildRoutePrefix(literal('/a'), partial(''), grammar), partial('/a/'));
+  }
+  // 부모가 `/`로 끝나고 플러그인 접두사가 `/` 아닌 글자로 시작하면 5는 `/`를 더하지 않고 4는 더한다
+  // (fastify 5.12.5·4.29.1에 실제로 등록해 `/v1/bare/y`·`/v1//bare/y`를 확인했다). 주 버전을 모르면 부모까지만 안다.
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), literal('bare'), 5), literal('/v1/bare'));
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), literal('bare'), 4), literal('/v1//bare'));
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), literal('bare'), undefined), partial('/v1/'));
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), partial('b'), 5), partial('/v1/b'));
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), partial('b'), 4), partial('/v1//b'));
+  assert.deepEqual(buildRoutePrefix(literal('/v1/'), partial('b'), undefined), partial('/v1/'));
+});
+
+test('타입으로만 아는 FastifyInstance 아래 register 접두사는 base 뒤의 꼬리로 잇는다', async () => {
+  // fastify-cli 형태(붙는 위치를 모르는 플러그인)다. 실제 fastify 5.12.5·4.29.1에 바깥 접두사 ''·'/api'로 붙여 보면 users 플러그인은
+  // `<바깥>/users`·`<바깥>/users/`·`<바깥>/users/:id`로 등록된다. 예전에는 base 아래 접두사를 모두 버려 `/`·`/{}` base로 냈다.
+  const document = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0', '@fastify/static': '8.0.0', 'fastify-plugin': '5.0.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import type { FastifyInstance } from 'fastify';",
+      "import fastifyStatic from '@fastify/static';",
+      "import fp from 'fastify-plugin';",
+      "import users from './users.ts';",
+      "const shared = fp(async (s: any) => { s.get('/shared', async () => 's'); });",
+      'export default async function app(f: FastifyInstance) {',
+      "  f.get('/health', async () => 'h');",
+      "  f.register(users, { prefix: '/users' });",
+      "  f.register(async (c) => { c.get('/x', async () => 'x'); }, { prefix: 'bare' });",
+      "  f.register(async (v) => {",
+      "    v.register(async (u) => { u.get('/', { prefixTrailingSlash: 'no-slash' }, async () => 'n'); u.get('/x', async () => 'x'); }, { prefix: '/users' });",
+      "  }, { prefix: '/v1/' });",
+      "  f.register(async (c) => { c.register(async (d) => { d.get('/z', async () => 'z'); }, { prefix: '/inner' }); }, { prefix: process.env.P });",
+      "  f.register(shared, { prefix: '/ignored' });",
+      "  f.register(fastifyStatic, { root: '/tmp', prefix: '/public' });",
+      '}',
+    ].join('\n'),
+    'src/users.ts': "export default async function users(f: any) {\n  f.get('/', async () => 'u');\n  f.get('/:id', async () => 'i');\n}\n",
+  });
+  assert.deepEqual(factLines(document), [
+    'GET base /health -',
+    'GET base /users -',
+    'GET base /users/ -',
+    'GET base /users/{} -',
+    'GET base /bare/x -',
+    'GET base /v1/users -',
+    'GET base /v1/users/x -',
+    // 모르는 접두사(process.env.P)는 알 수 없는 base에 합치고 그 뒤 리터럴 접두사는 남긴다.
+    'GET base /inner/z -',
+    'GET base /shared -',
+  ].sort());
+  // base 뒤 경로는 root 기준 접두사로 상한을 잡을 수 없어 스코프가 없다.
+  assert.deepEqual(limitationsWith(document, 'framework-provided-routes:').map((entry) => entry.scope), [undefined]);
+});
+
+test('부모 접두사가 /로 끝나면 플러그인 접두사 이음은 fastify 주 버전을 따르고 모르면 dynamic이다', async () => {
+  const files = (fastify: string): Record<string, string> => ({
+    'package.json': packageJson({ fastify }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      'const app = Fastify();',
+      "app.register(async (v) => {",
+      "  v.register(async (b) => { b.get('/y', async () => 'y'); }, { prefix: 'bare' });",
+      "  v.register(async (u) => { u.get('/x', async () => 'x'); }, { prefix: '/users' });",
+      "}, { prefix: '/v1/' });",
+      'export default app;',
+    ].join('\n'),
+  });
+  // fastify 4.29.1·5.12.5에 실제로 등록한 경로와 같다. 두 주 버전이 같은 `/v1/users/x`는 주 버전을 몰라도 정적 사실이다.
+  assert.deepEqual(factLines(await scanNodeProject(files('4.28.1'))), ['GET root /v1//bare/y strict', 'GET root /v1/users/x strict']);
+  assert.deepEqual(factLines(await scanNodeProject(files('5.2.0'))), ['GET root /v1/bare/y strict', 'GET root /v1/users/x strict']);
+  const unknown = await scanNodeProject(files('*'));
+  assert.deepEqual(factLines(unknown), ['GET root /v1/users/x strict', 'GET root /v1/{dynamic} - dynamic{"templatePrefixes":["/v1"]}']);
+  assert.equal(limitationsWith(unknown, 'route-framework-version-unknown:').length, 1);
+  // ignoreDuplicateSlashes면 두 주 버전 모두 겹친 `/`를 줄여 `/v1/bare/y`가 받는다(실제 실행으로 확인).
+  const collapsed = files('*');
+  collapsed['src/app.ts'] = collapsed['src/app.ts']!.replace('Fastify()', 'Fastify({ ignoreDuplicateSlashes: true })');
+  assert.deepEqual(factLines(await scanNodeProject(collapsed)), ['GET root /v1/bare/y strict', 'GET root /v1/users/x strict']);
 });
 
 test('빈 값 변형으로 펼친 템플릿이 16개를 넘으면 대안 하나든 여럿의 합이든 상한 초과 dynamic이다', async () => {
