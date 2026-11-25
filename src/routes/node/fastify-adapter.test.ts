@@ -328,9 +328,12 @@ test('CommonJS module.exports에 쓴 skip-override와 이름으로 풀 수 없�
   assert.deepEqual(factLines(await scanNodeProject(commonJs("module.exports[Symbol.for('skip-override')] = true;"))), ['GET root /cjs strict', 'GET root /o/other strict']);
   assert.deepEqual(factLines(await scanNodeProject(commonJs('module.exports[process.env.KEY] = true;'))), ['GET root /o/other strict', unproven]);
   assert.deepEqual(factLines(await scanNodeProject(commonJs("module.exports['meta'] = true;"))), ['GET root /o/other strict', 'GET root /p/cjs strict']);
-  // 어느 바인딩인지 모르는 대상에 그 키를 쓰면 증명하지 못한 플러그인 모두가 모르는 값이다.
+  // 어느 바인딩인지 모르는 대상(호출 결과)에 그 키를 쓰면 증명하지 못한 플러그인 모두가 모르는 값이다.
+  const unpinned = commonJs('', "function pick() { return {}; }\npick()[Symbol.for('skip-override')] = true;");
+  assert.deepEqual(factLines(await scanNodeProject(unpinned)), [unproven, unproven]);
+  // 이름 있는 다른 속성(값이 다른 함수)에 쓴 키는 그 속성의 근거라 등록한 플러그인과 상관없다.
   const registry = commonJs('', "const registry = { plugin: async () => {} };\nregistry.plugin[Symbol.for('skip-override')] = true;");
-  assert.deepEqual(factLines(await scanNodeProject(registry)), [unproven, unproven]);
+  assert.deepEqual(factLines(await scanNodeProject(registry)), ['GET root /o/other strict', 'GET root /p/cjs strict']);
 });
 
 test('skip-override에 쓴 값의 참·거짓, delete, 다른 변수로 흘러간 바인딩을 구별한다', async () => {
@@ -355,6 +358,10 @@ test('skip-override에 쓴 값의 참·거짓, delete, 다른 변수로 흘러�
       "const assigned = async (s: any) => { s.get('/assigned', async () => 'a'); };",
       'let holder: unknown;',
       'holder = assigned;',
+      "async function andLeft(s: any) { s.get('/and-left', async () => '&'); }",
+      'export const checked = andLeft && 0;',
+      "async function orLeft(s: any) { s.get('/or-left', async () => '|'); }",
+      'export const chosen = orLeft || null;',
       'const app = Fastify();',
       "app.register(one, { prefix: '/p1' });",
       "app.register(text, { prefix: '/p2' });",
@@ -362,9 +369,182 @@ test('skip-override에 쓴 값의 참·거짓, delete, 다른 변수로 흘러�
       "app.register(removed, { prefix: '/p4' });",
       "app.register(picked, { prefix: '/p5' });",
       "app.register(assigned, { prefix: '/p6' });",
+      "app.register(andLeft, { prefix: '/p7' });",
+      "app.register(orLeft, { prefix: '/p8' });",
       'export default app;',
     ].join('\n'),
   });
   const unproven = 'GET root {dynamic} - dynamic{"templatePrefixes":["/"]}';
-  assert.deepEqual(factLines(document), ['GET root /one strict', 'GET root /text strict', unproven, unproven, unproven, unproven]);
+  // `andLeft && 0`은 0을 돌려줘 함수가 흘러가지 않고, `orLeft || null`은 함수를 돌려준다.
+  assert.deepEqual(factLines(document), ['GET root /one strict', 'GET root /p7/and-left strict', 'GET root /text strict', unproven, unproven, unproven, unproven, unproven]);
+});
+
+test('해석에서 빼는 테스트 디렉터리 이름이어도 등록한 플러그인 파일의 skip-override 쓰기를 본다', async () => {
+  // `routes/test/index.ts`는 테스트 경로 규칙에 걸려 해석 대상에서 빠지지만 서버가 실제로 불러 쓴다. 실제 fastify 4.29.1·5.12.8은 `/ping`.
+  const document = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': "import Fastify from 'fastify';\nimport testRoutes from './routes/test/index.ts';\nconst app = Fastify();\napp.register(testRoutes, { prefix: '/test' });\nexport default app;\n",
+    'src/routes/test/index.ts': "export default async function testRoutes(f: any) { f.get('/ping', async () => 'pong'); }\n(testRoutes as any)[Symbol.for('skip-override')] = true;\n",
+  });
+  assert.deepEqual(factLines(document), ['GET root /ping strict']);
+});
+
+test('const 키·네임스페이스 속성에 쓴 skip-override는 그 속성의 근거이고, 이름으로 잇지 못한 대상은 모든 플러그인의 근거다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 셋 모두 접두사를 무시한다(`/x1`, `/x2`, `/x`).
+  const pinned = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import * as P from './plugins.ts';",
+      "const SKIP = Symbol.for('skip-override');",
+      "const plugins = { users: async (f: any) => { f.get('/x1', async () => 'x'); } };",
+      '(plugins.users as any)[SKIP] = true;',
+      '(P.items as any)[SKIP] = true;',
+      'const app = Fastify();',
+      "app.register(plugins.users, { prefix: '/u' });",
+      "app.register(P.items, { prefix: '/i' });",
+      'export default app;',
+    ].join('\n'),
+    'src/plugins.ts': "export async function items(f: any) { f.get('/x2', async () => 'x'); }\n",
+  });
+  assert.deepEqual(factLines(pinned), ['GET root /x1 strict', 'GET root /x2 strict']);
+  const loop = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import * as P from './plugins.ts';",
+      "import { items } from './plugins.ts';",
+      "for (const plugin of Object.values(P)) (plugin as any)[Symbol.for('skip-override')] = true;",
+      'const app = Fastify();',
+      "app.register(items, { prefix: '/i' });",
+      'export default app;',
+    ].join('\n'),
+    'src/plugins.ts': "export async function items(f: any) { f.get('/x', async () => 'x'); }\n",
+  });
+  assert.deepEqual(factLines(loop), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+  // 매개변수에 쓴 키도 그 값이 어디서 오는지 따라가지 않으므로 모든 플러그인의 근거다(모듈 객체가 흘러가지 않아도).
+  const parameter = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import { items } from './plugins.ts';",
+      "function mark(fn: any) { fn[Symbol.for('skip-override')] = true; }",
+      'mark(async () => {});',
+      'const app = Fastify();',
+      "app.register(items, { prefix: '/i' });",
+      'export default app;',
+    ].join('\n'),
+    'src/plugins.ts': "export async function items(f: any) { f.get('/x', async () => 'x'); }\n",
+  });
+  assert.deepEqual(factLines(parameter), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+});
+
+test('--include-tests의 테스트 소스는 테스트 밖 등록의 skip-override를 많아야 모르는 값으로 만든다', async () => {
+  // 운영 서버는 `/users/:id`를 등록한다(테스트 파일은 실행 경로가 아니다). 테스트 소스의 `fp(users)`는 이름 규칙으로 정한 테스트 파일이라
+  // 건너뜀으로 단정하지 않는다.
+  const files = {
+    'package.json': packageJson({ fastify: '5.2.0', 'fastify-plugin': '5.0.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': "import Fastify from 'fastify';\nimport users from './users.ts';\nconst app = Fastify();\napp.register(users, { prefix: '/users' });\nexport default app;\n",
+    'src/users.ts': "export default async function users(f: any) { f.get('/:id', async () => 'u'); }\n",
+    'src/users.test.ts': "import fp from 'fastify-plugin';\nimport users from './users.ts';\nexport const exposed = fp(users);\n",
+  };
+  assert.deepEqual(factLines(await scanNodeProject(files)), ['GET root /users/ strict', 'GET root /users/{} strict']);
+  assert.deepEqual(factLines(await scanNodeProject(files, ['--include-tests'])), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
+});
+
+test('프로젝트 함수 매개변수로 넘긴 바인딩은 그 매개변수의 사용을 따라 보고 console 출력은 바꾸지 않는다', async () => {
+  // 실제 fastify 4.29.1·5.12.8은 모두 접두사를 붙인다. 등록만 하는 도우미, 두 단계로 넘겨 console.log만 하는 도우미, 자기 자신만 다시 부르는 재귀 도우미는
+  // 건너뛰지 않음이고, 매개변수를 저장하거나 `arguments`·나머지 매개변수로 받으면 모른다.
+  const document = await scanNodeProject({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import users from './users.ts';",
+      "async function logged(f: any) { f.get('/logged', async () => 'l'); }",
+      "async function walked(f: any) { f.get('/walked', async () => 'w'); }",
+      "async function stored(f: any) { f.get('/stored', async () => 's'); }",
+      "async function rested(f: any) { f.get('/rested', async () => 'r'); }",
+      "async function counted(f: any) { f.get('/counted', async () => 'c'); }",
+      'const kept: unknown[] = [];',
+      "async function relayed(f: any) { f.get('/relayed', async () => 'd'); }",
+      "function mountUsers(app: any, plugin: any) { app.register(plugin, { prefix: '/users' }); }",
+      'function look(plugin: any) { console.log(plugin); }',
+      'function relay(plugin: any) { look(plugin); }',
+      'function visit(plugin: any, depth: number): void { if (depth > 0) visit(plugin, depth - 1); }',
+      'function keep(plugin: any) { kept.push(plugin); }',
+      'function variadic(...items: unknown[]) { return items.length; }',
+      'function tally(plugin: any) { return arguments.length + (plugin ? 1 : 0); }',
+      'const app = Fastify();',
+      'mountUsers(app, users);',
+      'relay(relayed);',
+      "app.register(relayed, { prefix: '/relay' });",
+      'console.log(logged);',
+      'visit(walked, 2);',
+      'keep(stored);',
+      'variadic(rested);',
+      'tally(counted);',
+      "app.register(logged, { prefix: '/log' });",
+      "app.register(walked, { prefix: '/walk' });",
+      "app.register(stored, { prefix: '/store' });",
+      "app.register(rested, { prefix: '/rest' });",
+      "app.register(counted, { prefix: '/count' });",
+      'export default app;',
+    ].join('\n'),
+    'src/users.ts': "export default async function users(f: any) { f.get('/:id', async () => 'u'); }\n",
+  });
+  const unproven = 'GET root {dynamic} - dynamic{"templatePrefixes":["/"]}';
+  assert.deepEqual(factLines(document), [
+    'GET root /log/logged strict', 'GET root /relay/relayed strict', 'GET root /users/ strict', 'GET root /users/{} strict', 'GET root /walk/walked strict',
+    unproven, unproven, unproven,
+  ].sort());
+});
+
+test('require() 모듈 객체가 흘러가면 그 모듈이 내보낸 플러그인을 모르고, 화살표 도우미의 매개변수도 따라간다', async () => {
+  const commonJs = (escape: string): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.js': [
+      "const fastify = require('fastify');",
+      "const mod = require('./plugins.js');",
+      "const local = async (f) => { f.get('/local', async () => 'l'); };",
+      'const show = (plugin) => { console.log(plugin); };',
+      'show(local);',
+      escape,
+      'const app = fastify();',
+      "app.register(mod.users, { prefix: '/u' });",
+      "app.register(local, { prefix: '/l' });",
+      'module.exports = app;',
+    ].join('\n'),
+    'src/plugins.js': "exports.users = async function (f) { f.get('/x', async () => 'x'); };\n",
+  });
+  const unproven = 'GET root {dynamic} - dynamic{"templatePrefixes":["/"]}';
+  // 점 접근만 하면 내보낸 플러그인에 이름 없이 닿지 않는다.
+  assert.deepEqual(factLines(await scanNodeProject(commonJs(''))), ['GET root /l/local strict', 'GET root /u/x strict']);
+  // 모듈 객체를 넘기거나 원소로 읽으면 그 너머에서 내보낸 함수에 심볼을 쓸 수 있다(같은 파일의 내보내지 않은 함수는 그대로).
+  assert.deepEqual(factLines(await scanNodeProject(commonJs('Object.keys(mod);'))), ['GET root /l/local strict', unproven]);
+  assert.deepEqual(factLines(await scanNodeProject(commonJs("console.info(require('./plugins.js')[process.env.NAME]);"))), ['GET root /l/local strict', unproven]);
+});
+
+test('네임스페이스 객체가 흘러가면 내보낸 최상위 선언 안의 플러그인도 모르고, 흘러가지 않으면 그대로다', async () => {
+  const files = (escape: string): Record<string, string> => ({
+    'package.json': packageJson({ fastify: '5.2.0' }),
+    'tsconfig.json': ambientTypesFreeConfig,
+    'src/app.ts': [
+      "import Fastify from 'fastify';",
+      "import * as P from './plugins.ts';",
+      escape,
+      'const app = Fastify();',
+      "app.register(P.group.users, { prefix: '/u' });",
+      'export default app;',
+    ].join('\n'),
+    'src/plugins.ts': "export const group = { users: async (f: any) => { f.get('/x', async () => 'x'); } };\n",
+  });
+  assert.deepEqual(factLines(await scanNodeProject(files(''))), ['GET root /u/x strict']);
+  assert.deepEqual(factLines(await scanNodeProject(files('export const all = Object.values(P);'))), ['GET root {dynamic} - dynamic{"templatePrefixes":["/"]}']);
 });

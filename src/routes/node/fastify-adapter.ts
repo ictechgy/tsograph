@@ -264,7 +264,7 @@ function recordRegister(target: RouterTarget, call: ts.CallExpression, site: Eve
   const inner = plugin.expression;
   const fn = inner === undefined ? undefined : context.resolveFunction(inner, plugin.frame);
   if (fn !== undefined) {
-    const skip = plugin.wrapped ? 'yes' : skipOverrideOf(context, plugin.symbols, fn.node);
+    const skip = plugin.wrapped ? 'yes' : skipOverrideOf(context, plugin.symbols, fn.node, call);
     const pluginPrefix = skip === 'unknown' ? unprovenPrefix(prefix) : prefix;
     const child = skip === 'yes' ? target : { instance: context.instance({ kind: 'plugin', options: { ...target.instance.options, prefix: pluginPrefix?.value ?? { kind: 'literal', text: '' } }, parent: target }, 'fastify', call, site.frame), basePaths: [] };
     if (skip !== 'yes') context.emit({ kind: 'mount', target, prefix: pluginPrefix, children: [child], unresolved: false, mode: 'reference', site });

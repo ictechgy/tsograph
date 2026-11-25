@@ -36,17 +36,32 @@
   tsograph는 `/v1/bare/y`·`/v1/a/b`를 냈고, `routerOptions: { caseSensitive: false, ignoreTrailingSlash: true }`면 실제로는 대소문자를 가리고
   끝 슬래시가 엄격한데(`/users`와 `/users/` 둘 다 등록) `trailingSlash: "optional"`·`caseInsensitive`와 `/users` 하나를 냈다. 이제 옵션마다
   최상위 값과 `routerOptions` 값을 따로 읽어, 4는 최상위 값, 5는 `routerOptions` 값(없으면 최상위 값)을 쓴다. 주 버전을 모르면 두 값이 같을
-  때만 쓰고 다르면 모르는 값이다(`trailingSlash` 생략, 갈리는 접두사 이음은 dynamic). 최상위 옵션만 쓰는 앱과 fastify 5 앱은 바뀌지 않는다.
+  때만 그 값을 쓴다. 다르면 `trailingSlash`는 생략하고(모름), `caseInsensitive`는 증명했을 때만 싣는 표식이라 싣지 않으며(대소문자를
+  구분하는 것으로 읽힌다 — 대소문자만 다른 호출은 isthmus에서 오류가 아니라 `route-case-mismatch` 경고다), 겹친 `/`는 줄이지 않는 것으로
+  컴파일하고 갈리는 접두사 이음은 dynamic이다. 최상위 옵션만 쓰는 앱과 fastify 5 앱은 바뀌지 않는다.
 - routes(server): 프로젝트 코드가 플러그인 바인딩에 `Symbol.for('skip-override')`를 직접 쓴 Fastify 플러그인의 `prefix`를 붙이던 문제를
   고쳤다. fastify 4.29.1·5.12.8은 `fn[Symbol.for('skip-override')]`가 참이면 새 인스턴스를 만들지 않아 `prefix`를 무시한다(실행으로 확인:
   `manual[Symbol.for('skip-override')] = true; app.register(manual, { prefix: '/p2' })`는 `/manual`). tsograph는 `fastify-plugin` 호출만 알아봐
-  `/p2/manual`을 냈다(타입으로만 아는 `FastifyInstance` 아래에서는 앞 항목의 수정 뒤 `/p2/manual` base). 이제 해석 대상 파일에서 그 심볼을
-  바꿀 수 있는 자리를 모아, 플러그인 바인딩에 참 리터럴을 모듈 최상위에서 조건 없이 쓰거나(그 심볼을 담은 `const` 키, CommonJS
-  `module.exports[…]`, 다른 이름으로 가져온 바인딩 포함) 바인딩을 `fastify-plugin`에 넘기면 `fastify-plugin`처럼 접두사를 무시한다. 건너뛰는지
-  증명하지 못하면(함수 안·조건 아래의 쓰기, 모르는 키, `register()` 첫 인자 밖의 호출 인자·다른 변수·객체·배열·반환값으로 흘러간 바인딩,
-  이름으로 풀 수 없는 대상에 그 키를 쓴 곳이 있는 프로젝트) 접두사를 모르는 값으로 본다: root에서는 부모 접두사까지만 아는 dynamic 사실,
-  base에서는 알 수 없는 base에 합친 꼬리다. 그래서 바인딩을 다른 곳에 넘기기만 해도 정적 사실이 dynamic이 될 수 있다(실제로 건너뛰지 않는
-  `export const registry = { users }`도 그렇다). 바인딩을 `register()`·호출 대상·점 접근·비교로만 쓰는 플러그인은 바뀌지 않는다.
+  `/p2/manual`을 냈다(타입으로만 아는 `FastifyInstance` 아래에서는 앞 항목의 수정 뒤 `/p2/manual` base). 이제 프로젝트 파일에서 그 심볼을
+  바꿀 수 있는 자리를 한 번 모아 바인딩(변수·함수·객체 속성·네임스페이스 속성)마다 판정한다.
+  - 건너뜀(접두사 무시): 바인딩에 참 리터럴을 모듈 최상위에서 조건 없이 쓴다(그 심볼을 담은 `const` 키, CommonJS `module.exports[…]`,
+    다른 이름으로 가져온 바인딩, `plugins.users`·`P.users` 같은 속성 포함). 바인딩을 `fastify-plugin` 한 인자 호출에 넘긴다.
+  - 건너뛰는지 모름(접두사를 모르는 값으로 본다: root는 부모 접두사까지만 아는 dynamic 사실, base는 알 수 없는 base에 합친 꼬리): 그 바인딩에
+    함수 안·조건 아래에서 쓰거나 값·키를 모르게 쓴다(`= 0`, `delete` 포함). 바인딩이 `register()` 첫 인자·호출 대상·점 접근·비교·
+    `&&`·쉼표의 왼쪽·바인딩에 대입하는 왼쪽·`console.*` 인자·`const` 별칭·프로젝트 함수의 매개변수(그 매개변수의 사용을 따라 본다) 밖으로 흘러간다(객체·배열·다른 변수·반환값·패키지
+    함수 인자 — 패키지 함수는 `fastify-plugin`처럼 받은 함수에 심볼을 쓸 수 있다). 값의 출처를 따라가지 않는 대상(매개변수·반복 변수·구조
+    분해·원소 접근·호출 결과)에 skip-override 키를 쓴 곳이 프로젝트에 있다(모든 플러그인). 플러그인을 내보낸 모듈의 네임스페이스·`require()`·
+    `import()`·`module.exports` 객체가 호출 인자·컨테이너·다른 변수로 흘러가거나 원소 접근으로 읽히거나 그 아래에 계산된 키로 쓰인다.
+  - 근거를 모으는 파일: 등록 호출·플러그인 함수·등록 인자에서 따라간 바인딩의 선언이 있는 파일(테스트 디렉터리 이름이어도 서버가 불러 쓰는
+    코드다)과 해석 대상 파일. 그래서 기본 실행에서는 그 밖의 테스트 소스를 보지 않고, `--include-tests`에서는 테스트 소스의 근거가 테스트
+    소스에 있지 않은 등록을 많아야 모르는 값으로 만든다(테스트 파일의 `fp(users)`는 운영 등록을 건너뜀으로 단정하지 않는다).
+  - 정밀도 비용: 객체·배열·다른 변수·패키지 함수로 흘러간 바인딩은 실제로 건너뛰지 않아도 dynamic이 된다(`export const registry = { users }`,
+    `[c]`). 그런 플러그인의 라우트는 등록마다 부모 접두사까지만 아는 dynamic 사실이 되어 사실 수가 줄 수 있다(라우트 여럿·빈 값 변형이
+    dynamic 하나로, 같은 위치면 하나로 합쳐진다). 줄어든 등록은 `route-coverage: N route declaration(s) have paths … dynamic`에 센다.
+    `--include-tests`에서 테스트 소스가 바인딩을 패키지 함수에 넘기면 운영 등록도 dynamic이 된다(프로젝트의 테스트 도우미 함수에 넘기는
+    것은 매개변수를 따라가 바뀌지 않는다).
+  - 남은 한계: 테스트 경로 규칙에 걸린 파일 중 등록·플러그인·바인딩 선언 파일이 아닌 운영 코드의 쓰기는 기본 실행에서 보지 않는다. 이름으로
+    다시 내보낸 모듈 네임스페이스(`export { P }`)를 받은 쪽의 동적 접근은 따라가지 않는다.
 - graph·reach·impact: `type` 없이 다시 내보낸 interface·type alias·값 없는 namespace·JSDoc `@typedef`
   (`export { Config } from './types'`)의 export 노드를 `unresolved-export-aliases:`(대상을 해석하지 못함)로 세던 문제를 고쳤다. 이런
   이름은 타입만 가리켜 런타임 선언이 없으므로(TypeScript는 이 재내보내기를 emit에서 지운다) 이을 대상이 처음부터 없다. 이제 checker가
