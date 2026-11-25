@@ -13,8 +13,8 @@
 - 2026-11-25 5회차: 브랜치 `ccr-37904670-hxdjsx`를 `origin/main` `2dac50e`에서 다시 시작해 Fastify 플러그인 접두사 이음 두 가지(아래 절)를
   고쳐 PR #62(`36491b4`·`e381053`, 조정자가 push)로 올렸다. 독립 리뷰의 should-fix 둘(`routerOptions` 주 버전, 직접 쓴 skip-override)과 nit 둘을
   `ae729b0`·`60553ce`로 반영했고(아래 "PR #62 독립 리뷰 반영"), 재확인 리뷰의 should-fix 넷(A~D)과 nit 넷을 그 위 커밋으로 반영했다(아래 "PR #62
-  재확인 리뷰 반영"). 마지막 재확인 리뷰의 should-fix 셋과 nit 셋은 `db64014` 위 커밋으로 반영했다(아래 "PR #62 마지막 재확인 리뷰
-  반영"). 이 반영 커밋은 push 전이다(조정자가 올린다).
+  재확인 리뷰 반영"). 마지막 재확인 리뷰의 should-fix 셋과 nit 셋은 `db64014` 위 커밋으로, 최종 확인에서 나온 작은 거짓 사실 둘은 `61b4b63` 위
+  커밋으로 반영했다(아래 "PR #62 마지막 재확인 리뷰 반영"·"PR #62 최종 확인 반영"). 이 반영 커밋들은 push 전이다(조정자가 올린다).
 
 ## Fastify 플러그인 접두사 이음 (2026-11-25, 5회차)
 
@@ -69,20 +69,19 @@
 
 ### 5회차 검증
 
-마지막 재확인 리뷰 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 1~3.5).
+최종 확인 반영 뒤(2026-11-25, Node 22.23.4, TypeScript 5.9.3, Git 2.43, root 컨테이너, 다른 세션과 공유한 4코어 load 1~3.5).
 
 - `npx tsc --noEmit` 통과.
-- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(5분 17초, 그 뒤 고친 것은 CommonJS 재내보내기 테스트의 기대 하나뿐이고 Fastify
-  테스트 세 파일 집중 실행 55/55로 확인): 1,849개 중 1,825 통과·23 skip·1 실패. 실패는
+- 상한 없이 `scripts/run-tests.mjs`와 같은 인자로 돌린 전체 suite(최종 트리, 5분 19초): 1,852개 중 1,828 통과·23 skip·1 실패. 실패는
   `relation-facts`의 `chmod 000`(root 컨테이너, 기존 환경 문제)뿐이다. 커버리지 라인 98.72%·분기 91.72%·함수 98.23%(90% 게이트 통과),
-  `fastify-adapter.ts` 100/92.02/97.14, `fastify-skip-override.ts` 99.63/93.00/98.81(미실행은 `++`·`--` 대입 대상 두 줄과 checker 예외 처리 세 줄).
-  앞 회차들: 첫 커밋 40분 54초(load 20~32), 첫 리뷰 반영 11분 57초, 재확인 반영 6분 6초(모두 같은 환경 실패 1).
+  `fastify-adapter.ts` 100/92.02/97.14, `fastify-skip-override.ts` 99.63/92.87/98.81(미실행은 `++`·`--` 대입 대상 두 줄과 checker 예외 처리 세 줄).
+  앞 회차들: 첫 커밋 40분 54초(load 20~32), 첫 리뷰 반영 11분 57초, 재확인 반영 6분 6초, 마지막 재확인 반영 5분 17초(모두 같은 환경 실패 1).
 - `npm run verify:cli`: 통과(`Build contract verified: clean dist output.`, `CLI contract verified: 0/2/64 (1 reserved)`).
 - isthmus `node ../isthmus/scripts/conformance-drift.mjs tsograph=.`: 모든 벡터 current(로컬 isthmus `4a3e99d`).
-- 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `db64014` worktree에 돌린 결과는 `db64014` 분석기 결과와 stdout·stderr
-  바이트가 같다(앞 회차는 `2dac50e`·`60553ce`와 같은 비교). 이 head 트리와의 노드·간선 차이는 바뀐 네 파일(`fastify-skip-override.ts`·그 테스트·
-  `fastify-adapter.test.ts`·`router-interpreter.ts`) 안뿐이다(노드 10,420 → 10,453, 간선 15,224 → 15,304, 바뀐 파일 밖 변화 0, `candidate-dispatch`
-  214 → 219·`unresolved-calls` 4,564 → 4,573은 새 코드의 호출). 그 밖의 limitation 차이(`effect-inventory` 문맥 수, `skipped-symlinks`)는 worktree의
+- 자기 분석(`graph --generated-at 2026-11-15T00:00:00Z`): 새 분석기를 `61b4b63` worktree에 돌린 결과는 `61b4b63` 분석기 결과와 stdout·stderr
+  바이트가 같다(앞 회차는 `2dac50e`·`60553ce`·`db64014`와 같은 비교). 이 head 트리와의 노드·간선 차이는 바뀐 두 파일(`fastify-skip-override.ts`·
+  `fastify-adapter.test.ts`) 안뿐이다(노드 10,454 → 10,459, 간선 15,305 → 15,321, 바뀐 파일 밖 변화 0). `db64014` 대비로는 노드 10,420 → 10,459,
+  간선 15,224 → 15,321이고 `candidate-dispatch` 214 → 219·`unresolved-calls` 4,564 → 4,573은 그때 더한 코드의 호출이다. 그 밖의 limitation 차이(`effect-inventory` 문맥 수, `skipped-symlinks`)는 worktree의
   `node_modules` symlink 때문에 생기는 줄뿐이다.
 - 실행하지 못한 것: GLM 리뷰(`packet-ask` 없음), Git 2.45+ change 캡처 테스트(로컬 skip), macOS·Windows·Node 24/26 job(CI), `runuser -u nobody`
   재실행, 저장소 오라클(`experiments/node-routes-oracle`) 재기록(fixture를 바꾸지 않았다; 대신 리뷰어 하네스 `rt4`·`rt5`의 fastify 4.29.1·5.12.8로
@@ -180,6 +179,28 @@
   파일의 쓰기도 보지 않는다). 해석기도 그 모듈의 등록을 따라가지 않지만 같은 플러그인을 정적으로 불러와 등록하면 놓친다.
 - 위 "PR #62 재확인 리뷰 반영" 절의 남은 한계 두 줄(테스트 경로의 그 밖의 운영 코드, `export { P }`를 받은 쪽)은 이 반영으로 닫혔다.
 
+### PR #62 최종 확인 반영 (2026-11-25, `61b4b63` 위)
+
+최종 확인은 막는 문제·비용 절벽 없이 Tarjan 합치기(요소 사이 간선, 메모 재사용), 선언 하나 규칙(p1·p2·q7·q8 dynamic, p6·p10 정적), 모듈 펼치기
+(b1~b3, q2 `export default NS`, q3 순환 배럴)를 확인했고 작은 거짓 사실 둘을 냈다. 반영하며 같은 갈래의 거짓 사실 하나를 더 찾아 고쳤다.
+
+| 지적 | 처리 | 회귀 근거 |
+|---|---|---|
+| 1(q6): 내보낸 `const` 별칭이 네임스페이스로 흘러가도 못 봄 — `plugins.ts`의 `export const handle = users`, `mount(app)`가 `register(users, { prefix: '/u' })`, `app.ts`의 `markAll(P)`(P = 그 네임스페이스)가 `/u/x`(실제 `/x`). `evidenceOf`가 `users → handle`을 따라가지만 `handle`의 흘러간 내보내기 근거를 보지 않았다 | 고침: Tarjan의 `open(symbol)`이 그 바인딩의 흘러간 내보내기 근거(`mergeEscapedExports`: 내보낸 심볼, 내보낸 선언 안, 심볼 없는 모듈 파일)를 그 바인딩의 근거에 더해, 요소 합치기로 플러그인까지 돌아온다 | 테스트 "따라간 const 별칭이 흘러간 모듈 객체로 내보내지면 …"(`markAll(P)` dynamic, 점 접근만 하면 `/u/x`), `61b4b63`에서 실패. 변이: `open`에서 근거를 더하지 않음 1 |
+| 2(q1): 태그 붙은 템플릿의 보간을 무해로 봄 — ``tag`${users}` ``(패키지 태그 함수) 뒤 `register(users, { prefix: '/u' })`가 `/u/x`(실제 `/x`) | 고침: `mayChangeBinding`이 `TemplateSpan`을 태그 붙은 템플릿 안이면 흘러감(태그 함수 인자 → 모름), 태그 없는 템플릿이면 무해로 본다 | 테스트 "태그 붙은 템플릿의 보간은 …"(태그 붙음 dynamic, `` console.log(`${users}`) ``는 `/u/x`), `61b4b63`에서 실패. 변이: 태그 붙은 쪽을 무해로 봄 1, 태그 없는 쪽을 흘러감으로 봄 1 |
+| 더 찾은 것: TS 파일의 CommonJS 내보내기 — `re.ts`의 `exports.handle = users`를 `markAll(require('./re.ts'))`로 넘기면 `/u/x`(실제 `/x`, `.cts`로 실행해 확인) | 고침: TypeScript는 TS 파일의 `exports.a = x`·`module.exports = x`를 내보내기로 묶지 않아 모듈 객체에서 그 바인딩에 닿는 길을 모르므로, TS 파일에서는 그 대입을 흘러감으로 본다(JS 파일은 별칭으로 묶여 지금처럼 모듈 객체가 흘러갈 때만 모름) | 테스트 "TS 파일에서 CommonJS 내보내기에 대입한 바인딩은 …", `61b4b63`에서 실패. 변이: TS 파일도 무해로 봄 1, JS 파일도 흘러감으로 봄 1 |
+| 문서 | NODE-ROUTES·CHANGELOG의 흘러가지 않는 자리에 태그 없는 템플릿 보간을 넣고 태그 붙은 보간은 흘러감으로 적었다. 따라간 별칭의 모듈 객체 근거, TS 파일 CommonJS 내보내기의 정밀도 비용을 적었다 | — |
+
+- 바뀐 출력(`61b4b63` 대비): 리뷰어 fixture 120개 중 q1-tagged·q6-alias-export만 `/u/x` → dynamic(실제 `/x`)으로 바뀌고 118개는 같다. 반영용
+  22개·재확인 fixture 9개·적대 입력 60개·`fixtures/node/fastify4-app`·`fastify5-app`도 같다.
+- 비용(wall/CPU user, load 1~2): perf3 `61b4b63` 4.9/7.7초·새 head 4.7/7.7초, 도우미 순환 9·10개 1.6초·1.5초와 1.4초·1.3초.
+- 변이: 앞 절의 23종에 다섯을 더한 28종 중 26종이 잡힌다(살아남는 둘은 앞 절과 같다).
+- 알려진 한계(거짓 사실이 날 수 있는 길, 문서에 적음): 문자열 리터럴이 아닌 `require(x)`·`import(x)`(앞 절에서 이미 밝힘). 값을 넘기는 것처럼 보이지
+  않는 숨은 호출 — `users instanceof C`가 부르는 `C[Symbol.hasInstance](users)`, 느슨한 `==`·`+`·태그 없는 템플릿이 부르는 변환 메서드
+  (`users == 1`은 users의 `Symbol.toPrimitive`·`valueOf`를, `` `${users}` ``는 `toString`을 users를 `this`로 해 부른다), getter·Proxy처럼 문법에
+  드러나지 않는 호출은 비교·판정·문자열 자리로 보아 무해로 센다. 그 메서드가 `this[키] = …`로 쓰면 이름으로 잇지 못한 대상의 쓰기라 모든
+  플러그인이 모름이 되지만, `this`를 다른 함수에 넘기면 놓친다. 짜맞춘 모양이라 실제 코드에서 드물다고 보고 남겼다.
+
 ### 이번에 살펴보고 남긴 것 (5회차)
 
 | 항목 | 이유 |
@@ -195,6 +216,7 @@
 | `reach --max-depth -1`이 "unknown, repeated, or empty option"을 낸다(`-`로 시작하는 값은 값으로 받지 않는 파서 규칙) | 종료 코드 64는 맞고 문구만 덜 정확하다. 파서 공통 규칙이라 이번 범위 밖에 두었다. |
 | 문자열 리터럴이 아닌 `require(x)`·`import(x)`의 결과가 흘러가거나 그것으로만 테스트 경로 파일을 불러오면 skip-override 근거를 보지 않는다 | 어느 모듈인지 모르면 모든 플러그인을 모름으로 봐야 하는데, 설정 로더(`require(configPath)`)처럼 흔한 모양이 프로젝트 전체를 dynamic으로 만든다. 해석기도 그 모듈을 따라가지 않으므로 같은 플러그인을 정적으로도 등록할 때만 생기는 누락이라 문서에 남겼다. |
 | 다시 내보낸 네임스페이스를 통째로 넘기면(`markAll(All)`, `All`이 `export * as R`을 담음) 한 겹만 보는 함수여도 그 안의 플러그인이 dynamic이다 | 받은 함수가 얼마나 깊이 걷는지 모른다. 건전한 쪽을 택했다(실제 `markAll`은 한 겹이라 `/u/x`). |
+| `users instanceof C`(`C[Symbol.hasInstance]`가 users를 받음)·getter·Proxy처럼 문법에 드러나지 않는 호출로 플러그인이 넘어가면 skip-override 근거를 보지 않는다 | 비교·판정 자리를 모두 흘러감으로 보면 `if (plugin)`·`plugin === x` 같은 흔한 자리가 전부 dynamic이 된다. 짜맞춘 모양이라 알려진 한계로 남겼다(최종 확인 반영 절). |
 | 4회차에 남긴 항목(`import type` 재내보내기 alias 간선, `import * as ns; export { ns }`, 산출물끼리만의 import 판정, 설정 루트 공백 반복 등) | 4회차 표의 이유 그대로다. |
 
 ## limitation 문장 정확성: 타입 전용 export 별칭·산출물끼리의 import·합친 설정 이름 (2026-11-22, 4회차)
